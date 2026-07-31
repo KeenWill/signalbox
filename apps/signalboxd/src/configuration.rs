@@ -10,13 +10,19 @@ use std::{
 };
 
 use signalbox_domain::{
-    DirectModelSelection, FrozenAliasDefinition, ModelAlias, ModelTargetCatalog,
-    ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget,
+    DirectModelSelection, FrozenAliasDefinition, ModelAlias, ModelSelectionRequest,
+    ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
     CredentialValue,
+};
+use signalbox_model_runtime_codex_cli::{
+    CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
+};
+use signalbox_persistence::{
+    ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
 };
 use signalbox_process_protocol::MAX_MODEL_ALIAS_CATALOG_ENTRIES;
 use signalbox_tools_basic::WebFetchEgressPolicy;
@@ -25,6 +31,93 @@ use uuid::Uuid;
 
 /// Non-secret reference pinned into every Anthropic operation.
 pub const ANTHROPIC_CREDENTIAL_REFERENCE: &str = "anthropic-primary";
+
+/// Non-secret reference naming the deployment-selected ambient Codex login.
+pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
+
+/// Adapter implementations this daemon build can construct.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ModelAdapter {
+    /// Anthropic's HTTP API adapter.
+    Anthropic,
+    /// The subscription-authenticated Codex CLI adapter.
+    CodexCli,
+}
+
+impl ModelAdapter {
+    fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
+        match value {
+            "anthropic" => Ok(Self::Anthropic),
+            "codex_cli" => Ok(Self::CodexCli),
+            _ => Err(HubModelConfigurationError::UnsupportedAdapter {
+                adapter: Arc::from(value),
+            }),
+        }
+    }
+
+    fn credential_profile(self) -> &'static str {
+        match self {
+            Self::Anthropic => ANTHROPIC_CREDENTIAL_REFERENCE,
+            Self::CodexCli => CODEX_CLI_CREDENTIAL_REFERENCE,
+        }
+    }
+}
+
+/// Validated deployment paths used to construct the Codex CLI adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodexCliConfiguration {
+    executable: PathBuf,
+    working_directory: PathBuf,
+}
+
+impl CodexCliConfiguration {
+    /// Absolute Codex executable path.
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    /// Absolute existing working directory used for CLI execution.
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+}
+
+/// One model's fully resolved static delivery route.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedModelRoute {
+    model_family: Arc<str>,
+    adapter: ModelAdapter,
+    credential_profile: Arc<str>,
+    target: ResolvedProviderTarget,
+}
+
+impl ResolvedModelRoute {
+    /// Configuration-owned model family key.
+    pub fn model_family(&self) -> &str {
+        &self.model_family
+    }
+
+    /// Build-provided adapter selected by the mapping table.
+    pub const fn adapter(&self) -> ModelAdapter {
+        self.adapter
+    }
+
+    /// Non-secret credential profile pinned for new sessions.
+    pub fn credential_profile(&self) -> &str {
+        &self.credential_profile
+    }
+
+    /// Exact provider target used by domain persistence.
+    pub const fn target(&self) -> ResolvedProviderTarget {
+        self.target
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AdapterMapping {
+    adapter: ModelAdapter,
+    credential_profile: Arc<str>,
+}
 
 /// Maximum exact deployment compaction-prompt bytes.
 pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
@@ -36,6 +129,11 @@ pub struct HubModelConfiguration {
     runtime_models: RuntimeModelCatalog,
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
+    routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
+    provider_model_adapters: HashMap<String, ModelAdapter>,
+    session_credential_pin: SessionCredentialPin,
+    credential_families: ModelCredentialFamilyCatalog,
+    codex_cli: Option<CodexCliConfiguration>,
     compaction_prompt: Arc<str>,
     web_fetch_egress_policy: WebFetchEgressPolicy,
 }
@@ -53,7 +151,15 @@ impl HubModelConfiguration {
             .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
         reject_unknown_fields(
             document.as_table(),
-            &["version", "models", "aliases", "compaction", "web_fetch"],
+            &[
+                "version",
+                "adapter_mappings",
+                "codex_cli",
+                "models",
+                "aliases",
+                "compaction",
+                "web_fetch",
+            ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
             return Err(HubModelConfigurationError::UnsupportedVersion);
@@ -105,16 +211,91 @@ impl HubModelConfiguration {
             return Err(HubModelConfigurationError::MissingModels);
         }
 
+        let mapping_tables = document
+            .get("adapter_mappings")
+            .and_then(|item| item.as_array_of_tables())
+            .ok_or(HubModelConfigurationError::MissingAdapterMappings)?;
+        if mapping_tables.is_empty() {
+            return Err(HubModelConfigurationError::MissingAdapterMappings);
+        }
+        let mut mappings = HashMap::<Arc<str>, AdapterMapping>::new();
+        let mut session_credentials = Vec::with_capacity(mapping_tables.len());
+        for mapping in mapping_tables {
+            reject_unknown_fields(mapping, &["model_family", "adapter", "credential_profile"])?;
+            let family = validated_name(required_string(mapping, "model_family")?)?;
+            let adapter = ModelAdapter::parse(required_string(mapping, "adapter")?)?;
+            let credential_profile =
+                validated_name(required_string(mapping, "credential_profile")?)?;
+            if credential_profile.as_ref() != adapter.credential_profile() {
+                return Err(HubModelConfigurationError::UnknownCredentialProfile {
+                    adapter,
+                    credential_profile,
+                });
+            }
+            let entry = AdapterMapping {
+                adapter,
+                credential_profile: Arc::clone(&credential_profile),
+            };
+            if mappings.contains_key(&family) {
+                return Err(HubModelConfigurationError::DuplicateModelFamily {
+                    model_family: family,
+                });
+            }
+            mappings.insert(Arc::clone(&family), entry);
+            session_credentials.push(SessionModelCredential::new(family, credential_profile));
+        }
+        let session_credential_pin = SessionCredentialPin::try_new(session_credentials)
+            .map_err(|_| HubModelConfigurationError::InvalidField)?;
+
+        let codex_cli = document
+            .get("codex_cli")
+            .map(|item| {
+                let table = item
+                    .as_table()
+                    .ok_or(HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+                reject_unknown_fields(table, &["executable", "working_directory"])?;
+                let executable = PathBuf::from(required_string(table, "executable")?);
+                let working_directory = PathBuf::from(required_string(table, "working_directory")?);
+                if !executable.is_absolute()
+                    || !working_directory.is_absolute()
+                    || !working_directory.is_dir()
+                {
+                    return Err(HubModelConfigurationError::InvalidCodexCliConfiguration);
+                }
+                Ok(CodexCliConfiguration {
+                    executable,
+                    working_directory,
+                })
+            })
+            .transpose()?;
+        if mappings
+            .values()
+            .any(|mapping| mapping.adapter == ModelAdapter::CodexCli)
+            && codex_cli.is_none()
+        {
+            return Err(HubModelConfigurationError::MissingCodexCliConfiguration);
+        }
+        if let Some(configuration) = codex_cli.as_ref() {
+            CodexCliRuntime::new(CodexCliConfig::new(
+                configuration.executable.clone(),
+                configuration.working_directory.clone(),
+                CredentialReference::new(CODEX_CLI_CREDENTIAL_REFERENCE),
+            ))
+            .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+        }
+
         let mut domain_definitions = Vec::with_capacity(models.len());
         let mut runtime_definitions = Vec::with_capacity(models.len());
         let mut direct_selections = HashSet::with_capacity(models.len());
+        let mut routes = HashMap::with_capacity(models.len());
+        let mut provider_model_adapters = HashMap::with_capacity(models.len());
         for model in models {
             reject_unknown_fields(
                 model,
                 &[
                     "selection_id",
                     "target_id",
-                    "provider",
+                    "model_family",
                     "provider_model",
                     "max_output_tokens",
                     "context_window_tokens",
@@ -124,9 +305,10 @@ impl HubModelConfiguration {
             if !direct_selections.insert(selection) {
                 return Err(HubModelConfigurationError::DuplicateSelection);
             }
-            if required_string(model, "provider")? != "anthropic" {
-                return Err(HubModelConfigurationError::UnsupportedProvider);
-            }
+            let model_family = validated_name(required_string(model, "model_family")?)?;
+            let Some(mapping) = mappings.get(&model_family) else {
+                return Err(HubModelConfigurationError::UnmappedModelFamily { model_family });
+            };
             let provider_model = required_string(model, "provider_model")?;
             if provider_model.is_empty() || provider_model.trim() != provider_model {
                 return Err(HubModelConfigurationError::InvalidProviderModel);
@@ -136,6 +318,21 @@ impl HubModelConfiguration {
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
+            if let Some(previous) =
+                provider_model_adapters.insert(provider_model.to_owned(), mapping.adapter)
+                && previous != mapping.adapter
+            {
+                return Err(HubModelConfigurationError::ConflictingProviderModelRoute);
+            }
+            routes.insert(
+                selection,
+                ResolvedModelRoute {
+                    model_family,
+                    adapter: mapping.adapter,
+                    credential_profile: Arc::clone(&mapping.credential_profile),
+                    target,
+                },
+            );
             domain_definitions.push(ModelTargetDefinition::new(selection, target));
             runtime_definitions.push(
                 RuntimeModelDefinition::try_new(
@@ -179,11 +376,22 @@ impl HubModelConfiguration {
             .map_err(|_| HubModelConfigurationError::DuplicateSelection)?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
+        let credential_families = ModelCredentialFamilyCatalog::try_new(
+            routes
+                .values()
+                .map(|route| (route.target, Arc::<str>::from(route.model_family.as_ref()))),
+        )
+        .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         Ok(Self {
             targets,
             runtime_models,
             direct_selections,
             aliases,
+            routes,
+            provider_model_adapters,
+            session_credential_pin,
+            credential_families,
+            codex_cli,
             compaction_prompt,
             web_fetch_egress_policy,
         })
@@ -197,6 +405,71 @@ impl HubModelConfiguration {
     /// Returns the exact runtime delivery catalog used by the provider bridge.
     pub fn runtime_model_catalog(&self) -> RuntimeModelCatalog {
         self.runtime_models.clone()
+    }
+
+    /// Returns the adapter route for one configured direct selection.
+    pub fn resolve_direct_model(
+        &self,
+        selection: DirectModelSelection,
+    ) -> Option<&ResolvedModelRoute> {
+        self.routes.get(&selection)
+    }
+
+    /// Resolves one session request through the exact static catalog.
+    pub fn resolve_session_model(
+        &self,
+        selection: ModelSelectionRequest,
+    ) -> Result<&ResolvedModelRoute, UnknownSessionModel> {
+        let direct = match selection {
+            ModelSelectionRequest::Direct(direct) => direct,
+            ModelSelectionRequest::Alias(alias) => self
+                .aliases
+                .get(&alias)
+                .map(|definition| definition.selected())
+                .ok_or(UnknownSessionModel { selection })?,
+        };
+        self.routes
+            .get(&direct)
+            .ok_or(UnknownSessionModel { selection })
+    }
+
+    /// Returns the adapter selected for an exact provider-native model name.
+    pub fn adapter_for_provider_model(&self, provider_model: &str) -> Option<ModelAdapter> {
+        self.provider_model_adapters.get(provider_model).copied()
+    }
+
+    /// Returns the complete credential snapshot pinned into a new session.
+    pub fn session_credential_pin(&self) -> SessionCredentialPin {
+        self.session_credential_pin.clone()
+    }
+
+    /// Maps each exact target to the family key stored in session snapshots.
+    pub fn credential_family_catalog(&self) -> ModelCredentialFamilyCatalog {
+        self.credential_families.clone()
+    }
+
+    /// Returns validated Codex CLI paths when that adapter is configured.
+    pub fn codex_cli(&self) -> Option<&CodexCliConfiguration> {
+        self.codex_cli.as_ref()
+    }
+
+    pub(crate) fn codex_cli_runtime(
+        &self,
+    ) -> Result<Option<CodexCliRuntime>, CodexCliConstructionError> {
+        self.codex_cli
+            .as_ref()
+            .map(|configuration| {
+                CodexCliRuntime::new(CodexCliConfig::new(
+                    configuration.executable.clone(),
+                    configuration.working_directory.clone(),
+                    CredentialReference::new(CODEX_CLI_CREDENTIAL_REFERENCE),
+                ))
+            })
+            .transpose()
+    }
+
+    pub(crate) fn adapter_routes(&self) -> HashMap<String, ModelAdapter> {
+        self.provider_model_adapters.clone()
     }
 
     /// Returns the exact configured compaction system prompt.
@@ -233,6 +506,14 @@ fn validate_alias_count(count: usize) -> Result<(), HubModelConfigurationError> 
         Err(HubModelConfigurationError::TooManyAliases)
     } else {
         Ok(())
+    }
+}
+
+fn validated_name(value: &str) -> Result<Arc<str>, HubModelConfigurationError> {
+    if value.is_empty() || value.trim() != value || value.contains('\0') {
+        Err(HubModelConfigurationError::InvalidField)
+    } else {
+        Ok(Arc::from(value))
     }
 }
 
@@ -273,7 +554,7 @@ fn required_positive_u32(table: &Table, key: &str) -> Result<u32, HubModelConfig
 }
 
 /// Sanitized static-configuration failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HubModelConfigurationError {
     /// The configuration file could not be read as UTF-8 text.
     Read,
@@ -283,6 +564,8 @@ pub enum HubModelConfigurationError {
     UnsupportedVersion,
     /// No nonempty model-definition array exists.
     MissingModels,
+    /// No nonempty static adapter mapping table exists.
+    MissingAdapterMappings,
     /// The required compaction configuration table is absent.
     MissingCompaction,
     /// An unrecognized root or table field was present.
@@ -291,8 +574,34 @@ pub enum HubModelConfigurationError {
     InvalidField,
     /// A configured identity was not a UUID.
     InvalidIdentity,
-    /// Only the Anthropic provider is admitted by this composition slice.
-    UnsupportedProvider,
+    /// A mapping named no adapter implementation provided by this build.
+    UnsupportedAdapter {
+        /// Exact adapter spelling from the rejected mapping.
+        adapter: Arc<str>,
+    },
+    /// A mapping named no credential profile provided for its adapter.
+    UnknownCredentialProfile {
+        /// Build-provided adapter whose profile registry was checked.
+        adapter: ModelAdapter,
+        /// Exact profile spelling absent from that registry.
+        credential_profile: Arc<str>,
+    },
+    /// One model family appeared more than once in the mapping table.
+    DuplicateModelFamily {
+        /// Exact repeated family key.
+        model_family: Arc<str>,
+    },
+    /// A model named no entry in the static mapping table.
+    UnmappedModelFamily {
+        /// Exact family key absent from the table.
+        model_family: Arc<str>,
+    },
+    /// One provider-native model spelling was routed to different adapters.
+    ConflictingProviderModelRoute,
+    /// A Codex mapping exists without its required process configuration.
+    MissingCodexCliConfiguration,
+    /// Codex paths were malformed, relative, or named no existing directory.
+    InvalidCodexCliConfiguration,
     /// The provider-native model spelling was empty or padded.
     InvalidProviderModel,
     /// An output or context token limit was zero or outside `u32`.
@@ -322,11 +631,30 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidDocument => "model configuration is not valid TOML",
             Self::UnsupportedVersion => "model configuration version is unsupported",
             Self::MissingModels => "model configuration has no model definitions",
+            Self::MissingAdapterMappings => "model configuration has no adapter mappings",
             Self::MissingCompaction => "model configuration has no compaction settings",
             Self::UnknownField => "model configuration contains an unknown field",
             Self::InvalidField => "model configuration has a missing or mistyped field",
             Self::InvalidIdentity => "model configuration contains an invalid identity",
-            Self::UnsupportedProvider => "model configuration names an unsupported provider",
+            Self::UnsupportedAdapter { .. } => "model configuration names an unsupported adapter",
+            Self::UnknownCredentialProfile { .. } => {
+                "model configuration names an unknown adapter credential profile"
+            }
+            Self::DuplicateModelFamily { .. } => {
+                "model configuration repeats a model family mapping"
+            }
+            Self::UnmappedModelFamily { .. } => {
+                "model configuration names an unmapped model family"
+            }
+            Self::ConflictingProviderModelRoute => {
+                "model configuration routes one provider model to conflicting adapters"
+            }
+            Self::MissingCodexCliConfiguration => {
+                "model configuration maps Codex CLI without Codex CLI settings"
+            }
+            Self::InvalidCodexCliConfiguration => {
+                "model configuration contains invalid Codex CLI settings"
+            }
             Self::InvalidProviderModel => "model configuration contains an invalid provider model",
             Self::InvalidLimit => "model configuration contains an invalid token limit",
             Self::InvalidCompactionPrompt => {
@@ -346,6 +674,25 @@ impl fmt::Display for HubModelConfigurationError {
 }
 
 impl Error for HubModelConfigurationError {}
+
+/// Typed session-admission rejection for a model absent from the static table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownSessionModel {
+    /// Exact model request that no configured entry serves.
+    pub selection: ModelSelectionRequest,
+}
+
+impl fmt::Display for UnknownSessionModel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "session model is not configured: {:?}",
+            self.selection
+        )
+    }
+}
+
+impl Error for UnknownSessionModel {}
 
 /// Line-termination bytes a credential file may end with. `gh auth token`,
 /// `op read`, `pass`, and a shell redirect all terminate the line they write,
@@ -428,21 +775,26 @@ impl CredentialAccess for FileCredentialAccess {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
-    use signalbox_domain::{DirectModelSelection, ModelAlias};
+    use signalbox_domain::{DirectModelSelection, ModelAlias, ModelSelectionRequest};
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_tools_basic::WebFetchEgressPolicy;
     use uuid::Uuid;
 
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
-        HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES, credential_bytes,
-        validate_alias_count,
+        HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES, ModelAdapter,
+        UnknownSessionModel, credential_bytes, validate_alias_count,
     };
 
     const CONFIGURATION: &str = r#"
 version = 1
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -453,7 +805,7 @@ allowed_origins = ["https://example.com"]
 [[models]]
 selection_id = "10000000-0000-4000-8000-000000000001"
 target_id = "20000000-0000-4000-8000-000000000001"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "claude-example"
 max_output_tokens = 256
 context_window_tokens = 200000
@@ -495,6 +847,80 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .target_catalog()
                 .resolve(signalbox_domain::FrozenModelSelection::Direct(selection))
                 .is_ok()
+        );
+        assert_eq!(
+            configuration
+                .resolve_direct_model(selection)
+                .expect("fixture selection has an adapter route")
+                .adapter(),
+            ModelAdapter::Anthropic
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_adapter_the_build_does_not_provide() {
+        let unsupported_adapter_name = "openai_http";
+        let unsupported_adapter = CONFIGURATION.replace(
+            "adapter = \"anthropic\"",
+            &format!("adapter = \"{unsupported_adapter_name}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unsupported_adapter).err(),
+            Some(HubModelConfigurationError::UnsupportedAdapter {
+                adapter: Arc::from(unsupported_adapter_name),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_profile_the_adapter_does_not_provide() {
+        let unknown_profile_name = "unknown-profile";
+        let unknown_profile = CONFIGURATION.replace(
+            "credential_profile = \"anthropic-primary\"",
+            &format!("credential_profile = \"{unknown_profile_name}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_profile).err(),
+            Some(HubModelConfigurationError::UnknownCredentialProfile {
+                adapter: ModelAdapter::Anthropic,
+                credential_profile: Arc::from(unknown_profile_name),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_models_with_no_family_mapping() {
+        let unmapped_family = "codex";
+        let unmapped = CONFIGURATION.replace(
+            "model_family = \"anthropic\"\nprovider_model",
+            &format!("model_family = \"{unmapped_family}\"\nprovider_model"),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unmapped).err(),
+            Some(HubModelConfigurationError::UnmappedModelFamily {
+                model_family: Arc::from(unmapped_family),
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_session_model_rejection_names_the_requested_model() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(99));
+        let request = ModelSelectionRequest::Direct(selection);
+
+        assert_eq!(
+            configuration.resolve_session_model(request),
+            Err(UnknownSessionModel { selection: request })
+        );
+        assert!(
+            UnknownSessionModel { selection: request }
+                .to_string()
+                .contains(&format!("{request:?}"))
         );
     }
 

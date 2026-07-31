@@ -3163,6 +3163,7 @@ dependencies = [
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
  "signalbox-model-runtime-anthropic",
+ "signalbox-model-runtime-codex-cli",
  "signalbox-persistence",
  "signalbox-process-protocol",
  "signalbox-tools-basic",

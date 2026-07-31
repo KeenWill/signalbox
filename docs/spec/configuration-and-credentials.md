@@ -377,6 +377,11 @@ fail-closed:
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.
+- At least one `[[adapter_mappings]]` entry is required. Each entry gives one
+  exact `model_family`, the build-provided `adapter`, and its non-secret
+  `credential_profile`. Duplicate families, an adapter this daemon build does
+  not provide, or a credential profile that adapter does not provide are typed
+  startup failures. Nothing is inferred from model spelling.
 - Unknown fields are rejected at the root and inside every table. Why: a
   silently ignored key would let a typo change model meaning invisibly, so
   unrecognized content fails explicitly instead.
@@ -398,24 +403,38 @@ Each `[[models]]` entry defines one direct selection:
 - `target_id` — UUID of the exact normalized provider/model identity
   (`ResolvedProviderTarget`). Identity encoding is
   [identity-and-commands](identity-and-commands.md) material.
-- `provider` — must be `"anthropic"`; the only provider this composition slice
-  admits.
+- `model_family` — exact key of one `[[adapter_mappings]]` entry.
 - `provider_model` — the exact provider-native model spelling; must be nonempty
   and unpadded.
 - `max_output_tokens` — required positive `u32` output-token ceiling.
+- `context_window_tokens` — required positive `u32` context ceiling, not smaller
+  than `max_output_tokens`.
+
+This build provides exactly `anthropic` with profile `anthropic-primary` and
+`codex_cli` with profile `codex-subscription-primary`. A Codex mapping also
+requires `[codex_cli]` with an absolute executable path and an absolute,
+existing `working_directory`; construction validates that shape and platform
+support without invoking Codex or inspecting login state. The Codex CLI
+continues to own its external subscription login exactly as the adapter contract
+specifies. OpenAI HTTP and Claude CLI mappings are not provided by this build.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
 aliases are rejected). Duplicate selection keys, duplicate aliases, and
 conflicting runtime meanings for one target are all rejected.
 
-One valid document yields two immutable in-memory catalogs:
+One valid document yields three correlated immutable in-memory catalogs:
 
 - the domain `ModelTargetCatalog`, mapping each `DirectModelSelection` to its
   exact `ResolvedProviderTarget`, used by execution-time target resolution;
 - the `RuntimeModelCatalog`, mapping each target to its provider-native spelling
-  and output-token ceiling, used by the provider bridge
+  and token ceilings, used by the provider bridge
   ([runtime-substrate](runtime-substrate.md)).
+- the exact provider-model-to-adapter routing table and target-to-family table.
+  The former selects Anthropic HTTP or Codex CLI for each operation; the latter
+  selects a session-pinned credential entry. A provider model routed to
+  different adapters or a target assigned conflicting families is rejected at
+  startup.
 
 The file is read once at startup and never reread; changing the catalog is a
 process restart. Why: pinned targets and frozen selections must not change
@@ -560,6 +579,10 @@ epoch authority and makes configuration edits forward-only.
 Validation happens at two boundaries, on frozen semantic meaning only —
 credential presence is never consulted (INV-008):
 
+- **At session creation.** The requested direct model or alias must resolve
+  through the static table. Absence is a typed rejection carrying that exact
+  `ModelSelectionRequest`; the process protocol projects it to its existing
+  `InvalidRequest` result without a protocol change.
 - **At acceptance.** `SubmitInput` freezes the requested selection into the
   turn's effective configuration. A direct selection freezes without catalog
   consultation. An alias request consults an acceptance-time definition
@@ -577,13 +600,11 @@ credential presence is never consulted (INV-008):
   [model-call-execution](model-call-execution.md) material.
 
 Each accepted origin retains the selection frozen from its defaults epoch.
-Replacing session defaults imposes no same-provider restriction: any selection
-admitted by the immutable catalog may become the next epoch, while the current
-daemon composition still configures only Anthropic targets. The first subsequent
-turn resolves and pins its own provider target and credential reference at its
-model-call boundary. A prepared or in-flight predecessor retains its pins. This
-re-establishes credential affinity where the new defaults take effect and keeps
-provider prompt-cache prefixes stable for work already in progress (INV-046).
+Replacing session defaults imposes no same-adapter restriction: any selection
+admitted by the immutable catalog may become the next epoch. The first
+subsequent turn resolves its target through the same static table and selects
+the latest session credential snapshot entry for that target's family. A
+prepared or in-flight predecessor retains its call pin (INV-046).
 
 In the provider bridge, a durably resolved target with no `RuntimeModelCatalog`
 mapping is a typed adapter defect (`UnconfiguredTarget`), never provider
@@ -601,16 +622,22 @@ deployment-side rules that code cannot enforce are stated in
   one credential; a `CredentialValue` carries the secret bytes. References are
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: rotation preserves the stable name so no record
-  or log ever needs the secret (INV-035). Two references exist today: the
-  composition constants `anthropic-primary` and `github-primary`.
+  or log ever needs the secret (INV-035). Three references exist today: the
+  composition constants `anthropic-primary`, `codex-subscription-primary`, and
+  `github-primary`.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
-  each reference to its corresponding deployment path and reads the file for
-  every model-call or code-host operation preparation; nothing is cached. Why:
-  atomic file replacement rotates either credential without restarting
-  signalboxd, and an in-flight operation keeps the value it authenticated with.
-  Resolution is reference-scoped: a foreign reference fails typed `Unmapped`; a
-  missing file is `Unavailable`; an unreadable file is `Unreadable` — all
-  reference-only errors.
+  the Anthropic and GitHub references to their corresponding deployment paths
+  and reads the file for every Anthropic model-call or code-host operation
+  preparation; nothing is cached. Why: atomic file replacement rotates either
+  credential without restarting signalboxd, and an in-flight operation keeps the
+  value it authenticated with. Resolution is reference-scoped: a foreign
+  reference fails typed `Unmapped`; a missing file is `Unavailable`; an
+  unreadable file is `Unreadable` — all reference-only errors.
+- **External Codex login.** `codex-subscription-primary` names the
+  operator-selected ambient Codex CLI login. The daemon and adapter neither
+  locate nor read its credential store and invent no credential-value shape; the
+  fresh CLI process resolves login state under the adapter's existing
+  environment contract.
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
@@ -626,14 +653,28 @@ deployment-side rules that code cannot enforce are stated in
   boot, so a missing or unsynced credential cannot block startup or the recovery
   scan. Why: recovery of acknowledged work must not depend on any provider or
   integration credential (INV-034).
-- **Resolution timing.** A model adapter resolves the durably pinned reference
-  during send preparation — after the durable `Prepared` record, before send
-  authorization — and scopes the resulting value to that request (INV-002
-  boundary type). The shared cancellation contract for preparation and execution
-  is owned by [model-call-execution](model-call-execution.md#staged-execution).
-  A code-host tool resolves its fixed `github-primary` reference only after the
-  durable tool attempt is authorized `InFlight` and immediately before its typed
-  transport call; no model argument, client, or runner can select or receive the
+- **Session credential history.** First handling of every native or imported
+  session-creation command appends event ordinal 1 to that session's credential
+  history in the same transaction as the session. The event has creation-command
+  provenance and a complete, nonempty family-to-reference snapshot copied from
+  the validated mapping table. Record and entry rows are append-only; a guarded
+  head names the current event, and model-call preparation reads the latest
+  entry for the resolved target's family. Equal command replay returns the
+  recorded session without consulting the current table, so a configuration edit
+  never silently re-resolves an existing session's credentials. The migration
+  seeds each preexisting session with the sole previously composed `anthropic` /
+  `anthropic-primary` pair.
+- **Resolution timing.** The Anthropic adapter resolves the durably pinned
+  reference during send preparation — after the durable `Prepared` record,
+  before send authorization — and scopes the resulting value to that request
+  (INV-002 boundary type). Codex validates that the operation carries its pinned
+  external-login reference and then prepares the process capability without
+  reading a credential value. The shared cancellation contract for preparation
+  and execution is owned by
+  [model-call-execution](model-call-execution.md#staged-execution). A code-host
+  tool resolves its fixed `github-primary` reference only after the durable tool
+  attempt is authorized `InFlight` and immediately before its typed transport
+  call; no model argument, client, or runner can select or receive the
   credential.
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
@@ -656,6 +697,14 @@ deployment-side rules that code cannot enforce are stated in
   attempts store neither integration references nor values: the immutable
   compiled code-host declaration selects `github-primary` again when execution
   resumes.
+
+**Committed unimplemented functionality — explicit session credential update.**
+No present API, process message, or command updates session credentials. A
+future explicit operation may add or change a session credential only by
+appending the next complete history event with its own command provenance and
+advancing the head by exactly one; it must never rewrite history or
+automatically apply a configuration edit. The current append-only record shape
+is compatible with that operation.
 
 ## Runner credential lifecycle
 

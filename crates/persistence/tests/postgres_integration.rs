@@ -94,6 +94,9 @@ use signalbox_persistence::{
     },
     scheduler::PostgresEligibilitySweep,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
+    session_credentials::{
+        SessionCredentialPin, SessionModelCredential, current_session_credential,
+    },
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
         StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
@@ -121,6 +124,145 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 fn model_credential_reference() -> ModelCallCredentialReference {
     ModelCallCredentialReference::new("fixture-provider-primary")
+}
+
+/// The creation pin is event 1, equal replay never rereads a changed pin, and
+/// current credentials are selected only by append-and-head advancement.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_model_credentials_are_an_append_only_creation_snapshot()
+-> Result<(), Box<dyn Error>> {
+    const ANTHROPIC_FAMILY: &str = "anthropic";
+    const CODEX_FAMILY: &str = "codex";
+    const FIRST_ANTHROPIC: &str = "anthropic-first";
+    const FIRST_CODEX: &str = "codex-first";
+    const SECOND_CODEX: &str = "codex-second";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xce01));
+    let session = SessionId::from_uuid(Uuid::from_u128(0xce02));
+    let replay_candidate = SessionId::from_uuid(Uuid::from_u128(0xce03));
+    let request = CreateSessionRequest::try_new(
+        command_id,
+        SessionConfigurationDefaults::new(direct(0xce04)),
+    )?;
+    let first_pin = SessionCredentialPin::try_new(vec![
+        SessionModelCredential::new(ANTHROPIC_FAMILY, FIRST_ANTHROPIC),
+        SessionModelCredential::new(CODEX_FAMILY, FIRST_CODEX),
+    ])
+    .expect("fixture credential snapshot is valid");
+    let mut first = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone()).with_credential_pin(first_pin),
+    );
+
+    let CreateSessionOutcome::Applied(first_result) = first.execute(request.clone()).await? else {
+        panic!("first handling applies the fixture creation");
+    };
+    assert_eq!(first_result.session(), session);
+    let first_snapshot: Vec<(String, String)> = sqlx::query_as(
+        "SELECT model_family, credential_reference
+           FROM session_model_credential_entry
+          WHERE session_id = $1 AND event_ordinal = 1
+          ORDER BY model_family",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        first_snapshot,
+        vec![
+            (ANTHROPIC_FAMILY.to_owned(), FIRST_ANTHROPIC.to_owned()),
+            (CODEX_FAMILY.to_owned(), FIRST_CODEX.to_owned()),
+        ]
+    );
+
+    let changed_pin = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        CODEX_FAMILY,
+        SECOND_CODEX,
+    )])
+    .expect("changed fixture credential snapshot is valid");
+    let mut replay = CreateSessionService::new(
+        FixedSessionIds::new([replay_candidate]),
+        CreateSessionRepository::new(pool.clone()).with_credential_pin(changed_pin),
+    );
+    let CreateSessionOutcome::Applied(replay_result) = replay.execute(request).await? else {
+        panic!("equal replay returns the applied fixture creation");
+    };
+    assert_eq!(replay_result.session(), session);
+    let replay_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM session_model_credential_record WHERE session_id = $1),
+            (SELECT count(*) FROM session_model_credential_entry WHERE session_id = $1),
+            (SELECT current_event_ordinal::bigint
+               FROM session_current_model_credentials WHERE session_id = $1)",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(replay_counts, (1, 2, 1));
+
+    sqlx::query(
+        "INSERT INTO session_model_credential_record
+            (session_id, event_ordinal, event_kind, provenance_kind,
+             provenance_command_id, recorded_at)
+         VALUES ($1, 2, 'updated', 'credential_update', $2, transaction_timestamp())",
+    )
+    .bind(session.into_uuid())
+    .bind(command_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_model_credential_entry
+            (session_id, event_ordinal, model_family, credential_reference)
+         VALUES ($1, 2, $2, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(CODEX_FAMILY)
+    .bind(SECOND_CODEX)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_model_credentials
+            SET current_event_ordinal = 2
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(
+        current_session_credential(&pool, session, CODEX_FAMILY)
+            .await?
+            .as_str(),
+        SECOND_CODEX
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE session_model_credential_entry
+                SET credential_reference = 'rewrite'
+              WHERE session_id = $1 AND event_ordinal = 1 AND model_family = $2",
+        )
+        .bind(session.into_uuid())
+        .bind(CODEX_FAMILY)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "DELETE FROM session_current_model_credentials
+              WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 async fn complete_text_turn(

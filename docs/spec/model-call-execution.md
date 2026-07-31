@@ -322,31 +322,22 @@ is a decided fact rather than a retryable database failure: the completion fails
 closed and its in-flight call is left to startup recovery, because the prepared
 identities are pinned by then and every identical retry fails the same way.
 
-Every catalog model selection also declares `context_window_tokens` as a
-required nonzero integer beside `max_output_tokens`; configuration is invalid
-when the maximum output reservation exceeds the context window. The window is
-operator-declared per selection and is never inferred from provider/model names.
-Before activating an eligible turn, the daemon renders its prospective initial
-ordinary call and obtains the exact input-token count from that selection's
-provider adapter. The call fits only when that input count plus the selection's
-full `max_output_tokens` reservation is at most the declared context window;
-checked addition fails closed on overflow. When the requested total exceeds the
-window, the turn is not activated and the ordinary call is not sent; the daemon
-runs compaction through the latest safe boundary, reloads the resulting complete
-frontier, renders and counts again, and proceeds only when the recounted input
-plus the same output reservation fits. A compaction result that still cannot fit
-fails closed rather than looping or guessing a different limit. The first
-automatic prepare durably and immutably associates its compaction command with
-the queued turn, and at most one automatic command may name that turn in its
-session. A later scheduler pass for the same queued turn therefore fails closed
-without issuing another dedicated compaction call when the already-compacted
-frontier still exceeds the limit.
+Every catalog model selection declares required positive `max_output_tokens` and
+`context_window_tokens`; configuration is invalid when the output ceiling
+exceeds the context ceiling. Both are operator-declared per selection and never
+inferred from provider or model names. The provider request uses the configured
+output ceiling. After a nominal completion, the daemon retains adapter-reported
+usage and changes the observation to `KnownFailed` when reported output exceeds
+`max_output_tokens`, or when the reported input-plus-output lower bound exceeds
+`context_window_tokens`. Missing usage fields remain missing and are never
+invented. Adapters need no separate counting operation, and the daemon performs
+no automatic pre-activation compaction; explicit compaction remains available.
 
-Both triggers share the same compaction transaction and provider-call lifecycle.
-An explicit command first resolves its owner-global replay state; an equal
-applied command returns its original receipt even when the current deployment no
-longer resolves the original selection or compaction credential. Configuration
-and credential resolution occur only for an unseen command.
+The explicit trigger uses the same compaction transaction and provider-call
+lifecycle. An explicit command first resolves its owner-global replay state; an
+equal applied command returns its original receipt even when the current
+deployment no longer resolves the original selection or compaction credential.
+Configuration and credential resolution occur only for an unseen command.
 
 Provider interaction remains outside database transactions, and the summary
 range loader selects only the exact source-qualified range fixed by the Prepared
@@ -356,16 +347,6 @@ atomically terminalizes a standalone Prepared compaction call as `KnownFailed`
 and an InFlight call as `Ambiguous`, marks its exactly correlated pending
 command failed, and produces no summary or result frontier. Any missing,
 duplicate, or mismatched command/call correlation fails closed.
-
-For the automatic guard, the exact call identity used during provider-native
-counting is retained. Once the count fits, one scheduler-locked transaction
-revalidates the activation, commits it, and creates that exact no-steering
-Prepared call. Steering accepted after that transaction remains pending for a
-later call and cannot enter the already-counted operation.
-
-The automatic path's known request-fit limitation and its blocking reliance
-condition are recorded under
-[Automatic context compaction](../open-questions.md#automatic-context-compaction).
 
 ## Staged execution
 
@@ -743,9 +724,11 @@ attempt, redispatches a call, or assumes a request was or was not sent.
 ## Composition and harness
 
 Production composition wires `PostgresModelCallRepository` (all four transaction
-roles), the in-process gate, and `RuntimeModelCallProvider` over the Anthropic
-runtime, with the domain target catalog and runtime model catalog built from one
-versioned static configuration file and a reread credential file
+roles), the in-process gate, and `RuntimeModelCallProvider` over the
+configuration-selected Anthropic HTTP or Codex CLI runtime, with the domain
+target catalog, runtime model catalog, and exact adapter routes built from one
+versioned static configuration file. Anthropic rereads its credential file;
+Codex uses its external CLI login
 ([configuration-and-credentials](configuration-and-credentials.md)). The
 `signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives
 one session through the real scheduler and PostgreSQL path with either a

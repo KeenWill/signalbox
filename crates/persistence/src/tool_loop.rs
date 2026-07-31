@@ -193,6 +193,7 @@ pub struct PostgresToolLoopRepository {
     pool: PgPool,
     continuation_targets: Option<signalbox_domain::ModelTargetCatalog>,
     continuation_credential: Option<ModelCallCredentialReference>,
+    credential_families: Option<crate::ModelCredentialFamilyCatalog>,
 }
 
 impl PostgresToolLoopRepository {
@@ -202,6 +203,7 @@ impl PostgresToolLoopRepository {
             pool,
             continuation_targets: None,
             continuation_credential: None,
+            credential_families: None,
         }
     }
 
@@ -216,7 +218,17 @@ impl PostgresToolLoopRepository {
             pool,
             continuation_targets: Some(targets),
             continuation_credential: Some(credential_reference),
+            credential_families: None,
         }
+    }
+
+    /// Selects continuation credentials from the session's latest snapshot.
+    pub fn with_session_credentials(
+        mut self,
+        credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    ) -> Self {
+        self.credential_families = credential_families;
+        self
     }
 
     /// Reloads the active logical batch without granting mutation authority.
@@ -840,6 +852,7 @@ impl PostgresToolLoopRepository {
                 turn,
                 targets,
                 credential_reference,
+                self.credential_families.as_ref(),
                 &projection,
                 identities.call(),
                 identities.target_failure().clone(),

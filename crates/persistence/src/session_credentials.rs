@@ -1,0 +1,209 @@
+//! Append-only per-session model credential history.
+
+use std::{collections::HashMap, sync::Arc};
+
+use signalbox_application::ModelCallCredentialReference;
+use signalbox_domain::{ResolvedProviderTarget, SessionId};
+use sqlx::{PgConnection, PgPool, Row, types::Uuid};
+
+/// One model-family credential entry in a complete session snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionModelCredential {
+    model_family: Arc<str>,
+    credential_reference: Arc<str>,
+}
+
+impl SessionModelCredential {
+    /// Names one model family and its non-secret credential reference.
+    pub fn new(
+        model_family: impl Into<Arc<str>>,
+        credential_reference: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            model_family: model_family.into(),
+            credential_reference: credential_reference.into(),
+        }
+    }
+
+    /// Configuration-owned model family key.
+    pub fn model_family(&self) -> &str {
+        &self.model_family
+    }
+
+    /// Non-secret reference pinned for this family.
+    pub fn credential_reference(&self) -> &str {
+        &self.credential_reference
+    }
+}
+
+/// A complete credential snapshot pinned as a session history event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionCredentialPin {
+    credentials: Arc<[SessionModelCredential]>,
+}
+
+impl SessionCredentialPin {
+    /// Validates a nonempty snapshot with one entry per model family.
+    pub fn try_new(
+        mut credentials: Vec<SessionModelCredential>,
+    ) -> Result<Self, SessionCredentialPinError> {
+        credentials.sort_by(|left, right| left.model_family.cmp(&right.model_family));
+        if credentials.is_empty() {
+            return Err(SessionCredentialPinError::Empty);
+        }
+        if credentials.iter().any(|credential| {
+            credential.model_family.is_empty() || credential.credential_reference.is_empty()
+        }) {
+            return Err(SessionCredentialPinError::EmptyValue);
+        }
+        if credentials
+            .windows(2)
+            .any(|pair| pair[0].model_family == pair[1].model_family)
+        {
+            return Err(SessionCredentialPinError::DuplicateModelFamily);
+        }
+        Ok(Self {
+            credentials: credentials.into(),
+        })
+    }
+
+    /// Iterates the complete snapshot in stable family order.
+    pub fn credentials(&self) -> impl Iterator<Item = &SessionModelCredential> {
+        self.credentials.iter()
+    }
+}
+
+/// Why a configuration-owned credential snapshot is invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionCredentialPinError {
+    /// A complete snapshot must contain at least one family.
+    Empty,
+    /// Family and credential spellings must be nonempty.
+    EmptyValue,
+    /// A family appeared more than once.
+    DuplicateModelFamily,
+}
+
+/// Static model-target-to-family mapping used only to select a pinned entry.
+#[derive(Clone, Debug)]
+pub struct ModelCredentialFamilyCatalog {
+    families: Arc<HashMap<ResolvedProviderTarget, Arc<str>>>,
+}
+
+impl ModelCredentialFamilyCatalog {
+    /// Builds an exact target mapping and rejects conflicting definitions.
+    pub fn try_new(
+        entries: impl IntoIterator<Item = (ResolvedProviderTarget, Arc<str>)>,
+    ) -> Result<Self, ModelCredentialFamilyCatalogError> {
+        let mut families = HashMap::new();
+        for (target, family) in entries {
+            if let Some(previous) = families.insert(target, Arc::clone(&family))
+                && previous != family
+            {
+                return Err(ModelCredentialFamilyCatalogError::ConflictingTarget);
+            }
+        }
+        Ok(Self {
+            families: Arc::new(families),
+        })
+    }
+
+    /// Resolves the configuration family for one exact provider target.
+    pub fn family(&self, target: ResolvedProviderTarget) -> Option<&str> {
+        self.families.get(&target).map(AsRef::as_ref)
+    }
+}
+
+/// Why a static target-family catalog cannot be constructed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelCredentialFamilyCatalogError {
+    /// One exact target was assigned more than one family.
+    ConflictingTarget,
+}
+
+pub(crate) async fn insert_initial_session_credential_event(
+    connection: &mut PgConnection,
+    session_id: Uuid,
+    command_id: Uuid,
+    provenance_kind: &'static str,
+    pin: &SessionCredentialPin,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO session_model_credential_record
+            (session_id, event_ordinal, event_kind, provenance_kind,
+             provenance_command_id, recorded_at)
+         VALUES ($1, 1, 'created', $2, $3, transaction_timestamp())",
+    )
+    .bind(session_id)
+    .bind(provenance_kind)
+    .bind(command_id)
+    .execute(&mut *connection)
+    .await?;
+    for credential in pin.credentials() {
+        sqlx::query(
+            "INSERT INTO session_model_credential_entry
+                (session_id, event_ordinal, model_family, credential_reference)
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(session_id)
+        .bind(credential.model_family())
+        .bind(credential.credential_reference())
+        .execute(&mut *connection)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO session_current_model_credentials
+            (session_id, current_event_ordinal)
+         VALUES ($1, 1)",
+    )
+    .bind(session_id)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn load_current_session_credential(
+    connection: &mut PgConnection,
+    session_id: Uuid,
+    family: &str,
+) -> Result<ModelCallCredentialReference, sqlx::Error> {
+    let reference: String = sqlx::query(
+        "SELECT entry.credential_reference
+           FROM session_current_model_credentials AS current
+           JOIN session_model_credential_entry AS entry
+             ON entry.session_id = current.session_id
+            AND entry.event_ordinal = current.current_event_ordinal
+          WHERE current.session_id = $1
+            AND entry.model_family = $2",
+    )
+    .bind(session_id)
+    .bind(family)
+    .fetch_one(&mut *connection)
+    .await?
+    .try_get("credential_reference")?;
+    Ok(ModelCallCredentialReference::new(reference))
+}
+
+/// Loads the current credential reference for one session and model family.
+pub async fn current_session_credential(
+    pool: &PgPool,
+    session: SessionId,
+    family: &str,
+) -> Result<ModelCallCredentialReference, sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    load_current_session_credential(&mut connection, session.into_uuid(), family).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionCredentialPin, SessionCredentialPinError, SessionModelCredential};
+
+    #[test]
+    fn credential_pin_rejects_duplicate_model_families() {
+        let result = SessionCredentialPin::try_new(vec![
+            SessionModelCredential::new("codex", "first"),
+            SessionModelCredential::new("codex", "second"),
+        ]);
+        assert_eq!(result, Err(SessionCredentialPinError::DuplicateModelFamily));
+    }
+}

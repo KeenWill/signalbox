@@ -113,13 +113,18 @@ const STREAMING_DELTA_BYTES: usize = 8 * 1024;
 const MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000003"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "fixture-model"
 max_output_tokens = 256
 context_window_tokens = 200000
@@ -127,7 +132,7 @@ context_window_tokens = 200000
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000004"
 target_id = "00000000-0000-0000-0000-000000000005"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "fixture-model-next"
 max_output_tokens = 256
 context_window_tokens = 200000
@@ -500,10 +505,10 @@ impl RunningRuntime {
             template_configuration,
         );
         if let Some(compaction_model) = compaction_model {
-            runtime = runtime.with_context_compaction_model(
-                RuntimeContextCompactionModel::new(compaction_model, runtime_models),
-                "scripted-compaction",
-            );
+            runtime = runtime.with_context_compaction_model(RuntimeContextCompactionModel::new(
+                compaction_model,
+                runtime_models,
+            ));
         }
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
@@ -597,6 +602,36 @@ async fn create_alias_session(
         ))
         .into()),
     }
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn create_session_rejects_a_model_absent_from_the_static_mapping()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let unknown_selection = CanonicalUuid::from_uuid(Uuid::from_u128(0xffff));
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSession {
+                command_id: command()?,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: unknown_selection,
+                },
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, .. } = response.message() else {
+        panic!("unmapped model must return a protocol error");
+    };
+    assert_eq!(*code, ErrorCode::InvalidRequest);
+
+    drop(connection);
+    runtime.stop().await
 }
 
 async fn submit_first_input(

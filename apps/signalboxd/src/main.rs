@@ -22,7 +22,8 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
     InProcessToolDispatchGate, ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop,
-    SchedulerLoopExit, StartupScanService, UuidV7StartupScanIdGenerator,
+    SchedulerLoopExit, StartEligibleTurnService, StartupScanService,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -40,14 +41,15 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, CODE_HOST_CREDENTIAL_REFERENCE, ContextGuardedTurnPass,
-    DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE, DaemonTools,
+    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
     FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
     HubModelConfigurationError, LocalProcessListener, LocalSocketError, OtlpRuntime,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
     SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics,
+    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -798,11 +800,23 @@ async fn run_hub(
         )
     })?;
     let runtime_models = model_configuration.runtime_model_catalog();
+    let compaction_runtime =
+        ConfiguredModelRuntime::new(compaction_anthropic, &model_configuration).map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("codex_cli_construction_failed"),
+            )
+        })?;
+    let runtime = ConfiguredModelRuntime::new(anthropic, &model_configuration).map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("codex_cli_construction_failed"),
+        )
+    })?;
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
-        RuntimeContextCompactionModel::new(compaction_anthropic, runtime_models.clone()),
+        RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
     );
-    let provider = RuntimeModelCallProvider::new(anthropic, runtime_models.clone());
-    let context_compaction_credential_reference = credential_reference.as_str().to_owned();
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models.clone());
     let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
@@ -926,28 +940,26 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
-    .with_context_compaction_model(
-        Arc::clone(&context_compaction_model),
-        context_compaction_credential_reference.clone(),
-    );
+    .with_context_compaction_model(Arc::clone(&context_compaction_model));
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,
     };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
-    let counter = provider.clone();
     let model_repository = PostgresModelCallRepository::new(
         scheduler_pool.clone(),
         model_targets,
         credential_reference,
-    );
-    let guarded_model_repository = model_repository.clone();
-    let guarded_tool_catalog = tool_catalog.clone();
+    )
+    .with_session_credentials(model_configuration.credential_family_catalog());
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,
             InProcessAttemptDispatchGate::default(),
-            provider,
+            UsageLimitedModelCallProvider::new(
+                provider,
+                model_configuration.runtime_model_catalog(),
+            ),
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor),
     );
@@ -955,15 +967,11 @@ async fn run_hub(
     // fatal recovery signal through this handle rather than ending an
     // undecidable durable outcome at the client response.
     let process_runtime = process_runtime.with_recovery_reporter(execution.recovery_reporter());
-    let pass = ContextGuardedTurnPass::new(
-        StartEligibleTurnRepository::new(scheduler_pool),
-        guarded_model_repository,
-        counter,
-        guarded_tool_catalog,
-        runtime_models,
-        model_configuration,
-        context_compaction_model,
-        context_compaction_credential_reference,
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(scheduler_pool),
+        ),
         execution,
     );
     let mut scheduler = SchedulerLoop::new(work_source, pass);

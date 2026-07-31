@@ -186,7 +186,6 @@ struct ConnectionServices {
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: Arc<HubModelConfiguration>,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
-    context_compaction_credential_reference: Option<Arc<str>>,
     template_configuration: Arc<SessionTemplateConfiguration>,
     fanouts: ProcessFanouts,
     inbound_frame_budget: Arc<Semaphore>,
@@ -206,7 +205,6 @@ pub struct ProcessRuntime {
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
-    context_compaction_credential_reference: Option<Arc<str>>,
     template_configuration: SessionTemplateConfiguration,
     fanouts: ProcessFanouts,
     metrics: Option<TelemetryMetrics>,
@@ -256,7 +254,6 @@ impl ProcessRuntime {
             tool_dispatch_gate,
             model_configuration,
             context_compaction_model: Arc::new(UnavailableContextCompactionModel),
-            context_compaction_credential_reference: None,
             template_configuration,
             metrics: None,
             fanouts: ProcessFanouts {
@@ -272,10 +269,8 @@ impl ProcessRuntime {
     pub fn with_context_compaction_model(
         mut self,
         model: impl ContextCompactionModel + 'static,
-        credential_reference: impl Into<Arc<str>>,
     ) -> Self {
         self.context_compaction_model = Arc::new(model);
-        self.context_compaction_credential_reference = Some(credential_reference.into());
         self
     }
 
@@ -314,7 +309,6 @@ impl ProcessRuntime {
             tool_dispatch_gate: self.tool_dispatch_gate,
             model_configuration: self.model_configuration,
             context_compaction_model: self.context_compaction_model,
-            context_compaction_credential_reference: self.context_compaction_credential_reference,
             template_configuration: self.template_configuration,
             fanouts: fanouts.clone(),
         };
@@ -450,7 +444,6 @@ struct ConnectionDependencies {
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
-    context_compaction_credential_reference: Option<Arc<str>>,
     template_configuration: SessionTemplateConfiguration,
     fanouts: ProcessFanouts,
 }
@@ -470,8 +463,6 @@ async fn serve_connections(
         tool_dispatch_gate: dependencies.tool_dispatch_gate,
         model_configuration: Arc::new(dependencies.model_configuration),
         context_compaction_model: dependencies.context_compaction_model,
-        context_compaction_credential_reference: dependencies
-            .context_compaction_credential_reference,
         template_configuration: Arc::new(dependencies.template_configuration),
         fanouts: dependencies.fanouts,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
@@ -892,7 +883,7 @@ where
                 command_id.into_uuid(),
                 initial_model_selection,
                 system_prompt,
-                &services.pool,
+                services,
             )
             .await
         }
@@ -906,8 +897,7 @@ where
                 request_id,
                 command_id.into_uuid(),
                 template_name,
-                &services.pool,
-                services.template_configuration.as_ref(),
+                services,
             )
             .await
         }
@@ -930,6 +920,7 @@ where
                     initial_model_selection,
                 },
                 &services.pool,
+                services.model_configuration.as_ref(),
             )
             .await
         }
@@ -3693,6 +3684,7 @@ async fn handle_create_session_from_imported_frontier<Writer>(
     request_id: RequestId,
     wire_request: WireImportedContinuationRequest,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -3700,11 +3692,11 @@ where
     let command_id = DurableCommandId::from_uuid(wire_request.command_uuid);
     let conversation_id = ImportedConversationId::from_uuid(wire_request.conversation.into_uuid());
     let relationship = domain_imported_relationship(wire_request.relationship);
-    let defaults = SessionConfigurationDefaults::new(domain_model_selection(
-        wire_request.initial_model_selection,
-    ));
+    let model_selection = domain_model_selection(wire_request.initial_model_selection);
+    let defaults = SessionConfigurationDefaults::new(model_selection);
     let through_position = wire_request.through_position;
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone())
+        .with_credential_pin(model_configuration.session_credential_pin());
 
     match repository.load(command_id).await {
         Ok(Some(recorded)) => {
@@ -3775,6 +3767,19 @@ where
             )
             .await;
         }
+    }
+
+    if model_configuration
+        .resolve_session_model(model_selection)
+        .is_err()
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
     }
 
     let Some(position) = ImportedTranscriptPosition::try_from_u64(through_position.value()) else {
@@ -3995,19 +4000,6 @@ where
             .await;
         }
     }
-    let Some(credential_reference) = services
-        .context_compaction_credential_reference
-        .as_ref()
-        .map(|value| value.to_string())
-    else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::Unavailable),
-        )
-        .await;
-    };
     let defaults = match ProcessReadRepository::new(services.pool.clone())
         .read_session_defaults(session, None)
         .await
@@ -4056,6 +4048,34 @@ where
             definition.selected()
         }
     };
+    let Some(route) = services.model_configuration.resolve_direct_model(selection) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    };
+    let credential_reference =
+        match signalbox_persistence::session_credentials::current_session_credential(
+            &services.pool,
+            session,
+            route.model_family(),
+        )
+        .await
+        {
+            Ok(reference) => reference.as_str().to_owned(),
+            Err(_) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::Unavailable),
+                )
+                .await;
+            }
+        };
     let target = match services
         .model_configuration
         .target_catalog()
@@ -5263,7 +5283,7 @@ async fn handle_create_session<Writer>(
     command_id: uuid::Uuid,
     initial_model_selection: WireModelSelection,
     system_prompt: SystemPromptMember,
-    pool: &PgPool,
+    services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -5277,10 +5297,11 @@ where
         )
         .await;
     };
+    let model_selection = domain_model_selection(initial_model_selection);
     let request = CreateSessionRequest::try_new(
         DurableCommandId::from_uuid(command_id),
         SessionConfigurationDefaults::complete(
-            domain_model_selection(initial_model_selection),
+            model_selection,
             DangerousToolAutoApproval::Disabled,
             system_prompt,
         ),
@@ -5294,7 +5315,15 @@ where
         )
         .await;
     };
-    execute_create_session_request(writer, version, request_id, request, pool).await
+    execute_create_session_request(
+        writer,
+        version,
+        request_id,
+        request,
+        &services.pool,
+        services.model_configuration.as_ref(),
+    )
+    .await
 }
 
 async fn handle_create_session_from_template<Writer>(
@@ -5303,8 +5332,7 @@ async fn handle_create_session_from_template<Writer>(
     request_id: RequestId,
     command_id: uuid::Uuid,
     template_name: String,
-    pool: &PgPool,
-    templates: &SessionTemplateConfiguration,
+    services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -5319,7 +5347,8 @@ where
         .await;
     };
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(services.pool.clone())
+        .with_credential_pin(services.model_configuration.session_credential_pin());
     match repository.load(command_id).await {
         Ok(Some(recorded)) => {
             let recorded_name = recorded
@@ -5387,7 +5416,7 @@ where
         }
     }
 
-    let Some(template) = templates.resolve(&template_name) else {
+    let Some(template) = services.template_configuration.resolve(&template_name) else {
         return write_error(
             writer,
             version,
@@ -5410,7 +5439,15 @@ where
         )
         .await;
     };
-    execute_create_session_request(writer, version, request_id, request, pool).await
+    execute_create_session_request(
+        writer,
+        version,
+        request_id,
+        request,
+        &services.pool,
+        services.model_configuration.as_ref(),
+    )
+    .await
 }
 
 async fn handle_list_templates<Writer>(
@@ -5460,14 +5497,93 @@ async fn execute_create_session_request<Writer>(
     request_id: RequestId,
     request: CreateSessionRequest,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let mut service = CreateSessionService::new(
-        UuidV7SessionIdGenerator,
-        CreateSessionRepository::new(pool.clone()),
-    );
+    let repository = CreateSessionRepository::new(pool.clone())
+        .with_credential_pin(model_configuration.session_credential_pin());
+    match repository.load(request.command_id()).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
+            if command.initial_configuration_defaults() == request.initial_configuration_defaults()
+                && command.template_provenance() == request.template_provenance()
+            {
+                return write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCreated {
+                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                    },
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(CreateSessionRepositoryError::DifferentCommandKind { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::CommitAmbiguous(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    None,
+                    InternalDiagnostic::TemplateSessionCreationCorruption,
+                ),
+            )
+            .await;
+        }
+    }
+
+    if model_configuration
+        .resolve_session_model(request.initial_configuration_defaults().model())
+        .is_err()
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    }
+
+    let mut service = CreateSessionService::new(UuidV7SessionIdGenerator, repository);
     match service.execute(request).await {
         Ok(CreateSessionOutcome::Applied(result)) => {
             write_message(
@@ -10318,13 +10434,18 @@ mod tests {
             r#"
 version = 1
 
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000002"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "still-current"
 max_output_tokens = 256
 context_window_tokens = 200000

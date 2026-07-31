@@ -101,13 +101,18 @@ const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
 const PROCESS_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000002"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "fixture-model"
 max_output_tokens = 64
 context_window_tokens = 200000

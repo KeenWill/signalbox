@@ -168,12 +168,22 @@ impl CreateSessionRepositoryError {
 #[derive(Clone, Debug)]
 pub struct CreateSessionRepository {
     pool: PgPool,
+    credential_pin: Option<crate::SessionCredentialPin>,
 }
 
 impl CreateSessionRepository {
     /// Uses the supplied pool for atomic handling and complete loads.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            credential_pin: None,
+        }
+    }
+
+    /// Pins the complete configured credential snapshot into first handling.
+    pub fn with_credential_pin(mut self, credential_pin: crate::SessionCredentialPin) -> Self {
+        self.credential_pin = Some(credential_pin);
+        self
     }
 
     /// Claims and applies a new command, or resolves replay from the winner.
@@ -265,7 +275,9 @@ impl CreateSessionRepository {
         }
 
         let result = prepared.applied_result();
-        if let Err(error) = insert_prepared(&mut transaction, prepared).await {
+        if let Err(error) =
+            insert_prepared(&mut transaction, prepared, self.credential_pin.as_ref()).await
+        {
             transaction.rollback().await?;
             return Err(error);
         }
@@ -336,6 +348,7 @@ fn existing_outcome(
 async fn insert_prepared(
     connection: &mut PgConnection,
     prepared: PreparedCreateSession,
+    credential_pin: Option<&crate::SessionCredentialPin>,
 ) -> Result<(), CreateSessionRepositoryError> {
     let command = prepared.command();
     let session = prepared.session();
@@ -364,6 +377,17 @@ async fn insert_prepared(
     )
     .execute(&mut *connection)
     .await?;
+
+    if let Some(pin) = credential_pin {
+        crate::session_credentials::insert_initial_session_credential_event(
+            connection,
+            session_id_to_uuid(session.id()),
+            durable_command_id_to_uuid(command.command_id()),
+            "create_session",
+            pin,
+        )
+        .await?;
+    }
 
     sqlx::query(
         "INSERT INTO session_scheduler (session_id)
