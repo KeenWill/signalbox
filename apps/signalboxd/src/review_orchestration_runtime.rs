@@ -1199,24 +1199,9 @@ fn build_snapshot(
             Ok(ReviewOrchestrationConcernSnapshot {
                 key: expected.key().as_str().to_owned(),
                 template_digest: wire_digest(expected.template_digest())?,
-                status: claim.map_or(
-                    ReviewOrchestrationConcernStatus::Pending,
-                    |claim| match claim.outcome() {
-                        ReviewConcernOutcome::Succeeded(_) => {
-                            ReviewOrchestrationConcernStatus::Succeeded
-                        }
-                        ReviewConcernOutcome::Failed { .. } => {
-                            ReviewOrchestrationConcernStatus::Failed
-                        }
-                        ReviewConcernOutcome::Blocked { .. } => {
-                            ReviewOrchestrationConcernStatus::Blocked
-                        }
-                        ReviewConcernOutcome::Cancelled { .. }
-                        | ReviewConcernOutcome::Superseded { .. } => {
-                            ReviewOrchestrationConcernStatus::Cancelled
-                        }
-                    },
-                ),
+                status: claim.map_or(ReviewOrchestrationConcernStatus::Pending, |claim| {
+                    concern_status(claim.outcome())
+                }),
                 pass_id: claim.and_then(|claim| concern_pass(claim.outcome())),
             })
         })
@@ -1263,6 +1248,16 @@ fn build_snapshot(
             publication_published_count: canonical_count(publication_published_count)?,
         },
     })
+}
+
+fn concern_status(outcome: &ReviewConcernOutcome) -> ReviewOrchestrationConcernStatus {
+    match outcome {
+        ReviewConcernOutcome::Succeeded(_) => ReviewOrchestrationConcernStatus::Succeeded,
+        ReviewConcernOutcome::Failed { .. } => ReviewOrchestrationConcernStatus::Failed,
+        ReviewConcernOutcome::Blocked { .. } => ReviewOrchestrationConcernStatus::Blocked,
+        ReviewConcernOutcome::Cancelled { .. } => ReviewOrchestrationConcernStatus::Cancelled,
+        ReviewConcernOutcome::Superseded { .. } => ReviewOrchestrationConcernStatus::Superseded,
+    }
 }
 
 fn concern_pass(outcome: &ReviewConcernOutcome) -> Option<CanonicalUuid> {
@@ -1526,10 +1521,30 @@ const fn internal(cause: ReviewOrchestrationInternalCause) -> ReviewOrchestratio
 
 #[cfg(test)]
 mod tests {
+    use signalbox_application::ReviewConcernOutcome;
+    use signalbox_domain::{
+        ReviewPassId, ReviewPassRef, ReviewRunId, ReviewRunRef, ReviewTargetId,
+    };
+    use signalbox_process_protocol::ReviewOrchestrationConcernStatus;
+    use uuid::Uuid;
+
     use super::{
         ReviewOrchestrationRuntimeError, ReviewOrchestrationServiceError,
         ReviewOrchestrationStoreError, RunnerError, map_service_error,
     };
+
+    #[test]
+    fn superseded_concern_keeps_its_distinct_wire_status() {
+        let target = ReviewTargetId::from_uuid(Uuid::from_u128(1));
+        let run = ReviewRunRef::new(target, ReviewRunId::from_uuid(Uuid::from_u128(2)));
+        let pass = ReviewPassRef::new(run, ReviewPassId::from_uuid(Uuid::from_u128(3)));
+        let outcome = ReviewConcernOutcome::Superseded { pass };
+
+        assert_eq!(
+            super::concern_status(&outcome),
+            ReviewOrchestrationConcernStatus::Superseded,
+        );
+    }
 
     #[test]
     fn durable_stage_conflict_is_not_command_identity_reuse() {

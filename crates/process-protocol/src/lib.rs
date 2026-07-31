@@ -757,6 +757,7 @@ pub enum ReviewOrchestrationConcernStatus {
     Failed,
     Blocked,
     Cancelled,
+    Superseded,
 }
 
 /// Resolved non-concern templates frozen into one attempt.
@@ -1748,7 +1749,8 @@ fn validate_review_orchestration_snapshot(
             ReviewOrchestrationConcernStatus::Pending => concern.pass_id.is_none(),
             ReviewOrchestrationConcernStatus::Succeeded
             | ReviewOrchestrationConcernStatus::Failed
-            | ReviewOrchestrationConcernStatus::Blocked => concern.pass_id.is_some(),
+            | ReviewOrchestrationConcernStatus::Blocked
+            | ReviewOrchestrationConcernStatus::Superseded => concern.pass_id.is_some(),
             ReviewOrchestrationConcernStatus::Cancelled => true,
         };
         if !valid_pass {
@@ -6977,6 +6979,31 @@ mod tests {
             ServerMessage::ReviewOrchestration { snapshot },
         )?;
         let encoded = encode_server_line(&frame)?;
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn review_orchestration_snapshot_preserves_superseded_concern_status()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = orchestration_snapshot_fixture(
+            ReviewOrchestrationState::FanoutIncomplete,
+            ReviewOrchestrationConcernStatus::Superseded,
+            Some(uuid(5)),
+            ReviewOrchestrationCounts {
+                finding_count: CanonicalU64::new(0),
+                judgment_member_count: CanonicalU64::new(0),
+                judgment_effect_applied_count: CanonicalU64::new(0),
+                repair_fixed_count: CanonicalU64::new(0),
+                publication_published_count: CanonicalU64::new(0),
+            },
+        )?;
+        let frame = ServerFrame::try_new(
+            request(18)?,
+            ServerMessage::ReviewOrchestration { snapshot },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
     }

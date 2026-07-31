@@ -304,26 +304,27 @@ State is exactly `awaiting_import`, `import_incomplete`, `awaiting_concerns`,
 `judgment_incomplete`, `awaiting_repair`, `repair_incomplete`,
 `awaiting_publication`, `publication_incomplete`, or `complete`. Each frozen
 concern carries `{ key, template_digest, status, pass_id }`; status is
-`pending`, `succeeded`, `failed`, `blocked`, or `cancelled`. Pending requires a
-null pass; success, failure, and blockage require a non-null pass; cancellation
-admits either. The required counts are `finding_count`, `judgment_member_count`,
-`judgment_effect_applied_count`, `repair_fixed_count`, and
-`publication_published_count`. Each is at most 1,024; judgment members cannot
-exceed findings, and applied, fixed, or published counts cannot exceed judgment
-members. The snapshot repeats the same nonempty unique one-through-32 concern
-inventory and checked concern-set key. Before import every concern is pending.
-Awaiting concerns requires a pending member; fan-out incomplete requires a
-complete inventory with at least one non-success; every state from awaiting
-judgment onward requires every concern to have succeeded. Judgment-effect states
-require strictly fewer applied effects than plan members, while repair and later
-states require equality. Counts belonging to a later barrier must remain zero
-until that barrier can exist. Any state, status, or count combination violating
-those relations is an impossible server projection and is malformed. Snapshot
-construction consumes two units from the shared pool-capacity budget, leaving
-two connections reserved for non-snapshot work; a pool with fewer than four
-configured connections cannot start the process listener. The database-global
-snapshot admission loser rolls back its transaction before an exponential retry
-wait that begins at 10 ms and is capped at 100 ms.
+`pending`, `succeeded`, `failed`, `blocked`, `cancelled`, or `superseded`.
+Pending requires a null pass; success, failure, blockage, and supersession
+require a non-null pass; cancellation admits either. The required counts are
+`finding_count`, `judgment_member_count`, `judgment_effect_applied_count`,
+`repair_fixed_count`, and `publication_published_count`. Each is at most 1,024;
+judgment members cannot exceed findings, and applied, fixed, or published counts
+cannot exceed judgment members. The snapshot repeats the same nonempty unique
+one-through-32 concern inventory and checked concern-set key. Before import
+every concern is pending. Awaiting concerns requires a pending member; fan-out
+incomplete requires a complete inventory with at least one non-success; every
+state from awaiting judgment onward requires every concern to have succeeded.
+Judgment-effect states require strictly fewer applied effects than plan members,
+while repair and later states require equality. Counts belonging to a later
+barrier must remain zero until that barrier can exist. Any state, status, or
+count combination violating those relations is an impossible server projection
+and is malformed. Snapshot construction consumes two units from the shared
+pool-capacity budget, leaving two connections reserved for non-snapshot work; a
+pool with fewer than four configured connections cannot start the process
+listener. The database-global snapshot admission loser rolls back its
+transaction before an exponential retry wait that begins at 10 ms and is capped
+at 100 ms.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the

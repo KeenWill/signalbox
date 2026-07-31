@@ -1767,6 +1767,7 @@ const fn review_orchestration_concern_status_label(
         ReviewOrchestrationConcernStatus::Failed => "failed",
         ReviewOrchestrationConcernStatus::Blocked => "blocked",
         ReviewOrchestrationConcernStatus::Cancelled => "cancelled",
+        ReviewOrchestrationConcernStatus::Superseded => "superseded",
     }
 }
 
