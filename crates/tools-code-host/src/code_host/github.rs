@@ -1,6 +1,6 @@
 //! Production GitHub REST/GraphQL adapter for the code-host tool suite.
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{collections::HashSet, error::Error, fmt, future::Future, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -14,8 +14,12 @@ use signalbox_tools_basic::{
     PublicDestinationClientError, has_more_response_bytes, public_destination_client,
 };
 
-use super::arguments::valid_revision;
-use super::result::absolute_https_url;
+use super::arguments::{MAX_FILE_PATH_BYTES, valid_revision};
+use super::repository_result::{
+    MAX_OBSERVED_DIRECTORY_ENTRIES, MAX_REPOSITORY_FILE_CONTENT_BYTES,
+    MAX_REPOSITORY_FILE_SCAN_BYTES, is_immediate_repository_child,
+};
+use super::result::{MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, absolute_https_url};
 use super::review_slog::{
     ReviewerActivity, author_class, authorized_association, disposition_class, finding_title,
     reviewer_verdict_evidence,
@@ -26,9 +30,11 @@ use super::{
     CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCursor, CodeHostOperation,
     CodeHostRepository, CodeHostResult, CodeHostResultCompleteness, CodeHostTransport,
     CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
-    ConvergenceStateResult, FilePatchResult, RerunFailedJobsResult, ReviewCheck,
-    ReviewDispositionClass, ReviewGateCheckArguments, ReviewGateCheckResult, ReviewThread,
-    ReviewThreadComment, ReviewThreadFields, ReviewThreadIdentity, ReviewThreadInventoryFields,
+    ConvergenceStateResult, FilePatchResult, RepositoryDirectoryEntry, RepositoryFileContentFields,
+    RepositoryLineRange, RepositoryListDirectoryResult, RepositoryObjectKind,
+    RepositoryReadFileResult, RerunFailedJobsResult, ReviewCheck, ReviewDispositionClass,
+    ReviewGateCheckArguments, ReviewGateCheckResult, ReviewThread, ReviewThreadComment,
+    ReviewThreadFields, ReviewThreadIdentity, ReviewThreadInventoryFields,
     ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult, StackStateArguments,
     StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
     ThreadReplyResult, ThreadResolveResult,
@@ -40,6 +46,27 @@ const USER_AGENT_VALUE: &str = "signalboxd";
 const API_VERSION: &str = "2026-03-10";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
+// A standard contents entry can repeat a path in `name`, `path`, four URL
+// fields, and the three `_links` fields. A symlink `target` is blob material,
+// and `submodule_git_url` is only a legacy kind marker; admit and budget both
+// separately instead of treating either as a path.
+const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 9;
+const MAX_REPOSITORY_SYMLINK_TARGET_BYTES: usize = 4 * 1024;
+const MAX_REPOSITORY_SUBMODULE_URL_BYTES: usize = 8 * 1024;
+const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
+const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
+    * (MAX_FILE_PATH_BYTES
+        * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
+        * MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY
+        + MAX_REPOSITORY_SYMLINK_TARGET_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
+        + MAX_REPOSITORY_SUBMODULE_URL_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
+        + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
+const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
+const COMMIT_SHA_ACCEPT: &str = "application/vnd.github.sha";
+const MAX_COMMIT_SHA_RESPONSE_BYTES: usize = 41;
+const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
+const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
@@ -288,6 +315,254 @@ impl GitHubCodeHostTransport {
         let result = ChangedFilesResult::try_new(files, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::ChangedFiles(result))
+    }
+
+    async fn repository_read_file(
+        &self,
+        arguments: super::RepositoryReadFileArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        with_read_operation_timeout(
+            DEFAULT_TIMEOUT,
+            self.repository_read_file_transaction(arguments, credential),
+        )
+        .await
+    }
+
+    async fn repository_read_file_transaction(
+        &self,
+        arguments: super::RepositoryReadFileArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let lookup = self
+            .repository_path_lookup(
+                arguments.repository(),
+                arguments.path(),
+                arguments.revision(),
+                credential,
+            )
+            .await?;
+        let result = match lookup {
+            RepositoryPathLookup::File { blob, source_bytes } => {
+                let scan_limit_bytes = u64::try_from(MAX_REPOSITORY_FILE_SCAN_BYTES)
+                    .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+                if arguments.line_range().is_some() && source_bytes > scan_limit_bytes {
+                    RepositoryReadFileResult::try_line_range_unavailable(&arguments, source_bytes)
+                } else {
+                    let body = self
+                        .repository_file_blob(
+                            arguments.repository(),
+                            blob.as_str(),
+                            arguments.line_range(),
+                            credential,
+                        )
+                        .await?;
+                    if body.observed_source_bytes > source_bytes
+                        || (body.source_exhausted && body.observed_source_bytes != source_bytes)
+                    {
+                        return Err(CodeHostTransportFailure::InvalidResponse);
+                    }
+                    let selected_source_bytes = if arguments.line_range().is_some() {
+                        body.observed_selected_bytes
+                    } else {
+                        source_bytes
+                    };
+                    match body.kind {
+                        RepositoryFileBodyKind::Text(selection) => {
+                            RepositoryReadFileResult::try_content(
+                                &arguments,
+                                RepositoryFileContentFields {
+                                    source_bytes,
+                                    selected_source_bytes,
+                                    start_line: selection.start_line,
+                                    end_line: selection.end_line,
+                                    returned_lines: selection.returned_lines,
+                                    last_line_complete: selection.last_line_complete,
+                                    content: selection.content,
+                                    completeness: selection.completeness,
+                                },
+                            )
+                        }
+                        RepositoryFileBodyKind::Binary => {
+                            RepositoryReadFileResult::try_binary(&arguments, source_bytes)
+                        }
+                    }
+                }
+            }
+            RepositoryPathLookup::Directory { .. } => RepositoryReadFileResult::try_not_a_file(
+                &arguments,
+                RepositoryObjectKind::Directory,
+            ),
+            RepositoryPathLookup::Other { kind } => {
+                RepositoryReadFileResult::try_not_a_file(&arguments, kind)
+            }
+            RepositoryPathLookup::PathNotFound => {
+                RepositoryReadFileResult::try_path_not_found(&arguments)
+            }
+            RepositoryPathLookup::RevisionNotFound => {
+                Some(RepositoryReadFileResult::revision_not_found(&arguments))
+            }
+        }
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        Ok(CodeHostResult::ReadFile(result))
+    }
+
+    async fn repository_list_directory(
+        &self,
+        arguments: super::RepositoryListDirectoryArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        with_read_operation_timeout(
+            DEFAULT_TIMEOUT,
+            self.repository_list_directory_transaction(arguments, credential),
+        )
+        .await
+    }
+
+    async fn repository_list_directory_transaction(
+        &self,
+        arguments: super::RepositoryListDirectoryArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let lookup = self
+            .repository_path_lookup(
+                arguments.repository(),
+                arguments.path(),
+                arguments.revision(),
+                credential,
+            )
+            .await?;
+        let result = match lookup {
+            RepositoryPathLookup::Directory {
+                entries,
+                completeness: source_completeness,
+            } => bounded_repository_directory_result(&arguments, entries, source_completeness),
+            RepositoryPathLookup::File { .. } => {
+                RepositoryListDirectoryResult::try_not_a_directory(
+                    &arguments,
+                    RepositoryObjectKind::File,
+                )
+            }
+            RepositoryPathLookup::Other { kind } => {
+                RepositoryListDirectoryResult::try_not_a_directory(&arguments, kind)
+            }
+            RepositoryPathLookup::PathNotFound => {
+                RepositoryListDirectoryResult::try_path_not_found(&arguments)
+            }
+            RepositoryPathLookup::RevisionNotFound => Some(
+                RepositoryListDirectoryResult::revision_not_found(&arguments),
+            ),
+        }
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        Ok(CodeHostResult::ListDirectory(result))
+    }
+
+    async fn repository_path_lookup(
+        &self,
+        repository: &CodeHostRepository,
+        path: &super::CodeHostFilePath,
+        revision: &super::CodeHostRevision,
+        credential: &CredentialValue,
+    ) -> Result<RepositoryPathLookup, CodeHostTransportFailure> {
+        let resolution = self
+            .repository_revision_resolution(repository, revision, credential)
+            .await?;
+        let (resolved_revision, revision_visible) = match resolution {
+            RepositoryRevisionResolution::Exact(resolved_revision) => (resolved_revision, true),
+            RepositoryRevisionResolution::Missing => (revision.clone(), false),
+            RepositoryRevisionResolution::DefinitiveMissing
+            | RepositoryRevisionResolution::EmptyRepository => {
+                return Ok(RepositoryPathLookup::RevisionNotFound);
+            }
+        };
+        let url = self.repository_contents_url(repository, path, &resolved_revision)?;
+        let response = self
+            .send_authenticated_with_accept(
+                Method::GET,
+                url,
+                None,
+                CONTENTS_OBJECT_ACCEPT,
+                credential,
+            )
+            .await?;
+        match response.status() {
+            StatusCode::OK if revision_visible => {
+                let (value, completeness) = bounded_json_page(
+                    response,
+                    StatusCode::OK,
+                    MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES,
+                )
+                .await?;
+                parse_repository_path_lookup(&value, path.as_str(), completeness)
+            }
+            StatusCode::OK => Err(CodeHostTransportFailure::InvalidResponse),
+            StatusCode::NOT_FOUND if revision_visible => Ok(RepositoryPathLookup::PathNotFound),
+            StatusCode::NOT_FOUND => {
+                if repository_contents_response_names_missing_revision(response, revision).await? {
+                    Ok(RepositoryPathLookup::RevisionNotFound)
+                } else {
+                    Err(CodeHostTransportFailure::Rejected)
+                }
+            }
+            status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
+            _ => Err(CodeHostTransportFailure::DispatchUnknown),
+        }
+    }
+
+    async fn repository_revision_resolution(
+        &self,
+        repository: &CodeHostRepository,
+        revision: &super::CodeHostRevision,
+        credential: &CredentialValue,
+    ) -> Result<RepositoryRevisionResolution, CodeHostTransportFailure> {
+        let url = self.repository_url(repository, &["commits", revision.as_str()], None)?;
+        let response = self
+            .send_authenticated_with_accept(Method::GET, url, None, COMMIT_SHA_ACCEPT, credential)
+            .await?;
+        match response.status() {
+            StatusCode::OK => exact_repository_revision_from_response(response, revision)
+                .await
+                .map(RepositoryRevisionResolution::Exact),
+            StatusCode::NOT_FOUND => Ok(RepositoryRevisionResolution::Missing),
+            StatusCode::CONFLICT => Ok(RepositoryRevisionResolution::EmptyRepository),
+            StatusCode::UNPROCESSABLE_ENTITY => {
+                if repository_commit_response_names_missing_revision(response, revision).await? {
+                    Ok(RepositoryRevisionResolution::DefinitiveMissing)
+                } else {
+                    Err(CodeHostTransportFailure::Rejected)
+                }
+            }
+            status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
+            _ => Err(CodeHostTransportFailure::DispatchUnknown),
+        }
+    }
+
+    async fn repository_file_blob(
+        &self,
+        repository: &CodeHostRepository,
+        blob: &str,
+        line_range: Option<RepositoryLineRange>,
+        credential: &CredentialValue,
+    ) -> Result<RepositoryFileBody, CodeHostTransportFailure> {
+        let url = self.repository_url(repository, &["git", "blobs", blob], None)?;
+        let response = self
+            .send_authenticated_with_accept(Method::GET, url, None, BLOB_RAW_ACCEPT, credential)
+            .await?;
+        ensure_expected_status(response.status(), StatusCode::OK)?;
+        select_repository_file_content(response.bytes_stream(), line_range).await
+    }
+
+    fn repository_contents_url(
+        &self,
+        repository: &CodeHostRepository,
+        path: &super::CodeHostFilePath,
+        revision: &super::CodeHostRevision,
+    ) -> Result<Url, CodeHostTransportFailure> {
+        let mut suffix = vec!["contents"];
+        if path.as_str() != "." {
+            suffix.extend(path.as_str().split('/'));
+        }
+        self.repository_url(repository, &suffix, Some(&[("ref", revision.as_str())]))
     }
 
     async fn file_patch(
@@ -1155,6 +1430,18 @@ impl GitHubCodeHostTransport {
         body: Option<Vec<u8>>,
         credential: &CredentialValue,
     ) -> Result<Response, CodeHostTransportFailure> {
+        self.send_authenticated_with_accept(method, url, body, DEFAULT_ACCEPT, credential)
+            .await
+    }
+
+    async fn send_authenticated_with_accept(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<Vec<u8>>,
+        accept: &'static str,
+        credential: &CredentialValue,
+    ) -> Result<Response, CodeHostTransportFailure> {
         let mut authentication = Vec::with_capacity(7 + credential.expose_bytes().len());
         authentication.extend_from_slice(b"Bearer ");
         authentication.extend_from_slice(credential.expose_bytes());
@@ -1165,7 +1452,7 @@ impl GitHubCodeHostTransport {
             .client
             .request(method, url)
             .header(AUTHORIZATION, authentication)
-            .header(ACCEPT, "application/vnd.github+json")
+            .header(ACCEPT, accept)
             .header("X-GitHub-Api-Version", API_VERSION)
             .header(USER_AGENT, USER_AGENT_VALUE);
         if let Some(body) = body {
@@ -1248,6 +1535,12 @@ impl CodeHostTransport for GitHubCodeHostTransport {
                 self.changed_files(arguments, credential).await
             }
             CodeHostOperation::FilePatch(arguments) => self.file_patch(arguments, credential).await,
+            CodeHostOperation::ListDirectory(arguments) => {
+                self.repository_list_directory(arguments, credential).await
+            }
+            CodeHostOperation::ReadFile(arguments) => {
+                self.repository_read_file(arguments, credential).await
+            }
             CodeHostOperation::ChecksStatus(arguments) => {
                 self.checks_status(arguments, credential).await
             }
@@ -1278,6 +1571,446 @@ impl CodeHostTransport for GitHubCodeHostTransport {
                 self.review_gate_check(arguments, credential).await
             }
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RepositoryRevisionResolution {
+    Exact(super::CodeHostRevision),
+    Missing,
+    DefinitiveMissing,
+    EmptyRepository,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RepositoryPathLookup {
+    File {
+        blob: String,
+        source_bytes: u64,
+    },
+    Directory {
+        entries: Vec<RepositoryDirectoryEntry>,
+        completeness: CodeHostResultCompleteness,
+    },
+    Other {
+        kind: RepositoryObjectKind,
+    },
+    PathNotFound,
+    RevisionNotFound,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RepositoryFileSelection {
+    content: String,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+    returned_lines: u32,
+    last_line_complete: bool,
+    completeness: CodeHostResultCompleteness,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryFileValidationMode {
+    RetainedContentOnly,
+    EntireSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RepositoryFileBodyKind {
+    Text(RepositoryFileSelection),
+    Binary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RepositoryFileBody {
+    kind: RepositoryFileBodyKind,
+    observed_source_bytes: u64,
+    observed_selected_bytes: u64,
+    source_exhausted: bool,
+}
+
+async fn exact_repository_revision_from_response(
+    response: Response,
+    expected: &super::CodeHostRevision,
+) -> Result<super::CodeHostRevision, CodeHostTransportFailure> {
+    let (body, completeness) =
+        read_bounded(response.bytes_stream(), MAX_COMMIT_SHA_RESPONSE_BYTES).await?;
+    if completeness == CodeHostResultCompleteness::Truncated {
+        return Err(CodeHostTransportFailure::ResponseTooLarge);
+    }
+    let body = body.strip_suffix(b"\n").unwrap_or(&body);
+    if body != expected.as_str().as_bytes() {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    Ok(expected.clone())
+}
+
+async fn repository_contents_response_names_missing_revision(
+    response: Response,
+    revision: &super::CodeHostRevision,
+) -> Result<bool, CodeHostTransportFailure> {
+    repository_response_message_names_revision(response, revision, "No commit found for the ref ")
+        .await
+}
+
+async fn repository_commit_response_names_missing_revision(
+    response: Response,
+    revision: &super::CodeHostRevision,
+) -> Result<bool, CodeHostTransportFailure> {
+    repository_response_message_names_revision(response, revision, "No commit found for SHA: ")
+        .await
+}
+
+async fn repository_response_message_names_revision(
+    response: Response,
+    revision: &super::CodeHostRevision,
+    prefix: &str,
+) -> Result<bool, CodeHostTransportFailure> {
+    let (body, completeness) =
+        read_bounded(response.bytes_stream(), MAX_JSON_RESPONSE_BYTES).await?;
+    if completeness == CodeHostResultCompleteness::Truncated {
+        return Err(CodeHostTransportFailure::ResponseTooLarge);
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return Ok(false);
+    };
+    let Some(message) = value
+        .as_object()
+        .and_then(|object| object.get("message"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(false);
+    };
+    Ok(message
+        .strip_prefix(prefix)
+        .is_some_and(|named_revision| named_revision == revision.as_str()))
+}
+
+async fn bounded_json_page(
+    response: Response,
+    expected: StatusCode,
+    limit: usize,
+) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
+    ensure_expected_status(response.status(), expected)?;
+    let completeness = if response
+        .headers()
+        .get(reqwest::header::LINK)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|link| link.contains("rel=\"next\"")))
+    {
+        CodeHostResultCompleteness::Truncated
+    } else {
+        CodeHostResultCompleteness::Complete
+    };
+    let (body, body_completeness) = read_bounded(response.bytes_stream(), limit).await?;
+    if body_completeness == CodeHostResultCompleteness::Truncated {
+        return Err(CodeHostTransportFailure::ResponseTooLarge);
+    }
+    let value =
+        serde_json::from_slice(&body).map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+    Ok((value, completeness))
+}
+
+fn bounded_repository_directory_result(
+    arguments: &super::RepositoryListDirectoryArguments,
+    entries: Vec<RepositoryDirectoryEntry>,
+    source_completeness: CodeHostResultCompleteness,
+) -> Option<RepositoryListDirectoryResult> {
+    let observed_entries = entries.len();
+    let mut entries = entries
+        .into_iter()
+        .take(MAX_RESULT_ITEMS)
+        .collect::<Vec<_>>();
+    let mut completeness = if source_completeness == CodeHostResultCompleteness::Truncated
+        || observed_entries > entries.len()
+    {
+        CodeHostResultCompleteness::Truncated
+    } else {
+        CodeHostResultCompleteness::Complete
+    };
+    loop {
+        let encoded_len = RepositoryListDirectoryResult::entries_encoded_len(
+            arguments,
+            entries.clone(),
+            observed_entries,
+            completeness,
+        )?;
+        if encoded_len <= MAX_ENCODED_RESULT_BYTES {
+            return RepositoryListDirectoryResult::try_entries(
+                arguments,
+                entries,
+                observed_entries,
+                completeness,
+            );
+        }
+        entries.pop()?;
+        completeness = CodeHostResultCompleteness::Truncated;
+    }
+}
+
+fn parse_repository_path_lookup(
+    value: &serde_json::Value,
+    requested_path: &str,
+    completeness: CodeHostResultCompleteness,
+) -> Result<RepositoryPathLookup, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    ensure_repository_response_path(object, requested_path)?;
+    let kind = parse_repository_object_kind(object)?;
+    match kind {
+        RepositoryObjectKind::File => {
+            let blob = required_string(object, "sha")?;
+            if !valid_revision(&blob) {
+                return Err(CodeHostTransportFailure::InvalidResponse);
+            }
+            Ok(RepositoryPathLookup::File {
+                blob,
+                source_bytes: required_u64(object, "size")?,
+            })
+        }
+        RepositoryObjectKind::Directory => {
+            let entries = required(object, "entries")?
+                .as_array()
+                .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+            if entries.len() > MAX_OBSERVED_DIRECTORY_ENTRIES {
+                return Err(CodeHostTransportFailure::InvalidResponse);
+            }
+            let completeness = if entries.len() == MAX_OBSERVED_DIRECTORY_ENTRIES {
+                CodeHostResultCompleteness::Truncated
+            } else {
+                completeness
+            };
+            let entries = entries
+                .iter()
+                .map(|entry| parse_repository_directory_entry(entry, requested_path))
+                .collect::<Result<Vec<_>, _>>()?;
+            let unique_paths = entries
+                .iter()
+                .map(|entry| entry.path())
+                .collect::<HashSet<_>>()
+                .len()
+                == entries.len();
+            if !unique_paths {
+                return Err(CodeHostTransportFailure::InvalidResponse);
+            }
+            Ok(RepositoryPathLookup::Directory {
+                entries,
+                completeness,
+            })
+        }
+        RepositoryObjectKind::Symlink | RepositoryObjectKind::Submodule => {
+            Ok(RepositoryPathLookup::Other { kind })
+        }
+    }
+}
+
+fn ensure_repository_response_path(
+    object: &serde_json::Map<String, serde_json::Value>,
+    requested_path: &str,
+) -> Result<(), CodeHostTransportFailure> {
+    let returned_path = match object.get("path") {
+        None => None,
+        Some(serde_json::Value::String(path)) => Some(path.as_str()),
+        Some(_) => return Err(CodeHostTransportFailure::InvalidResponse),
+    };
+    let matches = if requested_path == "." {
+        returned_path.is_none_or(|path| path.is_empty() || path == ".")
+    } else {
+        returned_path == Some(requested_path)
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(CodeHostTransportFailure::InvalidResponse)
+    }
+}
+
+fn parse_repository_object_kind(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<RepositoryObjectKind, CodeHostTransportFailure> {
+    let object_type = required_string(object, "type")?;
+    let has_submodule_marker = match object.get("submodule_git_url") {
+        Some(serde_json::Value::String(url)) if url.len() <= MAX_REPOSITORY_SUBMODULE_URL_BYTES => {
+            true
+        }
+        Some(serde_json::Value::String(_)) => {
+            return Err(CodeHostTransportFailure::InvalidResponse);
+        }
+        None | Some(serde_json::Value::Null) => false,
+        Some(_) => return Err(CodeHostTransportFailure::InvalidResponse),
+    };
+    match (object_type.as_str(), has_submodule_marker) {
+        ("file" | "submodule", true) | ("submodule", false) => Ok(RepositoryObjectKind::Submodule),
+        ("file", false) => Ok(RepositoryObjectKind::File),
+        ("dir", false) => Ok(RepositoryObjectKind::Directory),
+        ("symlink", false) => Ok(RepositoryObjectKind::Symlink),
+        ("dir" | "symlink", true) | (_, _) => Err(CodeHostTransportFailure::InvalidResponse),
+    }
+}
+
+fn parse_repository_directory_entry(
+    value: &serde_json::Value,
+    parent: &str,
+) -> Result<RepositoryDirectoryEntry, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    let path = required_string(object, "path")?;
+    if !is_immediate_repository_child(parent, &path) {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    let kind = parse_repository_object_kind(object)?;
+    if kind == RepositoryObjectKind::Symlink
+        && required_string(object, "target")?.len() > MAX_REPOSITORY_SYMLINK_TARGET_BYTES
+    {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    RepositoryDirectoryEntry::try_new(path, kind, omitted_optional_u64(object, "size")?)
+        .ok_or(CodeHostTransportFailure::InvalidResponse)
+}
+
+async fn select_repository_file_content<S, B, E>(
+    mut stream: S,
+    line_range: Option<RepositoryLineRange>,
+) -> Result<RepositoryFileBody, CodeHostTransportFailure>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+{
+    let requested_start = line_range.map_or(1, RepositoryLineRange::start);
+    let requested_end = line_range.map(RepositoryLineRange::end);
+    let mut current_line = 1_u32;
+    let mut retained = Vec::new();
+    let mut validated = Vec::new();
+    let mut observed_source_bytes = 0_u64;
+    let mut observed_selected_bytes = 0_u64;
+    let mut completeness = CodeHostResultCompleteness::Complete;
+    let mut source_exhausted = true;
+
+    'source: while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
+        for byte in chunk.as_ref() {
+            observed_source_bytes = observed_source_bytes
+                .checked_add(1)
+                .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+            if line_range.is_some() {
+                if validated.len() == MAX_REPOSITORY_FILE_SCAN_BYTES {
+                    return Err(CodeHostTransportFailure::ResponseTooLarge);
+                }
+                validated.push(*byte);
+            }
+            if current_line >= requested_start
+                && requested_end.is_none_or(|end| current_line <= end)
+            {
+                observed_selected_bytes = observed_selected_bytes
+                    .checked_add(1)
+                    .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+                if retained.len() == MAX_REPOSITORY_FILE_CONTENT_BYTES {
+                    completeness = CodeHostResultCompleteness::Truncated;
+                    if line_range.is_none() {
+                        source_exhausted = false;
+                        break 'source;
+                    }
+                } else {
+                    retained.push(*byte);
+                }
+            }
+            if *byte == b'\n' {
+                current_line = current_line
+                    .checked_add(1)
+                    .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+            }
+        }
+    }
+
+    if line_range.is_none() {
+        validated.clone_from(&retained);
+    }
+    let validation_mode = match line_range {
+        Some(_) => RepositoryFileValidationMode::EntireSource,
+        None => RepositoryFileValidationMode::RetainedContentOnly,
+    };
+    let kind = repository_file_body_kind(
+        &validated,
+        retained,
+        requested_start,
+        completeness,
+        validation_mode,
+    )?;
+    Ok(RepositoryFileBody {
+        kind,
+        observed_source_bytes,
+        observed_selected_bytes,
+        source_exhausted,
+    })
+}
+
+fn repository_file_body_kind(
+    validated: &[u8],
+    mut retained: Vec<u8>,
+    requested_start: u32,
+    completeness: CodeHostResultCompleteness,
+    validation_mode: RepositoryFileValidationMode,
+) -> Result<RepositoryFileBodyKind, CodeHostTransportFailure> {
+    let validated_as_binary = match validation_mode {
+        RepositoryFileValidationMode::RetainedContentOnly => validated.contains(&b'\0'),
+        RepositoryFileValidationMode::EntireSource => {
+            validated.contains(&b'\0') || std::str::from_utf8(validated).is_err()
+        }
+    };
+    if validated_as_binary {
+        return Ok(RepositoryFileBodyKind::Binary);
+    }
+    let content = match std::str::from_utf8(&retained) {
+        Ok(content) => content.to_owned(),
+        Err(error)
+            if completeness == CodeHostResultCompleteness::Truncated
+                && error.error_len().is_none() =>
+        {
+            retained.truncate(error.valid_up_to());
+            std::str::from_utf8(&retained)
+                .map(str::to_owned)
+                .map_err(|_| CodeHostTransportFailure::InvalidResponse)?
+        }
+        Err(_) => return Ok(RepositoryFileBodyKind::Binary),
+    };
+    let returned_lines = repository_content_line_count(&content)?;
+    let start_line = (!content.is_empty()).then_some(requested_start);
+    let end_line = start_line
+        .zip(returned_lines.checked_sub(1))
+        .and_then(|(start, span)| start.checked_add(span));
+    let last_line_complete = content.is_empty()
+        || content.ends_with('\n')
+        || completeness == CodeHostResultCompleteness::Complete;
+    Ok(RepositoryFileBodyKind::Text(RepositoryFileSelection {
+        content,
+        start_line,
+        end_line,
+        returned_lines,
+        last_line_complete,
+        completeness,
+    }))
+}
+
+fn repository_content_line_count(content: &str) -> Result<u32, CodeHostTransportFailure> {
+    if content.is_empty() {
+        return Ok(0);
+    }
+    let terminated_lines = content.bytes().filter(|byte| *byte == b'\n').count();
+    let lines = terminated_lines + usize::from(!content.ends_with('\n'));
+    lines
+        .try_into()
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)
+}
+
+fn omitted_optional_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    member: &str,
+) -> Result<Option<u64>, CodeHostTransportFailure> {
+    match object.get(member) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(value)) => value
+            .as_u64()
+            .map(Some)
+            .ok_or(CodeHostTransportFailure::InvalidResponse),
+        Some(_) => Err(CodeHostTransportFailure::InvalidResponse),
     }
 }
 
@@ -1965,6 +2698,23 @@ mod tests {
     const FILE_PATCH_HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
     const FILE_PATCH_MOVED_REVISION: &str = "3333333333333333333333333333333333333333";
     const FILE_PATCH_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
+    const REPOSITORY_REVISION: &str = "4444444444444444444444444444444444444444";
+    const REPOSITORY_BLOB: &str = "5555555555555555555555555555555555555555";
+    fn missing_revision_body() -> Vec<u8> {
+        serde_json::json!({
+            "message": format!("No commit found for the ref {REPOSITORY_REVISION}"),
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn missing_revision_sha_body() -> Vec<u8> {
+        serde_json::json!({
+            "message": format!("No commit found for SHA: {REPOSITORY_REVISION}"),
+        })
+        .to_string()
+        .into_bytes()
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct FilePatchRevisionTransitionInput {
@@ -2052,6 +2802,1182 @@ mod tests {
             url.as_str(),
             "https://api.github.com/repos/owner/repository/pulls/17/files?per_page=100&page=1"
         );
+    }
+
+    /// A forty-hex ref name cannot impersonate the exact commit argument when
+    /// GitHub resolves it to a different object identity.
+    #[tokio::test]
+    async fn repository_hex_named_ref_cannot_impersonate_exact_commit() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: FILE_PATCH_MOVED_REVISION.as_bytes(),
+                },
+            )
+            .await
+        });
+        let failure = transport
+            .repository_read_file(
+                repository_read_arguments("src/lib.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect_err("a differently resolved ref cannot produce repository evidence");
+        let request = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::InvalidResponse);
+        assert_eq!(request, revision_request());
+    }
+
+    /// A path present only at a moving head is still absent from the exact
+    /// reviewed revision, and both requests remain pinned to that revision.
+    #[tokio::test]
+    async fn repository_file_at_head_does_not_replace_requested_revision() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            [revision_request, path_request]
+        });
+        let arguments = repository_read_arguments("src/lib.rs", None);
+        let result = transport
+            .repository_read_file(arguments.clone(), &test_credential())
+            .await
+            .expect("an absent exact-revision path is a typed result");
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({
+                "outcome": "path_not_found",
+                "path": arguments.path().as_str(),
+                "revision": REPOSITORY_REVISION,
+                "truncated": false,
+            })
+        );
+        assert_eq!(requests, path_lookup_requests(arguments.path().as_str()));
+    }
+
+    /// A revision the host does not recognize is distinct from a path absent at
+    /// a revision the host does recognize.
+    #[tokio::test]
+    async fn repository_missing_revision_is_typed_separately() {
+        let (transport, listener) = repository_test_transport().await;
+        let response_body = missing_revision_body();
+        let server = tokio::spawn(async move {
+            let revision_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: &response_body,
+                },
+            )
+            .await;
+            [revision_request, path_request]
+        });
+        let arguments = repository_read_arguments("src/lib.rs", None);
+        let result = transport
+            .repository_read_file(arguments.clone(), &test_credential())
+            .await
+            .expect("an absent exact revision is a typed result");
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({
+                "outcome": "revision_not_found",
+                "path": arguments.path().as_str(),
+                "revision": arguments.revision().as_str(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(requests, path_lookup_requests(arguments.path().as_str()));
+    }
+
+    /// GitHub commit lookup can report an unknown well-formed SHA as a
+    /// bounded 422 whose message names that exact SHA.
+    #[tokio::test]
+    async fn repository_commit_unprocessable_missing_sha_is_typed_separately() {
+        let (transport, listener) = repository_test_transport().await;
+        let response_body = missing_revision_sha_body();
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "422 Unprocessable Entity",
+                    body: &response_body,
+                },
+            )
+            .await
+        });
+        let arguments = repository_read_arguments("src/lib.rs", None);
+        let result = transport
+            .repository_read_file(arguments.clone(), &test_credential())
+            .await
+            .expect("an exactly named absent commit is a typed result");
+        let request = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({
+                "outcome": "revision_not_found",
+                "path": arguments.path().as_str(),
+                "revision": arguments.revision().as_str(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(request, revision_request());
+    }
+
+    /// An unrelated validation response remains a host rejection rather than
+    /// being converted into evidence that the requested revision is absent.
+    #[tokio::test]
+    async fn repository_unrelated_commit_unprocessable_is_rejected() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "422 Unprocessable Entity",
+                    body: br#"{"message":"Validation Failed"}"#,
+                },
+            )
+            .await
+        });
+        let failure = transport
+            .repository_read_file(
+                repository_read_arguments("src/lib.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect_err("an unrelated validation failure cannot prove revision absence");
+        let request = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::Rejected);
+        assert_eq!(request, revision_request());
+    }
+
+    /// An empty repository's commit probe returns the distinct conflict that
+    /// proves the requested revision is absent.
+    #[tokio::test]
+    async fn repository_empty_conflict_is_a_missing_revision_result() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "409 Conflict",
+                    body: b"{}",
+                },
+            )
+            .await
+        });
+        let arguments = repository_read_arguments("src/lib.rs", None);
+        let result = transport
+            .repository_read_file(arguments.clone(), &test_credential())
+            .await
+            .expect("a revision in an empty visible repository is absent");
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({
+                "outcome": "revision_not_found",
+                "path": arguments.path().as_str(),
+                "revision": arguments.revision().as_str(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(requests, revision_request());
+    }
+
+    /// Metadata-only access leaves both content-bearing probes ambiguous, so a
+    /// generic 404 cannot prove revision absence.
+    #[tokio::test]
+    async fn repository_metadata_only_access_is_not_a_missing_revision_result() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            let revision_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            [revision_request, path_request]
+        });
+        let failure = transport
+            .repository_read_file(
+                repository_read_arguments("src/lib.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect_err("metadata-only access cannot prove revision absence");
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::Rejected);
+        assert_eq!(requests, path_lookup_requests("src/lib.rs"));
+    }
+
+    /// A definitive host rejection remains failed execution rather than being
+    /// mislabeled as either path or revision absence.
+    #[tokio::test]
+    async fn repository_rejected_request_is_not_a_not_found_result() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "403 Forbidden",
+                    body: b"{}",
+                },
+            )
+            .await
+        });
+        let failure = transport
+            .repository_read_file(
+                repository_read_arguments("src/lib.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect_err("a rejected request cannot produce absence evidence");
+        let request = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::Rejected);
+        assert_eq!(request, revision_request());
+    }
+
+    /// Reading a directory as a file yields its repository object kind without
+    /// issuing a blob request.
+    #[tokio::test]
+    async fn repository_file_read_reports_directory_path() {
+        let arguments = repository_read_arguments("src", None);
+        let (transport, listener) = repository_test_transport().await;
+        let directory =
+            repository_directory_value(arguments.path().as_str(), Vec::new()).to_string();
+        let server = tokio::spawn(async move {
+            serve_exact_revision_then(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: directory.as_bytes(),
+                },
+            )
+            .await
+        });
+        let result = transport
+            .repository_read_file(arguments.clone(), &test_credential())
+            .await
+            .expect("a directory path is a typed non-file result");
+        let request = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({
+                "object_type": "directory",
+                "outcome": "not_a_file",
+                "path": arguments.path().as_str(),
+                "revision": arguments.revision().as_str(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(request, path_lookup_requests(arguments.path().as_str()));
+    }
+
+    /// Invalid UTF-8 or NUL-bearing blob content is identified as binary and
+    /// never lossy-decoded into review evidence.
+    #[tokio::test]
+    async fn repository_file_read_reports_binary_blob() {
+        let source = vec![0xff, b'\0', 0xfe];
+        let arguments = repository_read_arguments("assets/image.bin", None);
+        let path = String::from(arguments.path().as_str());
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value(path.as_str(), source.len()).to_string();
+        let source_for_server = source.clone();
+        let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await;
+            let blob_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: &source_for_server,
+                },
+            )
+            .await;
+            [revision_request, path_request, blob_request]
+        });
+        let result = transport
+            .repository_read_file(arguments, &test_credential())
+            .await
+            .expect("binary content is a typed result");
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({
+                "outcome": "binary_file",
+                "path": path.as_str(),
+                "revision": REPOSITORY_REVISION,
+                "source_bytes": source.len(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(requests, file_read_requests(path.as_str()));
+    }
+
+    /// An inclusive line range returns only those complete lines while every
+    /// physical request remains pinned to immutable object identities.
+    #[tokio::test]
+    async fn repository_file_read_returns_exact_line_range() {
+        const REQUESTED_START: u32 = 2;
+        const REQUESTED_END: u32 = 2;
+        let source = b"first\nsecond\nthird\n".to_vec();
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value("src/lines.rs", source.len()).to_string();
+        let source_for_server = source.clone();
+        let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await;
+            let blob_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: &source_for_server,
+                },
+            )
+            .await;
+            [revision_request, path_request, blob_request]
+        });
+        let result = transport
+            .repository_read_file(
+                repository_read_arguments(
+                    "src/lines.rs",
+                    Some(serde_json::json!({
+                        "end": REQUESTED_END,
+                        "start": REQUESTED_START,
+                    })),
+                ),
+                &test_credential(),
+            )
+            .await
+            .expect("an exact line range returns typed text")
+            .into_json_value();
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(result["outcome"], "content");
+        assert_eq!(result["content"], "second\n");
+        assert_eq!(result["source_bytes"], source.len());
+        assert_eq!(result["returned_bytes"], "second\n".len());
+        assert_eq!(result["returned_lines"], 1);
+        assert_eq!(result["start_line"], REQUESTED_START);
+        assert_eq!(result["end_line"], REQUESTED_END);
+        assert_eq!(result["last_line_complete"], true);
+        assert_eq!(result["truncated"], false);
+        assert_eq!(
+            result["requested_line_range"],
+            serde_json::json!({
+                "end": REQUESTED_END,
+                "start": REQUESTED_START,
+            })
+        );
+        assert_eq!(requests, file_read_requests("src/lines.rs"));
+    }
+
+    /// Ranged truncation is backed by source bytes observed inside the
+    /// requested selection rather than unrelated bytes before it.
+    #[tokio::test]
+    async fn repository_file_range_truncation_is_witnessed_inside_selection() {
+        const REQUESTED_START: u32 = 2;
+        const REQUESTED_END: u32 = 3;
+        let selected_prefix = format!("{}\n", "x".repeat(MAX_REPOSITORY_FILE_CONTENT_BYTES - 1));
+        let source = format!("first\n{selected_prefix}y").into_bytes();
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value("src/lines.rs", source.len()).to_string();
+        let source_for_server = source.clone();
+        let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await;
+            let blob_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: &source_for_server,
+                },
+            )
+            .await;
+            [revision_request, path_request, blob_request]
+        });
+        let result = transport
+            .repository_read_file(
+                repository_read_arguments(
+                    "src/lines.rs",
+                    Some(serde_json::json!({
+                        "end": REQUESTED_END,
+                        "start": REQUESTED_START,
+                    })),
+                ),
+                &test_credential(),
+            )
+            .await
+            .expect("selected source excess produces honest truncation")
+            .into_json_value();
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(result["source_bytes"], source.len());
+        assert_eq!(result["returned_bytes"], MAX_REPOSITORY_FILE_CONTENT_BYTES);
+        assert_eq!(result["returned_lines"], 1);
+        assert_eq!(result["start_line"], REQUESTED_START);
+        assert_eq!(result["end_line"], REQUESTED_START);
+        assert_eq!(result["last_line_complete"], true);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(requests, file_read_requests("src/lines.rs"));
+    }
+
+    /// Ranged text classification scans the complete bounded blob so binary
+    /// bytes outside the selected lines cannot be hidden by a text prefix.
+    #[tokio::test]
+    async fn repository_file_line_range_validates_the_whole_blob_as_binary() {
+        const REQUESTED_START: u32 = 1;
+        const REQUESTED_END: u32 = 1;
+        let source = b"first\nsecond\nthird\xff".to_vec();
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value("src/mixed.rs", source.len()).to_string();
+        let source_for_server = source.clone();
+        let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await;
+            let blob_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: &source_for_server,
+                },
+            )
+            .await;
+            [revision_request, path_request, blob_request]
+        });
+        let result = transport
+            .repository_read_file(
+                repository_read_arguments(
+                    "src/mixed.rs",
+                    Some(serde_json::json!({
+                        "end": REQUESTED_END,
+                        "start": REQUESTED_START,
+                    })),
+                ),
+                &test_credential(),
+            )
+            .await
+            .expect("binary content outside the selection is still typed")
+            .into_json_value();
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "outcome": "binary_file",
+                "path": "src/mixed.rs",
+                "revision": REPOSITORY_REVISION,
+                "source_bytes": source.len(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(requests, file_read_requests("src/mixed.rs"));
+    }
+
+    /// GitHub cannot serve line-addressed blob ranges, so an auto-approved
+    /// request refuses oversized ingress before issuing the blob request.
+    #[tokio::test]
+    async fn repository_file_oversized_line_range_is_typed_without_blob_download() {
+        const REQUESTED_START: u32 = 10;
+        const REQUESTED_END: u32 = 10;
+        const SOURCE_BYTES: usize = MAX_REPOSITORY_FILE_SCAN_BYTES + 1;
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value("src/huge.rs", SOURCE_BYTES).to_string();
+        let server = tokio::spawn(async move {
+            serve_exact_revision_then(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await
+        });
+        let result = transport
+            .repository_read_file(
+                repository_read_arguments(
+                    "src/huge.rs",
+                    Some(serde_json::json!({
+                        "end": REQUESTED_END,
+                        "start": REQUESTED_START,
+                    })),
+                ),
+                &test_credential(),
+            )
+            .await
+            .expect("oversized ranged ingress is an honest typed outcome")
+            .into_json_value();
+        let request = repository_server_result(server).await;
+
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "outcome": "line_range_unavailable",
+                "path": "src/huge.rs",
+                "requested_line_range": {
+                    "end": REQUESTED_END,
+                    "start": REQUESTED_START,
+                },
+                "revision": REPOSITORY_REVISION,
+                "scan_limit_bytes": MAX_REPOSITORY_FILE_SCAN_BYTES,
+                "source_bytes": SOURCE_BYTES,
+                "truncated": true,
+            })
+        );
+        assert_eq!(request, path_lookup_requests("src/huge.rs"));
+    }
+
+    /// A source larger than the retained text bound exposes every count and the
+    /// partial final-line posture alongside explicit truncation.
+    #[tokio::test]
+    async fn repository_file_read_reports_honest_truncation() {
+        let source = vec![b'x'; MAX_REPOSITORY_FILE_CONTENT_BYTES + 1];
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value("src/large.rs", source.len()).to_string();
+        let source_for_server = source.clone();
+        let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await;
+            let blob_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: &source_for_server,
+                },
+            )
+            .await;
+            [revision_request, path_request, blob_request]
+        });
+        let result = transport
+            .repository_read_file(
+                repository_read_arguments("src/large.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect("oversized text returns a typed truncated prefix")
+            .into_json_value();
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(result["outcome"], "content");
+        assert_eq!(result["source_bytes"], source.len());
+        assert_eq!(result["returned_bytes"], MAX_REPOSITORY_FILE_CONTENT_BYTES);
+        assert_eq!(result["returned_lines"], 1);
+        assert_eq!(result["start_line"], 1);
+        assert_eq!(result["end_line"], 1);
+        assert_eq!(result["last_line_complete"], false);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(
+            result["content"]
+                .as_str()
+                .expect("typed content remains text")
+                .len(),
+            MAX_REPOSITORY_FILE_CONTENT_BYTES
+        );
+        assert_eq!(requests, file_read_requests("src/large.rs"));
+    }
+
+    /// Directory entry count alone cannot admit JSON whose escaped paths exceed
+    /// the aggregate result budget; the retained prefix exposes that truncation.
+    #[test]
+    fn repository_directory_listing_respects_encoded_result_budget() {
+        const OBSERVED_ENTRIES: usize = MAX_RESULT_ITEMS;
+        let arguments = repository_list_arguments("src");
+        let result = bounded_repository_directory_result(
+            &arguments,
+            repository_escaping_directory_entries(OBSERVED_ENTRIES),
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("a directory prefix fits after encoded-budget truncation")
+        .into_value();
+        let encoded = serde_json::to_vec(&result).expect("typed result encodes");
+
+        assert_eq!(result["outcome"], "entries");
+        assert_eq!(result["observed_entries"], OBSERVED_ENTRIES);
+        assert!(
+            result["returned_entries"]
+                .as_u64()
+                .expect("returned entry count is numeric")
+                < OBSERVED_ENTRIES as u64,
+            "encoded-budget truncation must remove at least one observed entry"
+        );
+        assert_eq!(result["truncated"], true);
+        assert!(
+            encoded.len() <= MAX_ENCODED_RESULT_BYTES,
+            "retained directory output must fit the shared encoded-result budget"
+        );
+    }
+
+    /// The contents endpoint cannot prove completeness when its fixed
+    /// directory-entry ceiling is reached, even without a pagination header.
+    #[test]
+    fn repository_directory_host_boundary_is_never_complete() {
+        let directory = repository_directory_value(
+            "src",
+            repository_directory_entries(MAX_OBSERVED_DIRECTORY_ENTRIES),
+        );
+        let completeness = repository_directory_lookup_completeness(&directory)
+            .expect("a host-boundary directory response remains typed");
+
+        assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
+    }
+
+    /// A present repository-root response path must retain its documented string type.
+    #[test]
+    fn repository_root_rejects_a_non_string_response_path() {
+        let value = serde_json::json!({
+            "entries": [],
+            "path": 17,
+            "type": "dir",
+        });
+
+        assert_eq!(
+            parse_repository_path_lookup(&value, ".", CodeHostResultCompleteness::Complete),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// GitHub's legacy submodule marker must be either absent, null, or a string.
+    #[test]
+    fn repository_entry_rejects_a_non_string_submodule_marker() {
+        let value = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": 17,
+            "type": "file",
+        });
+
+        assert_eq!(
+            parse_repository_path_lookup(
+                &value,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A submodule URL marker is admitted under its own byte bound so every
+    /// valid directory entry remains covered by the aggregate ingress cap.
+    #[test]
+    fn repository_entry_bounds_the_submodule_url_marker() {
+        let admitted = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "x".repeat(MAX_REPOSITORY_SUBMODULE_URL_BYTES),
+            "type": "file",
+        });
+        let rejected = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "x".repeat(MAX_REPOSITORY_SUBMODULE_URL_BYTES + 1),
+            "type": "file",
+        });
+
+        assert_eq!(
+            parse_repository_path_lookup(
+                &admitted,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Ok(RepositoryPathLookup::Other {
+                kind: RepositoryObjectKind::Submodule,
+            })
+        );
+        assert_eq!(
+            parse_repository_path_lookup(
+                &rejected,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A legacy submodule marker cannot override a contradictory or absent
+    /// base object discriminator.
+    #[test]
+    fn repository_submodule_marker_requires_a_compatible_base_type() {
+        let directory = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "https://example.test/dependency.git",
+            "type": "dir",
+        });
+        let missing_type = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "https://example.test/dependency.git",
+        });
+        let unknown_type = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "https://example.test/dependency.git",
+            "type": "future-kind",
+        });
+
+        assert_eq!(
+            parse_repository_path_lookup(
+                &directory,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+        assert_eq!(
+            parse_repository_path_lookup(
+                &missing_type,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+        assert_eq!(
+            parse_repository_path_lookup(
+                &unknown_type,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A duplicate outside the retained prefix invalidates the complete host
+    /// observation instead of becoming an honest truncation claim.
+    #[test]
+    fn repository_directory_rejects_duplicate_in_discarded_suffix() {
+        let value =
+            repository_directory_value("src", repository_directory_entries_with_suffix_duplicate());
+
+        assert_eq!(
+            parse_repository_path_lookup(&value, "src", CodeHostResultCompleteness::Complete,),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A symlink target is admitted under its own byte bound rather than being
+    /// silently charged as a repository path.
+    #[test]
+    fn repository_directory_rejects_symlink_target_over_ingress_bound() {
+        let value = repository_directory_value(
+            "src",
+            vec![serde_json::json!({
+                "path": "src/link",
+                "target": "x".repeat(MAX_REPOSITORY_SYMLINK_TARGET_BYTES + 1),
+                "type": "symlink",
+            })],
+        );
+
+        assert_eq!(
+            parse_repository_path_lookup(&value, "src", CodeHostResultCompleteness::Complete,),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A complete standard contents-entry shape can repeat every admitted
+    /// escaped path and still reach bounded projection.
+    #[tokio::test]
+    async fn repository_directory_ingress_admits_escaped_path_bound() {
+        const OBSERVED_ENTRIES: usize = MAX_RESULT_ITEMS + 10;
+        const PRIOR_RESPONSE_CAP: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
+            * (MAX_FILE_PATH_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE + 256);
+        let (transport, listener) = repository_test_transport().await;
+        let directory = repository_directory_value(
+            "src",
+            repository_escaping_directory_values(OBSERVED_ENTRIES),
+        )
+        .to_string();
+        let encoded_bytes = directory.len();
+        let server = tokio::spawn(async move {
+            serve_exact_revision_then(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: directory.as_bytes(),
+                },
+            )
+            .await
+        });
+        let result = transport
+            .repository_list_directory(repository_list_arguments("src"), &test_credential())
+            .await
+            .expect("complete escaped contents entries reach bounded projection")
+            .into_json_value();
+        let request = repository_server_result(server).await;
+
+        assert!(encoded_bytes > PRIOR_RESPONSE_CAP);
+        assert_eq!(result["outcome"], "entries");
+        assert_eq!(result["observed_entries"], OBSERVED_ENTRIES);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(request, path_lookup_requests("src"));
+    }
+
+    /// A directory larger than the result item bound reports both the observed
+    /// and returned counts instead of discarding the truncation signal.
+    #[tokio::test]
+    async fn repository_directory_listing_reports_honest_truncation() {
+        const OBSERVED_ENTRIES: usize = MAX_RESULT_ITEMS + 1;
+        let (transport, listener) = repository_test_transport().await;
+        let directory =
+            repository_directory_value("src", repository_directory_entries(OBSERVED_ENTRIES))
+                .to_string();
+        let server = tokio::spawn(async move {
+            serve_exact_revision_then(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: directory.as_bytes(),
+                },
+            )
+            .await
+        });
+        let result = transport
+            .repository_list_directory(repository_list_arguments("src"), &test_credential())
+            .await
+            .expect("an oversized directory returns a typed truncated prefix")
+            .into_json_value();
+        let request = repository_server_result(server).await;
+
+        assert_eq!(result["outcome"], "entries");
+        assert_eq!(result["observed_entries"], OBSERVED_ENTRIES);
+        assert_eq!(result["returned_entries"], MAX_RESULT_ITEMS);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(
+            result["entries"]
+                .as_array()
+                .expect("typed entries remain an array")
+                .len(),
+            MAX_RESULT_ITEMS
+        );
+        assert_eq!(request, path_lookup_requests("src"));
+    }
+
+    async fn repository_test_transport() -> (GitHubCodeHostTransport, tokio::net::TcpListener) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener address is available");
+        let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
+        transport.rest_base =
+            Url::parse(&format!("http://{address}/")).expect("loopback REST base is valid");
+        (transport, listener)
+    }
+
+    fn test_credential() -> CredentialValue {
+        CredentialValue::new(b"synthetic-repository-test-token".to_vec())
+    }
+
+    fn repository_read_arguments(
+        path: &str,
+        line_range: Option<serde_json::Value>,
+    ) -> crate::RepositoryReadFileArguments {
+        serde_json::from_value(serde_json::json!({
+            "line_range": line_range,
+            "path": path,
+            "repository": FILE_PATCH_REPOSITORY,
+            "revision": REPOSITORY_REVISION,
+        }))
+        .expect("fixture repository-read arguments decode")
+    }
+
+    fn repository_list_arguments(path: &str) -> crate::RepositoryListDirectoryArguments {
+        serde_json::from_value(serde_json::json!({
+            "path": path,
+            "repository": FILE_PATCH_REPOSITORY,
+            "revision": REPOSITORY_REVISION,
+        }))
+        .expect("fixture directory-list arguments decode")
+    }
+
+    fn repository_file_value(path: &str, source_bytes: usize) -> serde_json::Value {
+        serde_json::json!({
+            "content": "",
+            "encoding": "none",
+            "path": path,
+            "sha": REPOSITORY_BLOB,
+            "size": source_bytes,
+            "type": "file",
+        })
+    }
+
+    fn repository_directory_value(
+        path: &str,
+        entries: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "entries": entries,
+            "path": path,
+            "type": "dir",
+        })
+    }
+
+    fn repository_escaping_directory_entries(count: usize) -> Vec<RepositoryDirectoryEntry> {
+        let entry_name = "\u{1}".repeat(super::super::arguments::MAX_FILE_PATH_BYTES - 7);
+        (0..count)
+            .map(|index| {
+                RepositoryDirectoryEntry::try_new(
+                    format!("src/{entry_name}{index:03}"),
+                    RepositoryObjectKind::File,
+                    None,
+                )
+                .expect("fixture directory entry is admitted")
+            })
+            .collect()
+    }
+
+    fn repository_escaping_directory_values(count: usize) -> Vec<serde_json::Value> {
+        let entry_name = "\u{1}".repeat(super::super::arguments::MAX_FILE_PATH_BYTES - 7);
+        (0..count)
+            .map(|index| {
+                let path = format!("src/{entry_name}{index:03}");
+                serde_json::json!({
+                    "_links": {
+                        "git": path,
+                        "html": path,
+                        "self": path,
+                    },
+                    "download_url": path,
+                    "git_url": path,
+                    "html_url": path,
+                    "name": path,
+                    "path": path,
+                    "size": index,
+                    "target": path,
+                    "type": "symlink",
+                    "url": path,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repository_escaping_directory_values_have_complete_entry_shape() {
+        let values = repository_escaping_directory_values(1);
+
+        assert_eq!(values.len(), 1);
+        let path = values[0]["path"].clone();
+        assert_eq!(
+            values[0],
+            serde_json::json!({
+                "_links": {
+                    "git": path,
+                    "html": path,
+                    "self": path,
+                },
+                "download_url": path,
+                "git_url": path,
+                "html_url": path,
+                "name": path,
+                "path": path,
+                "size": 0,
+                "target": path,
+                "type": "symlink",
+                "url": path,
+            })
+        );
+    }
+
+    fn repository_directory_entries(count: usize) -> Vec<serde_json::Value> {
+        (0..count)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("src/file-{index}.rs"),
+                    "size": index,
+                    "type": "file",
+                })
+            })
+            .collect()
+    }
+
+    fn repository_directory_entries_with_suffix_duplicate() -> Vec<serde_json::Value> {
+        let mut entries = repository_directory_entries(MAX_RESULT_ITEMS);
+        entries.push(entries[0].clone());
+        entries
+    }
+
+    fn repository_directory_lookup_completeness(
+        value: &serde_json::Value,
+    ) -> Result<CodeHostResultCompleteness, CodeHostTransportFailure> {
+        match parse_repository_path_lookup(value, "src", CodeHostResultCompleteness::Complete)? {
+            RepositoryPathLookup::Directory { completeness, .. } => Ok(completeness),
+            RepositoryPathLookup::File { .. }
+            | RepositoryPathLookup::Other { .. }
+            | RepositoryPathLookup::PathNotFound
+            | RepositoryPathLookup::RevisionNotFound => {
+                Err(CodeHostTransportFailure::InvalidResponse)
+            }
+        }
+    }
+
+    fn revision_request() -> String {
+        format!("GET /repos/{FILE_PATCH_REPOSITORY}/commits/{REPOSITORY_REVISION} HTTP/1.1")
+    }
+
+    fn contents_request(path: &str) -> String {
+        format!(
+            "GET /repos/{FILE_PATCH_REPOSITORY}/contents/{path}?ref={REPOSITORY_REVISION} HTTP/1.1"
+        )
+    }
+
+    fn path_lookup_requests(path: &str) -> [String; 2] {
+        [revision_request(), contents_request(path)]
+    }
+
+    fn file_read_requests(path: &str) -> [String; 3] {
+        [
+            revision_request(),
+            contents_request(path),
+            format!("GET /repos/{FILE_PATCH_REPOSITORY}/git/blobs/{REPOSITORY_BLOB} HTTP/1.1"),
+        ]
+    }
+
+    enum TestHttpResponse<'a> {
+        Json { status: &'a str, body: &'a [u8] },
+        Raw { body: &'a [u8] },
+    }
+
+    struct TestHttpResponseParts<'a> {
+        status: &'a str,
+        content_type: &'a str,
+        body: &'a [u8],
+    }
+
+    impl<'a> TestHttpResponse<'a> {
+        fn into_parts(self) -> TestHttpResponseParts<'a> {
+            match self {
+                Self::Json { status, body } => TestHttpResponseParts {
+                    status,
+                    content_type: "application/json",
+                    body,
+                },
+                Self::Raw { body } => TestHttpResponseParts {
+                    status: "200 OK",
+                    content_type: "application/octet-stream",
+                    body,
+                },
+            }
+        }
+    }
+
+    async fn serve_exact_revision(listener: &tokio::net::TcpListener) -> String {
+        serve_test_response(
+            listener,
+            TestHttpResponse::Raw {
+                body: REPOSITORY_REVISION.as_bytes(),
+            },
+        )
+        .await
+    }
+
+    async fn serve_exact_revision_then(
+        listener: &tokio::net::TcpListener,
+        response: TestHttpResponse<'_>,
+    ) -> [String; 2] {
+        let revision_request = serve_exact_revision(listener).await;
+        let path_request = serve_test_response(listener, response).await;
+        [revision_request, path_request]
+    }
+
+    async fn serve_test_response(
+        listener: &tokio::net::TcpListener,
+        response: TestHttpResponse<'_>,
+    ) -> String {
+        let TestHttpResponseParts {
+            status,
+            content_type,
+            body,
+        } = response.into_parts();
+        let (mut stream, _) = listener.accept().await.expect("one request connects");
+        let mut request_line = String::new();
+        let mut reader = BufReader::new(&mut stream);
+        reader
+            .read_line(&mut request_line)
+            .await
+            .expect("request line is readable");
+        drop(reader);
+        let header = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .await
+            .expect("response header is writable");
+        stream
+            .write_all(body)
+            .await
+            .expect("response body is writable");
+        request_line.trim_end().to_owned()
+    }
+
+    async fn repository_server_result<Output>(server: tokio::task::JoinHandle<Output>) -> Output {
+        tokio::time::timeout(FILE_PATCH_SERVER_TIMEOUT, server)
+            .await
+            .expect("loopback server observes every expected request")
+            .expect("loopback server task completes")
     }
 
     fn changed_file_value(path: String) -> serde_json::Value {
@@ -2330,15 +4256,16 @@ mod tests {
         assert_eq!(parse_changed_file(&value), Ok((expected_file, None)));
     }
 
-    /// Paths returned by GitHub remain repository-relative across both result
-    /// shapes that expose them.
+    /// Paths returned by GitHub retain canonical repository-relative
+    /// components across both result shapes that expose them.
     #[test]
-    fn returned_paths_reject_absolute_values() {
+    fn returned_paths_reject_noncanonical_values() {
         let absolute_path = String::from("/src/lib.rs");
-        let changed_file =
+        let noncanonical_path = String::from("src/../lib.rs");
+        let absolute_changed_file =
             ChangedFile::try_new(absolute_path.clone(), String::from("modified"), 1, 0);
-        let review_thread = ReviewThread::try_new(ReviewThreadFields {
-            id: String::from("PRRT_fixture"),
+        let absolute_review_thread = ReviewThread::try_new(ReviewThreadFields {
+            id: String::from("PRRT_absolute_fixture"),
             resolved: false,
             outdated: false,
             path: absolute_path,
@@ -2346,9 +4273,41 @@ mod tests {
             comments: Vec::new(),
             comments_truncated: false,
         });
+        let noncanonical_changed_file =
+            ChangedFile::try_new(noncanonical_path.clone(), String::from("modified"), 1, 0);
+        let noncanonical_review_thread = ReviewThread::try_new(ReviewThreadFields {
+            id: String::from("PRRT_noncanonical_fixture"),
+            resolved: false,
+            outdated: false,
+            path: noncanonical_path,
+            line: Some(1),
+            comments: Vec::new(),
+            comments_truncated: false,
+        });
 
-        assert_eq!(changed_file, None);
-        assert_eq!(review_thread, None);
+        assert_eq!(absolute_changed_file, None);
+        assert_eq!(absolute_review_thread, None);
+        assert_eq!(noncanonical_changed_file, None);
+        assert_eq!(noncanonical_review_thread, None);
+    }
+
+    /// File-shaped results cannot identify the repository root directory.
+    #[test]
+    fn returned_file_paths_reject_repository_root() {
+        let root_changed_file =
+            ChangedFile::try_new(String::from("."), String::from("modified"), 1, 0);
+        let root_review_thread = ReviewThread::try_new(ReviewThreadFields {
+            id: String::from("PRRT_root_fixture"),
+            resolved: false,
+            outdated: false,
+            path: String::from("."),
+            line: Some(1),
+            comments: Vec::new(),
+            comments_truncated: false,
+        });
+
+        assert_eq!(root_changed_file, None);
+        assert_eq!(root_review_thread, None);
     }
 
     /// A GraphQL mutation error cannot be mistaken for a definitive

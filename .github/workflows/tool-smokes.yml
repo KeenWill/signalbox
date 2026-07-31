@@ -1,0 +1,39 @@
+name: Tool live smokes
+
+on:
+  pull_request:
+    paths:
+      - "crates/tools-github/**"
+      - ".github/workflows/tool-smokes.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Report-only home for tool-crate live smokes: fixture drift stays visible but
+  # never merge-gates. Future web-search and exec/bwrap smokes extend this job
+  # instead of inventing another CI pattern.
+  live-smokes:
+    name: Tool live smokes (report only)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: tool-live-smokes
+      - name: Run GitHub read smokes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          cargo test --no-fail-fast -p signalbox-tools-github
+          --test live_smoke -- --ignored

@@ -79,15 +79,18 @@ pub use signalbox_tools_code_host::{
     CodeHostRevision, CodeHostTools, CodeHostToolsConstructionError, CodeHostTransport,
     CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
     ConvergenceStateResult, ConvergenceVerdict, FilePatchArguments, FilePatchResult,
-    GitHubCodeHostConstructionError, GitHubCodeHostTransport, REVIEW_GATE_CHECK_NAME,
-    RerunFailedJobsArguments, RerunFailedJobsResult, ReviewAuthorClass, ReviewCheck,
-    ReviewDispositionClass, ReviewGateBlockerCode, ReviewGateCheckArguments, ReviewGateCheckResult,
-    ReviewGatePurpose, ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadIdentity,
-    ReviewThreadInventoryFields, ReviewThreadInventoryItem, ReviewThreadResolution,
-    ReviewThreadsArguments, ReviewThreadsResult, ReviewerVerdictEvidence, ReviewerVerdictFields,
-    ReviewerVerdictStatus, StackStateArguments, StackStateFields, StackStateResult,
-    ThreadInventoryArguments, ThreadInventoryResult, ThreadReplyArguments, ThreadReplyResult,
-    ThreadResolveArguments, ThreadResolveResult,
+    GitHubCodeHostConstructionError, GitHubCodeHostTransport, REPOSITORY_LIST_DIRECTORY_NAME,
+    REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RepositoryDirectoryEntry,
+    RepositoryFileContentFields, RepositoryLineRange, RepositoryListDirectoryArguments,
+    RepositoryListDirectoryResult, RepositoryObjectKind, RepositoryReadFileArguments,
+    RepositoryReadFileResult, RerunFailedJobsArguments, RerunFailedJobsResult, ReviewAuthorClass,
+    ReviewCheck, ReviewDispositionClass, ReviewGateBlockerCode, ReviewGateCheckArguments,
+    ReviewGateCheckResult, ReviewGatePurpose, ReviewThread, ReviewThreadComment,
+    ReviewThreadFields, ReviewThreadIdentity, ReviewThreadInventoryFields,
+    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsArguments, ReviewThreadsResult,
+    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, StackStateArguments,
+    StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
+    ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments, ThreadResolveResult,
 };
 pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 pub use telemetry::{
@@ -862,7 +865,6 @@ where
                     ModelCallExecutionOutcome::Checkpointed(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
-                    | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
@@ -995,7 +997,6 @@ where
                 match model_outcome {
                     ModelCallExecutionOutcome::Checkpointed(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
-                    | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_) => {
                         return Ok(());
@@ -1145,7 +1146,6 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     ModelCallExecutionOutcome::Checkpointed(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
-                    | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
