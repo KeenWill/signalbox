@@ -3049,6 +3049,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-runner"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "signalbox-runner-wire",
+ "tempfile",
+ "tokio",
+ "toml",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-runner-wire"
 version = "0.0.0"
 dependencies = [
@@ -3204,6 +3219,7 @@ dependencies = [
  "signalbox-model-runtime-codex-cli",
  "signalbox-persistence",
  "signalbox-process-protocol",
+ "signalbox-runner-wire",
  "signalbox-tools-basic",
  "signalbox-tools-code-host",
  "sqlx",

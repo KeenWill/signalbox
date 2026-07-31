@@ -35,13 +35,13 @@ through PR #291 (`agent/turn-control-verbs`). INV-tagged tests are the
 enforcement of record; tags below resolve through the generated
 [invariant test index](../invariants.md). Designed lifecycle behavior that has
 no committed code path appears only under [Open edges](#open-edges). The
-runner-loss recovery and runner-socket startup paragraphs are the foundation
-proposal at the bottom of their implementing stack and become verified only with
-those child pull requests. Sibling pages named in scope deferrals below
-(identity-and-commands, sessions-and-transcript, persistence-protocol,
-model-call-execution, configuration-and-credentials, runtime-substrate) are
-companion pages of this spec set; each deferral names the owning page rather
-than restating its material.
+registration-only runner-socket startup and supervision are verified by PR #376
+(`agent/runner-daemon`). Runner-loss recovery and recovery-only startup remain
+committed unimplemented functionality as labeled below. Sibling pages named in
+scope deferrals below (identity-and-commands, sessions-and-transcript,
+persistence-protocol, model-call-execution, configuration-and-credentials,
+runtime-substrate) are companion pages of this spec set; each deferral names the
+owning page rather than restating its material.
 
 ## Turns, states, and the single active slot
 
@@ -300,14 +300,21 @@ through the ports owned by [tool-loop](tool-loop.md).
 
 After configuration and database connection, signalboxd acquires the dedicated
 single-daemon advisory guard specified by
-[process-protocol](process-protocol.md), then orders startup strictly: embedded
-migrations; runner-socket bind in recovery-only mode; retained runner inventory,
-evidence, and nonterminal replacement-command reconciliation; the generic
-startup scan to completion; process-socket bind; and only then ordinary runner
-enrollment, client request admission, outbox dispatch, and scheduling. Why: any
-lifecycle writer or client read before recovery could observe or alter a
-live-looking prior-process attempt, while a generic scan before runner evidence
-admission could terminalize the authority that evidence resolves (INV-034).
+[process-protocol](process-protocol.md). The registration-only startup order is
+embedded migrations, the generic startup scan to completion, prior-process
+runner connections marked lost, runner-socket bind, process-socket bind, then
+concurrent runner enrollment, client request admission, outbox dispatch, and
+scheduling. Runner admission cannot begin before the migration that creates
+durable request receipts, the generic scan, or connection-loss classification.
+
+**Committed unimplemented functionality.** No present surface performs retained
+runner recovery. When recovery is implemented, startup must instead bind the
+runner socket in recovery-only mode after migrations, reconcile retained runner
+inventory, evidence, and nonterminal replacement commands, complete the generic
+startup scan, bind the process socket, and only then enable ordinary runner
+enrollment and scheduling. This compatibility constraint prevents generic
+recovery from terminalizing authority that retained runner evidence resolves
+(INV-034).
 
 The runner recovery phase admits only `resume` for a recorded active or pending
 identity and frames needed to reconcile its bounded inventory; it creates no new
@@ -479,9 +486,14 @@ The occupied-slot delivery outcomes implemented here are:
 
 ## Runner-loss session recovery
 
-The heartbeat-loss transaction durably advances the exact connection loss epoch
-and fences new offers before bounded per-session propagation. Each restartable
-session transaction marks a pinned placement `RunnerLost` or an unpinned
+The heartbeat-loss transaction durably records `lost` for the exact current
+connection epoch, and stale epochs cannot write after that commit. Transport
+closure and protocol failure reach the same terminal connection state; clean
+shutdown remains a distinct durable state.
+
+**Committed unimplemented functionality.** No present runner execution or
+placement surface propagates connection loss into sessions. Future bounded
+per-session propagation marks a pinned placement `RunnerLost` or an unpinned
 placement whose exact-identity selector names the lost runner
 `RunnerLostBeforePin { runner }`, preserves exact tool-attempt ambiguity, and
 appends one durable runner state event. An active turn already at a runner
@@ -492,9 +504,8 @@ runner-only proposal parks before authorization because the frozen runner locus
 is now lost. No provider call is repeated merely to project runner loss. A
 queued turn remains queued and cannot activate while its placement is lost. An
 unpinned capability-class request names no selected runner and is unaffected
-until a live registration can satisfy it. A stale connection epoch cannot write
-after the first commit. Locking, page bounds, and crash recovery are owned by
-[persistence-protocol](persistence-protocol.md).
+until a live registration can satisfy it. Locking, page bounds, and crash
+recovery are owned by [persistence-protocol](persistence-protocol.md).
 
 Only two owner commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
@@ -716,31 +727,31 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 ## Daemon runtime: startup order and shutdown
 
-signalboxd is the composition root. It reads the six unconditionally required
-values `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML
+signalboxd is the composition root. It reads the five unconditionally required
+values—`DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML
 naming provider targets, selections, and aliases),
-`SIGNALBOX_TEMPLATE_CONFIG_FILE`, `GITHUB_TOKEN_FILE`, `SIGNALBOX_SOCKET_PATH`,
-and `SIGNALBOX_RUNNER_SOCKET_PATH` from the process environment, plus `HOME` as
-specified below. It additionally requires `ANTHROPIC_API_KEY_FILE` when at least
-one static model mapping selects the Anthropic adapter, as specified by
+`SIGNALBOX_TEMPLATE_CONFIG_FILE`, `GITHUB_TOKEN_FILE`, and
+`SIGNALBOX_SOCKET_PATH`—from the process environment, plus the optional
+`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. It
+additionally requires `ANTHROPIC_API_KEY_FILE` when at least one static model
+mapping selects the Anthropic adapter, as specified by
 [configuration and credentials](configuration-and-credentials.md#process-configuration).
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against
 that model catalog, before connecting. It then acquires the single-daemon guard,
 fences the prior pool incarnation, migrates and resolves the one-time imported
 display-title backfill
-([conversation-import](conversation-import.md#derived-display-titles)), binds
-the runner socket in recovery-only mode, reconciles retained runner work,
-completes the generic recovery scan, binds the process socket, enables ordinary
-runner admission, then concurrently admits protocol requests, dispatches the
+([conversation-import](conversation-import.md#derived-display-titles)),
+completes the generic recovery scan, marks every prior-process nonterminal
+runner connection lost, binds the runner socket, binds the process socket, then
+concurrently admits runner enrollment and protocol requests, dispatches the
 outbox, and schedules eligible work. On a database without the fence migration,
 the guarded first migration creates the fence row before the daemon initializes
 its first fenced pool. No request, dispatch cursor advance, or scheduler pass
 occurs before recovery completes. Any phase failure is a failed startup with a
-classified, key-bearing log line and a failure exit code. The runner-socket
-bind, reconciliation, and admission steps are the foundation proposal at the
-bottom of their implementing stack and become verified only with those child
-pull requests.
+classified, key-bearing log line and a failure exit code. Runner recovery-only
+binding and reconciliation remain the committed unimplemented ordering stated
+under [startup scan and recovery](#startup-scan-and-recovery).
 
 The dedicated guard connection is checked once per second while the runtime is
 active. Losing that session is a fatal fencing event: admission, dispatch, and
