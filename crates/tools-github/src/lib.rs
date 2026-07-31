@@ -324,6 +324,14 @@ impl PublishReviewEvent {
             Self::RequestChanges => "REQUEST_CHANGES",
         }
     }
+
+    const fn acknowledged_state(self) -> &'static str {
+        match self {
+            Self::Comment => "COMMENTED",
+            Self::Approve => "APPROVED",
+            Self::RequestChanges => "CHANGES_REQUESTED",
+        }
+    }
 }
 
 /// Side of a diff line.
@@ -1001,7 +1009,11 @@ where
             Err(failure) => return self.failure_evidence(invocation, kind, failure),
         };
         scrubber.redact_value(&mut result.value);
-        let content = serde_json::to_string(&result.value).map_err(|_| caller_bug())?;
+        let mut content = serde_json::to_string(&result.value).map_err(|_| caller_bug())?;
+        if content.len() > MAX_RESULT_BYTES && matches!(kind, ToolKind::Diff) {
+            truncate_diff_result(&mut result.value).map_err(|_| caller_bug())?;
+            content = serde_json::to_string(&result.value).map_err(|_| caller_bug())?;
+        }
         if content.len() > MAX_RESULT_BYTES {
             if kind.mutates() {
                 return Err(infrastructure(CommitOutcome::Ambiguous));
@@ -1012,6 +1024,52 @@ where
         }
         Ok(invocation.bind(ToolExecutorEvidence::CompletedText(content)))
     }
+}
+
+fn truncate_diff_result(value: &mut serde_json::Value) -> Result<(), InvalidGitHubArguments> {
+    let object = value.as_object_mut().ok_or(InvalidGitHubArguments)?;
+    let files = object.remove("files").ok_or(InvalidGitHubArguments)?;
+    let serde_json::Value::Array(files) = files else {
+        return Err(InvalidGitHubArguments);
+    };
+    object.insert("files".to_owned(), serde_json::Value::Array(Vec::new()));
+    object.insert("truncated".to_owned(), serde_json::Value::Bool(true));
+    let empty_size = serde_json::to_vec(&serde_json::Value::Object(object.clone()))
+        .map_err(|_| InvalidGitHubArguments)?
+        .len();
+    let mut remaining = MAX_RESULT_BYTES
+        .checked_sub(empty_size)
+        .ok_or(InvalidGitHubArguments)?;
+    let mut retained = Vec::new();
+    for mut file in files {
+        let separator = usize::from(!retained.is_empty());
+        let encoded_size = serde_json::to_vec(&file)
+            .map_err(|_| InvalidGitHubArguments)?
+            .len();
+        if separator + encoded_size <= remaining {
+            remaining -= separator + encoded_size;
+            retained.push(file);
+            continue;
+        }
+        let patch = file
+            .as_object_mut()
+            .and_then(|object| object.get_mut("patch"))
+            .ok_or(InvalidGitHubArguments)?;
+        if patch.is_null() {
+            break;
+        }
+        *patch = serde_json::Value::Null;
+        let encoded_size = serde_json::to_vec(&file)
+            .map_err(|_| InvalidGitHubArguments)?
+            .len();
+        if separator + encoded_size > remaining {
+            break;
+        }
+        remaining -= separator + encoded_size;
+        retained.push(file);
+    }
+    object.insert("files".to_owned(), serde_json::Value::Array(retained));
+    Ok(())
 }
 
 impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
@@ -1190,6 +1248,10 @@ fn sanitize_error_body(
     source: ResponseExtent,
     scrubber: &CredentialScrubber,
 ) -> Option<SanitizedGitHubError> {
+    let bytes = match source {
+        ResponseExtent::Complete => bytes,
+        ResponseExtent::Truncated => discard_incomplete_utf8_suffix(bytes),
+    };
     let redacted = scrubber.redact_text(String::from_utf8_lossy(bytes).into_owned());
     let redacted = match source {
         ResponseExtent::Complete => redacted,
@@ -1212,6 +1274,34 @@ fn sanitize_error_body(
         None
     } else {
         Some(SanitizedGitHubError(truncate_sanitized(normalized)))
+    }
+}
+
+fn discard_incomplete_utf8_suffix(bytes: &[u8]) -> &[u8] {
+    let mut continuation_count = 0;
+    for byte in bytes.iter().rev().take(3) {
+        if byte & 0b1100_0000 == 0b1000_0000 {
+            continuation_count += 1;
+        } else {
+            break;
+        }
+    }
+    let lead_index = bytes.len().saturating_sub(continuation_count + 1);
+    let Some(&lead) = bytes.get(lead_index) else {
+        return bytes;
+    };
+    let expected_width = match lead {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return bytes,
+    };
+    let available_width = continuation_count + 1;
+    if expected_width > available_width {
+        &bytes[..lead_index]
+    } else {
+        bytes
     }
 }
 
@@ -1448,7 +1538,7 @@ impl GitHubApiTransport {
             .success_json(response, StatusCode::OK, credential)
             .await
             .map_err(mutation_failure)?;
-        normalize_published_review(&value, arguments.commit_id().as_str())
+        normalize_published_review(&value, arguments.commit_id().as_str(), arguments.event())
             .map(GitHubResult::published_review)
             .map_err(mutation_failure)
     }
@@ -1864,6 +1954,7 @@ fn normalize_comment(
 fn normalize_published_review(
     value: &serde_json::Value,
     expected_commit: &str,
+    expected_event: PublishReviewEvent,
 ) -> Result<serde_json::Value, GitHubTransportFailure> {
     let object = required_object(value)?;
     let commit_id = checked_revision(required_string(object, "commit_id")?)?;
@@ -1874,9 +1965,13 @@ fn normalize_published_review(
     if id == 0 {
         return Err(invalid_response(None));
     }
+    let state = checked_text(required_string(object, "state")?, TextPresence::Required)?;
+    if state != expected_event.acknowledged_state() {
+        return Err(invalid_response(None));
+    }
     Ok(serde_json::json!({
         "id": id,
-        "state": checked_text(required_string(object, "state")?, TextPresence::Required)?,
+        "state": state,
         "url": checked_url(required_string(object, "html_url")?)?,
         "commit_id": commit_id,
     }))
@@ -2061,6 +2156,7 @@ mod tests {
     const REVIEW_COMMENT_BODY: &str = "Please cover this edge.";
     const ERROR_BODY_PREFIX: &str = "safe ";
     const PUBLISHED_REVIEW_STATE: &str = "APPROVED";
+    const MISMATCHED_PUBLISHED_REVIEW_STATE: &str = "COMMENTED";
     const GITHUB_FILE_CEILING: usize = 3_000;
     const FILES_BEYOND_CEILING: usize = 3_001;
     const CLIENT_ERROR_STATUS: u16 = 422;
@@ -2068,6 +2164,8 @@ mod tests {
     const SYNTHETIC_TOKEN: &str = "github_pat_synthetic_fixture_secret";
     const SYNTHETIC_UNICODE_TOKEN: &str = "github_pat_synthétic_fixture_secret";
     const SYNTHETIC_UNICODE_PREFIX: &str = "github_pat_synth";
+    const DIFF_FILES_FOR_RESULT_OVERFLOW: usize = 9;
+    const LAST_OVERFLOW_FILE_INDEX: usize = DIFF_FILES_FOR_RESULT_OVERFLOW - 1;
     const PROVIDER_ERROR_TEXT: &str = "private provider detail";
     const PATCH_FILLER: &str = "x";
 
@@ -2311,6 +2409,47 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_diff_evidence_is_truncated_to_result_bound() {
+        let mut response = files_response();
+        response[0]["patch"] = serde_json::Value::String(PATCH_FILLER.repeat(MAX_TEXT_BYTES));
+        let file = normalize_files(&response)
+            .expect("bounded response is retained")
+            .files
+            .pop()
+            .expect("recorded response contains one file");
+        let mut result = serde_json::json!({
+            "base_revision": BASE_REVISION,
+            "head_revision": HEAD_REVISION,
+            "files": vec![file; DIFF_FILES_FOR_RESULT_OVERFLOW],
+            "truncated": false,
+        });
+
+        assert!(
+            serde_json::to_vec(&result)
+                .expect("fixture serializes")
+                .len()
+                > MAX_RESULT_BYTES
+        );
+        truncate_diff_result(&mut result).expect("diff result can be bounded");
+
+        assert!(
+            serde_json::to_vec(&result)
+                .expect("result serializes")
+                .len()
+                <= MAX_RESULT_BYTES
+        );
+        assert_eq!(result["truncated"], serde_json::Value::Bool(true));
+        assert_eq!(
+            result["files"].as_array().map(Vec::len),
+            Some(DIFF_FILES_FOR_RESULT_OVERFLOW)
+        );
+        assert_eq!(
+            result["files"][LAST_OVERFLOW_FILE_INDEX]["patch"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn result_kind_mismatch_preserves_mutation_ambiguity() {
         assert_eq!(
             result_kind_mismatch(ToolKind::PublishReview).operator_failure_class(),
@@ -2457,6 +2596,21 @@ mod tests {
     }
 
     #[test]
+    fn truncated_error_source_discards_partial_unicode_before_redaction() {
+        let credential = CredentialValue::new(SYNTHETIC_UNICODE_TOKEN.as_bytes().to_vec());
+        let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
+        let partial_prefix_end = SYNTHETIC_UNICODE_PREFIX.len() + 1;
+        let mut body = ERROR_BODY_PREFIX.as_bytes().to_vec();
+        body.extend_from_slice(&SYNTHETIC_UNICODE_TOKEN.as_bytes()[..partial_prefix_end]);
+
+        let sanitized = sanitize_error_body(&body, ResponseExtent::Truncated, &scrubber)
+            .expect("nonempty error remains");
+
+        assert_eq!(sanitized.as_str(), format!("{ERROR_BODY_PREFIX}[redacted]"));
+        assert!(!sanitized.as_str().contains(char::REPLACEMENT_CHARACTER));
+    }
+
+    #[test]
     fn result_debug_never_formats_provider_content() {
         let result = GitHubResult::metadata(serde_json::json!({"body": SYNTHETIC_TOKEN}));
 
@@ -2475,10 +2629,29 @@ mod tests {
             "commit_id": HEAD_REVISION
         });
 
-        let parsed = normalize_published_review(&response, HEAD_REVISION)
-            .expect("recorded response is valid");
+        let parsed =
+            normalize_published_review(&response, HEAD_REVISION, PublishReviewEvent::Approve)
+                .expect("recorded response is valid");
 
         assert_eq!(parsed["commit_id"], HEAD_REVISION);
         assert_eq!(parsed["state"], PUBLISHED_REVIEW_STATE);
+    }
+
+    #[test]
+    fn mutation_acknowledgement_rejects_inconsistent_state_as_ambiguous() {
+        let response = serde_json::json!({
+            "id": 7001,
+            "state": MISMATCHED_PUBLISHED_REVIEW_STATE,
+            "html_url": "https://github.com/KeenWill/signalbox/pull/1#pullrequestreview-7001",
+            "commit_id": HEAD_REVISION
+        });
+        let failure =
+            normalize_published_review(&response, HEAD_REVISION, PublishReviewEvent::Approve)
+                .expect_err("mismatched acknowledgement is rejected");
+
+        assert_eq!(
+            mutation_failure(failure),
+            GitHubTransportFailure::DispatchUnknown
+        );
     }
 }
