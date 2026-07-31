@@ -262,10 +262,23 @@ impl RepositoryReadFileResult {
         arguments: &RepositoryReadFileArguments,
         kind: RepositoryObjectKind,
     ) -> Option<Self> {
-        if kind == RepositoryObjectKind::File {
-            return None;
-        }
-        Some(Self {
+        let kind_matches_path = match (arguments.path().as_str() == ".", kind) {
+            (true, RepositoryObjectKind::Directory) => true,
+            (
+                true,
+                RepositoryObjectKind::File
+                | RepositoryObjectKind::Symlink
+                | RepositoryObjectKind::Submodule,
+            ) => false,
+            (false, RepositoryObjectKind::File) => false,
+            (
+                false,
+                RepositoryObjectKind::Directory
+                | RepositoryObjectKind::Symlink
+                | RepositoryObjectKind::Submodule,
+            ) => true,
+        };
+        kind_matches_path.then_some(Self {
             identity: RepositoryObjectIdentity::from_file_arguments(arguments),
             requested_line_range: arguments.line_range(),
             outcome: RepositoryFileOutcome::NotAFile(kind),
@@ -529,10 +542,23 @@ impl RepositoryListDirectoryResult {
         arguments: &RepositoryListDirectoryArguments,
         kind: RepositoryObjectKind,
     ) -> Option<Self> {
-        if kind == RepositoryObjectKind::Directory {
-            return None;
-        }
-        Some(Self {
+        let kind_matches_path = match (arguments.path().as_str() == ".", kind) {
+            (
+                true,
+                RepositoryObjectKind::File
+                | RepositoryObjectKind::Directory
+                | RepositoryObjectKind::Symlink
+                | RepositoryObjectKind::Submodule,
+            ) => false,
+            (false, RepositoryObjectKind::Directory) => false,
+            (
+                false,
+                RepositoryObjectKind::File
+                | RepositoryObjectKind::Symlink
+                | RepositoryObjectKind::Submodule,
+            ) => true,
+        };
+        kind_matches_path.then_some(Self {
             identity: RepositoryObjectIdentity::from_directory_arguments(arguments),
             outcome: RepositoryDirectoryOutcome::NotADirectory(kind),
         })
@@ -619,6 +645,21 @@ mod tests {
             "revision": REVISION,
         }))
         .expect("fixture directory arguments are admitted")
+    }
+
+    fn oversized_encoded_directory_entries() -> Vec<RepositoryDirectoryEntry> {
+        let escaped_prefix =
+            "\u{0001}".repeat(crate::code_host::arguments::MAX_FILE_PATH_BYTES - 3);
+        (0..MAX_RESULT_ITEMS)
+            .map(|index| {
+                RepositoryDirectoryEntry::try_new(
+                    format!("{escaped_prefix}{index:03}"),
+                    RepositoryObjectKind::File,
+                    None,
+                )
+                .expect("fixture entry path is admitted")
+            })
+            .collect()
     }
 
     /// A nonempty ranged result cannot silently omit leading requested lines.
@@ -915,6 +956,52 @@ mod tests {
         assert!(unavailable.is_none());
     }
 
+    /// The repository root can only be reported as the directory kind when a
+    /// file read identifies it as a non-file object.
+    #[test]
+    fn root_file_non_file_outcome_only_accepts_directory_kind() {
+        let arguments = file_arguments(".", REVISION, None);
+        let directory =
+            RepositoryReadFileResult::try_not_a_file(&arguments, RepositoryObjectKind::Directory);
+        let file = RepositoryReadFileResult::try_not_a_file(&arguments, RepositoryObjectKind::File);
+        let symlink =
+            RepositoryReadFileResult::try_not_a_file(&arguments, RepositoryObjectKind::Symlink);
+        let submodule =
+            RepositoryReadFileResult::try_not_a_file(&arguments, RepositoryObjectKind::Submodule);
+
+        assert!(directory.is_some());
+        assert!(file.is_none());
+        assert!(symlink.is_none());
+        assert!(submodule.is_none());
+    }
+
+    /// No non-directory outcome can describe the repository root.
+    #[test]
+    fn root_directory_rejects_every_non_directory_outcome() {
+        let arguments = directory_arguments(".");
+        let file = RepositoryListDirectoryResult::try_not_a_directory(
+            &arguments,
+            RepositoryObjectKind::File,
+        );
+        let directory = RepositoryListDirectoryResult::try_not_a_directory(
+            &arguments,
+            RepositoryObjectKind::Directory,
+        );
+        let symlink = RepositoryListDirectoryResult::try_not_a_directory(
+            &arguments,
+            RepositoryObjectKind::Symlink,
+        );
+        let submodule = RepositoryListDirectoryResult::try_not_a_directory(
+            &arguments,
+            RepositoryObjectKind::Submodule,
+        );
+
+        assert!(file.is_none());
+        assert!(directory.is_none());
+        assert!(symlink.is_none());
+        assert!(submodule.is_none());
+    }
+
     /// A complete whole-file result contains every byte reported by its source
     /// metadata before evidence scrubbing changes the emitted byte count.
     #[test]
@@ -998,21 +1085,27 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// The generated oversized fixture passes every constructor invariant that
+    /// precedes the encoded-result budget.
+    #[test]
+    fn oversized_encoded_directory_fixture_passes_pre_encoding_invariants() {
+        let entries = oversized_encoded_directory_entries();
+        let observed_entries = entries.len();
+        let arguments = directory_arguments(".");
+        let result = RepositoryListDirectoryResult::try_entries_candidate(
+            &arguments,
+            entries,
+            observed_entries,
+            CodeHostResultCompleteness::Complete,
+        );
+
+        assert!(result.is_some());
+    }
+
     /// A typed directory result cannot exceed the encoded tool-result bound.
     #[test]
     fn directory_entries_reject_an_oversized_encoded_result() {
-        let escaped_prefix =
-            "\u{0001}".repeat(crate::code_host::arguments::MAX_FILE_PATH_BYTES - 3);
-        let entries = (0..MAX_RESULT_ITEMS)
-            .map(|index| {
-                RepositoryDirectoryEntry::try_new(
-                    format!("{escaped_prefix}{index:03}"),
-                    RepositoryObjectKind::File,
-                    None,
-                )
-                .expect("fixture entry path is admitted")
-            })
-            .collect::<Vec<_>>();
+        let entries = oversized_encoded_directory_entries();
         let observed_entries = entries.len();
         let arguments = directory_arguments(".");
         let result = RepositoryListDirectoryResult::try_entries(

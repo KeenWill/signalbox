@@ -864,6 +864,9 @@ fn scrub_result_value(
         return Some(());
     }
     let returned_bytes = value.get("content")?.as_str()?.len();
+    if returned_bytes > repository_result::MAX_REPOSITORY_FILE_CONTENT_BYTES {
+        return None;
+    }
     value.as_object_mut()?.insert(
         String::from("returned_bytes"),
         serde_json::Value::from(returned_bytes),
@@ -1963,6 +1966,45 @@ mod tests {
         assert_eq!(value["returned_bytes"], emitted_content.len());
         assert_eq!(value["source_bytes"], source_bytes);
         assert!(!value.to_string().contains(CREDENTIAL));
+    }
+
+    /// Credential redaction cannot expand emitted file content past its
+    /// advertised retained-content bound.
+    #[test]
+    fn repository_file_scrubbing_rejects_content_expansion_past_the_bound() {
+        const CREDENTIAL: &str = "x";
+        const SOURCE_CONTENT_BYTES: usize = 10 * 1024;
+        const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let source_content = CREDENTIAL.repeat(SOURCE_CONTENT_BYTES);
+        let source_bytes =
+            u64::try_from(source_content.len()).expect("fixture source size fits u64");
+        let arguments: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/lib.rs",
+            "repository": "owner/repository",
+            "revision": REVISION,
+        }))
+        .expect("fixture file arguments are admitted");
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: Some(1),
+                end_line: Some(1),
+                returned_lines: 1,
+                last_line_complete: true,
+                content: source_content,
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        )
+        .expect("fixture file result is admitted");
+        let mut value = CodeHostResult::ReadFile(result).into_json_value();
+
+        let scrubbed = scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value);
+
+        assert!(scrubbed.is_none());
     }
 
     /// A custom transport cannot satisfy one exact repository operation with a
