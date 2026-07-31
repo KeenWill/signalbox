@@ -2,6 +2,8 @@ import SwiftUI
 
 @main
 struct SignalboxNativeApp: App {
+    // Capture harness arguments once: reconstructing the scene must not change
+    // the selected fixture or presentation environment mid-export.
     private static let launchArguments = ProcessInfo.processInfo.arguments
     private static let launchScreenshotScenario = ScreenshotScenario.parse(arguments: launchArguments)
     private static let launchColorScheme = ScreenshotPresentation.parseColorScheme(arguments: launchArguments)

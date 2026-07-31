@@ -268,6 +268,7 @@ pub struct PostgresModelCallRepository {
     pool: PgPool,
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
+    credential_families: Option<crate::ModelCredentialFamilyCatalog>,
 }
 
 impl PostgresModelCallRepository {
@@ -282,7 +283,17 @@ impl PostgresModelCallRepository {
             pool,
             targets,
             credential_reference,
+            credential_families: None,
         }
+    }
+
+    /// Selects credentials from each session's latest append-only snapshot.
+    pub fn with_session_credentials(
+        mut self,
+        credential_families: crate::ModelCredentialFamilyCatalog,
+    ) -> Self {
+        self.credential_families = Some(credential_families);
+        self
     }
 
     /// Borrows the shared pool for composition-owned adjacent transactions.
@@ -298,6 +309,7 @@ impl PostgresModelCallRepository {
             self.targets.clone(),
             self.credential_reference.clone(),
         )
+        .with_session_credentials(self.credential_families.clone())
     }
 
     /// Reconstitutes the exact first-call operation for one read-only activation preview.
@@ -370,10 +382,18 @@ impl PostgresModelCallRepository {
         )
         .await?;
         let tool_entries = load_tool_conversation_entries(&mut transaction, &request).await?;
+        let credential_reference = resolve_session_credential(
+            &mut transaction,
+            session_id,
+            request.call().target(),
+            &self.credential_reference,
+            self.credential_families.as_ref(),
+        )
+        .await?;
         transaction.rollback().await?;
         Ok(ProspectiveModelCall {
             request,
-            credential_reference: self.credential_reference.clone(),
+            credential_reference,
             system_prompt,
             tool_entries,
         })
@@ -409,7 +429,15 @@ impl PostgresModelCallRepository {
                     "counted activation initial call cannot be prepared",
                 )
             })?;
-        insert_prepared_call(connection, &prepared, &self.credential_reference).await
+        let credential_reference = resolve_session_credential(
+            connection,
+            session,
+            prepared.call().target(),
+            &self.credential_reference,
+            self.credential_families.as_ref(),
+        )
+        .await?;
+        insert_prepared_call(connection, &prepared, &credential_reference).await
     }
 
     /// Commits Prepared while consuming the complete locked steering inventory.
@@ -566,7 +594,15 @@ impl PostgresModelCallRepository {
                     ));
                 }
             };
-            insert_prepared_call(&mut transaction, &prepared, &self.credential_reference).await?;
+            let credential_reference = resolve_session_credential(
+                &mut transaction,
+                session,
+                prepared.call().target(),
+                &self.credential_reference,
+                self.credential_families.as_ref(),
+            )
+            .await?;
+            insert_prepared_call(&mut transaction, &prepared, &credential_reference).await?;
             let reloaded = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 call,
@@ -1142,6 +1178,7 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     turn: TurnId,
     targets: &ModelTargetCatalog,
     credential_reference: &ModelCallCredentialReference,
+    credential_families: Option<&crate::ModelCredentialFamilyCatalog>,
     projection: &PreparedToolResultProjection,
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
@@ -1254,8 +1291,56 @@ where
             ));
         }
     };
-    insert_prepared_call(connection, &prepared, credential_reference).await?;
+    let credential_reference = resolve_session_credential(
+        connection,
+        session,
+        prepared.call().target(),
+        credential_reference,
+        credential_families,
+    )
+    .await?;
+    insert_prepared_call(connection, &prepared, &credential_reference).await?;
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
+}
+
+async fn resolve_session_credential(
+    connection: &mut PgConnection,
+    session: SessionId,
+    target: ResolvedProviderTarget,
+    fallback: &ModelCallCredentialReference,
+    families: Option<&crate::ModelCredentialFamilyCatalog>,
+) -> Result<ModelCallCredentialReference, ModelCallRepositoryError> {
+    let Some(families) = families else {
+        return Ok(fallback.clone());
+    };
+    let family = families
+        .family(target)
+        .ok_or(ModelCallCorruption::Missing("model credential family"))?;
+    match crate::session_credentials::load_current_session_credential(
+        connection,
+        session_id_to_uuid(session),
+        family,
+    )
+    .await
+    {
+        Ok(reference) => Ok(reference),
+        Err(sqlx::Error::RowNotFound) => match families.migration_fallback_family(target) {
+            Some(fallback_family) => crate::session_credentials::load_migrated_session_credential(
+                connection,
+                session_id_to_uuid(session),
+                fallback_family,
+            )
+            .await
+            .map_err(|error| match error {
+                sqlx::Error::RowNotFound => {
+                    ModelCallCorruption::Missing("current session model credential").into()
+                }
+                error => error.into(),
+            }),
+            None => Err(ModelCallCorruption::Missing("current session model credential").into()),
+        },
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Closes a turn after a prepared or effect-free tool attempt was lost across

@@ -78,6 +78,16 @@ const DATABASE_NAME: &str = "signalbox_review_workflow_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
+
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     migrated_postgres_with_max_connections(4).await
 }
@@ -620,7 +630,7 @@ async fn insert_active_turn_with_offset(
     )
     .prepare(session)
     .expect("owner-created fixture session is preparable");
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(create)
         .await
         .expect("fixture session persists");

@@ -16,6 +16,9 @@ public struct SignalboxStoredEvent: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// Known event kinds fail soft into a payload-preserving unknown value when
+/// their shape evolves. Timeline consumers can then retain ordering and a
+/// decoding diagnostic without inventing semantics for the new shape.
 public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
     case message(SignalboxMessageEvent)
     case toolInvocation(SignalboxToolInvocationEvent)

@@ -1,4 +1,7 @@
+// Test-only retention of the retired WebSocket stream. The native product
+// communicates exclusively through the process protocol.
 import Foundation
+@testable import SignalboxNative
 #if canImport(SignalboxModels)
 import SignalboxModels
 #endif

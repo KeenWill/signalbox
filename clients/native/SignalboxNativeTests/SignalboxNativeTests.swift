@@ -4,6 +4,44 @@ import XCTest
 
 @MainActor
 final class SignalboxNativeTests: XCTestCase {
+    func testLegacyRemoteSettingsCleanupRepeatsCredentialDeletionAcrossLaunches() throws {
+        let suiteName = "SignalboxNativeTests.\(#function)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var deletionAttempts = 0
+
+        LegacyRemoteSettingsCleanup.perform(userDefaults: defaults) {
+            deletionAttempts += 1
+        }
+        XCTAssertEqual(deletionAttempts, 1)
+
+        LegacyRemoteSettingsCleanup.perform(userDefaults: defaults) {
+            deletionAttempts += 1
+        }
+
+        XCTAssertEqual(deletionAttempts, 2)
+    }
+
+    func testLegacyRemoteSettingsCleanupRemovesStateRecreatedByRollback() throws {
+        let suiteName = "SignalboxNativeTests.\(#function)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let retiredServerURL = "https://retired.example"
+        var deletionAttempts = 0
+
+        LegacyRemoteSettingsCleanup.perform(userDefaults: defaults) {
+            deletionAttempts += 1
+        }
+
+        defaults.set(retiredServerURL, forKey: LegacyRemoteSettingsCleanup.serverURLDefaultsKey)
+        LegacyRemoteSettingsCleanup.perform(userDefaults: defaults) {
+            deletionAttempts += 1
+        }
+
+        XCTAssertNil(defaults.object(forKey: LegacyRemoteSettingsCleanup.serverURLDefaultsKey))
+        XCTAssertEqual(deletionAttempts, 2)
+    }
+
     func testMockServiceLoadsMainOperationsState() async throws {
         let service = MockSignalboxService()
         let sessions = try await service.listSessions(archived: false)
@@ -14,67 +52,6 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertTrue(runners.contains { $0.status == .online })
         XCTAssertTrue(monitor.contains { $0.status.state == .waitingForConfirmation })
         XCTAssertTrue(monitor.contains { $0.status.state == .failed })
-    }
-
-    func testSettingsRejectsInvalidServerURL() throws {
-        let settings = SignalboxSettingsViewModel(
-            keychain: KeychainSecretStore(
-                service: "co.rdwd.SignalboxNativeTests.invalid-url",
-                account: "synthetic-api-key"
-            ),
-            userDefaults: UserDefaults(suiteName: "SignalboxNativeTests")!
-        )
-        settings.serverURLText = "not a url"
-        settings.apiKey = "key"
-
-        try requireFailure(settings.configurationResult())
-    }
-
-    func testSettingsKeychainUsesInjectedIdentity() throws {
-        let service = "co.rdwd.SignalboxNativeTests.injected-identity"
-        let account = "synthetic-api-key"
-        let keychain = KeychainSecretStore(service: service, account: account)
-        let defaultsSuite = "SignalboxNativeTests.injected-keychain-identity"
-        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
-        keychain.deleteSecret()
-        userDefaults.removePersistentDomain(forName: defaultsSuite)
-        defer {
-            keychain.deleteSecret()
-            userDefaults.removePersistentDomain(forName: defaultsSuite)
-        }
-        try keychain.writeSecret("synthetic-existing-api-key")
-        let settings = SignalboxSettingsViewModel(
-            keychain: keychain,
-            userDefaults: userDefaults
-        )
-
-        XCTAssertEqual(settings.apiKey, "synthetic-existing-api-key")
-
-        settings.apiKey = "synthetic-saved-api-key"
-        settings.save()
-
-        XCTAssertEqual(keychain.readSecret(), "synthetic-saved-api-key")
-    }
-
-    func testClientErrorsDoNotExposeConfiguredCredential() async throws {
-        let configuredCredential = "synthetic-credential-must-stay-private"
-        let transport = MockSignalboxHTTPTransport()
-        await transport.setJSONResponse(
-            path: "/api/v1/templates",
-            statusCode: 503,
-            json: #"{"detail":"synthetic service unavailable"}"#
-        )
-        let configuration = try SignalboxClientConfiguration(
-            baseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8000")),
-            apiKey: configuredCredential
-        )
-        let client = SignalboxAPIClient(configuration: configuration, transport: transport)
-
-        let error = try await requireSignalboxClientError {
-            _ = try await client.listTemplates()
-        }
-
-        XCTAssertFalse(error.localizedDescription.contains(configuredCredential))
     }
 
     func testApprovalCardsShowTheirMatchedConcurrentToolCallActions() throws {
@@ -1145,65 +1122,6 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertTrue(sentMessages.isEmpty)
     }
 
-    func testListEventsPreservesPageWhenKnownEventFieldsEvolve() async throws {
-        let preservedEventID = SignalboxEventID(rawValue: 1)
-        let evolvedEventID = SignalboxEventID(rawValue: 2)
-        let preservedEventKind = "future_event"
-        let evolvedEventKind = "message"
-        let transport = MockSignalboxHTTPTransport()
-        await transport.setJSONResponse(
-            path: "/api/v1/sessions/session-1/events",
-            json: """
-            {
-              "events": [
-                {
-                  "event_id": \(preservedEventID.rawValue),
-                  "event": {"kind": "\(preservedEventKind)", "field": "preserved"}
-                },
-                {
-                  "event_id": \(evolvedEventID.rawValue),
-                  "event": {
-                    "kind": "\(evolvedEventKind)",
-                    "message": {
-                      "role": "assistant",
-                      "parts": [{"kind": "text", "text": "still loading"}]
-                    },
-                    "visible_to_llm": true,
-                    "visible_to_user": true,
-                    "is_streaming": false,
-                    "parent_tool_invocation": null,
-                    "created_at": "2026-05-10T12:00:00Z",
-                    "last_modified_at": "2026-05-10T12:00:00Z"
-                  }
-                }
-              ],
-              "limit": 500,
-              "next_after": null
-            }
-            """
-        )
-        let configuration = try SignalboxClientConfiguration(
-            baseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8000")),
-            apiKey: "synthetic-api-key"
-        )
-        let client = SignalboxAPIClient(configuration: configuration, transport: transport)
-
-        let events = try await client.listEvents(sessionID: SignalboxSessionID(rawValue: "session-1"))
-
-        XCTAssertEqual(events.count, 2)
-        XCTAssertEqual(events[0].eventID, preservedEventID)
-        let preservedUnknown = try requireUnknownConversationEvent(events[0].event)
-        XCTAssertEqual(preservedUnknown.kind, preservedEventKind)
-        XCTAssertNil(preservedUnknown.decodingDiagnostic)
-        XCTAssertEqual(events[1].eventID, evolvedEventID)
-        let evolvedKnownEvent = try requireUnknownConversationEvent(events[1].event)
-        XCTAssertEqual(evolvedKnownEvent.kind, evolvedEventKind)
-        XCTAssertEqual(
-            evolvedKnownEvent.decodingDiagnostic?.message,
-            "Missing required field at events[1].event.created_from."
-        )
-    }
-
     func testKnownEventInvalidTimestampDiagnosticIncludesFieldPath() throws {
         let record = try SignalboxJSONCoding.decoder().decode(
             SignalboxStoredEvent.self,
@@ -1324,27 +1242,6 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertFalse(viewModel.isStreaming)
         withExtendedLifetime(staleCompletion.cancellable) {}
         withExtendedLifetime(currentStreamStopped.cancellable) {}
-    }
-
-    private func requireFailure<Success, Failure: Error>(
-        _ result: Result<Success, Failure>
-    ) throws {
-        guard case .failure = result else {
-            throw SignalboxNativeTestExpectationError("Expected a failure result")
-        }
-    }
-
-    private func requireSignalboxClientError(
-        _ operation: () async throws -> Void
-    ) async throws -> SignalboxClientError {
-        do {
-            try await operation()
-            throw SignalboxNativeTestExpectationError("Expected a Signalbox client error")
-        } catch let error as SignalboxClientError {
-            return error
-        } catch {
-            throw error
-        }
     }
 
     private func requireToolCard(
