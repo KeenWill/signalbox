@@ -191,11 +191,6 @@ simulator_resolve_iphone_ids() {
 	local device_name
 	local device_os
 
-	if [[ -n "${XCODE_SIMULATOR_ID:-}" ]]; then
-		printf '%s\n' "$XCODE_SIMULATOR_ID"
-		return 0
-	fi
-
 	if [[ -n "${XCODE_DESTINATION:-}" ]]; then
 		if simulator_destination_device_id "$XCODE_DESTINATION"; then
 			return 0
@@ -207,6 +202,11 @@ simulator_resolve_iphone_ids() {
 			simulator_find_iphone_ids_by_name "$device_name" "$device_os" "$device_list"
 			return 0
 		fi
+	fi
+
+	if [[ -n "${XCODE_SIMULATOR_ID:-}" ]]; then
+		printf '%s\n' "$XCODE_SIMULATOR_ID"
+		return 0
 	fi
 
 	device_list="$(simulator_list_available)"
