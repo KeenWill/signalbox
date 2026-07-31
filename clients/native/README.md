@@ -136,6 +136,8 @@ The following work remains:
 - Compact-width navigation omits Templates until its information architecture is
   owner-approved; regular-width and macOS navigation retain the explicit
   capability gate.
-- The older REST/WebSocket implementation remains compiled temporarily for
-  import-era test and presentation compatibility, but production composition no
-  longer installs it.
+- The app, client, and model test directories are separate targets in the shared
+  scheme. The older REST/WebSocket implementation remains compiled because the
+  native and client bundles directly test it and legacy presentation view
+  models still use its client protocol; production composition does not install
+  it.

@@ -82,16 +82,9 @@ jobs:
       # UI and screenshot-capture suites need an interactive simulator
       # session (and the Tart VM shards for the full device matrix), so they
       # stay a manual/local flow via clients/native/scripts for now; the
-      # remaining suite is the unit-test bundle, which still runs against a
-      # booted simulator the script resolves itself.
-      #
-      # That bundle is SignalboxNativeTests, the only unit-test target the
-      # imported xcodeproj wires. The snapshot's Tests/SignalboxAppTests,
-      # Tests/SignalboxClientTests, and Tests/SignalboxModelsTests are
-      # unreachable until the rewire restores their targets (see the known
-      # issues in clients/native/README.md), so a green run here is not full
-      # client unit coverage — the step name says which bundle ran.
-      - name: Run unit tests (SignalboxNativeTests bundle)
+      # four unit-test bundles still run against a booted simulator the script
+      # resolves itself.
+      - name: Run native unit-test bundles
         run: clients/native/scripts/test-xcode.sh
         env:
           SIGNALBOX_NATIVE_SKIP_TESTING: SignalboxNativeUITests

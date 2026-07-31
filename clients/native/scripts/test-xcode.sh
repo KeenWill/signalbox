@@ -21,6 +21,9 @@ else
 
 	echo "Using newest available iPhone simulator for iOS $MIN_IOS_VERSION or newer: $DEVICE_ID"
 	DESTINATION="$(simulator_xcode_destination_for_id "$DEVICE_ID")"
+	# A prior test or UI-test run can leave the shared host app active long
+	# enough for the next unit-test bundle launch to fail simulator preflight.
+	xcrun simctl terminate "$DEVICE_ID" co.rdwd.SignalboxNative >/dev/null 2>&1 || true
 fi
 
 CMD=(
