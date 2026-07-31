@@ -26,6 +26,7 @@ signalbox-domain = { path = "../domain" }
 signalbox-model-runtime = { path = "../model-runtime" }
 signalbox-tool-contract = { path = "../tool-contract" }
 signalbox-tools-basic = { path = "../tools-basic" }
+tokio = { version = "1.53.0", default-features = false, features = ["time"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.0", default-features = false, features = [

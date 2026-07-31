@@ -4,7 +4,13 @@
 //! publication. GraphQL supplies review threads because only that API exposes
 //! thread resolution state.
 
-use std::{borrow::Cow, error::Error, fmt, future::Future, time::Duration};
+use std::{
+    borrow::Cow,
+    error::Error,
+    fmt,
+    future::Future,
+    time::{Duration, Instant},
+};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -352,7 +358,7 @@ impl TryFrom<String> for BoundedText {
     type Error = InvalidGitHubArguments;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        (!value.is_empty() && valid_text(&value, false))
+        (!value.is_empty() && valid_text(&value, TextPresence::Optional))
             .then_some(Self(value))
             .ok_or(InvalidGitHubArguments)
     }
@@ -502,7 +508,7 @@ impl PublishReviewArguments {
         self.comments.len() <= MAX_INLINE_COMMENTS
             && match self.event {
                 PublishReviewEvent::Approve => true,
-                PublishReviewEvent::Comment => self.body.is_some() || !self.comments.is_empty(),
+                PublishReviewEvent::Comment => self.body.is_some(),
                 PublishReviewEvent::RequestChanges => self.body.is_some(),
             }
             && self.comments.iter().all(|comment| comment.line > 0)
@@ -992,7 +998,7 @@ where
         let content = serde_json::to_string(&result.value).map_err(|_| caller_bug())?;
         if content.len() > MAX_RESULT_BYTES {
             if kind.mutates() {
-                return Err(infrastructure(true));
+                return Err(infrastructure(CommitOutcome::Ambiguous));
             }
             return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.rejected_detail.clone()),
@@ -1011,9 +1017,7 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
     ) -> Result<CorrelatedToolExecutorEvidence, GitHubExecutorError> {
         let detail = match failure {
             GitHubTransportFailure::InvalidCredential => self.credential_detail.clone(),
-            GitHubTransportFailure::Rejected { status, detail }
-                if !kind.mutates() || status < 500 =>
-            {
+            GitHubTransportFailure::Rejected { status, detail } if status_is_definitive(status) => {
                 self.response_detail(status, detail.as_ref())
             }
             GitHubTransportFailure::InvalidResponse { detail } if !kind.mutates() => {
@@ -1028,7 +1032,7 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
             | GitHubTransportFailure::InvalidResponse { .. }
             | GitHubTransportFailure::ResponseTooLarge
             | GitHubTransportFailure::DispatchUnknown => {
-                return Err(infrastructure(kind.mutates()));
+                return Err(infrastructure(kind.commit_outcome()));
             }
         };
         Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
@@ -1072,9 +1076,45 @@ fn caller_bug() -> GitHubExecutorError {
     }
 }
 
-const fn infrastructure(commit_ambiguous: bool) -> GitHubExecutorError {
+const fn status_is_definitive(status: u16) -> bool {
+    status < 500
+}
+
+fn classify_error_body_failure(
+    status: StatusCode,
+    failure: GitHubTransportFailure,
+) -> GitHubTransportFailure {
+    if status.is_client_error() {
+        GitHubTransportFailure::Rejected {
+            status: status.as_u16(),
+            detail: None,
+        }
+    } else {
+        failure
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CommitOutcome {
+    Definite,
+    Ambiguous,
+}
+
+impl ToolKind {
+    const fn commit_outcome(self) -> CommitOutcome {
+        if self.mutates() {
+            CommitOutcome::Ambiguous
+        } else {
+            CommitOutcome::Definite
+        }
+    }
+}
+
+const fn infrastructure(outcome: CommitOutcome) -> GitHubExecutorError {
     GitHubExecutorError {
-        class: OperatorFailureClass::Infrastructure { commit_ambiguous },
+        class: OperatorFailureClass::Infrastructure {
+            commit_ambiguous: matches!(outcome, CommitOutcome::Ambiguous),
+        },
     }
 }
 
@@ -1140,20 +1180,26 @@ fn longest_trailing_prefix(text: &str, secret: &str) -> usize {
     let limit = secret.len().min(text.len() + 1);
     (1..limit)
         .rev()
+        .filter(|length| secret.is_char_boundary(*length))
         .find(|length| text.ends_with(&secret[..*length]))
         .unwrap_or(0)
 }
 
+#[derive(Clone, Copy)]
+enum ResponseExtent {
+    Complete,
+    Truncated,
+}
+
 fn sanitize_error_body(
     bytes: &[u8],
-    source_truncated: bool,
+    source: ResponseExtent,
     scrubber: &CredentialScrubber,
 ) -> Option<SanitizedGitHubError> {
     let redacted = scrubber.redact_text(String::from_utf8_lossy(bytes).into_owned());
-    let redacted = if source_truncated {
-        scrubber.redact_trailing_prefix(redacted)
-    } else {
-        redacted
+    let redacted = match source {
+        ResponseExtent::Complete => redacted,
+        ResponseExtent::Truncated => scrubber.redact_trailing_prefix(redacted),
     };
     let normalized = redacted
         .chars()
@@ -1232,19 +1278,32 @@ impl GitHubApiTransport {
         Ok(url)
     }
 
+    async fn pull_request_value(
+        &self,
+        arguments: &PullRequestArguments,
+        credential: &CredentialValue,
+        policy: &GitHubEgressPolicy,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, GitHubTransportFailure> {
+        let number = arguments.number().get().to_string();
+        let url = self.repository_url(arguments.repository(), &["pulls", &number], None)?;
+        let response = self
+            .send_with_timeout(Method::GET, url, None, credential, policy, timeout)
+            .await?;
+        let value = self
+            .success_json(response, StatusCode::OK, credential)
+            .await?;
+        Ok(value)
+    }
+
     async fn metadata_value(
         &self,
         arguments: &PullRequestArguments,
         credential: &CredentialValue,
         policy: &GitHubEgressPolicy,
     ) -> Result<serde_json::Value, GitHubTransportFailure> {
-        let number = arguments.number().get().to_string();
-        let url = self.repository_url(arguments.repository(), &["pulls", &number], None)?;
-        let response = self
-            .send(Method::GET, url, None, credential, policy)
-            .await?;
         let value = self
-            .success_json(response, StatusCode::OK, credential)
+            .pull_request_value(arguments, credential, policy, self.timeout)
             .await?;
         normalize_metadata(&value, arguments.number())
     }
@@ -1266,11 +1325,30 @@ impl GitHubApiTransport {
         credential: &CredentialValue,
         policy: &GitHubEgressPolicy,
     ) -> Result<GitHubResult, GitHubTransportFailure> {
-        let initial = self.metadata_value(&arguments, credential, policy).await?;
-        let initial_base = required_string(required_object(&initial)?, "base_revision")?;
-        let initial_head = required_string(required_object(&initial)?, "head_revision")?;
+        let deadline = Instant::now()
+            .checked_add(self.timeout)
+            .ok_or(GitHubTransportFailure::DispatchUnknown)?;
+        tokio::time::timeout(
+            self.timeout,
+            self.diff_before_deadline(arguments, credential, policy, deadline),
+        )
+        .await
+        .map_err(|_| GitHubTransportFailure::DispatchUnknown)?
+    }
+
+    async fn diff_before_deadline(
+        &self,
+        arguments: PullRequestArguments,
+        credential: &CredentialValue,
+        policy: &GitHubEgressPolicy,
+        deadline: Instant,
+    ) -> Result<GitHubResult, GitHubTransportFailure> {
+        let initial_value = self
+            .pull_request_value(&arguments, credential, policy, remaining_timeout(deadline)?)
+            .await?;
+        let initial = normalize_diff_snapshot(&initial_value, arguments.number())?;
         let mut files = Vec::new();
-        let mut truncated = false;
+        let mut pagination_extent = FilePaginationExtent::Complete;
         for page in 1..=MAX_FILE_PAGES {
             let page_text = page.to_string();
             let number = arguments.number().get().to_string();
@@ -1280,7 +1358,14 @@ impl GitHubApiTransport {
                 Some(&[("per_page", PAGE_SIZE), ("page", &page_text)]),
             )?;
             let response = self
-                .send(Method::GET, url, None, credential, policy)
+                .send_with_timeout(
+                    Method::GET,
+                    url,
+                    None,
+                    credential,
+                    policy,
+                    remaining_timeout(deadline)?,
+                )
                 .await?;
             let has_next = response_has_next_page(&response);
             let value = self
@@ -1291,18 +1376,22 @@ impl GitHubApiTransport {
                 break;
             }
             if page == MAX_FILE_PAGES {
-                truncated = true;
+                pagination_extent = FilePaginationExtent::Truncated;
             }
         }
-        let current = self.metadata_value(&arguments, credential, policy).await?;
-        let current_base = required_string(required_object(&current)?, "base_revision")?;
-        let current_head = required_string(required_object(&current)?, "head_revision")?;
-        if initial_base != current_base || initial_head != current_head {
+        let truncated = files_incomplete(files.len(), initial.changed_files, pagination_extent);
+        let current_value = self
+            .pull_request_value(&arguments, credential, policy, remaining_timeout(deadline)?)
+            .await?;
+        let current = normalize_diff_snapshot(&current_value, arguments.number())?;
+        if initial.base_revision != current.base_revision
+            || initial.head_revision != current.head_revision
+        {
             return Err(GitHubTransportFailure::RevisionChanged);
         }
         Ok(GitHubResult::diff(serde_json::json!({
-            "base_revision": initial_base,
-            "head_revision": initial_head,
+            "base_revision": initial.base_revision,
+            "head_revision": initial.head_revision,
             "files": files,
             "truncated": truncated,
         })))
@@ -1353,25 +1442,7 @@ impl GitHubApiTransport {
         let number = arguments.number().get().to_string();
         let url =
             self.repository_url(arguments.repository(), &["pulls", &number, "reviews"], None)?;
-        let comments = arguments
-            .comments()
-            .iter()
-            .map(|comment| {
-                serde_json::json!({
-                    "path": comment.path(),
-                    "line": comment.line(),
-                    "side": comment.side().api_value(),
-                    "body": comment.body(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let body = serde_json::to_vec(&serde_json::json!({
-            "commit_id": arguments.commit_id().as_str(),
-            "event": arguments.event().api_value(),
-            "body": arguments.body(),
-            "comments": comments,
-        }))
-        .map_err(|_| invalid_response(None))?;
+        let body = publish_review_body(&arguments)?;
         let response = self
             .send(Method::POST, url, Some(body), credential, policy)
             .await?;
@@ -1392,6 +1463,19 @@ impl GitHubApiTransport {
         credential: &CredentialValue,
         policy: &GitHubEgressPolicy,
     ) -> Result<Response, GitHubTransportFailure> {
+        self.send_with_timeout(method, url, body, credential, policy, self.timeout)
+            .await
+    }
+
+    async fn send_with_timeout(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<Vec<u8>>,
+        credential: &CredentialValue,
+        policy: &GitHubEgressPolicy,
+        timeout: Duration,
+    ) -> Result<Response, GitHubTransportFailure> {
         if !policy.admits(&url) {
             return Err(GitHubTransportFailure::EgressRejected);
         }
@@ -1403,7 +1487,7 @@ impl GitHubApiTransport {
         let mut authentication = HeaderValue::from_bytes(&authentication)
             .map_err(|_| GitHubTransportFailure::InvalidCredential)?;
         authentication.set_sensitive(true);
-        let client = public_destination_client(&url, self.timeout)
+        let client = public_destination_client(&url, timeout)
             .await
             .map_err(classify_destination_failure)?;
         let mut request = client
@@ -1422,10 +1506,17 @@ impl GitHubApiTransport {
         if response.status().is_success() {
             return Ok(response);
         }
-        let status = response.status().as_u16();
-        let (body, truncated) = read_bounded(response, MAX_ERROR_SOURCE_BYTES).await?;
-        let detail = sanitize_error_body(&body, truncated, &scrubber);
-        Err(GitHubTransportFailure::Rejected { status, detail })
+        let status = response.status();
+        let status_code = status.as_u16();
+        let (body, extent) = match read_bounded(response, MAX_ERROR_SOURCE_BYTES).await {
+            Ok(body) => body,
+            Err(failure) => return Err(classify_error_body_failure(status, failure)),
+        };
+        let detail = sanitize_error_body(&body, extent, &scrubber);
+        Err(GitHubTransportFailure::Rejected {
+            status: status_code,
+            detail,
+        })
     }
 
     async fn success_json(
@@ -1437,17 +1528,58 @@ impl GitHubApiTransport {
         if response.status() != expected {
             return Err(invalid_response(None));
         }
-        let (body, truncated) = read_bounded(response, MAX_RESPONSE_BYTES).await?;
-        if truncated {
+        let (body, extent) = read_bounded(response, MAX_RESPONSE_BYTES).await?;
+        if matches!(extent, ResponseExtent::Truncated) {
             return Err(GitHubTransportFailure::ResponseTooLarge);
         }
         let scrubber = CredentialScrubber::try_new(credential)
             .ok_or(GitHubTransportFailure::InvalidCredential)?;
-        let mut value = serde_json::from_slice::<serde_json::Value>(&body)
-            .map_err(|_| invalid_response(sanitize_error_body(&body, false, &scrubber)))?;
+        let mut value = serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
+            invalid_response(sanitize_error_body(
+                &body,
+                ResponseExtent::Complete,
+                &scrubber,
+            ))
+        })?;
         scrubber.redact_value(&mut value);
         Ok(value)
     }
+}
+
+fn publish_review_body(
+    arguments: &PublishReviewArguments,
+) -> Result<Vec<u8>, GitHubTransportFailure> {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "commit_id".to_owned(),
+        serde_json::Value::String(arguments.commit_id().as_str().to_owned()),
+    );
+    payload.insert(
+        "event".to_owned(),
+        serde_json::Value::String(arguments.event().api_value().to_owned()),
+    );
+    if let Some(body) = arguments.body() {
+        payload.insert(
+            "body".to_owned(),
+            serde_json::Value::String(body.to_owned()),
+        );
+    }
+    if !arguments.comments().is_empty() {
+        let comments = arguments
+            .comments()
+            .iter()
+            .map(|comment| {
+                serde_json::json!({
+                    "path": comment.path(),
+                    "line": comment.line(),
+                    "side": comment.side().api_value(),
+                    "body": comment.body(),
+                })
+            })
+            .collect();
+        payload.insert("comments".to_owned(), serde_json::Value::Array(comments));
+    }
+    serde_json::to_vec(&serde_json::Value::Object(payload)).map_err(|_| invalid_response(None))
 }
 
 impl GitHubTransport for GitHubApiTransport {
@@ -1508,7 +1640,7 @@ const fn classify_destination_failure(
 async fn read_bounded(
     response: Response,
     limit: usize,
-) -> Result<(Vec<u8>, bool), GitHubTransportFailure> {
+) -> Result<(Vec<u8>, ResponseExtent), GitHubTransportFailure> {
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -1516,17 +1648,21 @@ async fn read_bounded(
         let remaining = limit.saturating_sub(body.len());
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
-            return Ok((body, true));
+            return Ok((body, ResponseExtent::Truncated));
         }
         body.extend_from_slice(&chunk);
         if body.len() == limit {
-            let truncated = has_more_response_bytes(&mut stream)
+            let has_more = has_more_response_bytes(&mut stream)
                 .await
                 .map_err(classify_more_bytes_failure)?;
-            return Ok((body, truncated));
+            let extent = match has_more {
+                true => ResponseExtent::Truncated,
+                false => ResponseExtent::Complete,
+            };
+            return Ok((body, extent));
         }
     }
-    Ok((body, false))
+    Ok((body, ResponseExtent::Complete))
 }
 
 const fn classify_more_bytes_failure(_failure: WebFetchTransportFailure) -> GitHubTransportFailure {
@@ -1541,6 +1677,48 @@ fn response_has_next_page(response: &Response) -> bool {
         .is_some_and(|value| value.split(',').any(|link| link.contains("rel=\"next\"")))
 }
 
+fn remaining_timeout(deadline: Instant) -> Result<Duration, GitHubTransportFailure> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(GitHubTransportFailure::DispatchUnknown)
+}
+
+#[derive(Clone, Copy)]
+enum FilePaginationExtent {
+    Complete,
+    Truncated,
+}
+
+fn files_incomplete(received: usize, expected: usize, extent: FilePaginationExtent) -> bool {
+    matches!(extent, FilePaginationExtent::Truncated) || received < expected
+}
+
+struct DiffSnapshot {
+    base_revision: String,
+    head_revision: String,
+    changed_files: usize,
+}
+
+fn normalize_diff_snapshot(
+    value: &serde_json::Value,
+    expected_number: PullRequestNumber,
+) -> Result<DiffSnapshot, GitHubTransportFailure> {
+    let object = required_object(value)?;
+    if required_u64(object, "number")? != u64::from(expected_number.get()) {
+        return Err(invalid_response(None));
+    }
+    let base = required_object(required(object, "base")?)?;
+    let head = required_object(required(object, "head")?)?;
+    let changed_files = usize::try_from(required_u64(object, "changed_files")?)
+        .map_err(|_| invalid_response(None))?;
+    Ok(DiffSnapshot {
+        base_revision: checked_revision(required_string(base, "sha")?)?,
+        head_revision: checked_revision(required_string(head, "sha")?)?,
+        changed_files,
+    })
+}
+
 fn normalize_metadata(
     value: &serde_json::Value,
     expected_number: PullRequestNumber,
@@ -1551,13 +1729,13 @@ fn normalize_metadata(
     }
     let base = required_object(required(object, "base")?)?;
     let head = required_object(required(object, "head")?)?;
-    let title = checked_text(required_string(object, "title")?, true)?;
+    let title = checked_text(required_string(object, "title")?, TextPresence::Required)?;
     let body = optional_string(object, "body")?
-        .map(|body| checked_text(body, false))
+        .map(|body| checked_text(body, TextPresence::Optional))
         .transpose()?;
-    let state = checked_text(required_string(object, "state")?, true)?;
+    let state = checked_text(required_string(object, "state")?, TextPresence::Required)?;
     let author = optional_object_string(object, "user", "login")?
-        .map(|author| checked_text(author, true))
+        .map(|author| checked_text(author, TextPresence::Required))
         .transpose()?;
     Ok(serde_json::json!({
         "number": expected_number.get(),
@@ -1566,9 +1744,9 @@ fn normalize_metadata(
         "state": state,
         "draft": required_bool(object, "draft")?,
         "author": author,
-        "base_ref": checked_text(required_string(base, "ref")?, true)?,
+        "base_ref": checked_text(required_string(base, "ref")?, TextPresence::Required)?,
         "base_revision": checked_revision(required_string(base, "sha")?)?,
-        "head_ref": checked_text(required_string(head, "ref")?, true)?,
+        "head_ref": checked_text(required_string(head, "ref")?, TextPresence::Required)?,
         "head_revision": checked_revision(required_string(head, "sha")?)?,
         "url": checked_url(required_string(object, "html_url")?)?,
     }))
@@ -1585,12 +1763,12 @@ fn normalize_files(
                 .map(checked_path)
                 .transpose()?;
             let patch = optional_string(object, "patch")?
-                .map(|patch| checked_text(patch, false))
+                .map(|patch| checked_text(patch, TextPresence::Optional))
                 .transpose()?;
             Ok(serde_json::json!({
                 "path": checked_path(required_string(object, "filename")?)?,
                 "previous_path": previous,
-                "status": checked_text(required_string(object, "status")?, true)?,
+                "status": checked_text(required_string(object, "status")?, TextPresence::Required)?,
                 "additions": required_u64(object, "additions")?,
                 "deletions": required_u64(object, "deletions")?,
                 "changes": required_u64(object, "changes")?,
@@ -1629,7 +1807,7 @@ fn normalize_thread(
         .map(normalize_comment)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::json!({
-        "id": checked_text(required_string(object, "id")?, true)?,
+        "id": checked_text(required_string(object, "id")?, TextPresence::Required)?,
         "resolved": required_bool(object, "isResolved")?,
         "outdated": required_bool(object, "isOutdated")?,
         "path": checked_path(required_string(object, "path")?)?,
@@ -1644,13 +1822,13 @@ fn normalize_comment(
 ) -> Result<serde_json::Value, GitHubTransportFailure> {
     let object = required_object(value)?;
     let author = optional_object_string(object, "author", "login")?
-        .map(|author| checked_text(author, true))
+        .map(|author| checked_text(author, TextPresence::Required))
         .transpose()?;
     Ok(serde_json::json!({
-        "id": checked_text(required_string(object, "id")?, true)?,
+        "id": checked_text(required_string(object, "id")?, TextPresence::Required)?,
         "author": author,
-        "body": checked_text(required_string(object, "body")?, false)?,
-        "created_at": checked_text(required_string(object, "createdAt")?, true)?,
+        "body": checked_text(required_string(object, "body")?, TextPresence::Optional)?,
+        "created_at": checked_text(required_string(object, "createdAt")?, TextPresence::Required)?,
         "url": checked_url(required_string(object, "url")?)?,
     }))
 }
@@ -1670,7 +1848,7 @@ fn normalize_published_review(
     }
     Ok(serde_json::json!({
         "id": id,
-        "state": checked_text(required_string(object, "state")?, true)?,
+        "state": checked_text(required_string(object, "state")?, TextPresence::Required)?,
         "url": checked_url(required_string(object, "html_url")?)?,
         "commit_id": commit_id,
     }))
@@ -1680,12 +1858,19 @@ fn invalid_response(detail: Option<SanitizedGitHubError>) -> GitHubTransportFail
     GitHubTransportFailure::InvalidResponse { detail }
 }
 
-fn valid_text(value: &str, required: bool) -> bool {
-    (!required || !value.is_empty()) && value.len() <= MAX_TEXT_BYTES && !value.contains('\0')
+#[derive(Clone, Copy)]
+enum TextPresence {
+    Required,
+    Optional,
 }
 
-fn checked_text(value: String, required: bool) -> Result<String, GitHubTransportFailure> {
-    valid_text(&value, required)
+fn valid_text(value: &str, presence: TextPresence) -> bool {
+    let content_is_valid = matches!(presence, TextPresence::Optional) || !value.is_empty();
+    content_is_valid && value.len() <= MAX_TEXT_BYTES && !value.contains('\0')
+}
+
+fn checked_text(value: String, presence: TextPresence) -> Result<String, GitHubTransportFailure> {
+    valid_text(&value, presence)
         .then_some(value)
         .ok_or_else(|| invalid_response(None))
 }
@@ -1723,7 +1908,7 @@ fn sanitized_value_detail(
 ) -> Option<SanitizedGitHubError> {
     let bytes = serde_json::to_vec(value).ok()?;
     let scrubber = CredentialScrubber::try_new(credential)?;
-    sanitize_error_body(&bytes, false, &scrubber)
+    sanitize_error_body(&bytes, ResponseExtent::Complete, &scrubber)
 }
 
 fn required_object(
@@ -1837,7 +2022,24 @@ mod tests {
 
     const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
     const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
+    const PULL_REQUEST_NUMBER: u64 = 348;
+    const CHANGED_FILES: usize = 1;
+    const FILE_PATH: &str = "crates/example/src/lib.rs";
+    const FILE_PATCH: &str = "@@ -1 +1 @@\n-old\n+new";
+    const THREADS_TRUNCATED: bool = false;
+    const THREAD_RESOLVED: bool = false;
+    const THREAD_OUTDATED: bool = false;
+    const COMMENTS_TRUNCATED: bool = false;
+    const REVIEW_COMMENT_BODY: &str = "Please cover this edge.";
+    const ERROR_BODY_PREFIX: &str = "safe ";
+    const PUBLISHED_REVIEW_STATE: &str = "APPROVED";
+    const GITHUB_FILE_CEILING: usize = 3_000;
+    const FILES_BEYOND_CEILING: usize = 3_001;
+    const CLIENT_ERROR_STATUS: u16 = 422;
+    const SERVER_ERROR_STATUS: u16 = 503;
     const SYNTHETIC_TOKEN: &str = "github_pat_synthetic_fixture_secret";
+    const SYNTHETIC_UNICODE_TOKEN: &str = "github_pat_synthétic_fixture_secret";
+    const SYNTHETIC_UNICODE_PREFIX: &str = "github_pat_synth";
 
     struct SyntheticCredentials;
     struct SyntheticTransport;
@@ -1858,6 +2060,10 @@ mod tests {
             .expect("fixture arguments are admitted")
     }
 
+    fn publish_arguments(value: serde_json::Value) -> PublishReviewArguments {
+        serde_json::from_value(value).expect("publish fixture is admitted")
+    }
+
     fn definition(catalog: &CompiledToolCatalog, name: &str) -> ToolDefinition {
         catalog
             .definition(&ToolName::try_new(name.to_owned()).expect("fixture name is admitted"))
@@ -1866,7 +2072,8 @@ mod tests {
 
     fn metadata_response() -> serde_json::Value {
         serde_json::json!({
-            "number": 348,
+            "number": PULL_REQUEST_NUMBER,
+            "changed_files": CHANGED_FILES,
             "title": "Exact revision repository reads",
             "body": "Synthetic body",
             "state": "open",
@@ -1880,12 +2087,12 @@ mod tests {
 
     fn files_response() -> serde_json::Value {
         serde_json::json!([{
-            "filename": "crates/example/src/lib.rs",
+            "filename": FILE_PATH,
             "status": "modified",
             "additions": 4,
             "deletions": 2,
             "changes": 6,
-            "patch": "@@ -1 +1 @@\n-old\n+new"
+            "patch": FILE_PATCH
         }])
     }
 
@@ -1894,22 +2101,22 @@ mod tests {
             "data": {"repository": {"pullRequest": {"reviewThreads": {
                 "nodes": [{
                     "id": "PRRT_fixture",
-                    "isResolved": false,
-                    "isOutdated": false,
-                    "path": "crates/example/src/lib.rs",
+                    "isResolved": THREAD_RESOLVED,
+                    "isOutdated": THREAD_OUTDATED,
+                    "path": FILE_PATH,
                     "line": 42,
                     "comments": {
                         "nodes": [{
                             "id": "PRRC_fixture",
                             "author": {"login": "reviewer"},
-                            "body": "Please cover this edge.",
+                            "body": REVIEW_COMMENT_BODY,
                             "createdAt": "2026-07-31T00:00:00Z",
                             "url": "https://github.com/KeenWill/signalbox/pull/1#discussion_r1"
                         }],
-                        "pageInfo": {"hasNextPage": false}
+                        "pageInfo": {"hasNextPage": COMMENTS_TRUNCATED}
                     }
                 }],
-                "pageInfo": {"hasNextPage": false}
+                "pageInfo": {"hasNextPage": THREADS_TRUNCATED}
             }}}}
         })
     }
@@ -1961,47 +2168,135 @@ mod tests {
             "repository": "KeenWill/signalbox", "number": 1,
             "commit_id": HEAD_REVISION, "event": "comment", "comments": []
         }));
+        let inline_only_comment = normalized(serde_json::json!({
+            "repository": "KeenWill/signalbox", "number": 1,
+            "commit_id": HEAD_REVISION, "event": "comment",
+            "comments": [{
+                "path": FILE_PATH, "line": 1, "side": "RIGHT", "body": REVIEW_COMMENT_BODY
+            }]
+        }));
         let approval = normalized(serde_json::json!({
             "repository": "KeenWill/signalbox", "number": 1,
             "commit_id": HEAD_REVISION, "event": "approve", "comments": []
         }));
 
         assert!(catalog.validate_arguments(&name, &empty_comment).is_err());
+        assert!(
+            catalog
+                .validate_arguments(&name, &inline_only_comment)
+                .is_err()
+        );
         assert_eq!(catalog.validate_arguments(&name, &approval), Ok(()));
     }
 
     #[test]
+    fn approval_without_body_omits_optional_payload_fields() {
+        let arguments = publish_arguments(serde_json::json!({
+            "repository": "KeenWill/signalbox", "number": 1,
+            "commit_id": HEAD_REVISION, "event": "approve"
+        }));
+        let body = publish_review_body(&arguments).expect("publish fixture serializes");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("serialized fixture is JSON");
+
+        assert_eq!(payload["commit_id"], HEAD_REVISION);
+        assert_eq!(payload.get("body"), None);
+        assert_eq!(payload.get("comments"), None);
+    }
+
+    #[test]
     fn recorded_metadata_preserves_exact_base_and_head() {
-        let number = PullRequestNumber::try_from(348).expect("fixture number is admitted");
+        let number =
+            PullRequestNumber::try_from(PULL_REQUEST_NUMBER).expect("fixture number is admitted");
 
         let parsed =
             normalize_metadata(&metadata_response(), number).expect("recorded response is valid");
 
         assert_eq!(parsed["base_revision"], BASE_REVISION);
         assert_eq!(parsed["head_revision"], HEAD_REVISION);
-        assert_eq!(parsed["number"], 348);
+        assert_eq!(parsed["number"], PULL_REQUEST_NUMBER);
+    }
+
+    #[test]
+    fn diff_snapshot_ignores_unrelated_metadata_fields() {
+        let mut response = metadata_response();
+        response["body"] = serde_json::Value::String("é".repeat(MAX_TEXT_BYTES));
+        let number =
+            PullRequestNumber::try_from(PULL_REQUEST_NUMBER).expect("fixture number is admitted");
+        let snapshot =
+            normalize_diff_snapshot(&response, number).expect("revision-only snapshot is valid");
+
+        assert!(normalize_metadata(&response, number).is_err());
+        assert_eq!(snapshot.base_revision, BASE_REVISION);
+        assert_eq!(snapshot.head_revision, HEAD_REVISION);
+        assert_eq!(snapshot.changed_files, CHANGED_FILES);
     }
 
     #[test]
     fn recorded_files_preserve_patch_text() {
         let parsed = normalize_files(&files_response()).expect("recorded response is valid");
 
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0]["path"], "crates/example/src/lib.rs");
-        assert_eq!(parsed[0]["patch"], "@@ -1 +1 @@\n-old\n+new");
+        assert_eq!(parsed.len(), CHANGED_FILES);
+        assert_eq!(parsed[0]["path"], FILE_PATH);
+        assert_eq!(parsed[0]["patch"], FILE_PATCH);
+    }
+
+    #[test]
+    fn github_file_ceiling_is_reported_as_incomplete() {
+        assert!(files_incomplete(
+            GITHUB_FILE_CEILING,
+            FILES_BEYOND_CEILING,
+            FilePaginationExtent::Complete,
+        ));
+        assert!(!files_incomplete(
+            CHANGED_FILES,
+            CHANGED_FILES,
+            FilePaginationExtent::Complete
+        ));
+    }
+
+    #[test]
+    fn provider_status_distinguishes_rejection_from_infrastructure() {
+        let client_status =
+            StatusCode::from_u16(CLIENT_ERROR_STATUS).expect("fixture status is valid");
+        let server_status =
+            StatusCode::from_u16(SERVER_ERROR_STATUS).expect("fixture status is valid");
+        let client_failure =
+            classify_error_body_failure(client_status, GitHubTransportFailure::DispatchUnknown);
+        let server_failure =
+            classify_error_body_failure(server_status, GitHubTransportFailure::DispatchUnknown);
+
+        assert!(status_is_definitive(CLIENT_ERROR_STATUS));
+        assert!(!status_is_definitive(SERVER_ERROR_STATUS));
+        assert_eq!(
+            client_failure,
+            GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS)
+        );
+        assert_eq!(server_failure, GitHubTransportFailure::DispatchUnknown);
+    }
+
+    #[test]
+    fn exhausted_diff_deadline_is_dispatch_unknown() {
+        assert_eq!(
+            remaining_timeout(Instant::now()),
+            Err(GitHubTransportFailure::DispatchUnknown),
+        );
     }
 
     #[test]
     fn graphql_recording_preserves_resolution_state_and_comments() {
         let parsed = normalize_threads(&threads_response()).expect("recorded response is valid");
 
-        assert_eq!(parsed["truncated"], false);
-        assert_eq!(parsed["threads"][0]["resolved"], false);
-        assert_eq!(parsed["threads"][0]["outdated"], false);
-        assert_eq!(parsed["threads"][0]["comments_truncated"], false);
+        assert_eq!(parsed["truncated"], THREADS_TRUNCATED);
+        assert_eq!(parsed["threads"][0]["resolved"], THREAD_RESOLVED);
+        assert_eq!(parsed["threads"][0]["outdated"], THREAD_OUTDATED);
+        assert_eq!(
+            parsed["threads"][0]["comments_truncated"],
+            COMMENTS_TRUNCATED
+        );
         assert_eq!(
             parsed["threads"][0]["comments"][0]["body"],
-            "Please cover this edge."
+            REVIEW_COMMENT_BODY
         );
     }
 
@@ -2014,8 +2309,8 @@ mod tests {
         );
         let body = format!("{prefix}{SYNTHETIC_TOKEN}{}", "tail".repeat(100));
 
-        let sanitized =
-            sanitize_error_body(body.as_bytes(), false, &scrubber).expect("nonempty error remains");
+        let sanitized = sanitize_error_body(body.as_bytes(), ResponseExtent::Complete, &scrubber)
+            .expect("nonempty error remains");
 
         assert!(!sanitized.as_str().contains(SYNTHETIC_TOKEN));
         assert!(sanitized.as_str().contains("[redacted]"));
@@ -2029,12 +2324,24 @@ mod tests {
         let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let token_prefix = &SYNTHETIC_TOKEN[..SYNTHETIC_TOKEN.len() - 3];
-        let body = format!("safe {token_prefix}");
+        let body = format!("{ERROR_BODY_PREFIX}{token_prefix}");
 
-        let sanitized =
-            sanitize_error_body(body.as_bytes(), true, &scrubber).expect("nonempty error remains");
+        let sanitized = sanitize_error_body(body.as_bytes(), ResponseExtent::Truncated, &scrubber)
+            .expect("nonempty error remains");
 
-        assert_eq!(sanitized.as_str(), "safe [redacted]");
+        assert_eq!(sanitized.as_str(), format!("{ERROR_BODY_PREFIX}[redacted]"));
+    }
+
+    #[test]
+    fn truncated_error_source_handles_unicode_token_prefix() {
+        let credential = CredentialValue::new(SYNTHETIC_UNICODE_TOKEN.as_bytes().to_vec());
+        let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
+        let body = format!("{ERROR_BODY_PREFIX}{SYNTHETIC_UNICODE_PREFIX}");
+
+        let sanitized = sanitize_error_body(body.as_bytes(), ResponseExtent::Truncated, &scrubber)
+            .expect("nonempty error remains");
+
+        assert_eq!(sanitized.as_str(), format!("{ERROR_BODY_PREFIX}[redacted]"));
     }
 
     #[test]
@@ -2051,7 +2358,7 @@ mod tests {
     fn mutation_acknowledgement_is_pinned_to_requested_commit() {
         let response = serde_json::json!({
             "id": 7001,
-            "state": "APPROVED",
+            "state": PUBLISHED_REVIEW_STATE,
             "html_url": "https://github.com/KeenWill/signalbox/pull/1#pullrequestreview-7001",
             "commit_id": HEAD_REVISION
         });
@@ -2060,6 +2367,6 @@ mod tests {
             .expect("recorded response is valid");
 
         assert_eq!(parsed["commit_id"], HEAD_REVISION);
-        assert_eq!(parsed["state"], "APPROVED");
+        assert_eq!(parsed["state"], PUBLISHED_REVIEW_STATE);
     }
 }
