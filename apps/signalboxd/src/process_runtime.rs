@@ -132,6 +132,7 @@ use tokio::{
     time::sleep,
 };
 
+use crate::telemetry::{ModelMetricDisposition, TelemetryMetrics, TurnMetricOutcome};
 use crate::{
     FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener, LocalSocketError,
     SessionTemplateConfiguration,
@@ -201,6 +202,7 @@ pub struct ProcessRuntime {
     context_compaction_credential_reference: Option<Arc<str>>,
     template_configuration: SessionTemplateConfiguration,
     fanouts: ProcessFanouts,
+    metrics: Option<TelemetryMetrics>,
 }
 
 #[derive(Clone, Debug)]
@@ -249,6 +251,7 @@ impl ProcessRuntime {
             context_compaction_model: Arc::new(UnavailableContextCompactionModel),
             context_compaction_credential_reference: None,
             template_configuration,
+            metrics: None,
             fanouts: ProcessFanouts {
                 durable: durable_updates,
                 streaming: streaming_updates,
@@ -280,6 +283,13 @@ impl ProcessRuntime {
         self
     }
 
+    /// Installs the private Prometheus counters fed by durable outbox events.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: TelemetryMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
     pub fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
         ProcessProviderTextDeltaSink {
             updates: self.fanouts.streaming.clone(),
@@ -302,7 +312,7 @@ impl ProcessRuntime {
             fanouts: fanouts.clone(),
         };
         let server = serve_connections(&self.listener, connection_dependencies, shutdown.clone());
-        let dispatcher = dispatch_updates(self.pool, fanouts, shutdown);
+        let dispatcher = dispatch_updates(self.pool, fanouts, self.metrics, shutdown);
         let result = tokio::try_join!(server, dispatcher);
         let cleanup = self.listener.cleanup();
 
@@ -326,15 +336,23 @@ impl ProviderTextDeltaSink for ProcessProviderTextDeltaSink {
 async fn dispatch_updates(
     pool: PgPool,
     fanouts: ProcessFanouts,
+    metrics: Option<TelemetryMetrics>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
     let dispatcher = OutboxDispatcher::new(pool);
+    let mut last_metric_sequence = None;
     loop {
         if shutdown_requested(&shutdown) {
             return Ok(());
         }
         let outcome = dispatcher
             .dispatch_next(|event| {
+                observe_outbox_metrics_once(
+                    metrics.as_ref(),
+                    &mut last_metric_sequence,
+                    event.sequence(),
+                    event.kind(),
+                );
                 let update = ProcessUpdate::from(event);
                 let _ = fanouts.durable.send(update.clone());
                 let _ = fanouts.streaming.send(update);
@@ -355,6 +373,67 @@ async fn dispatch_updates(
             }
         }
     }
+}
+
+fn observe_outbox_metrics_once(
+    metrics: Option<&TelemetryMetrics>,
+    last_sequence: &mut Option<u64>,
+    sequence: u64,
+    event: &DispatchedOutboxEventKind,
+) {
+    if *last_sequence == Some(sequence) {
+        return;
+    }
+    *last_sequence = Some(sequence);
+    observe_outbox_metrics(metrics, event);
+}
+
+fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &DispatchedOutboxEventKind) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    match event {
+        DispatchedOutboxEventKind::TurnActivated { .. } => metrics.observe_turn_started(),
+        DispatchedOutboxEventKind::TurnCompleted { .. } => {
+            metrics.observe_turn_terminal(TurnMetricOutcome::Completed);
+        }
+        DispatchedOutboxEventKind::TurnFailed { .. } => {
+            metrics.observe_turn_terminal(TurnMetricOutcome::Failed);
+        }
+        DispatchedOutboxEventKind::TurnRefused { .. } => {
+            metrics.observe_turn_terminal(TurnMetricOutcome::Refused);
+        }
+        DispatchedOutboxEventKind::TurnCancelled { .. } => {
+            metrics.observe_turn_terminal(TurnMetricOutcome::Cancelled);
+        }
+        DispatchedOutboxEventKind::TurnReconciliationRequired { .. } => {
+            metrics.observe_turn_terminal(TurnMetricOutcome::ReconciliationRequired);
+        }
+        DispatchedOutboxEventKind::ModelCallTransition { state, .. } => {
+            observe_model_call_metrics(metrics, *state);
+        }
+        DispatchedOutboxEventKind::SessionCreated
+        | DispatchedOutboxEventKind::InputAccepted { .. }
+        | DispatchedOutboxEventKind::ToolBatchTransition { .. }
+        | DispatchedOutboxEventKind::ContextCompacted { .. } => {}
+    }
+}
+
+fn observe_model_call_metrics(metrics: &TelemetryMetrics, state: DispatchedModelCallState) {
+    let disposition = match state {
+        DispatchedModelCallState::Terminal(disposition) => disposition,
+        DispatchedModelCallState::Prepared
+        | DispatchedModelCallState::InFlight
+        | DispatchedModelCallState::CancellationRequested => return,
+    };
+    let disposition = match disposition {
+        DispatchedModelCallDisposition::Completed => ModelMetricDisposition::Completed,
+        DispatchedModelCallDisposition::KnownFailed => ModelMetricDisposition::KnownFailed,
+        DispatchedModelCallDisposition::Refused => ModelMetricDisposition::Refused,
+        DispatchedModelCallDisposition::Cancelled => ModelMetricDisposition::Cancelled,
+        DispatchedModelCallDisposition::Ambiguous => ModelMetricDisposition::Ambiguous,
+    };
+    metrics.observe_model_terminal(disposition);
 }
 
 struct ConnectionDependencies {
@@ -9077,8 +9156,8 @@ mod tests {
         ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
         ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
         ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
-        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId, SubmitInputRejectedResult,
-        ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
+        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId, SessionInputPosition,
+        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, FrameEncodeError,
@@ -9109,14 +9188,15 @@ mod tests {
         admitted_user_content, canonical_review_request_digest, consume_snapshot_queued_update,
         context_compaction_failure_disposition, execute_import,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
-        internal_protocol_error, map_rejection, operational_import_error, read_frame_line,
-        replacement_model_is_admitted, retry_context_compaction_range_database_reads,
-        run_until_shutdown, snapshot_reader_capacity, submit_input_model_execution_diagnostic,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
+        internal_protocol_error, map_rejection, observe_outbox_metrics_once,
+        operational_import_error, read_frame_line, replacement_model_is_admitted,
+        retry_context_compaction_range_database_reads, run_until_shutdown,
+        snapshot_reader_capacity, submit_input_model_execution_diagnostic, wire_model_call_state,
+        wire_tool_decision, wire_turn_state, wire_uuid, write_content,
         write_context_compaction_repository_error, write_snapshot_spool_error,
         write_transcript_entry,
     };
-    use crate::FatalExecutionSupervisor;
+    use crate::{FatalExecutionSupervisor, TelemetryMetrics};
     use signalbox_model_provider_runtime::ContextCompactionModelError;
     use signalbox_persistence::{
         context_compaction::{
@@ -9139,6 +9219,44 @@ mod tests {
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
 
+    #[test]
+    fn durable_metric_mapping_ignores_content_and_uses_only_closed_labels() {
+        let metrics = TelemetryMetrics::new().expect("static metric descriptors are valid");
+        let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(1));
+        let turn = TurnId::from_uuid(Uuid::from_u128(2));
+        let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(3));
+        let call = ModelCallId::from_uuid(Uuid::from_u128(4));
+        let input = DispatchedOutboxEventKind::InputAccepted {
+            accepted_input,
+            turn,
+            acceptance_position: SessionInputPosition::first(),
+            content: "synthetic prompt with tool arguments".to_owned(),
+        };
+        let activation = DispatchedOutboxEventKind::TurnActivated {
+            turn,
+            current_attempt: attempt,
+        };
+        let terminal_call = DispatchedOutboxEventKind::ModelCallTransition {
+            turn,
+            call,
+            state: DispatchedModelCallState::Terminal(DispatchedModelCallDisposition::Ambiguous),
+        };
+        let mut last_sequence = None;
+
+        observe_outbox_metrics_once(Some(&metrics), &mut last_sequence, 1, &input);
+        observe_outbox_metrics_once(Some(&metrics), &mut last_sequence, 2, &activation);
+        observe_outbox_metrics_once(Some(&metrics), &mut last_sequence, 2, &activation);
+        observe_outbox_metrics_once(Some(&metrics), &mut last_sequence, 3, &terminal_call);
+        let rendered = metrics.render().expect("static registry encodes");
+
+        assert!(rendered.contains("signalbox_turns_started_total 1"));
+        assert!(rendered.contains("disposition=\"ambiguous\""));
+        assert!(!rendered.contains("synthetic prompt with tool arguments"));
+        assert!(!rendered.contains(&accepted_input.into_uuid().to_string()));
+        assert!(!rendered.contains(&turn.into_uuid().to_string()));
+        assert!(!rendered.contains(&attempt.into_uuid().to_string()));
+        assert!(!rendered.contains(&call.into_uuid().to_string()));
+    }
     struct PendingResponseWriter;
 
     #[derive(Clone, Default)]
