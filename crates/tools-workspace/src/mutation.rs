@@ -588,6 +588,18 @@ fn decode_operation(
     }
 }
 
+fn replacement_output_bytes(
+    source_bytes: usize,
+    old_bytes: usize,
+    new_bytes: usize,
+    matches: usize,
+) -> Option<usize> {
+    let removed = old_bytes.checked_mul(matches)?;
+    let retained = source_bytes.checked_sub(removed)?;
+    let added = new_bytes.checked_mul(matches)?;
+    retained.checked_add(added)
+}
+
 /// Executor for the three approved workspace mutation tools.
 pub struct WorkspaceMutationExecutor<FileSystem: WorkspaceMutationFileSystem> {
     filesystem: FileSystem,
@@ -789,14 +801,16 @@ impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationExecutor<FileSyst
         if matches == 0 || !replace_all && matches != 1 {
             return Err(MutationFailure::EditMatch);
         }
+        let output_bytes =
+            replacement_output_bytes(source.len(), old_string.len(), new_string.len(), matches)
+                .filter(|bytes| *bytes <= MAX_WORKSPACE_MUTATION_FILE_BYTES)
+                .ok_or(MutationFailure::EditMatch)?;
         let content = if replace_all {
             source.replace(old_string, new_string)
         } else {
             source.replacen(old_string, new_string, 1)
         };
-        if content.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES {
-            return Err(MutationFailure::EditMatch);
-        }
+        debug_assert_eq!(content.len(), output_bytes);
         let bytes_written = content.len();
         self.commit(
             &snapshot,
@@ -1863,6 +1877,39 @@ mod tests {
 
         assert_eq!(result, Err(MutationFailure::EditMatch));
         assert_eq!(filesystem.files(), original);
+    }
+
+    #[test]
+    fn edit_file_replace_all_rejects_huge_expansion_before_allocation() {
+        const PATH: &str = "file.txt";
+        const MATCH: &str = "a";
+        const REPLACEMENT_UNIT: &str = "b";
+
+        let source = MATCH.repeat(MAX_WORKSPACE_MUTATION_FILE_BYTES);
+        let replacement = REPLACEMENT_UNIT.repeat(MAX_WORKSPACE_MUTATION_FILE_BYTES);
+        let filesystem = FakeFileSystem::default();
+        filesystem
+            .state
+            .lock()
+            .expect("fake lock is available")
+            .files
+            .insert(String::from(PATH), source);
+        let executor = executor(filesystem.clone());
+        let original = filesystem.files();
+        let result = executor.edit_file(
+            WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid"),
+            MATCH,
+            &replacement,
+            true,
+        );
+
+        assert_eq!(result, Err(MutationFailure::EditMatch));
+        assert_eq!(filesystem.files(), original);
+    }
+
+    #[test]
+    fn replacement_output_length_rejects_arithmetic_overflow() {
+        assert_eq!(replacement_output_bytes(usize::MAX, 1, usize::MAX, 2), None);
     }
 
     #[test]
