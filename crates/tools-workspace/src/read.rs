@@ -530,6 +530,13 @@ impl<FileSystem: WorkspaceFileSystem> ToolExecutor for WorkspaceReadExecutor<Fil
     }
 }
 
+fn map_resolve_failure(error: WorkspaceResolveError) -> ReadFailure {
+    match error {
+        WorkspaceResolveError::Rejected(_) => ReadFailure::PathRejected,
+        WorkspaceResolveError::Io(_) => ReadFailure::Filesystem,
+    }
+}
+
 fn kind_for_name(name: &str) -> Option<ReadToolKind> {
     match name {
         READ_FILE_NAME => Some(ReadToolKind::ReadFile),
@@ -595,8 +602,8 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
     ) -> Result<ReadFileResult, ReadFailure> {
         let read = self
             .filesystem
-            .read_file_prefix(path, max_bytes)
-            .map_err(|_| ReadFailure::Filesystem)?;
+            .read_file_prefix(&self.root, path, max_bytes)
+            .map_err(map_resolve_failure)?;
         let retained = utf8_prefix(&read.bytes, max_bytes).ok_or(ReadFailure::NotUtf8)?;
         let bytes_read = retained.len();
         Ok(ReadFileResult {
@@ -604,7 +611,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
             content: retained.to_owned(),
             bytes_read,
             total_bytes: read.total_bytes,
-            truncated: (bytes_read as u64) < read.total_bytes,
+            truncated: read.truncated || (bytes_read as u64) < read.total_bytes,
         })
     }
 
@@ -615,8 +622,8 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
     ) -> Result<ListDirectoryResult, ReadFailure> {
         let read = self
             .filesystem
-            .read_directory(path, max_results)
-            .map_err(|_| ReadFailure::Filesystem)?;
+            .read_directory(&self.root, path, max_results)
+            .map_err(map_resolve_failure)?;
         let entries = read.entries;
         let truncated = read.truncated;
         let entries = entries
@@ -645,7 +652,11 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
             .entries
             .into_iter()
             .filter_map(|entry| {
-                let relative_to_base = entry.path.strip_prefix(path).ok()?;
+                let relative_to_base = if path == Path::new(".") {
+                    entry.path.as_path()
+                } else {
+                    entry.path.strip_prefix(path).ok()?
+                };
                 pattern.matches_path(relative_to_base).then(|| {
                     self.root.relative_name(&entry.path).map(|path| GlobMatch {
                         path,
@@ -670,9 +681,9 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
     ) -> Result<SearchFilesResult, ReadFailure> {
         let metadata = self
             .filesystem
-            .symlink_metadata(path)
-            .map_err(|_| ReadFailure::Filesystem)?;
-        let single_file = metadata.is_file();
+            .entry_kind(&self.root, path)
+            .map_err(map_resolve_failure)?;
+        let single_file = metadata == WorkspaceEntryKind::File;
         let walk = if single_file {
             WalkResult {
                 entries: vec![crate::WorkspaceDirectoryEntry {
@@ -696,6 +707,8 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
             }
             let relative_to_base = if single_file {
                 entry.path.file_name().map(Path::new).unwrap_or(&entry.path)
+            } else if path == Path::new(".") {
+                entry.path.as_path()
             } else {
                 entry.path.strip_prefix(path).unwrap_or(&entry.path)
             };
@@ -704,11 +717,11 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
             }
             let read = self
                 .filesystem
-                .read_file_prefix(&entry.path, MAX_SEARCH_FILE_BYTES)
-                .map_err(|_| ReadFailure::Filesystem)?;
+                .read_file_prefix(&self.root, &entry.path, MAX_SEARCH_FILE_BYTES)
+                .map_err(map_resolve_failure)?;
             let retained =
                 utf8_prefix(&read.bytes, MAX_SEARCH_FILE_BYTES).ok_or(ReadFailure::NotUtf8)?;
-            if (retained.len() as u64) < read.total_bytes {
+            if read.truncated || (retained.len() as u64) < read.total_bytes {
                 result.truncated = true;
             }
             self.collect_matches(&entry.path, retained, pattern, max_results, &mut result)?;
@@ -762,8 +775,8 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
             let remaining = MAX_WALK_ENTRIES.saturating_sub(visited);
             let read = self
                 .filesystem
-                .read_directory(&directory, remaining)
-                .map_err(|_| ReadFailure::Filesystem)?;
+                .read_directory(&self.root, &directory, remaining)
+                .map_err(map_resolve_failure)?;
             let directory_truncated = read.truncated;
             let mut children = read.entries;
             children.sort_by(|left, right| right.path.cmp(&left.path));
@@ -1139,5 +1152,34 @@ mod tests {
         let Err(ToolCatalogValidationFailure::InvalidArguments { .. }) = result else {
             panic!("escaping search symlink is rejected as invalid arguments")
         };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn glob_recursive_traversal_never_follows_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let outside = tempfile::tempdir().expect("outside fixture constructs");
+        fs::write(outside.path().join("secret.txt"), "secret").expect("outside fixture writes");
+        symlink(outside.path(), workspace.path().join("linked"))
+            .expect("directory symlink fixture constructs");
+        let (_catalog, executor) = fixture_tools(&workspace);
+        let operation = decode_operation(
+            ReadToolKind::GlobFiles,
+            &arguments(r#"{"pattern":"**/*.txt","path":"."}"#),
+            &executor.filesystem,
+            &executor.root,
+        )
+        .expect("glob arguments are valid");
+        let ReadResult::GlobFiles(result) = executor
+            .execute_operation(operation)
+            .expect("fixture glob succeeds")
+        else {
+            panic!("glob_files returns glob matches")
+        };
+
+        assert!(result.matches.is_empty());
+        assert!(!result.truncated);
     }
 }
