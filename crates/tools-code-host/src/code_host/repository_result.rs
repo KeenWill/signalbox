@@ -126,6 +126,8 @@ impl RepositoryReadFileResult {
         let requested_line_range = arguments.line_range();
         let requested_start_line = requested_line_range.map(RepositoryLineRange::start);
         let requested_end_line = requested_line_range.map(RepositoryLineRange::end);
+        let source_within_scan_limit = requested_line_range.is_none()
+            || fields.source_bytes <= u64::try_from(MAX_REPOSITORY_FILE_SCAN_BYTES).ok()?;
         let empty_selection_valid = match requested_start_line {
             None | Some(1) => fields.source_bytes == 0,
             Some(_) => true,
@@ -176,6 +178,7 @@ impl RepositoryReadFileResult {
             && valid_text(&fields.content)
             && fields.content.len() <= MAX_REPOSITORY_FILE_CONTENT_BYTES
             && source_bytes_consistent
+            && source_within_scan_limit
             && fields.last_line_complete == last_line_complete)
             .then_some(Self {
                 identity: RepositoryObjectIdentity::from_file_arguments(arguments),
@@ -364,7 +367,7 @@ impl RepositoryDirectoryEntry {
 
 pub(super) fn is_immediate_repository_child(parent: &str, child: &str) -> bool {
     if parent == "." {
-        return !child.is_empty() && !child.contains('/');
+        return !child.is_empty() && child != "." && !child.contains('/');
     }
     child
         .strip_prefix(parent)
@@ -620,6 +623,36 @@ mod tests {
         assert!(result.is_some());
     }
 
+    /// A custom transport cannot return ranged content from a source whose exact
+    /// size exceeds the bounded scan limit.
+    #[test]
+    fn ranged_content_rejects_a_source_above_the_scan_limit() {
+        const CONTENT: &str = "first\n";
+        const REQUESTED_START: u32 = 1;
+        const REQUESTED_END: u32 = 1;
+        let source_bytes = u64::try_from(MAX_REPOSITORY_FILE_SCAN_BYTES + 1)
+            .expect("fixture source size fits u64");
+        let arguments = file_arguments(
+            "src/lib.rs",
+            REVISION,
+            Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
+        );
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: Some(REQUESTED_START),
+                end_line: Some(REQUESTED_END),
+                returned_lines: 1,
+                last_line_complete: true,
+                content: String::from(CONTENT),
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        );
+
+        assert!(result.is_none());
+    }
+
     /// A complete whole-file result contains every byte reported by its source
     /// metadata before evidence scrubbing changes the emitted byte count.
     #[test]
@@ -657,6 +690,28 @@ mod tests {
         let entries = vec![entry];
         let observed_entries = entries.len();
         let arguments = directory_arguments("src");
+        let result = RepositoryListDirectoryResult::try_entries(
+            &arguments,
+            entries,
+            observed_entries,
+            CodeHostResultCompleteness::Complete,
+        );
+
+        assert!(result.is_none());
+    }
+
+    /// The repository root cannot appear as its own immediate child.
+    #[test]
+    fn root_directory_entries_reject_the_root_identity() {
+        let entry = RepositoryDirectoryEntry::try_new(
+            String::from("."),
+            RepositoryObjectKind::Directory,
+            None,
+        )
+        .expect("fixture root path is admitted");
+        let entries = vec![entry];
+        let observed_entries = entries.len();
+        let arguments = directory_arguments(".");
         let result = RepositoryListDirectoryResult::try_entries(
             &arguments,
             entries,

@@ -2730,11 +2730,9 @@ mod tests {
             .await;
             [path_request, revision_request, repository_request]
         });
+        let arguments = repository_read_arguments("src/lib.rs", None);
         let result = transport
-            .repository_read_file(
-                repository_read_arguments("src/lib.rs", None),
-                &test_credential(),
-            )
+            .repository_read_file(arguments.clone(), &test_credential())
             .await
             .expect("an absent exact revision is a typed result");
         let requests = repository_server_result(server).await;
@@ -2743,12 +2741,15 @@ mod tests {
             result.into_json_value(),
             serde_json::json!({
                 "outcome": "revision_not_found",
-                "path": "src/lib.rs",
-                "revision": REPOSITORY_REVISION,
+                "path": arguments.path().as_str(),
+                "revision": arguments.revision().as_str(),
                 "truncated": false,
             })
         );
-        assert_eq!(requests, missing_revision_requests("src/lib.rs"));
+        assert_eq!(
+            requests,
+            missing_revision_requests(arguments.path().as_str())
+        );
     }
 
     /// An empty visible repository returns a conflict for commit lookup but
