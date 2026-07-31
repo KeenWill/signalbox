@@ -224,6 +224,11 @@ impl WorkspaceMutationSnapshot {
         self.modes.get(path)
     }
 
+    /// Iterates captured paths in lexical order without cloning file content.
+    pub fn paths(&self) -> impl Iterator<Item = &WorkspaceMutationPath> {
+        self.files.keys()
+    }
+
     /// Iterates captured files in lexical path order.
     pub fn files(&self) -> impl Iterator<Item = WorkspaceFileSnapshot> + '_ {
         self.files
@@ -938,7 +943,7 @@ impl WorkspaceMutationFileSystem for LocalWorkspaceFileSystem {
         expected: &WorkspaceMutationSnapshot,
         mutations: &[WorkspaceFileMutation],
     ) -> Result<(), WorkspaceMutationCommitError> {
-        let paths = expected.files().map(|file| file.path).collect::<Vec<_>>();
+        let paths = expected.paths().cloned().collect::<Vec<_>>();
         let current = self
             .snapshot(root, &paths, MAX_WORKSPACE_MUTATION_FILE_BYTES)
             .map_err(snapshot_commit_error)?;
@@ -979,11 +984,13 @@ fn verify_precondition(
 ) -> Result<(), WorkspaceMutationCommitError> {
     let current = local_file_snapshot(filesystem, root, path, MAX_WORKSPACE_MUTATION_FILE_BYTES)
         .map_err(snapshot_commit_error)?;
-    let expected_file = expected
-        .files()
-        .find(|file| file.path == *path)
+    let expected_content = expected
+        .content(path)
         .ok_or(WorkspaceMutationCommitError::Filesystem)?;
-    if current == expected_file {
+    let expected_mode = expected
+        .mode(path)
+        .ok_or(WorkspaceMutationCommitError::Filesystem)?;
+    if &current.content == expected_content && &current.mode == expected_mode {
         Ok(())
     } else {
         Err(WorkspaceMutationCommitError::Conflict)
@@ -1146,7 +1153,7 @@ fn write_staged_file(
     let result = file
         .write_all(content.as_bytes())
         .and_then(|()| {
-            fchmod(&file, Mode::from_bits_retain(mode & 0o7777)).map_err(std::io::Error::from)
+            fchmod(&file, Mode::from_bits_retain(mode & 0o1777)).map_err(std::io::Error::from)
         })
         .and_then(|()| file.sync_all());
     drop(file);
@@ -1475,19 +1482,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_edit_preserves_executable_mode() {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use std::os::unix::fs::PermissionsExt;
 
         const PATH: &str = "script.sh";
         const ORIGINAL_MODE: u32 = 0o674;
 
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
-        std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(ORIGINAL_MODE)
-            .open(workspace.path().join(PATH))
-            .expect("script fixture creates");
         std::fs::write(workspace.path().join(PATH), "old\n").expect("script fixture writes");
+        std::fs::set_permissions(
+            workspace.path().join(PATH),
+            std::fs::Permissions::from_mode(ORIGINAL_MODE),
+        )
+        .expect("script fixture mode sets");
         let executor = local_executor(&workspace);
 
         executor
@@ -1505,6 +1511,48 @@ mod tests {
             & 0o7777;
 
         assert_eq!(mode, ORIGINAL_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_edit_drops_setuid_and_setgid_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const PATH: &str = "privileged.sh";
+        const ORIGINAL_MODE: u32 = 0o6674;
+        const EXPECTED_MODE: u32 = 0o674;
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        std::fs::write(workspace.path().join(PATH), "old\n").expect("script fixture writes");
+        std::fs::set_permissions(
+            workspace.path().join(PATH),
+            std::fs::Permissions::from_mode(ORIGINAL_MODE),
+        )
+        .expect("script fixture mode sets");
+        let executor = local_executor(&workspace);
+        let fixture_mode = std::fs::metadata(workspace.path().join(PATH))
+            .expect("fixture metadata reads")
+            .permissions()
+            .mode()
+            & 0o7777;
+
+        assert_eq!(fixture_mode, ORIGINAL_MODE);
+
+        executor
+            .edit_file(
+                WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid"),
+                "old",
+                "new",
+                false,
+            )
+            .expect("local edit succeeds");
+        let mode = std::fs::metadata(workspace.path().join(PATH))
+            .expect("edited metadata reads")
+            .permissions()
+            .mode()
+            & 0o7777;
+
+        assert_eq!(mode, EXPECTED_MODE);
     }
 
     #[cfg(unix)]
