@@ -8,7 +8,8 @@ use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallCause, FailedModelCallDisposition,
     ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
     MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ReviewDiffSide,
-    ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
+    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolBatchState, ToolDecision,
     TranscriptEntry, TranscriptTextEntry, TurnState,
@@ -510,6 +511,49 @@ impl<'a> Output<'a> {
     pub(crate) fn review_acknowledgement(&mut self, line: &str) -> io::Result<()> {
         self.stdout.write_all(self.render(line).as_bytes())?;
         self.stdout.write_all(b"\n")
+    }
+
+    pub(crate) fn review_orchestration(
+        &mut self,
+        snapshot: &ReviewOrchestrationSnapshot,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "attempt={} target={} state={} concerns={} findings={} judgment_members={} \
+             judgment_effects_applied={} repairs_fixed={} publications_published={}",
+            snapshot.attempt_id,
+            snapshot.target_id,
+            review_orchestration_state_label(snapshot.state),
+            snapshot.concerns.len(),
+            snapshot.counts.finding_count.value(),
+            snapshot.counts.judgment_member_count.value(),
+            snapshot.counts.judgment_effect_applied_count.value(),
+            snapshot.counts.repair_fixed_count.value(),
+            snapshot.counts.publication_published_count.value(),
+        )?;
+        self.review_text_field("concern_set_version", &snapshot.concern_set_version)?;
+        writeln!(
+            self.stdout,
+            "template_import_digest={} template_judgment_digest={} template_repair_digest={} \
+             template_publication_digest={}",
+            snapshot.stage_template_digests.import.as_str(),
+            snapshot.stage_template_digests.judgment.as_str(),
+            snapshot.stage_template_digests.repair.as_str(),
+            snapshot.stage_template_digests.publication.as_str(),
+        )?;
+        for (index, concern) in snapshot.concerns.iter().enumerate() {
+            writeln!(
+                self.stdout,
+                "concern_index={index} status={} pass={} template_digest={}",
+                review_orchestration_concern_status_label(concern.status),
+                concern
+                    .pass_id
+                    .map_or_else(|| String::from("-"), |id| id.to_string()),
+                concern.template_digest.as_str(),
+            )?;
+            self.review_text_field("concern_key", &concern.key)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn review_target(&mut self, target: &ReviewTargetSnapshot) -> io::Result<()> {
@@ -1694,6 +1738,36 @@ const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
         FailedModelCallCause::Overloaded => "overloaded",
         FailedModelCallCause::ProviderInternal => "provider_internal",
         FailedModelCallCause::Unrecognized => "unrecognized",
+    }
+}
+
+const fn review_orchestration_state_label(state: ReviewOrchestrationState) -> &'static str {
+    match state {
+        ReviewOrchestrationState::AwaitingImport => "awaiting_import",
+        ReviewOrchestrationState::ImportIncomplete => "import_incomplete",
+        ReviewOrchestrationState::AwaitingConcerns => "awaiting_concerns",
+        ReviewOrchestrationState::FanoutIncomplete => "fanout_incomplete",
+        ReviewOrchestrationState::AwaitingJudgment => "awaiting_judgment",
+        ReviewOrchestrationState::AwaitingJudgmentEffects => "awaiting_judgment_effects",
+        ReviewOrchestrationState::JudgmentIncomplete => "judgment_incomplete",
+        ReviewOrchestrationState::AwaitingRepair => "awaiting_repair",
+        ReviewOrchestrationState::RepairIncomplete => "repair_incomplete",
+        ReviewOrchestrationState::AwaitingPublication => "awaiting_publication",
+        ReviewOrchestrationState::PublicationIncomplete => "publication_incomplete",
+        ReviewOrchestrationState::Complete => "complete",
+    }
+}
+
+const fn review_orchestration_concern_status_label(
+    status: ReviewOrchestrationConcernStatus,
+) -> &'static str {
+    match status {
+        ReviewOrchestrationConcernStatus::Pending => "pending",
+        ReviewOrchestrationConcernStatus::Succeeded => "succeeded",
+        ReviewOrchestrationConcernStatus::Failed => "failed",
+        ReviewOrchestrationConcernStatus::Blocked => "blocked",
+        ReviewOrchestrationConcernStatus::Cancelled => "cancelled",
+        ReviewOrchestrationConcernStatus::Superseded => "superseded",
     }
 }
 

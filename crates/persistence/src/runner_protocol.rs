@@ -14,23 +14,26 @@ use std::{
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_domain::{
-    CredentialDispatchAuthorization, CredentialProfileGrant,
+    CanonicalCloneUrlDigest, CredentialDispatchAuthorization, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState, CredentialProfileName,
     CredentialProfilePolicy, CredentialToolApproval, EndedToolAttempt, PinnedRunnerPlacement,
-    ProvisionedWorkspace, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
-    RunnerClaimedAttemptReplacement, RunnerCredentialGrantLineage, RunnerDomainError,
-    RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
+    ProvisionedWorkspace, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
+    RunnerCatalog, RunnerClaimedAttemptReplacement, RunnerCredentialGrantLineage,
+    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
     RunnerEnrollmentState, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
     RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
-    RunnerLeaseState, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
-    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    RunnerLeaseState, RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector,
+    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
     ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
     ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
+    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceManifestId,
+    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
+    WorkspaceRevision,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -307,6 +310,11 @@ impl RunnerProtocolStore {
         enrollment: &RunnerEnrollment,
         advertisement: signalbox_domain::RunnerAdvertisement,
     ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
+        if advertisement.repositories().count() > RunnerAdvertisement::MAX_REPOSITORIES {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::TooManyAdvertisedRepositories,
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let enrollment_id = enrollment.enrollment();
         let locked = sqlx::query(RUNNER_ENROLLMENT)
@@ -1326,12 +1334,14 @@ async fn insert_registration(
     let tools: Vec<_> = registration.tools().collect();
     let profiles: Vec<_> = registration.profiles().collect();
     let workspaces: Vec<_> = registration.workspaces().collect();
+    let sandboxes: Vec<_> = registration.sandboxes().collect();
+    let repositories: Vec<_> = registration.repositories().collect();
     sqlx::query(
         "INSERT INTO runner_registration
             (enrollment_id, registration_revision, runner_id,
              authentication_reference_id, class_count, tool_count,
-             profile_count, workspace_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             profile_count, workspace_count, repository_count, sandbox_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(registration.enrollment().into_uuid())
     .bind(Decimal::from(revision.get()))
@@ -1341,6 +1351,8 @@ async fn insert_registration(
     .bind(count_decimal(tools.len())?)
     .bind(count_decimal(profiles.len())?)
     .bind(count_decimal(workspaces.len())?)
+    .bind(count_decimal(repositories.len())?)
+    .bind(count_decimal(sandboxes.len())?)
     .execute(&mut **transaction)
     .await?;
     for class in classes {
@@ -1421,6 +1433,36 @@ async fn insert_registration(
         .execute(&mut **transaction)
         .await?;
     }
+    for sandbox in sandboxes {
+        sqlx::query(
+            "INSERT INTO runner_registration_sandbox
+                (enrollment_id, registration_revision, sandbox_profile)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(registration.enrollment().into_uuid())
+        .bind(Decimal::from(revision.get()))
+        .bind(encode_sandbox(sandbox))
+        .execute(&mut **transaction)
+        .await?;
+    }
+    for repository in repositories {
+        sqlx::query(
+            "INSERT INTO runner_registration_repository
+                (enrollment_id, registration_revision, repository_key,
+                 credential_profile_name)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(registration.enrollment().into_uuid())
+        .bind(Decimal::from(revision.get()))
+        .bind(repository.key().as_str())
+        .bind(
+            repository
+                .credential_profile()
+                .map(CredentialProfileName::as_str),
+        )
+        .execute(&mut **transaction)
+        .await?;
+    }
     Ok(())
 }
 
@@ -1493,10 +1535,32 @@ async fn load_registration_in(
     .bind(Decimal::from(revision.get()))
     .fetch_all(&mut *connection)
     .await?;
+    let sandbox_rows = sqlx::query(
+        "SELECT sandbox_profile
+           FROM runner_registration_sandbox
+          WHERE enrollment_id = $1 AND registration_revision = $2
+          ORDER BY sandbox_profile",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .fetch_all(&mut *connection)
+    .await?;
+    let repository_rows = sqlx::query(
+        "SELECT repository_key, credential_profile_name
+           FROM runner_registration_repository
+          WHERE enrollment_id = $1 AND registration_revision = $2
+          ORDER BY repository_key",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .fetch_all(&mut *connection)
+    .await?;
     require_count(&row, "class_count", class_rows.len())?;
     require_count(&row, "tool_count", tool_rows.len())?;
     require_count(&row, "profile_count", profile_rows.len())?;
     require_count(&row, "workspace_count", workspace_rows.len())?;
+    require_count(&row, "sandbox_count", sandbox_rows.len())?;
+    require_count(&row, "repository_count", repository_rows.len())?;
     let classes = decode_classes(&class_rows)?;
     let tools = tool_rows
         .iter()
@@ -1537,6 +1601,21 @@ async fn load_registration_in(
         .iter()
         .map(|row| decode_workspace(row.decode_column("workspace_kind")?))
         .collect::<Result<BTreeSet<_>, _>>()?;
+    let sandboxes = sandbox_rows
+        .iter()
+        .map(|row| decode_sandbox(row.decode_column("sandbox_profile")?))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let repositories = repository_rows
+        .iter()
+        .map(|row| {
+            Ok(RunnerRepositoryEntry::new(
+                repository_key(row.decode_column("repository_key")?)?,
+                row.decode_column::<Option<String>>("credential_profile_name")?
+                    .map(profile_name)
+                    .transpose()?,
+            ))
+        })
+        .collect::<Result<Vec<_>, RunnerProtocolStoreError>>()?;
     let registration = ValidatedRunnerRegistration::reconstitute(
         authority,
         catalog,
@@ -1552,6 +1631,8 @@ async fn load_registration_in(
             tools,
             profiles,
             workspaces,
+            sandboxes,
+            repositories,
         },
     )
     .map_err(RunnerProtocolStoreError::Domain)?;
@@ -1675,6 +1756,7 @@ async fn insert_placement_record(
     let (directory_kind, requested_directory) = encode_directory(&request.working_directory);
     let (workspace_kind, requested_repository) = encode_workspace_requirement(&request.workspace);
     let state = encode_placement_state(placement.state());
+    let permission_overrides: Vec<_> = request.permission_overrides.iter().collect();
     let (registration_enrollment, registration_revision) = registration_identity;
     sqlx::query(
         "INSERT INTO runner_session_placement_record
@@ -1682,16 +1764,23 @@ async fn insert_placement_record(
              selector_kind, selector_runner_id, selector_capability_class,
              directory_selection_kind, requested_working_directory,
              requested_credential_profile_name, workspace_requirement_kind,
-             requested_repository_key, state_kind, pinned_runner_id,
+             requested_repository_key, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_runner_id,
              pinned_working_directory, pinned_credential_profile_name,
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
-             workspace_working_directory, credential_grant_runner_id,
+             workspace_working_directory, workspace_manifest_id,
+             workspace_placement_revision,
+             workspace_clone_url_digest, workspace_credential_profile_name,
+             workspace_sandbox_profile, workspace_relative_path,
+             workspace_recovery_kind, workspace_branch_name, workspace_revision,
+             credential_grant_runner_id,
              credential_grant_lineage_origin_ordinal, credential_grant_revision)
          VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
              $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-             $22, $23, $24
+             $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
+             $32, $33, $34, $35
          )",
     )
     .bind(placement.session().into_uuid())
@@ -1711,6 +1800,8 @@ async fn insert_placement_record(
     )
     .bind(workspace_kind)
     .bind(requested_repository)
+    .bind(encode_sandbox(request.sandbox))
+    .bind(count_decimal(permission_overrides.len())?)
     .bind(state.kind)
     .bind(state.pinned_runner)
     .bind(state.pinned_directory)
@@ -1720,6 +1811,15 @@ async fn insert_placement_record(
     .bind(count_decimal(state.tools.len())?)
     .bind(state.workspace_repository)
     .bind(state.workspace_directory)
+    .bind(state.workspace_manifest)
+    .bind(state.workspace_placement_revision)
+    .bind(state.workspace_clone_url_digest)
+    .bind(state.workspace_credential_profile)
+    .bind(state.workspace_sandbox)
+    .bind(state.workspace_relative_path)
+    .bind(state.workspace_recovery_kind)
+    .bind(state.workspace_branch_name)
+    .bind(state.workspace_revision)
     .bind(
         state
             .grant_lineage
@@ -1746,6 +1846,19 @@ async fn insert_placement_record(
         .execute(&mut **transaction)
         .await?;
     }
+    for (tool, permission) in permission_overrides {
+        sqlx::query(
+            "INSERT INTO runner_session_placement_permission_override
+                (session_id, event_ordinal, tool_name, permission_kind)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(placement.session().into_uuid())
+        .bind(Decimal::from(event_ordinal))
+        .bind(tool.as_str())
+        .bind(encode_permission_override(permission))
+        .execute(&mut **transaction)
+        .await?;
+    }
     Ok(())
 }
 
@@ -1761,6 +1874,7 @@ async fn insert_grant_if_new(
     let registration = authority.stored;
     let catalog = authority.catalog;
     let historical_registration;
+    let mut tombstone_policy_event = None;
     let tombstone = matches!(
         placement.state(),
         SessionRunnerPlacementState::Pinned(pinned)
@@ -1777,12 +1891,33 @@ async fn insert_grant_if_new(
             .filter(|revision| *revision > 0)
             .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
         let row = sqlx::query(
-            "SELECT registration_enrollment_id, registration_revision
-               FROM runner_credential_grant
-              WHERE session_id = $1
-                AND lineage_origin_event_ordinal = $2
-                AND runner_id = $3
-                AND grant_revision = $4",
+            "WITH RECURSIVE grant_line AS (
+                 SELECT grant_record.*
+                   FROM runner_credential_grant AS grant_record
+                  WHERE grant_record.session_id = $1
+                    AND grant_record.lineage_origin_event_ordinal = $2
+                    AND grant_record.runner_id = $3
+                    AND grant_record.grant_revision = $4
+                 UNION ALL
+                 SELECT predecessor.*
+                   FROM grant_line AS successor
+                   JOIN runner_credential_grant AS predecessor
+                     ON predecessor.session_id = successor.session_id
+                    AND predecessor.lineage_origin_event_ordinal =
+                        successor.lineage_origin_event_ordinal
+                    AND predecessor.runner_id = successor.prior_runner_id
+                    AND predecessor.grant_revision = successor.prior_grant_revision
+             )
+             SELECT grant_line.registration_enrollment_id,
+                    grant_line.registration_revision,
+                    grant_line.placement_event_ordinal
+               FROM grant_line
+               JOIN runner_session_placement_record AS placement
+                 ON placement.session_id = grant_line.session_id
+                AND placement.event_ordinal = grant_line.placement_event_ordinal
+              WHERE placement.pinned_credential_profile_name IS NOT NULL
+              ORDER BY grant_line.grant_revision DESC
+              LIMIT 1",
         )
         .bind(grant.session().into_uuid())
         .bind(grant_origin)
@@ -1791,6 +1926,7 @@ async fn insert_grant_if_new(
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+        tombstone_policy_event = Some(row.decode_column::<Decimal>("placement_event_ordinal")?);
         historical_registration = load_registration_in(
             transaction.as_mut(),
             runner_enrollment_id(row.decode_column("registration_enrollment_id")?),
@@ -1802,10 +1938,35 @@ async fn insert_grant_if_new(
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
         &historical_registration
     };
+    let (grant_sandbox, grant_permission_overrides) = if tombstone {
+        let policy_event =
+            tombstone_policy_event.ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let prior_record = sqlx::query(
+            "SELECT *
+               FROM runner_session_placement_record
+              WHERE session_id = $1 AND event_ordinal = $2",
+        )
+        .bind(placement.session().into_uuid())
+        .bind(policy_event)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        (
+            decode_sandbox(prior_record.decode_column("requested_sandbox_profile")?)?,
+            load_permission_overrides(transaction.as_mut(), &prior_record).await?,
+        )
+    } else {
+        (
+            placement.request().sandbox,
+            placement.request().permission_overrides.clone(),
+        )
+    };
     CredentialProfileGrant::reconstitute(
         grant_input(grant),
         grant.session(),
         grant_registration.registration(),
+        grant_sandbox,
+        &grant_permission_overrides,
     )
     .map_err(RunnerProtocolStoreError::Domain)?;
     let exists: bool = sqlx::query_scalar(
@@ -2022,6 +2183,37 @@ async fn load_placement_registration(
     }
 }
 
+async fn load_permission_overrides(
+    connection: &mut PgConnection,
+    row: &PgRow,
+) -> Result<RunnerToolPermissionOverrides, RunnerProtocolStoreError> {
+    let session = row.decode_column::<Uuid>("session_id")?;
+    let event = row.decode_column::<Decimal>("event_ordinal")?;
+    let override_rows = sqlx::query(
+        "SELECT tool_name, permission_kind
+           FROM runner_session_placement_permission_override
+          WHERE session_id = $1 AND event_ordinal = $2
+          ORDER BY tool_name",
+    )
+    .bind(session)
+    .bind(event)
+    .fetch_all(&mut *connection)
+    .await?;
+    require_count(row, "permission_override_count", override_rows.len())?;
+    RunnerToolPermissionOverrides::try_new(
+        override_rows
+            .iter()
+            .map(|override_row| {
+                Ok((
+                    tool_name(override_row.decode_column("tool_name")?)?,
+                    decode_permission_override(override_row.decode_column("permission_kind")?)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, RunnerProtocolStoreError>>()?,
+    )
+    .map_err(RunnerProtocolStoreError::Domain)
+}
+
 async fn decode_placement(
     connection: &mut PgConnection,
     row: &PgRow,
@@ -2030,6 +2222,8 @@ async fn decode_placement(
 ) -> Result<SessionRunnerPlacement, RunnerProtocolStoreError> {
     let session = session_id(row.decode_column("session_id")?);
     let event = row.decode_column::<Decimal>("event_ordinal")?;
+    let placement_revision = decode_generation(row.decode_column("placement_revision")?)?;
+    let permission_overrides = load_permission_overrides(connection, row).await?;
     let request = SessionRunnerPlacementRequest {
         selector: decode_selector(row)?,
         working_directory: decode_directory(row)?,
@@ -2038,6 +2232,8 @@ async fn decode_placement(
             .map(profile_name)
             .transpose()?,
         workspace: decode_workspace_requirement(row)?,
+        sandbox: decode_sandbox(row.decode_column("requested_sandbox_profile")?)?,
+        permission_overrides: permission_overrides.clone(),
     };
     let state_kind: String = row.decode_column("state_kind")?;
     let state = if state_kind == "unpinned" {
@@ -2076,19 +2272,7 @@ async fn decode_placement(
             .map(working_directory)
             .transpose()?
             .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-        let workspace = match (
-            row.decode_column::<Option<String>>("workspace_repository_key")?,
-            row.decode_column::<Option<String>>("workspace_working_directory")?,
-        ) {
-            (None, None) => None,
-            (Some(repository), Some(workspace_directory)) => Some(ProvisionedWorkspace {
-                session,
-                runner,
-                repository: repository_key(repository)?,
-                working_directory: working_directory(workspace_directory)?,
-            }),
-            _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
-        };
+        let workspace = decode_provisioned_workspace(row, session, runner)?;
         let pinned = PinnedRunnerPlacement {
             runner,
             working_directory: directory,
@@ -2100,6 +2284,8 @@ async fn decode_placement(
             tools,
             runner_required_tools,
             workspace,
+            sandbox: request.sandbox,
+            permission_overrides,
         };
         match state_kind.as_str() {
             "pinned" => SessionRunnerPlacementState::Pinned(pinned),
@@ -2110,7 +2296,7 @@ async fn decode_placement(
     SessionRunnerPlacement::reconstitute(
         SessionRunnerPlacementReconstitutionInput {
             session,
-            revision: decode_generation(row.decode_column("placement_revision")?)?,
+            revision: placement_revision,
             request,
             state,
         },
@@ -2119,6 +2305,78 @@ async fn decode_placement(
         profileless_tombstone,
     )
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+fn decode_provisioned_workspace(
+    row: &PgRow,
+    session: SessionId,
+    runner: RunnerId,
+) -> Result<Option<ProvisionedWorkspace>, RunnerProtocolStoreError> {
+    let repository = row.decode_column::<Option<String>>("workspace_repository_key")?;
+    let directory = row.decode_column::<Option<String>>("workspace_working_directory")?;
+    let manifest = row.decode_column::<Option<Uuid>>("workspace_manifest_id")?;
+    let placement_revision =
+        row.decode_column::<Option<Decimal>>("workspace_placement_revision")?;
+    let clone_url_digest = row.decode_column::<Option<String>>("workspace_clone_url_digest")?;
+    let credential_profile =
+        row.decode_column::<Option<String>>("workspace_credential_profile_name")?;
+    let sandbox = row.decode_column::<Option<String>>("workspace_sandbox_profile")?;
+    let relative_path = row.decode_column::<Option<String>>("workspace_relative_path")?;
+    let recovery_kind = row.decode_column::<Option<String>>("workspace_recovery_kind")?;
+    let branch_name = row.decode_column::<Option<String>>("workspace_branch_name")?;
+    let revision = row.decode_column::<Option<String>>("workspace_revision")?;
+    let any_present = repository.is_some()
+        || directory.is_some()
+        || manifest.is_some()
+        || placement_revision.is_some()
+        || clone_url_digest.is_some()
+        || credential_profile.is_some()
+        || sandbox.is_some()
+        || relative_path.is_some()
+        || recovery_kind.is_some()
+        || branch_name.is_some()
+        || revision.is_some();
+    if !any_present {
+        return Ok(None);
+    }
+    let recovery = match (recovery_kind.as_deref(), branch_name, revision) {
+        (None, None, None) => None,
+        (Some("commit"), None, Some(revision)) => Some(WorkspaceRecovery::Commit {
+            revision: WorkspaceRevision::try_new(revision)
+                .map_err(RunnerProtocolStoreError::Domain)?,
+        }),
+        (Some("branch"), Some(name), Some(revision)) => Some(WorkspaceRecovery::Branch {
+            name: WorkspaceBranchName::try_new(name).map_err(RunnerProtocolStoreError::Domain)?,
+            revision: WorkspaceRevision::try_new(revision)
+                .map_err(RunnerProtocolStoreError::Domain)?,
+        }),
+        _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
+    };
+    Ok(Some(ProvisionedWorkspace {
+        session,
+        placement_revision: decode_generation(
+            placement_revision.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+        )?,
+        runner,
+        repository: repository.map(repository_key).transpose()?,
+        canonical_clone_url_digest: clone_url_digest
+            .map(CanonicalCloneUrlDigest::try_new)
+            .transpose()
+            .map_err(RunnerProtocolStoreError::Domain)?,
+        credential_profile: credential_profile.map(profile_name).transpose()?,
+        sandbox: decode_sandbox(sandbox.ok_or(RunnerProtocolCorruption::IncompleteInventory)?)?,
+        working_directory: working_directory(
+            directory.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+        )?,
+        relative_path: WorkspaceRelativePath::try_new(
+            relative_path.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+        )
+        .map_err(RunnerProtocolStoreError::Domain)?,
+        manifest_id: WorkspaceManifestId::from_uuid(
+            manifest.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+        ),
+        recovery,
+    }))
 }
 
 fn decode_grant_lineage(
@@ -2182,6 +2440,7 @@ async fn load_grant_for_placement(
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
     let profile = row.decode_column::<String>("credential_profile_name")?;
+    let revoked = decode_stored_grant_revocation(row.decode_column::<bool>("revoked")?);
     let pinned_profile =
         placement.decode_column::<Option<String>>("pinned_credential_profile_name")?;
     if pinned_profile
@@ -2190,6 +2449,54 @@ async fn load_grant_for_placement(
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
+    let policy_event: Decimal = sqlx::query_scalar(
+        "WITH RECURSIVE grant_line AS (
+             SELECT grant_record.*
+               FROM runner_credential_grant AS grant_record
+              WHERE grant_record.session_id = $1
+                AND grant_record.lineage_origin_event_ordinal = $2
+                AND grant_record.runner_id = $3
+                AND grant_record.grant_revision = $4
+             UNION ALL
+             SELECT predecessor.*
+               FROM grant_line AS successor
+               JOIN runner_credential_grant AS predecessor
+                 ON predecessor.session_id = successor.session_id
+                AND predecessor.lineage_origin_event_ordinal =
+                    successor.lineage_origin_event_ordinal
+                AND predecessor.runner_id = successor.prior_runner_id
+                AND predecessor.grant_revision = successor.prior_grant_revision
+         )
+         SELECT grant_line.placement_event_ordinal
+           FROM grant_line
+           JOIN runner_session_placement_record AS policy_placement
+             ON policy_placement.session_id = grant_line.session_id
+            AND policy_placement.event_ordinal = grant_line.placement_event_ordinal
+          WHERE policy_placement.pinned_credential_profile_name IS NOT NULL
+          ORDER BY grant_line.grant_revision DESC
+          LIMIT 1",
+    )
+    .bind(session.into_uuid())
+    .bind(origin)
+    .bind(runner)
+    .bind(Decimal::from(revision.get()))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+    let policy_placement = sqlx::query(
+        "SELECT *
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(policy_event)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let grant_sandbox =
+        decode_sandbox(policy_placement.decode_column("requested_sandbox_profile")?)?;
+    let grant_permission_overrides =
+        load_permission_overrides(connection, &policy_placement).await?;
     let grant_registration = load_registration_in(
         connection,
         runner_enrollment_id(row.decode_column("registration_enrollment_id")?),
@@ -2233,13 +2540,15 @@ async fn load_grant_for_placement(
             profile: profile_name(profile)?,
             tools,
             approvals,
-            state: match decode_stored_grant_revocation(row.decode_column::<bool>("revoked")?) {
+            state: match revoked {
                 StoredGrantRevocation::Active => CredentialProfileGrantState::Active,
                 StoredGrantRevocation::Revoked => CredentialProfileGrantState::Revoked,
             },
         },
         session,
         grant_registration.registration(),
+        grant_sandbox,
+        &grant_permission_overrides,
     )
     .map(Some)
     .map_err(RunnerProtocolStoreError::Domain)
@@ -2683,6 +2992,15 @@ struct EncodedPlacementState<'a> {
     runner_required_tools: BTreeSet<&'a ToolName>,
     workspace_repository: Option<&'a str>,
     workspace_directory: Option<&'a str>,
+    workspace_manifest: Option<Uuid>,
+    workspace_placement_revision: Option<Decimal>,
+    workspace_clone_url_digest: Option<&'a str>,
+    workspace_credential_profile: Option<&'a str>,
+    workspace_sandbox: Option<&'static str>,
+    workspace_relative_path: Option<&'a str>,
+    workspace_recovery_kind: Option<&'static str>,
+    workspace_branch_name: Option<&'a str>,
+    workspace_revision: Option<&'a str>,
 }
 
 fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlacementState<'_> {
@@ -2698,11 +3016,25 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
                 runner_required_tools: BTreeSet::new(),
                 workspace_repository: None,
                 workspace_directory: None,
+                workspace_manifest: None,
+                workspace_placement_revision: None,
+                workspace_clone_url_digest: None,
+                workspace_credential_profile: None,
+                workspace_sandbox: None,
+                workspace_relative_path: None,
+                workspace_recovery_kind: None,
+                workspace_branch_name: None,
+                workspace_revision: None,
             };
         }
         SessionRunnerPlacementState::Pinned(pinned) => ("pinned", pinned),
         SessionRunnerPlacementState::RunnerLost(pinned) => ("runner_lost", pinned),
     };
+    let workspace = pinned.workspace.as_ref();
+    let (workspace_recovery_kind, workspace_branch_name, workspace_revision) = workspace
+        .and_then(|workspace| workspace.recovery.as_ref())
+        .map(encode_workspace_recovery)
+        .unwrap_or((None, None, None));
     EncodedPlacementState {
         kind: state_kind,
         pinned_runner: Some(pinned.runner.into_uuid()),
@@ -2714,14 +3046,35 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
         grant_lineage: pinned.grant_lineage,
         tools: pinned.tools.iter().collect(),
         runner_required_tools: pinned.runner_required_tools.iter().collect(),
-        workspace_repository: pinned
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.repository.as_str()),
-        workspace_directory: pinned
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.working_directory.as_str()),
+        workspace_repository: workspace
+            .and_then(|workspace| workspace.repository.as_ref())
+            .map(WorkspaceRepositoryKey::as_str),
+        workspace_directory: workspace.map(|workspace| workspace.working_directory.as_str()),
+        workspace_manifest: workspace.map(|workspace| workspace.manifest_id.into_uuid()),
+        workspace_placement_revision: workspace
+            .map(|workspace| Decimal::from(workspace.placement_revision.get())),
+        workspace_clone_url_digest: workspace
+            .and_then(|workspace| workspace.canonical_clone_url_digest.as_ref())
+            .map(CanonicalCloneUrlDigest::as_str),
+        workspace_credential_profile: workspace
+            .and_then(|workspace| workspace.credential_profile.as_ref())
+            .map(CredentialProfileName::as_str),
+        workspace_sandbox: workspace.map(|workspace| encode_sandbox(workspace.sandbox)),
+        workspace_relative_path: workspace.map(|workspace| workspace.relative_path.as_str()),
+        workspace_recovery_kind,
+        workspace_branch_name,
+        workspace_revision,
+    }
+}
+
+fn encode_workspace_recovery(
+    recovery: &WorkspaceRecovery,
+) -> (Option<&'static str>, Option<&str>, Option<&str>) {
+    match recovery {
+        WorkspaceRecovery::Commit { revision } => (Some("commit"), None, Some(revision.as_str())),
+        WorkspaceRecovery::Branch { name, revision } => {
+            (Some("branch"), Some(name.as_str()), Some(revision.as_str()))
+        }
     }
 }
 
@@ -2857,6 +3210,23 @@ fn decode_tool_declaration(row: &PgRow) -> Result<RunnerToolDeclaration, RunnerP
     ))
 }
 
+const fn encode_permission_override(permission: RunnerToolPermissionOverride) -> &'static str {
+    match permission {
+        RunnerToolPermissionOverride::Auto => "auto",
+        RunnerToolPermissionOverride::Confirm => "confirm",
+    }
+}
+
+fn decode_permission_override(
+    value: String,
+) -> Result<RunnerToolPermissionOverride, RunnerProtocolStoreError> {
+    match value.as_str() {
+        "auto" => Ok(RunnerToolPermissionOverride::Auto),
+        "confirm" => Ok(RunnerToolPermissionOverride::Confirm),
+        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    }
+}
+
 const fn encode_permission(permission: ToolPermissionDefault) -> &'static str {
     match permission {
         ToolPermissionDefault::Auto => "auto",
@@ -2900,6 +3270,21 @@ fn decode_approval(value: String) -> Result<CredentialToolApproval, RunnerProtoc
     match value.as_str() {
         "automatic" => Ok(CredentialToolApproval::Automatic),
         "session_policy" => Ok(CredentialToolApproval::SessionPolicy),
+        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    }
+}
+
+const fn encode_sandbox(sandbox: RunnerSandboxProfile) -> &'static str {
+    match sandbox {
+        RunnerSandboxProfile::Ambient => "ambient",
+        RunnerSandboxProfile::WorkspaceRestricted => "workspace_restricted",
+    }
+}
+
+fn decode_sandbox(value: String) -> Result<RunnerSandboxProfile, RunnerProtocolStoreError> {
+    match value.as_str() {
+        "ambient" => Ok(RunnerSandboxProfile::Ambient),
+        "workspace_restricted" => Ok(RunnerSandboxProfile::WorkspaceRestricted),
         _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     }
 }

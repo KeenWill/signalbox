@@ -3,22 +3,62 @@ name: Swift
 on:
   pull_request:
     paths:
+      - "apps/signalboxd/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
       - "clients/native/**"
       - ".github/workflows/swift.yml"
+      - "rust-toolchain.toml"
   push:
     branches: [main]
     paths:
+      - "apps/signalboxd/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
       - "clients/native/**"
       - ".github/workflows/swift.yml"
+      - "rust-toolchain.toml"
 
 permissions:
   contents: read
 
 jobs:
+  swift-change-scope:
+    name: Swift native change scope
+    runs-on: ubuntu-latest
+    outputs:
+      native: ${{ steps.paths.outputs.native }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed paths
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          native=false
+          while IFS= read -r path; do
+            case "$path" in
+              clients/native/* | .github/workflows/swift.yml)
+                native=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "native=$native" >> "$GITHUB_OUTPUT"
+
   # Not `validate`: rust.yml already publishes a job by that name, and a status
   # check is identified by its job name alone, so two `validate` jobs would be
   # one ambiguous check that branch protection cannot require independently.
   swift-validate:
+    needs: swift-change-scope
+    if: needs.swift-change-scope.outputs.native == 'true'
     # macos-latest is the macOS 26 arm64 image. The project was created with
     # Xcode 26.4.1 and targets iOS 26.4, so it needs an Xcode 26.4+ toolchain
     # with a matching simulator runtime; the image ships Xcode 26.6 with the
@@ -42,16 +82,9 @@ jobs:
       # UI and screenshot-capture suites need an interactive simulator
       # session (and the Tart VM shards for the full device matrix), so they
       # stay a manual/local flow via clients/native/scripts for now; the
-      # remaining suite is the unit-test bundle, which still runs against a
-      # booted simulator the script resolves itself.
-      #
-      # That bundle is SignalboxNativeTests, the only unit-test target the
-      # imported xcodeproj wires. The snapshot's Tests/SignalboxAppTests,
-      # Tests/SignalboxClientTests, and Tests/SignalboxModelsTests are
-      # unreachable until the rewire restores their targets (see the known
-      # issues in clients/native/README.md), so a green run here is not full
-      # client unit coverage — the step name says which bundle ran.
-      - name: Run unit tests (SignalboxNativeTests bundle)
+      # four unit-test bundles still run against a booted simulator the script
+      # resolves itself.
+      - name: Run native unit-test bundles
         run: clients/native/scripts/test-xcode.sh
         env:
           SIGNALBOX_NATIVE_SKIP_TESTING: SignalboxNativeUITests
@@ -64,3 +97,31 @@ jobs:
       # recapturing goldens is a manual flow.
       - name: Check screenshot goldens
         run: clients/native/scripts/check-screenshot-goldens.sh
+
+  # Builds Rust separately from the simulator suite so Swift-only feedback does
+  # not wait behind the daemon build. The name is unique across workflows for
+  # the same branch-protection reason documented on swift-validate above.
+  swift-real-daemon:
+    name: Swift real-daemon integration
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Xcode 26.6
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcodebuild -version
+      - name: Install PostgreSQL 18
+        run: |
+          brew install postgresql@18
+          echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: swift-real-daemon
+      - name: Run native client against signalboxd
+        run: clients/native/scripts/test-real-server-xcode.sh

@@ -532,6 +532,7 @@ impl SubmitInputRepository {
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
                 | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession,
             ) => Err(Self::wrong_kind(command_id)),
         }
@@ -618,6 +619,7 @@ where
             | CommandKind::ReplaceSessionMetadata
             | CommandKind::DecideToolRequest
             | CommandKind::ReviewWorkflow
+            | CommandKind::ReviewOrchestration
             | CommandKind::CompactSession,
         ) => {
             return Ok(TransactionDecision::Rollback(
@@ -654,6 +656,7 @@ where
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
                 | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },

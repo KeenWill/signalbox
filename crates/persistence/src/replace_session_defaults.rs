@@ -255,6 +255,7 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
                 | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession,
             ) => {
                 transaction.rollback().await?;
@@ -294,6 +295,7 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::SubmitInput
                     | CommandKind::DecideToolRequest
                     | CommandKind::ReviewWorkflow
+                    | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
@@ -391,6 +393,7 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
                 | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }

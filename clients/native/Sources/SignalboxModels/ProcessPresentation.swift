@@ -149,6 +149,67 @@ public struct SignalboxProcessConversation: Identifiable, Equatable, Sendable {
   }
 }
 
+extension SignalboxImportedConversationEntry: Identifiable {
+  public var id: String {
+    importedEntryID.rawValue
+  }
+
+  public var sourceSpeakerLabel: String {
+    switch sourceSpeaker {
+    case .notAttested:
+      return "Speaker not attested"
+    case .attestedAbsent:
+      return "Speaker absent"
+    case .attested(speaker: .user):
+      return "User"
+    case .attested(speaker: .assistant):
+      return "Assistant"
+    case .unknown:
+      return "Unknown speaker"
+    }
+  }
+
+  public var contentKindLabel: String {
+    switch contentKind {
+    case .sourceEvent:
+      return "Source event"
+    case .sourceMessageBlock:
+      return "Message block"
+    case .text:
+      return "Text"
+    case .toolCall:
+      return "Tool call"
+    case .toolResult:
+      return "Tool result"
+    case .thinking:
+      return "Thinking"
+    case .redactedThinking:
+      return "Redacted thinking"
+    case .document:
+      return "Document"
+    case .messageContentAbsent:
+      return "Message content absent"
+    }
+  }
+}
+
+public struct SignalboxImportedConversationTranscript: Equatable, Sendable {
+  public let importedConversationID: SignalboxCanonicalUUID
+  public let entries: [SignalboxImportedConversationEntry]
+
+  public init(
+    importedConversationID: SignalboxCanonicalUUID,
+    entries: [SignalboxImportedConversationEntry]
+  ) {
+    self.importedConversationID = importedConversationID
+    self.entries = entries
+  }
+
+  public var entryCount: SignalboxCanonicalUInt64 {
+    SignalboxCanonicalUInt64(rawValue: UInt64(entries.count))
+  }
+}
+
 public struct SignalboxProcessStreamedText: Identifiable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let turnID: SignalboxCanonicalUUID
