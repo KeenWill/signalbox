@@ -35,10 +35,10 @@ through PR #291 (`agent/turn-control-verbs`). INV-tagged tests are the
 enforcement of record; tags below resolve through the generated
 [invariant test index](../invariants.md). Designed lifecycle behavior that has
 no committed code path appears only under [Open edges](#open-edges). The
-registration-only runner-socket startup and supervision are verified against ref
-`agent/runner-daemon`. Runner-loss recovery and recovery-only startup remain
-committed unimplemented functionality as labeled below. Sibling pages named in
-scope deferrals below (identity-and-commands, sessions-and-transcript,
+registration-only runner-socket startup and supervision are verified through PR
+#376 (`agent/runner-daemon`). Runner-loss recovery and recovery-only startup
+remain committed unimplemented functionality as labeled below. Sibling pages
+named in scope deferrals below (identity-and-commands, sessions-and-transcript,
 persistence-protocol, model-call-execution, configuration-and-credentials,
 runtime-substrate) are companion pages of this spec set; each deferral names the
 owning page rather than restating its material.

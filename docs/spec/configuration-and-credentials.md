@@ -27,8 +27,8 @@ verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`).
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. The runner configuration parser, filesystem admission, exact availability
-advertisement, and checked-in example are verified against ref
-`agent/runner-daemon`. Runner credential use during provisioning or execution
+advertisement, and checked-in example are verified through PR #376
+(`agent/runner-daemon`). Runner credential use during provisioning or execution
 remains committed unimplemented functionality as labeled below.
 
 ## Process configuration

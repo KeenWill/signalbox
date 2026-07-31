@@ -18,14 +18,14 @@ session transcript and frontier mechanics remain owned by
 remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant test index](../invariants.md).
 
-The registration-only executable slice is verified against ref
-`agent/runner-daemon`. It adds the dedicated local listener, durable idempotent
-enrollment receipts, exact resume and replacement-advertisement registration,
-the `signalbox-runner` binary, explicit credential/repository availability, and
-heartbeat liveness exchange with durable connection epochs, shutdown, suspect,
-and loss facts. Recovery inventory, workspaces, leases, execution, and model
-calls remain unimplemented as labeled below. Remote transport and dynamic policy
-stay under [Open edges](#open-edges).
+The registration-only executable slice is verified through PR #376
+(`agent/runner-daemon`). It adds the dedicated local listener, durable
+idempotent enrollment receipts, exact resume and replacement-advertisement
+registration, the `signalbox-runner` binary, explicit credential/repository
+availability, and heartbeat liveness exchange with durable connection epochs,
+shutdown, suspect, and loss facts. Recovery inventory, workspaces, leases,
+execution, and model calls remain unimplemented as labeled below. Remote
+transport and dynamic policy stay under [Open edges](#open-edges).
 
 ## Version-one executable boundary
 
