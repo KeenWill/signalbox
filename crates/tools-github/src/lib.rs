@@ -997,7 +997,7 @@ where
             .await
         {
             Ok(result) if kind.accepts(&result) => result,
-            Ok(_) => return Err(caller_bug()),
+            Ok(_) => return Err(result_kind_mismatch(kind)),
             Err(failure) => return self.failure_evidence(invocation, kind, failure),
         };
         scrubber.redact_value(&mut result.value);
@@ -1021,13 +1021,24 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
         kind: ToolKind,
         failure: GitHubTransportFailure,
     ) -> Result<CorrelatedToolExecutorEvidence, GitHubExecutorError> {
+        let detail = self.failure_detail(kind, &failure)?;
+        Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        }))
+    }
+
+    fn failure_detail(
+        &self,
+        kind: ToolKind,
+        failure: &GitHubTransportFailure,
+    ) -> Result<ToolExecutionErrorDetail, GitHubExecutorError> {
         let detail = match failure {
             GitHubTransportFailure::InvalidCredential => self.credential_detail.clone(),
-            GitHubTransportFailure::Rejected { status, detail } if status_is_definitive(status) => {
-                self.response_detail(status, detail.as_ref())
+            GitHubTransportFailure::Rejected { status, .. } if status_is_definitive(*status) => {
+                self.rejected_detail.clone()
             }
-            GitHubTransportFailure::InvalidResponse { detail } if !kind.mutates() => {
-                self.invalid_response_detail(detail.as_ref())
+            GitHubTransportFailure::InvalidResponse { .. } if !kind.mutates() => {
+                self.rejected_detail.clone()
             }
             GitHubTransportFailure::ResponseTooLarge if !kind.mutates() => {
                 self.rejected_detail.clone()
@@ -1041,44 +1052,21 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
                 return Err(infrastructure(kind.commit_outcome()));
             }
         };
-        Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
-            detail: Some(detail),
-        }))
-    }
-
-    fn response_detail(
-        &self,
-        status: u16,
-        body: Option<&SanitizedGitHubError>,
-    ) -> ToolExecutionErrorDetail {
-        body.and_then(|body| {
-            ToolExecutionErrorDetail::try_new(format!(
-                "GitHub returned HTTP {status}: {}",
-                body.as_str()
-            ))
-            .ok()
-        })
-        .unwrap_or_else(|| self.rejected_detail.clone())
-    }
-
-    fn invalid_response_detail(
-        &self,
-        body: Option<&SanitizedGitHubError>,
-    ) -> ToolExecutionErrorDetail {
-        body.and_then(|body| {
-            ToolExecutionErrorDetail::try_new(format!(
-                "GitHub returned an invalid response: {}",
-                body.as_str()
-            ))
-            .ok()
-        })
-        .unwrap_or_else(|| self.rejected_detail.clone())
+        Ok(detail)
     }
 }
 
 fn caller_bug() -> GitHubExecutorError {
     GitHubExecutorError {
         class: OperatorFailureClass::CallerOrHubBug,
+    }
+}
+
+fn result_kind_mismatch(kind: ToolKind) -> GitHubExecutorError {
+    if kind.mutates() {
+        infrastructure(kind.commit_outcome())
+    } else {
+        caller_bug()
     }
 }
 
@@ -1355,6 +1343,7 @@ impl GitHubApiTransport {
         let initial = normalize_diff_snapshot(&initial_value, arguments.number())?;
         let mut files = Vec::new();
         let mut pagination_extent = FilePaginationExtent::Complete;
+        let mut patch_extent = FilePatchExtent::Complete;
         for page in 1..=MAX_FILE_PAGES {
             let page_text = page.to_string();
             let number = arguments.number().get().to_string();
@@ -1377,7 +1366,9 @@ impl GitHubApiTransport {
             let value = self
                 .success_json(response, StatusCode::OK, credential)
                 .await?;
-            files.extend(normalize_files(&value)?);
+            let normalized = normalize_files(&value)?;
+            files.extend(normalized.files);
+            patch_extent.absorb(normalized.patch_extent);
             if !has_next {
                 break;
             }
@@ -1385,7 +1376,8 @@ impl GitHubApiTransport {
                 pagination_extent = FilePaginationExtent::Truncated;
             }
         }
-        let truncated = files_incomplete(files.len(), initial.changed_files, pagination_extent);
+        let truncated = files_incomplete(files.len(), initial.changed_files, pagination_extent)
+            || matches!(patch_extent, FilePatchExtent::Truncated);
         let current_value = self
             .pull_request_value(&arguments, credential, policy, remaining_timeout(deadline)?)
             .await?;
@@ -1696,6 +1688,36 @@ enum FilePaginationExtent {
     Truncated,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FilePatchExtent {
+    Complete,
+    Truncated,
+}
+
+impl FilePatchExtent {
+    fn absorb(&mut self, other: Self) {
+        if matches!(other, Self::Truncated) {
+            *self = Self::Truncated;
+        }
+    }
+}
+
+struct NormalizedFiles {
+    files: Vec<serde_json::Value>,
+    patch_extent: FilePatchExtent,
+}
+
+fn normalize_patch(
+    patch: Option<String>,
+) -> Result<(Option<String>, FilePatchExtent), GitHubTransportFailure> {
+    match patch {
+        None => Ok((None, FilePatchExtent::Truncated)),
+        Some(patch) if patch.contains('\0') => Err(invalid_response(None)),
+        Some(patch) if patch.len() > MAX_TEXT_BYTES => Ok((None, FilePatchExtent::Truncated)),
+        Some(patch) => Ok((Some(patch), FilePatchExtent::Complete)),
+    }
+}
+
 fn files_incomplete(received: usize, expected: usize, extent: FilePaginationExtent) -> bool {
     matches!(extent, FilePaginationExtent::Truncated) || received < expected
 }
@@ -1758,30 +1780,30 @@ fn normalize_metadata(
     }))
 }
 
-fn normalize_files(
-    value: &serde_json::Value,
-) -> Result<Vec<serde_json::Value>, GitHubTransportFailure> {
-    required_array(value)?
-        .iter()
-        .map(|value| {
-            let object = required_object(value)?;
-            let previous = optional_string(object, "previous_filename")?
-                .map(checked_path)
-                .transpose()?;
-            let patch = optional_string(object, "patch")?
-                .map(|patch| checked_text(patch, TextPresence::Optional))
-                .transpose()?;
-            Ok(serde_json::json!({
-                "path": checked_path(required_string(object, "filename")?)?,
-                "previous_path": previous,
-                "status": checked_text(required_string(object, "status")?, TextPresence::Required)?,
-                "additions": required_u64(object, "additions")?,
-                "deletions": required_u64(object, "deletions")?,
-                "changes": required_u64(object, "changes")?,
-                "patch": patch,
-            }))
-        })
-        .collect()
+fn normalize_files(value: &serde_json::Value) -> Result<NormalizedFiles, GitHubTransportFailure> {
+    let mut files = Vec::new();
+    let mut patch_extent = FilePatchExtent::Complete;
+    for value in required_array(value)? {
+        let object = required_object(value)?;
+        let previous = optional_string(object, "previous_filename")?
+            .map(checked_path)
+            .transpose()?;
+        let (patch, current_extent) = normalize_patch(optional_string(object, "patch")?)?;
+        patch_extent.absorb(current_extent);
+        files.push(serde_json::json!({
+            "path": checked_path(required_string(object, "filename")?)?,
+            "previous_path": previous,
+            "status": checked_text(required_string(object, "status")?, TextPresence::Required)?,
+            "additions": required_u64(object, "additions")?,
+            "deletions": required_u64(object, "deletions")?,
+            "changes": required_u64(object, "changes")?,
+            "patch": patch,
+        }));
+    }
+    Ok(NormalizedFiles {
+        files,
+        patch_extent,
+    })
 }
 
 fn normalize_threads(
@@ -2046,6 +2068,8 @@ mod tests {
     const SYNTHETIC_TOKEN: &str = "github_pat_synthetic_fixture_secret";
     const SYNTHETIC_UNICODE_TOKEN: &str = "github_pat_synthétic_fixture_secret";
     const SYNTHETIC_UNICODE_PREFIX: &str = "github_pat_synth";
+    const PROVIDER_ERROR_TEXT: &str = "private provider detail";
+    const PATCH_FILLER: &str = "x";
 
     struct SyntheticCredentials;
     struct SyntheticTransport;
@@ -2259,9 +2283,45 @@ mod tests {
     fn recorded_files_preserve_patch_text() {
         let parsed = normalize_files(&files_response()).expect("recorded response is valid");
 
-        assert_eq!(parsed.len(), CHANGED_FILES);
-        assert_eq!(parsed[0]["path"], FILE_PATH);
-        assert_eq!(parsed[0]["patch"], FILE_PATCH);
+        assert_eq!(parsed.files.len(), CHANGED_FILES);
+        assert_eq!(parsed.files[0]["path"], FILE_PATH);
+        assert_eq!(parsed.files[0]["patch"], FILE_PATCH);
+        assert_eq!(parsed.patch_extent, FilePatchExtent::Complete);
+    }
+
+    #[test]
+    fn oversized_file_patch_is_omitted_and_marks_content_truncated() {
+        let mut response = files_response();
+        response[0]["patch"] = serde_json::Value::String(PATCH_FILLER.repeat(MAX_TEXT_BYTES + 1));
+
+        let parsed = normalize_files(&response).expect("bounded response is retained");
+
+        assert_eq!(parsed.files.len(), CHANGED_FILES);
+        assert_eq!(parsed.files[0]["path"], FILE_PATH);
+        assert_eq!(parsed.files[0]["patch"], serde_json::Value::Null);
+        assert_eq!(parsed.patch_extent, FilePatchExtent::Truncated);
+    }
+
+    #[test]
+    fn malformed_file_patch_is_rejected() {
+        let mut response = files_response();
+        response[0]["patch"] = serde_json::Value::String(String::from('\0'));
+
+        assert!(normalize_files(&response).is_err());
+    }
+
+    #[test]
+    fn result_kind_mismatch_preserves_mutation_ambiguity() {
+        assert_eq!(
+            result_kind_mismatch(ToolKind::PublishReview).operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        );
+        assert_eq!(
+            result_kind_mismatch(ToolKind::Metadata).operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
     }
 
     #[test]
@@ -2296,6 +2356,35 @@ mod tests {
             GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS)
         );
         assert_eq!(server_failure, GitHubTransportFailure::DispatchUnknown);
+    }
+
+    #[test]
+    fn provider_response_text_never_enters_durable_error_detail() {
+        let executor = GitHubTools::try_new(
+            SyntheticCredentials,
+            SyntheticTransport,
+            GitHubEgressPolicy::github_api_only(),
+        )
+        .expect("static declarations compile")
+        .into_parts()
+        .1;
+        let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
+        let rejection = GitHubTransportFailure::Rejected {
+            status: CLIENT_ERROR_STATUS,
+            detail: Some(SanitizedGitHubError(PROVIDER_ERROR_TEXT.to_owned())),
+        };
+        let malformed = GitHubTransportFailure::InvalidResponse {
+            detail: Some(SanitizedGitHubError(PROVIDER_ERROR_TEXT.to_owned())),
+        };
+
+        assert_eq!(
+            executor.failure_detail(ToolKind::PublishReview, &rejection),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            executor.failure_detail(ToolKind::Metadata, &malformed),
+            Ok(expected)
+        );
     }
 
     #[test]
