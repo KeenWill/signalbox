@@ -8,7 +8,7 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use signalbox_application::{
@@ -16,18 +16,19 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AssistantResponsePart,
-    CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DecideToolRequest,
-    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval,
-    ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
-    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
-    ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolCallProposal,
-    ToolEffectClass, ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
-    TurnAttemptId, TurnId, UserContent,
+    CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, CurrentToolAttempt,
+    CurrentToolAttemptState, DecideToolRequest, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    PerInputConfigurationChoices, ProviderModelIdentity, ReconstitutedToolAttempt,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputResult, ToolApprovalDecision,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolCallProposal, ToolEffectClass,
+    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     create_session::{CreateSessionHandlingOutcome, CreateSessionRepository},
@@ -48,10 +49,12 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-benchmark-only";
 const ADMIN_DATABASE: &str = "signalbox_benchmark";
-const DEFAULT_DURATION_SECONDS: u64 = 10;
+const DEFAULT_DURATION_SECONDS: u64 = 60;
 const DEFAULT_POOL_SIZE: u32 = 80;
 const DEFAULT_CONCURRENCIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 const SERVER_CONNECTION_HEADROOM: u32 = 4;
+const MAX_POOL_SIZE: u32 = u32::MAX - SERVER_CONNECTION_HEADROOM;
+const MAX_CONCURRENCY: u32 = MAX_POOL_SIZE - 1;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const WARMUP_DURATION: Duration = Duration::from_secs(5);
 const IDENTITY_PREFIX: u128 = 0x5b00_0000_u128 << 96;
@@ -273,11 +276,11 @@ fn print_help() {
          --bench postgres_load -- [OPTIONS]\n\n\
          Options:\n\
            --duration-seconds N   Positive offered-load seconds per point, within the \
-         platform timer range (default: 10)\n\
-           --pool-size N          Pre-opened pool size, above the highest concurrency \
-         (default: 80)\n\
-           --concurrency LIST     Comma-separated positive sweep (default: \
-         1,2,4,8,16,32,64)\n\
+         platform timer range (default: 60)\n\
+           --pool-size N          Pre-opened pool size, above the highest concurrency and \
+         at most {MAX_POOL_SIZE} (default: 80)\n\
+           --concurrency LIST     Comma-separated positive sweep; each value at most \
+         {MAX_CONCURRENCY} and below pool size (default: 1,2,4,8,16,32,64)\n\
            --fsync MODE           both, on, or off (default: both)\n\
            --scenario NAME        all, session-creation, full-path, or scheduler-lock \
          (default: all)\n\
@@ -480,7 +483,6 @@ struct PointConfig {
     pool_size: u32,
     server_max_connections: u32,
     concurrency: usize,
-    warmup_duration: Duration,
     duration: Duration,
     available_parallelism: usize,
 }
@@ -558,7 +560,7 @@ async fn run_point(
 
     start_barrier.wait().await;
     tokio::select! {
-        () = tokio::time::sleep(config.warmup_duration) => {}
+        () = tokio::time::sleep(WARMUP_DURATION) => {}
         worker = workers.join_next() => {
             let worker_error = match worker {
                 Some(Ok(Err(worker_error))) => worker_error,
@@ -599,7 +601,7 @@ async fn run_point(
         scenario: config.scenario,
         fsync: config.fsync,
         concurrency: config.concurrency,
-        warmup_duration: config.warmup_duration,
+        warmup_duration: WARMUP_DURATION,
         offered_duration: config.duration,
         elapsed,
         completed_during_offered_load,
@@ -608,36 +610,6 @@ async fn run_point(
         available_parallelism: config.available_parallelism,
         latencies,
     })
-}
-
-fn randomized_warmup_duration(offered_duration: Duration) -> HarnessResult<Duration> {
-    let since_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|clock_error| {
-            error(format!(
-                "system clock is before the Unix epoch: {clock_error}"
-            ))
-        })?;
-    let offered_nanos = offered_duration.as_nanos();
-    if offered_nanos == 0 {
-        return Err(error("offered duration must be positive"));
-    }
-    let jitter_nanos = since_epoch.as_nanos() % offered_nanos;
-    let jitter_seconds =
-        u64::try_from(jitter_nanos / 1_000_000_000).map_err(|conversion_error| {
-            error(format!(
-                "warmup jitter seconds are unrepresentable: {conversion_error}"
-            ))
-        })?;
-    let jitter_subseconds =
-        u32::try_from(jitter_nanos % 1_000_000_000).map_err(|conversion_error| {
-            error(format!(
-                "warmup jitter nanoseconds are unrepresentable: {conversion_error}"
-            ))
-        })?;
-    WARMUP_DURATION
-        .checked_add(Duration::new(jitter_seconds, jitter_subseconds))
-        .ok_or_else(|| error("randomized warmup duration exceeds the platform timer range"))
 }
 
 async fn perform_operation_with_timeout(
@@ -985,9 +957,25 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
             ToolEffectClass::EffectFree,
         )
         .await?;
-    if prepared_attempt.is_none() {
+    let Some(prepared_attempt) = prepared_attempt else {
         return Err(error("approved tool request did not prepare an attempt"));
-    }
+    };
+    let first_reload = load_exact_prepared_tool_attempt(
+        &tool_repository,
+        flow.session,
+        flow.turn,
+        request,
+        &prepared_attempt,
+    )
+    .await?;
+    let _second_reload = load_exact_prepared_tool_attempt(
+        &tool_repository,
+        flow.session,
+        flow.turn,
+        request,
+        &first_reload,
+    )
+    .await?;
     let authorized_attempt = tool_repository
         .authorize_attempt(flow.session, flow.turn, attempt)
         .await?;
@@ -1013,6 +1001,38 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         }
     }
     Ok(())
+}
+
+async fn load_exact_prepared_tool_attempt(
+    repository: &PostgresToolLoopRepository,
+    session: SessionId,
+    turn: TurnId,
+    request: ToolRequestId,
+    expected: &CurrentToolAttempt,
+) -> HarnessResult<CurrentToolAttempt> {
+    let batch = repository
+        .load_active_batch(session, turn)
+        .await?
+        .ok_or_else(|| error("prepared tool attempt reload found no active batch"))?;
+    if !batch
+        .requests()
+        .iter()
+        .any(|candidate| candidate.id() == request)
+    {
+        return Err(error("prepared tool attempt reload omitted its request"));
+    }
+    match batch.attempt(request) {
+        Some(ReconstitutedToolAttempt::Current(current))
+            if current == expected && current.state() == CurrentToolAttemptState::Prepared =>
+        {
+            Ok(current.clone())
+        }
+        Some(ReconstitutedToolAttempt::Current(_))
+        | Some(ReconstitutedToolAttempt::Ended(_))
+        | None => Err(error(
+            "prepared tool attempt reload did not preserve the exact prepared state",
+        )),
+    }
 }
 
 fn format_optional(value: Option<f64>) -> String {
@@ -1070,7 +1090,6 @@ async fn main() -> HarnessResult<()> {
     for fsync in config.fsync_modes.iter().copied() {
         for scenario in config.scenarios.iter().copied() {
             for concurrency in config.concurrencies.iter().copied() {
-                let warmup_duration = randomized_warmup_duration(config.duration)?;
                 database_sequence = database_sequence
                     .checked_add(1)
                     .ok_or_else(|| error("benchmark database sequence exhausted"))?;
@@ -1082,11 +1101,11 @@ async fn main() -> HarnessResult<()> {
                 let environment =
                     PostgresEnvironment::start(fsync, config.server_max_connections).await?;
                 eprintln!(
-                    "running scenario={} fsync={} concurrency={} warmup={:.3}s duration={}s pool={}",
+                    "running scenario={} fsync={} concurrency={} warmup={}s duration={}s pool={}",
                     scenario.label(),
                     fsync.label(),
                     concurrency,
-                    warmup_duration.as_secs_f64(),
+                    WARMUP_DURATION.as_secs(),
                     config.duration.as_secs(),
                     config.pool_size
                 );
@@ -1100,7 +1119,6 @@ async fn main() -> HarnessResult<()> {
                         pool_size: config.pool_size,
                         server_max_connections: config.server_max_connections,
                         concurrency,
-                        warmup_duration,
                         duration: config.duration,
                         available_parallelism,
                     },
