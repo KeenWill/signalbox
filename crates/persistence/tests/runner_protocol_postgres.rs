@@ -66,7 +66,7 @@ const RETRY_ATTEMPT: u128 = 0x9601;
 const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
-const PRE_RUNNER_WIRE_MIGRATION: i64 = 202607310102;
+const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 
