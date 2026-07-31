@@ -621,9 +621,28 @@ impl WebSearchTransport for ReqwestWebSearchTransport {
         if status != StatusCode::OK {
             let error = WebSearchProviderError::new(status.as_u16(), body)
                 .ok_or(WebSearchTransportFailure::ResponseTooLarge)?;
-            return Err(WebSearchTransportFailure::ProviderRejected(error));
+            return Err(credential_safe_provider_rejection(error, credential));
         }
         decode_provider_response(provider, &body)
+    }
+}
+
+fn credential_safe_provider_rejection(
+    error: WebSearchProviderError,
+    credential: &CredentialValue,
+) -> WebSearchTransportFailure {
+    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    let source_contains_credential = format!("{error:?}").contains(credential_text)
+        || error.to_string().contains(credential_text);
+    let failure = WebSearchTransportFailure::ProviderRejected(error);
+    if credential_text.is_empty()
+        || format!("{failure:?}").contains(credential_text)
+        || failure.to_string().contains(credential_text)
+        || source_contains_credential
+    {
+        WebSearchTransportFailure::InvalidCredential
+    } else {
+        failure
     }
 }
 
@@ -1656,6 +1675,28 @@ mod tests {
         assert!(!format!("{failure:?}").contains(&status_collision_key));
         assert!(!failure.to_string().contains(&status_collision_key));
         assert!(failure.source().is_some());
+    }
+
+    /// INV-035: a credential colliding with fixed provider-rejection prose is
+    /// rejected before that public diagnostic can leave the transport.
+    #[test]
+    fn web_search_transport_rejects_credential_colliding_provider_prose() {
+        const PROVIDER_PROSE_COLLISION_KEY: &str = "provider";
+        let credential = CredentialValue::new(PROVIDER_PROSE_COLLISION_KEY.as_bytes().to_vec());
+        let provider_error = WebSearchProviderError::new(
+            PROVIDER_REJECTION_STATUS,
+            br#"{"message":"synthetic rejection"}"#.to_vec(),
+        )
+        .expect("fixture provider error is admitted");
+        let failure = credential_safe_provider_rejection(provider_error, &credential);
+
+        assert!(!format!("{failure:?}").contains(PROVIDER_PROSE_COLLISION_KEY));
+        assert!(!failure.to_string().contains(PROVIDER_PROSE_COLLISION_KEY));
+        assert!(failure.source().is_none());
+        assert!(matches!(
+            failure,
+            WebSearchTransportFailure::InvalidCredential
+        ));
     }
 
     /// INV-035: provider response and error diagnostics never render
