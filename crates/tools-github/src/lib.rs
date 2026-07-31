@@ -1966,11 +1966,37 @@ fn validate_graphql_errors(value: &serde_json::Value) -> Result<(), GitHubTransp
     let Some(errors) = object.get("errors") else {
         return Ok(());
     };
-    if required_array(errors)?.is_empty() {
-        Ok(())
-    } else {
-        Err(GitHubTransportFailure::DispatchUnknown)
+    let errors = required_array(errors)?;
+    if errors.is_empty() {
+        return Ok(());
     }
+    if errors.iter().all(graphql_error_is_definitive) {
+        return Err(GitHubTransportFailure::rejected(
+            StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+        ));
+    }
+    Err(GitHubTransportFailure::DispatchUnknown)
+}
+
+fn graphql_error_is_definitive(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let error_type = object.get("type").and_then(serde_json::Value::as_str);
+    let error_code = object
+        .get("extensions")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|extensions| extensions.get("code"))
+        .and_then(serde_json::Value::as_str);
+    error_type
+        .into_iter()
+        .chain(error_code)
+        .all(graphql_error_code_is_definitive)
+        && (error_type.is_some() || error_code.is_some())
+}
+
+fn graphql_error_code_is_definitive(code: &str) -> bool {
+    matches!(code, "NOT_FOUND" | "FORBIDDEN" | "UNPROCESSABLE")
 }
 
 fn normalize_threads(
@@ -2240,6 +2266,9 @@ mod tests {
     const COMMENTS_TRUNCATED: bool = false;
     const REVIEW_COMMENT_BODY: &str = "Please cover this edge.";
     const GRAPHQL_ERROR_MESSAGE: &str = "synthetic GraphQL failure";
+    const GRAPHQL_NOT_FOUND: &str = "NOT_FOUND";
+    const GRAPHQL_FORBIDDEN: &str = "FORBIDDEN";
+    const GRAPHQL_RATE_LIMITED: &str = "RATE_LIMITED";
     const ERROR_BODY_PREFIX: &str = "safe ";
     const PUBLISHED_REVIEW_STATE: &str = "APPROVED";
     const MISMATCHED_PUBLISHED_REVIEW_STATE: &str = "COMMENTED";
@@ -2705,7 +2734,7 @@ mod tests {
     }
 
     #[test]
-    fn graphql_nonempty_errors_are_dispatch_unknown() {
+    fn graphql_unclassified_errors_are_dispatch_unknown() {
         let mut response = threads_response();
         response["errors"] = serde_json::json!([{"message": GRAPHQL_ERROR_MESSAGE}]);
 
@@ -2715,6 +2744,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn graphql_definitive_error_types_are_rejections() {
+        let mut response = threads_response();
+        response["errors"] = serde_json::json!([
+            {"message": GRAPHQL_ERROR_MESSAGE, "type": GRAPHQL_NOT_FOUND},
+            {"message": GRAPHQL_ERROR_MESSAGE, "type": GRAPHQL_FORBIDDEN}
+        ]);
+
+        assert_eq!(
+            validate_graphql_errors(&response),
+            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
+        );
+    }
+
+    #[test]
+    fn graphql_definitive_extension_codes_are_rejections() {
+        let mut response = threads_response();
+        response["errors"] = serde_json::json!([{
+            "message": GRAPHQL_ERROR_MESSAGE,
+            "extensions": {"code": GRAPHQL_NOT_FOUND}
+        }]);
+
+        assert_eq!(
+            validate_graphql_errors(&response),
+            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
+        );
+    }
+
+    #[test]
+    fn graphql_transient_error_prevents_definitive_classification() {
+        let mut response = threads_response();
+        response["errors"] = serde_json::json!([
+            {"message": GRAPHQL_ERROR_MESSAGE, "type": GRAPHQL_NOT_FOUND},
+            {"message": GRAPHQL_ERROR_MESSAGE, "type": GRAPHQL_RATE_LIMITED}
+        ]);
+
+        assert_eq!(
+            validate_graphql_errors(&response),
+            Err(GitHubTransportFailure::DispatchUnknown)
+        );
+    }
     #[test]
     fn graphql_empty_errors_allow_normalization() {
         let mut response = threads_response();
