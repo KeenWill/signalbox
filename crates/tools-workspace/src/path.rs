@@ -96,6 +96,10 @@ impl fmt::Debug for WorkspaceRoot {
 }
 
 impl WorkspaceRoot {
+    pub(crate) fn descriptor(&self) -> &OwnedFd {
+        self.descriptor.as_ref()
+    }
+
     /// Opens and pins one injected directory without following a final symlink.
     pub fn try_new<FileSystem: WorkspaceFileSystem>(
         filesystem: &FileSystem,

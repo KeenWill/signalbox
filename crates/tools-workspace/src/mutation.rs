@@ -1,9 +1,16 @@
 use std::{
     collections::BTreeMap,
     error::Error,
+    ffi::{OsStr, OsString},
     fmt,
-    path::{Path, PathBuf},
+    fs::File,
+    io::Write,
+    os::fd::OwnedFd,
+    path::{Component, Path},
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat, renameat_with, unlinkat};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -18,7 +25,8 @@ use signalbox_tool_contract::{
 };
 
 use crate::{
-    PatchApplyError, PlannedPatchOperation, WorkspacePatch, WorkspacePathRejection, parse_patch,
+    LocalWorkspaceFileSystem, PatchApplyError, PlannedPatchOperation, WorkspaceFileSystem,
+    WorkspacePatch, WorkspacePathRejection, WorkspaceResolveError, WorkspaceRoot, parse_patch,
     plan_patch,
 };
 
@@ -314,10 +322,16 @@ impl Error for WorkspaceMutationCommitError {}
 /// non-regular files. `commit_atomically` must either apply every mutation or
 /// leave every captured path unchanged, and must reject changed preconditions.
 pub trait WorkspaceMutationFileSystem: Clone + Send + Sync + 'static {
+    /// Pinned root authority retained by the executor.
+    type Root: Clone + Send + Sync + 'static;
+
+    /// Opens and pins one injected workspace root.
+    fn open_root(&self, root: &Path) -> Result<Self::Root, WorkspaceMutationSnapshotError>;
+
     /// Captures complete bounded values for every requested path.
     fn snapshot(
         &self,
-        root: &Path,
+        root: &Self::Root,
         paths: &[WorkspaceMutationPath],
         max_file_bytes: usize,
     ) -> Result<WorkspaceMutationSnapshot, WorkspaceMutationSnapshotError>;
@@ -325,7 +339,7 @@ pub trait WorkspaceMutationFileSystem: Clone + Send + Sync + 'static {
     /// Atomically commits a prevalidated batch against its captured values.
     fn commit_atomically(
         &self,
-        root: &Path,
+        root: &Self::Root,
         expected: &WorkspaceMutationSnapshot,
         mutations: &[WorkspaceFileMutation],
     ) -> Result<(), WorkspaceMutationCommitError>;
@@ -342,6 +356,8 @@ pub enum WorkspaceMutationToolConstructionError {
     ErrorDetail,
     /// The catalog unexpectedly contained a duplicate.
     Duplicate,
+    /// The injected root could not be pinned.
+    Root,
 }
 
 impl fmt::Display for WorkspaceMutationToolConstructionError {
@@ -351,6 +367,7 @@ impl fmt::Display for WorkspaceMutationToolConstructionError {
             Self::Schema => "workspace mutation-tool static schema is invalid",
             Self::ErrorDetail => "workspace mutation-tool static detail is invalid",
             Self::Duplicate => "workspace mutation-tool catalog is duplicated",
+            Self::Root => "workspace mutation-tool root is invalid",
         })
     }
 }
@@ -358,7 +375,7 @@ impl fmt::Display for WorkspaceMutationToolConstructionError {
 impl Error for WorkspaceMutationToolConstructionError {}
 
 /// Compiled mutation catalog and executor around one injected root authority.
-pub struct WorkspaceMutationTools<FileSystem> {
+pub struct WorkspaceMutationTools<FileSystem: WorkspaceMutationFileSystem> {
     catalog: CompiledToolCatalog,
     executor: WorkspaceMutationExecutor<FileSystem>,
 }
@@ -369,6 +386,9 @@ impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationTools<FileSystem>
         filesystem: FileSystem,
         root: impl AsRef<Path>,
     ) -> Result<Self, WorkspaceMutationToolConstructionError> {
+        let root = filesystem
+            .open_root(root.as_ref())
+            .map_err(|_| WorkspaceMutationToolConstructionError::Root)?;
         let invalid_arguments_detail = detail(INVALID_ARGUMENTS_DETAIL)?;
         let snapshot_failed_detail = detail(SNAPSHOT_FAILED_DETAIL)?;
         let edit_match_failed_detail = detail(EDIT_MATCH_FAILED_DETAIL)?;
@@ -398,7 +418,7 @@ impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationTools<FileSystem>
             catalog,
             executor: WorkspaceMutationExecutor {
                 filesystem,
-                root: root.as_ref().to_owned(),
+                root,
                 snapshot_failed_detail,
                 edit_match_failed_detail,
                 patch_failed_detail,
@@ -496,9 +516,9 @@ fn decode_operation(
 fn drop<T>(_value: T) {}
 
 /// Executor for the three approved workspace mutation tools.
-pub struct WorkspaceMutationExecutor<FileSystem> {
+pub struct WorkspaceMutationExecutor<FileSystem: WorkspaceMutationFileSystem> {
     filesystem: FileSystem,
-    root: PathBuf,
+    root: FileSystem::Root,
     snapshot_failed_detail: ToolExecutionErrorDetail,
     edit_match_failed_detail: ToolExecutionErrorDetail,
     patch_failed_detail: ToolExecutionErrorDetail,
@@ -799,6 +819,301 @@ pub struct ApplyPatchResult {
     pub operations_applied: usize,
 }
 
+impl WorkspaceMutationFileSystem for LocalWorkspaceFileSystem {
+    type Root = WorkspaceRoot;
+
+    fn open_root(&self, root: &Path) -> Result<Self::Root, WorkspaceMutationSnapshotError> {
+        WorkspaceRoot::try_new(self, root).map_err(|_| WorkspaceMutationSnapshotError {
+            path: None,
+            kind: WorkspaceMutationSnapshotErrorKind::Filesystem,
+        })
+    }
+
+    fn snapshot(
+        &self,
+        root: &Self::Root,
+        paths: &[WorkspaceMutationPath],
+        max_file_bytes: usize,
+    ) -> Result<WorkspaceMutationSnapshot, WorkspaceMutationSnapshotError> {
+        let files = paths
+            .iter()
+            .map(|path| local_file_snapshot(self, root, path, max_file_bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        WorkspaceMutationSnapshot::try_new(files)
+    }
+
+    fn commit_atomically(
+        &self,
+        root: &Self::Root,
+        expected: &WorkspaceMutationSnapshot,
+        mutations: &[WorkspaceFileMutation],
+    ) -> Result<(), WorkspaceMutationCommitError> {
+        let paths = expected.files().map(|file| file.path).collect::<Vec<_>>();
+        let current = self
+            .snapshot(root, &paths, MAX_WORKSPACE_MUTATION_FILE_BYTES)
+            .map_err(snapshot_commit_error)?;
+        if current != *expected {
+            return Err(WorkspaceMutationCommitError::Conflict);
+        }
+
+        let mut staged = Vec::with_capacity(mutations.len());
+        for mutation in mutations {
+            match stage_mutation(root, expected, mutation) {
+                Ok(file) => staged.push(file),
+                Err(error) => {
+                    cleanup_staged(&mut staged);
+                    return Err(error);
+                }
+            }
+        }
+
+        for index in 0..staged.len() {
+            if let Err(error) = install_staged(&mut staged[index]) {
+                rollback_staged(&mut staged);
+                return Err(error);
+            }
+        }
+        cleanup_backups(&mut staged);
+        Ok(())
+    }
+}
+
+fn local_file_snapshot(
+    filesystem: &LocalWorkspaceFileSystem,
+    root: &WorkspaceRoot,
+    path: &WorkspaceMutationPath,
+    max_file_bytes: usize,
+) -> Result<WorkspaceFileSnapshot, WorkspaceMutationSnapshotError> {
+    match filesystem.read_file_prefix(root, Path::new(path.as_str()), max_file_bytes) {
+        Ok(read) if read.truncated => Err(WorkspaceMutationSnapshotError {
+            path: Some(path.clone()),
+            kind: WorkspaceMutationSnapshotErrorKind::TooLarge,
+        }),
+        Ok(read) => String::from_utf8(read.bytes)
+            .map(|content| WorkspaceFileSnapshot {
+                path: path.clone(),
+                content: Some(content),
+            })
+            .map_err(|_| WorkspaceMutationSnapshotError {
+                path: Some(path.clone()),
+                kind: WorkspaceMutationSnapshotErrorKind::NotUtf8,
+            }),
+        Err(WorkspaceResolveError::Rejected(reason)) => Err(WorkspaceMutationSnapshotError {
+            path: Some(path.clone()),
+            kind: WorkspaceMutationSnapshotErrorKind::PathRejected(reason),
+        }),
+        Err(WorkspaceResolveError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(WorkspaceFileSnapshot {
+                path: path.clone(),
+                content: None,
+            })
+        }
+        Err(WorkspaceResolveError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::InvalidData =>
+        {
+            Err(WorkspaceMutationSnapshotError {
+                path: Some(path.clone()),
+                kind: WorkspaceMutationSnapshotErrorKind::NotRegularFile,
+            })
+        }
+        Err(WorkspaceResolveError::Io { .. }) => Err(WorkspaceMutationSnapshotError {
+            path: Some(path.clone()),
+            kind: WorkspaceMutationSnapshotErrorKind::Filesystem,
+        }),
+    }
+}
+
+fn snapshot_commit_error(error: WorkspaceMutationSnapshotError) -> WorkspaceMutationCommitError {
+    match (error.path, error.kind) {
+        (Some(path), WorkspaceMutationSnapshotErrorKind::PathRejected(reason)) => {
+            WorkspaceMutationCommitError::PathRejected { path, reason }
+        }
+        _ => WorkspaceMutationCommitError::Filesystem,
+    }
+}
+
+struct StagedMutation {
+    parent: OwnedFd,
+    path: WorkspaceMutationPath,
+    target: OsString,
+    stage: Option<OsString>,
+    backup: Option<OsString>,
+    backup_created: bool,
+    target_installed: bool,
+    writes_target: bool,
+}
+
+fn stage_mutation(
+    root: &WorkspaceRoot,
+    expected: &WorkspaceMutationSnapshot,
+    mutation: &WorkspaceFileMutation,
+) -> Result<StagedMutation, WorkspaceMutationCommitError> {
+    let path = mutation.path().clone();
+    let (parent, target) = open_mutation_parent(root, &path)?;
+    let had_original = expected
+        .content(&path)
+        .is_some_and(|content| content.is_some());
+    let backup = had_original.then(|| transaction_name("backup"));
+    let (stage, writes_target) = match mutation {
+        WorkspaceFileMutation::Write { content, .. } => {
+            let name = transaction_name("stage");
+            write_staged_file(&parent, &name, content, &path)?;
+            (Some(name), true)
+        }
+        WorkspaceFileMutation::Delete { .. } => (None, false),
+    };
+    Ok(StagedMutation {
+        parent,
+        path,
+        target,
+        stage,
+        backup,
+        backup_created: false,
+        target_installed: false,
+        writes_target,
+    })
+}
+
+fn open_mutation_parent(
+    root: &WorkspaceRoot,
+    path: &WorkspaceMutationPath,
+) -> Result<(OwnedFd, OsString), WorkspaceMutationCommitError> {
+    let supplied = Path::new(path.as_str());
+    let target = supplied
+        .file_name()
+        .filter(|name| *name != OsStr::new("."))
+        .ok_or_else(|| WorkspaceMutationCommitError::PathRejected {
+            path: path.clone(),
+            reason: WorkspacePathRejection::Invalid,
+        })?
+        .to_owned();
+    let mut current = openat(
+        root.descriptor(),
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| commit_errno(path, error))?;
+    if let Some(parent) = supplied.parent() {
+        for component in parent.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            current = openat(
+                &current,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| commit_errno(path, error))?;
+        }
+    }
+    Ok((current, target))
+}
+
+fn write_staged_file(
+    parent: &OwnedFd,
+    name: &OsStr,
+    content: &str,
+    path: &WorkspaceMutationPath,
+) -> Result<(), WorkspaceMutationCommitError> {
+    let descriptor = openat(
+        parent,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|error| commit_errno(path, error))?;
+    let mut file = File::from(descriptor);
+    file.write_all(content.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| WorkspaceMutationCommitError::Filesystem)
+}
+
+fn install_staged(staged: &mut StagedMutation) -> Result<(), WorkspaceMutationCommitError> {
+    if let Some(backup) = &staged.backup {
+        renameat_with(
+            &staged.parent,
+            &staged.target,
+            &staged.parent,
+            backup,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| commit_errno(&staged.path, error))?;
+        staged.backup_created = true;
+    }
+    if let Some(stage) = staged.stage.as_ref() {
+        renameat_with(
+            &staged.parent,
+            stage,
+            &staged.parent,
+            &staged.target,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| commit_errno(&staged.path, error))?;
+        staged.stage = None;
+    }
+    staged.target_installed = true;
+    Ok(())
+}
+
+fn rollback_staged(staged: &mut [StagedMutation]) {
+    for file in staged.iter_mut().rev() {
+        if file.target_installed && file.writes_target {
+            let _ = unlinkat(&file.parent, &file.target, AtFlags::empty());
+        }
+        if file.backup_created
+            && let Some(backup) = &file.backup
+        {
+            let _ = renameat(&file.parent, backup, &file.parent, &file.target);
+        }
+        if let Some(stage) = file.stage.take() {
+            let _ = unlinkat(&file.parent, stage, AtFlags::empty());
+        }
+    }
+}
+
+fn cleanup_staged(staged: &mut [StagedMutation]) {
+    for file in staged {
+        if let Some(stage) = file.stage.take() {
+            let _ = unlinkat(&file.parent, stage, AtFlags::empty());
+        }
+    }
+}
+
+fn cleanup_backups(staged: &mut [StagedMutation]) {
+    for file in staged {
+        if let Some(backup) = file.backup.take() {
+            let _ = unlinkat(&file.parent, backup, AtFlags::empty());
+        }
+    }
+}
+
+fn commit_errno(
+    path: &WorkspaceMutationPath,
+    error: rustix::io::Errno,
+) -> WorkspaceMutationCommitError {
+    if error == rustix::io::Errno::LOOP {
+        WorkspaceMutationCommitError::PathRejected {
+            path: path.clone(),
+            reason: WorkspacePathRejection::Symlink,
+        }
+    } else {
+        WorkspaceMutationCommitError::Filesystem
+    }
+}
+
+fn transaction_name(role: &str) -> OsString {
+    static NEXT_TRANSACTION_FILE: AtomicU64 = AtomicU64::new(1);
+    OsString::from(format!(
+        ".signalbox-{}-{}-{role}",
+        std::process::id(),
+        NEXT_TRANSACTION_FILE.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -842,9 +1157,15 @@ mod tests {
     }
 
     impl WorkspaceMutationFileSystem for FakeFileSystem {
+        type Root = std::path::PathBuf;
+
+        fn open_root(&self, root: &Path) -> Result<Self::Root, WorkspaceMutationSnapshotError> {
+            Ok(root.to_owned())
+        }
+
         fn snapshot(
             &self,
-            _root: &Path,
+            _root: &Self::Root,
             paths: &[WorkspaceMutationPath],
             max_file_bytes: usize,
         ) -> Result<WorkspaceMutationSnapshot, WorkspaceMutationSnapshotError> {
@@ -873,7 +1194,7 @@ mod tests {
 
         fn commit_atomically(
             &self,
-            _root: &Path,
+            _root: &Self::Root,
             expected: &WorkspaceMutationSnapshot,
             mutations: &[WorkspaceFileMutation],
         ) -> Result<(), WorkspaceMutationCommitError> {
@@ -908,6 +1229,133 @@ mod tests {
             .expect("fixture tools construct")
             .into_parts()
             .1
+    }
+
+    fn local_executor(
+        workspace: &tempfile::TempDir,
+    ) -> WorkspaceMutationExecutor<LocalWorkspaceFileSystem> {
+        WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())
+            .expect("local fixture tools construct")
+            .into_parts()
+            .1
+    }
+
+    fn immediate_entry_names(workspace: &tempfile::TempDir) -> Vec<String> {
+        let mut names = std::fs::read_dir(workspace.path())
+            .expect("fixture directory reads")
+            .map(|entry| {
+                entry
+                    .expect("fixture entry reads")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn local_patch_commits_add_update_delete_batch() {
+        const KEPT_PATH: &str = "kept.txt";
+        const GONE_PATH: &str = "gone.txt";
+        const NEW_PATH: &str = "new.txt";
+        const UPDATED: &str = "after\n";
+        const ADDED: &str = "new\n";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        std::fs::write(workspace.path().join(KEPT_PATH), "before\n").expect("kept fixture writes");
+        std::fs::write(workspace.path().join(GONE_PATH), "old\n").expect("deleted fixture writes");
+        let executor = local_executor(&workspace);
+        let patch = parse_patch(
+            "*** Begin Patch\n\
+             *** Add File: new.txt\n\
+             +new\n\
+             *** Update File: kept.txt\n\
+             @@\n\
+             -before\n\
+             +after\n\
+             *** Delete File: gone.txt\n\
+             *** End Patch",
+        )
+        .expect("structured patch parses");
+
+        let result = executor.apply_patch(&patch).expect("local patch commits");
+
+        assert_eq!(result.operations_applied, 3);
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(KEPT_PATH)).expect("updated file reads"),
+            UPDATED
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(NEW_PATH)).expect("added file reads"),
+            ADDED
+        );
+        assert!(!workspace.path().join(GONE_PATH).exists());
+    }
+
+    #[test]
+    fn local_staging_failure_leaves_every_target_unchanged() {
+        const KEPT_PATH: &str = "kept.txt";
+        const KEPT_CONTENT: &str = "kept\n";
+        const NEW_PATH: &str = "new.txt";
+        const EXPECTED_ENTRIES: [&str; 1] = [KEPT_PATH];
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        std::fs::write(workspace.path().join(KEPT_PATH), KEPT_CONTENT)
+            .expect("kept fixture writes");
+        let executor = local_executor(&workspace);
+        let patch = parse_patch(
+            "*** Begin Patch\n\
+             *** Add File: new.txt\n\
+             +new\n\
+             *** Add File: missing/child.txt\n\
+             +child\n\
+             *** End Patch",
+        )
+        .expect("structured patch parses");
+
+        let result = executor.apply_patch(&patch);
+
+        assert_eq!(result, Err(MutationFailure::Commit));
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(KEPT_PATH)).expect("kept file reads"),
+            KEPT_CONTENT
+        );
+        assert!(!workspace.path().join(NEW_PATH).exists());
+        assert_eq!(immediate_entry_names(&workspace), EXPECTED_ENTRIES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_snapshot_rejects_escaping_symlink() {
+        use std::os::unix::fs::symlink;
+
+        const ESCAPE_PATH: &str = "escape.txt";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let outside = tempfile::tempdir().expect("outside fixture constructs");
+        let outside_path = outside.path().join("secret.txt");
+        std::fs::write(&outside_path, "secret").expect("outside fixture writes");
+        symlink(&outside_path, workspace.path().join(ESCAPE_PATH))
+            .expect("escaping symlink fixture constructs");
+        let executor = local_executor(&workspace);
+        let path = WorkspaceMutationPath::try_new(ESCAPE_PATH).expect("fixture path is valid");
+
+        let error = executor
+            .filesystem
+            .snapshot(
+                &executor.root,
+                std::slice::from_ref(&path),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES,
+            )
+            .expect_err("escaping symlink rejects");
+
+        assert_eq!(error.path, Some(path));
+        assert_eq!(
+            error.kind,
+            WorkspaceMutationSnapshotErrorKind::PathRejected(WorkspacePathRejection::Symlink)
+        );
     }
 
     #[test]
