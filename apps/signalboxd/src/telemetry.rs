@@ -39,7 +39,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::Semaphore,
     task::JoinHandle,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tonic::metadata::{
     AsciiMetadataKey, AsciiMetadataValue, BinaryMetadataKey, BinaryMetadataValue, MetadataMap,
@@ -87,6 +87,7 @@ const MAX_HEADER_VALUE_BYTES: usize = 1_024;
 const MAX_SCRAPE_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_SCRAPE_CONNECTIONS: usize = 16;
 const SCRAPE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
+const SCRAPE_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const DEFAULT_SERVICE_NAME: &str = "signalboxd";
 const SERVICE_NAMES: &[&str] = &[
     DEFAULT_SERVICE_NAME,
@@ -1135,14 +1136,25 @@ impl Drop for PrometheusServer {
 
 async fn serve_prometheus(listener: TcpListener, metrics: TelemetryMetrics) {
     let permits = Arc::new(Semaphore::new(MAX_SCRAPE_CONNECTIONS));
+    let mut accept_failure_logged = false;
     loop {
-        let Ok((stream, _peer)) = listener.accept().await else {
-            tracing::warn!(
-                target: TELEMETRY_INTERNAL_TARGET,
-                cause_code = "prometheus_accept_failed",
-                "Prometheus scrape listener stopped after an accept failure"
-            );
-            return;
+        let stream = match listener.accept().await {
+            Ok((stream, _peer)) => {
+                accept_failure_logged = false;
+                stream
+            }
+            Err(_) => {
+                if !accept_failure_logged {
+                    tracing::warn!(
+                        target: TELEMETRY_INTERNAL_TARGET,
+                        cause_code = "prometheus_accept_failed",
+                        "Prometheus scrape listener accept failed; retrying after a bounded delay"
+                    );
+                    accept_failure_logged = true;
+                }
+                sleep(SCRAPE_ACCEPT_RETRY_DELAY).await;
+                continue;
+            }
         };
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             continue;

@@ -183,8 +183,10 @@ and there is no authentication or TLS. Therefore every peer that can reach the
 configured address can read the metrics, and deployment network policy owns that
 reachability. At most 16 connections are served concurrently; an excess
 connection is dropped immediately. Each request is bounded to 8 KiB, and a
-connection is abandoned after two seconds. A bind or accept failure disables or
-stops only metrics; it does not fail request handling.
+connection is abandoned after two seconds. A bind failure disables only metrics;
+it does not fail request handling. An accept failure emits one static warning
+per failure streak and retries after 250 milliseconds, so sustained failure is
+rate-limited and a transient failure does not stop later scrapes.
 
 ```text
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
