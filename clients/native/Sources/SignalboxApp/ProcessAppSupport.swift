@@ -30,14 +30,8 @@ enum NativeProcessConstants {
   }
 }
 
-enum LegacyCredentialCleanupOutcome {
-  case complete
-  case retryLater
-}
-
 enum LegacyRemoteSettingsCleanup {
   static let serverURLDefaultsKey = "hub-url"
-  static let completionDefaultsKey = "signalbox-retired-remote-settings-cleaned"
   static let keychainService = "co.rdwd.SignalboxNative"
   static let keychainAccount = "hub-api-key"
 
@@ -47,39 +41,22 @@ enum LegacyRemoteSettingsCleanup {
 
   static func perform(
     userDefaults: UserDefaults,
-    deleteCredential: () -> LegacyCredentialCleanupOutcome
+    deleteCredential: () -> Void
   ) {
-    let legacyStateReappeared = userDefaults.object(forKey: serverURLDefaultsKey) != nil
-    guard legacyStateReappeared || !userDefaults.bool(forKey: completionDefaultsKey) else {
-      return
-    }
-    if legacyStateReappeared {
-      // Legacy builds write the URL before the keychain item. Its reappearance
-      // therefore invalidates a prior completion marker after a rollback.
-      userDefaults.removeObject(forKey: completionDefaultsKey)
-    }
+    // Legacy builds may run concurrently and write the URL and credential in
+    // separate operations. Both removals are idempotent and intentionally run
+    // at every launch so no interleaving can permanently suppress a retry.
     userDefaults.removeObject(forKey: serverURLDefaultsKey)
-    // Mark completion only after the credential is absent. Transient keychain
-    // failures must retry on a later launch, but successful migration must not
-    // leave permanent keychain access in the process-only product.
-    guard deleteCredential() == .complete else {
-      return
-    }
-    userDefaults.set(true, forKey: completionDefaultsKey)
+    deleteCredential()
   }
 
-  private static func deleteCredential() -> LegacyCredentialCleanupOutcome {
+  private static func deleteCredential() {
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: keychainService,
       kSecAttrAccount as String: keychainAccount,
     ]
-    switch SecItemDelete(query as CFDictionary) {
-    case errSecSuccess, errSecItemNotFound:
-      return .complete
-    default:
-      return .retryLater
-    }
+    _ = SecItemDelete(query as CFDictionary)
   }
 }
 
