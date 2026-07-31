@@ -331,13 +331,16 @@ identities are pinned by then and every identical retry fails the same way.
 Every catalog model selection declares required positive `max_output_tokens` and
 `context_window_tokens`; configuration is invalid when the output ceiling
 exceeds the context ceiling. Both are operator-declared per selection and never
-inferred from provider or model names. The provider request uses the configured
-output ceiling. After a nominal completion, the daemon retains adapter-reported
-usage and changes the observation to `KnownFailed` when reported output exceeds
-`max_output_tokens`, or when the reported input-plus-output lower bound exceeds
-`context_window_tokens`. Missing usage fields remain missing and are never
-invented. Adapters need no separate counting operation, and the daemon performs
-no automatic pre-activation compaction; explicit compaction remains available.
+inferred from provider or model names. Adapters with a provider setting surface,
+including Anthropic, send the configured output ceiling in the provider request.
+Codex CLI instead renders the ceiling as model-visible advisory context because
+the CLI exposes no provider-side control. After a nominal completion, the daemon
+retains adapter-reported usage and changes the observation to `KnownFailed` when
+reported output exceeds `max_output_tokens`, or when the reported
+input-plus-output lower bound exceeds `context_window_tokens`. Missing usage
+fields remain missing and are never invented. Adapters need no separate counting
+operation, and the daemon performs no automatic pre-activation compaction;
+explicit compaction remains available.
 
 The explicit trigger uses the same compaction transaction and provider-call
 lifecycle. An explicit command first resolves its owner-global replay state; an
