@@ -18,7 +18,8 @@ use signalbox_tool_contract::{
 };
 
 use crate::{
-    PlannedPatchOperation, WorkspacePatch, WorkspacePathRejection, parse_patch, plan_patch,
+    PatchApplyError, PlannedPatchOperation, WorkspacePatch, WorkspacePathRejection, parse_patch,
+    plan_patch,
 };
 
 pub const WRITE_FILE_NAME: &str = "write_file";
@@ -554,8 +555,11 @@ impl<FileSystem: WorkspaceMutationFileSystem> ToolExecutor
             Err(MutationFailure::EditMatch) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.edit_match_failed_detail.clone()),
             },
-            Err(MutationFailure::Patch) => ToolExecutorEvidence::KnownFailed {
-                detail: Some(self.patch_failed_detail.clone()),
+            Err(MutationFailure::Patch(detail)) => ToolExecutorEvidence::KnownFailed {
+                detail: Some(
+                    ToolExecutionErrorDetail::try_new(detail)
+                        .unwrap_or_else(|_| self.patch_failed_detail.clone()),
+                ),
             },
             Err(MutationFailure::Commit) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.commit_failed_detail.clone()),
@@ -593,11 +597,11 @@ impl serde::Serialize for MutationResult {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum MutationFailure {
     Snapshot,
     EditMatch,
-    Patch,
+    Patch(String),
     Commit,
 }
 
@@ -710,13 +714,13 @@ impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationExecutor<FileSyst
             .iter()
             .map(|operation| WorkspaceMutationPath::try_new(String::from(operation.path())))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| MutationFailure::Patch)?;
+            .map_err(|_| generic_patch_failure())?;
         let snapshot = self.capture(&paths)?;
         let contents = snapshot
             .files()
             .filter_map(|file| file.content.map(|content| (file.path.0, content)))
             .collect::<BTreeMap<_, _>>();
-        let plan = plan_patch(patch, &contents).map_err(|_| MutationFailure::Patch)?;
+        let plan = plan_patch(patch, &contents).map_err(patch_apply_failure)?;
         let mutations = plan
             .operations()
             .iter()
@@ -736,19 +740,34 @@ fn planned_mutation(
         PlannedPatchOperation::Add { path, content }
         | PlannedPatchOperation::Update { path, content } => {
             if content.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES {
-                return Err(MutationFailure::Patch);
+                return Err(generic_patch_failure());
             }
             Ok(WorkspaceFileMutation::Write {
                 path: WorkspaceMutationPath::try_new(path.clone())
-                    .map_err(|_| MutationFailure::Patch)?,
+                    .map_err(|_| generic_patch_failure())?,
                 content: content.clone(),
             })
         }
         PlannedPatchOperation::Delete { path } => Ok(WorkspaceFileMutation::Delete {
             path: WorkspaceMutationPath::try_new(path.clone())
-                .map_err(|_| MutationFailure::Patch)?,
+                .map_err(|_| generic_patch_failure())?,
         }),
     }
+}
+
+fn generic_patch_failure() -> MutationFailure {
+    MutationFailure::Patch(String::from(PATCH_FAILED_DETAIL))
+}
+
+fn patch_apply_failure(error: PatchApplyError) -> MutationFailure {
+    let hunk = error.hunk.map_or_else(
+        || String::from("file operation"),
+        |hunk| format!("hunk {hunk}"),
+    );
+    MutationFailure::Patch(format!(
+        "patch operation {}, {hunk} failed: {:?}",
+        error.operation, error.kind
+    ))
 }
 
 /// Successful `write_file` result.
@@ -998,7 +1017,10 @@ mod tests {
 
         let result = executor.apply_patch(&patch);
 
-        assert_eq!(result, Err(MutationFailure::Patch));
+        assert!(matches!(
+            result,
+            Err(MutationFailure::Patch(detail)) if detail.contains("hunk 1")
+        ));
         assert_eq!(filesystem.files(), original);
     }
 
