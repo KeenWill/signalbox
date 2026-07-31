@@ -1090,12 +1090,15 @@ where
                     }
                     Message::HeartbeatAck(acknowledgement) => {
                         if let Err(failure) = heartbeat_state.accept(&acknowledgement) {
-                            write_rejected(&mut writer, failure).await?;
-                            transition_is_current(
+                            terminalize_protocol_rejection(
                                 &service,
                                 context,
-                                RunnerConnectionTransition::ProtocolFailure,
-                            ).await?;
+                                &mut writer,
+                                RunnerInboundFrameKind::HeartbeatAck,
+                                context.epoch,
+                                failure,
+                            )
+                            .await?;
                             return Ok(());
                         }
                         if !transition_is_current(
@@ -1109,8 +1112,12 @@ where
                     }
                     Message::Shutdown(order) => {
                         if order.reason != ShutdownReason::RunnerShutdown {
-                            write_rejected(
+                            terminalize_protocol_rejection(
+                                &service,
+                                context,
                                 &mut writer,
+                                RunnerInboundFrameKind::Shutdown,
+                                order.connection_epoch,
                                 RunnerRegistrationFailure::new(
                                     RunnerInboundFrameKind::Shutdown,
                                     AvailableCorrelation::ConnectionEpoch(order.connection_epoch),
@@ -1118,7 +1125,7 @@ where
                                 ),
                             )
                             .await?;
-                            continue;
+                            return Ok(());
                         }
                         if order.connection_epoch != context.epoch {
                             write_stale_epoch(
@@ -1264,6 +1271,31 @@ where
     .await?
     {
         write_stale_epoch(writer, RunnerInboundFrameKind::Heartbeat, context.epoch).await?;
+    }
+    Ok(())
+}
+
+async fn terminalize_protocol_rejection<S>(
+    service: &S,
+    context: ConnectionContext,
+    writer: &mut OwnedWriteHalf,
+    offending_kind: RunnerInboundFrameKind,
+    evidence_epoch: PositiveU64,
+    failure: RunnerRegistrationFailure,
+) -> Result<(), RunnerProtocolRuntimeError>
+where
+    S: RunnerRegistrationService,
+{
+    if transition_is_current(
+        service,
+        context,
+        RunnerConnectionTransition::ProtocolFailure,
+    )
+    .await?
+    {
+        write_rejected(writer, failure).await?;
+    } else {
+        write_stale_epoch(writer, offending_kind, evidence_epoch).await?;
     }
     Ok(())
 }
@@ -2636,6 +2668,136 @@ mod tests {
         );
 
         served.expect("the rejected connection closes after terminalization");
+        assert_eq!(rejected, expected);
+        assert_eq!(connection.state(), RunnerConnectionState::Lost);
+        assert_eq!(connection.cause(), RunnerConnectionCause::ProtocolFailure);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn invalid_heartbeat_terminalizes_before_failed_rejection_write() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let advertisement = empty_advertisement();
+        let request_id = identity(1);
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Enroll(Enroll {
+                    request_id,
+                    digest_version: DIGEST_VERSION,
+                    advertisement,
+                }),
+            )
+            .await
+            .expect("the enrollment request is sent");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment response is received")
+                .message
+            else {
+                panic!("the durable service returns an enrolled receipt");
+            };
+            rustix::net::shutdown(reader.get_ref().as_ref(), rustix::net::Shutdown::Read)
+                .expect("the peer refuses every later inbound frame");
+            write_message(
+                &mut writer,
+                Message::HeartbeatAck(HeartbeatAck {
+                    challenge_sequence: PositiveU64::try_new(1)
+                        .expect("the unsolicited challenge sequence is positive"),
+                    runner_sequence: PositiveU64::try_new(1)
+                        .expect("the first runner sequence is positive"),
+                    lease_phase: None,
+                    workspace_phase: None,
+                }),
+            )
+            .await
+            .expect("the invalid heartbeat acknowledgement is sent");
+            enrolled
+        };
+
+        let (served, enrolled) = tokio::join!(server, client);
+        let enrollment_id = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+        let connection = store
+            .load_connection(enrollment_id)
+            .await
+            .expect("the terminal connection loads")
+            .expect("the connection lifecycle exists");
+
+        let failure = served.expect_err("the peer rejects the outbound failure evidence");
+        assert!(matches!(failure, RunnerProtocolRuntimeError::Write(_)));
+        assert_eq!(connection.state(), RunnerConnectionState::Lost);
+        assert_eq!(connection.cause(), RunnerConnectionCause::ProtocolFailure);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn wrong_direction_shutdown_terminalizes_the_connection() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let advertisement = empty_advertisement();
+        let request_id = identity(1);
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Enroll(Enroll {
+                    request_id,
+                    digest_version: DIGEST_VERSION,
+                    advertisement,
+                }),
+            )
+            .await
+            .expect("the enrollment request is sent");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment response is received")
+                .message
+            else {
+                panic!("the durable service returns an enrolled receipt");
+            };
+            write_message(
+                &mut writer,
+                Message::Shutdown(Shutdown {
+                    connection_epoch: enrolled.connection_epoch,
+                    reason: ShutdownReason::DaemonShutdown,
+                }),
+            )
+            .await
+            .expect("the wrong-direction shutdown is sent");
+            let rejected = read_frame(&mut reader)
+                .await
+                .expect("the shutdown rejection is received")
+                .message;
+            (enrolled, rejected)
+        };
+
+        let (served, (enrolled, rejected)) = tokio::join!(server, client);
+        let enrollment_id = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+        let connection = store
+            .load_connection(enrollment_id)
+            .await
+            .expect("the terminal connection loads")
+            .expect("the connection lifecycle exists");
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Shutdown,
+                AvailableCorrelation::ConnectionEpoch(enrolled.connection_epoch),
+                RejectionCode::CorrelationMismatch,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the wrong-direction shutdown closes after terminalization");
         assert_eq!(rejected, expected);
         assert_eq!(connection.state(), RunnerConnectionState::Lost);
         assert_eq!(connection.cause(), RunnerConnectionCause::ProtocolFailure);

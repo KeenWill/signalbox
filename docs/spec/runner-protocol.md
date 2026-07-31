@@ -257,11 +257,12 @@ never guesses what the sender meant. Its arms are `none` with no correlation,
 revision, `lease` with the complete lease correlation, `provision` with the
 complete provisioning correlation, `release` with the complete release
 correlation, `leak_page` with the complete leak-page correlation, and
-`operation_failure` with the exact refused-operation correlation. `none` is
-admissible only when the frame failed before one complete arm was available.
-Every other arm is rejected if any of its required correlation members was
-unavailable; fragments are never padded with sentinels or borrowed from
-connection memory.
+`operation_failure` with the exact refused-operation correlation, and
+`connection_epoch` with the hub-assigned epoch targeted by the refused frame.
+`none` is admissible only when the frame failed before one complete arm was
+available. Every other arm is rejected if any of its required correlation
+members was unavailable; fragments are never padded with sentinels or borrowed
+from connection memory.
 
 An advertisement contains at most 16 capability classes, 256 tools, 64
 credential-profile names, and 64 repository entries; names are sorted and
