@@ -49,8 +49,14 @@ enum LegacyRemoteSettingsCleanup {
     userDefaults: UserDefaults,
     deleteCredential: () -> LegacyCredentialCleanupOutcome
   ) {
-    guard !userDefaults.bool(forKey: completionDefaultsKey) else {
+    let legacyStateReappeared = userDefaults.object(forKey: serverURLDefaultsKey) != nil
+    guard legacyStateReappeared || !userDefaults.bool(forKey: completionDefaultsKey) else {
       return
+    }
+    if legacyStateReappeared {
+      // Legacy builds write the URL before the keychain item. Its reappearance
+      // therefore invalidates a prior completion marker after a rollback.
+      userDefaults.removeObject(forKey: completionDefaultsKey)
     }
     userDefaults.removeObject(forKey: serverURLDefaultsKey)
     // Mark completion only after the credential is absent. Transient keychain
