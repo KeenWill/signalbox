@@ -4,6 +4,34 @@ import XCTest
 
 @MainActor
 final class SignalboxNativeTests: XCTestCase {
+    func testLegacyRemoteSettingsCleanupRetriesCredentialDeletionBeforeCompleting() throws {
+        let suiteName = "SignalboxNativeTests.\(#function)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let retiredServerURL = "https://retired.example"
+        defaults.set(retiredServerURL, forKey: LegacyRemoteSettingsCleanup.serverURLDefaultsKey)
+        var deletionAttempts = 0
+
+        LegacyRemoteSettingsCleanup.perform(userDefaults: defaults) {
+            deletionAttempts += 1
+            return .retryLater
+        }
+
+        XCTAssertNil(defaults.object(forKey: LegacyRemoteSettingsCleanup.serverURLDefaultsKey))
+        XCTAssertEqual(deletionAttempts, 1)
+
+        LegacyRemoteSettingsCleanup.perform(userDefaults: defaults) {
+            deletionAttempts += 1
+            return .complete
+        }
+        LegacyRemoteSettingsCleanup.perform(userDefaults: defaults) {
+            deletionAttempts += 1
+            return .retryLater
+        }
+
+        XCTAssertEqual(deletionAttempts, 2)
+    }
+
     func testMockServiceLoadsMainOperationsState() async throws {
         let service = MockSignalboxService()
         let sessions = try await service.listSessions(archived: false)

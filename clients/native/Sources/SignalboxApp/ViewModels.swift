@@ -25,6 +25,7 @@ final class AppCoordinator: ObservableObject {
         self.screenshotScenario = screenshotScenario
         let shouldInstallMockService = isMockMode || screenshotScenario?.requiresMockService == true
         self.isMockMode = shouldInstallMockService
+        LegacyRemoteSettingsCleanup.perform()
         if resetPersistedSettings {
             UserDefaults.standard.removeObject(forKey: NativeProcessConstants.socketDefaultsKey)
         }

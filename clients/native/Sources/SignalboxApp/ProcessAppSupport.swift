@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import Security
 
 #if canImport(SignalboxClient)
   import SignalboxClient
@@ -26,6 +27,53 @@ enum NativeProcessConstants {
       .appendingPathComponent("signalbox", isDirectory: true)
       .appendingPathComponent("signalboxd.sock", isDirectory: false)
       .path
+  }
+}
+
+enum LegacyCredentialCleanupOutcome {
+  case complete
+  case retryLater
+}
+
+enum LegacyRemoteSettingsCleanup {
+  static let serverURLDefaultsKey = "hub-url"
+  static let completionDefaultsKey = "signalbox-retired-remote-settings-cleaned"
+  static let keychainService = "co.rdwd.SignalboxNative"
+  static let keychainAccount = "hub-api-key"
+
+  static func perform(userDefaults: UserDefaults = .standard) {
+    perform(userDefaults: userDefaults, deleteCredential: deleteCredential)
+  }
+
+  static func perform(
+    userDefaults: UserDefaults,
+    deleteCredential: () -> LegacyCredentialCleanupOutcome
+  ) {
+    guard !userDefaults.bool(forKey: completionDefaultsKey) else {
+      return
+    }
+    userDefaults.removeObject(forKey: serverURLDefaultsKey)
+    // Mark completion only after the credential is absent. Transient keychain
+    // failures must retry on a later launch, but successful migration must not
+    // leave permanent keychain access in the process-only product.
+    guard deleteCredential() == .complete else {
+      return
+    }
+    userDefaults.set(true, forKey: completionDefaultsKey)
+  }
+
+  private static func deleteCredential() -> LegacyCredentialCleanupOutcome {
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: keychainService,
+      kSecAttrAccount as String: keychainAccount,
+    ]
+    switch SecItemDelete(query as CFDictionary) {
+    case errSecSuccess, errSecItemNotFound:
+      return .complete
+    default:
+      return .retryLater
+    }
   }
 }
 
