@@ -212,13 +212,34 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             ))),
         });
     }
+    // A cancellation already visible to the public runner outranks every
+    // request-validation failure. In particular, an invalid inherited
+    // environment must not turn an operation the caller already cancelled
+    // into a connection failure.
+    if cancellation.is_cancelled() {
+        return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+            cause: UnsentCause::CancelledBeforeSend,
+        });
+    }
+    // Establish the usable deadline before command conversion, environment
+    // access, SendCommenced, or spawn. `CliProcessRequest` is public and may
+    // therefore carry a duration the runtime clock cannot represent even
+    // though the bundled adapter constructors validate their configurations.
+    let Some(deadline) = tokio::time::Instant::now().checked_add(request.exchange_timeout) else {
+        return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+            cause: UnsentCause::ConnectFailed(TransportFacts::new(format!(
+                "{} exchange timeout cannot be represented by the runtime clock",
+                request.labels.process
+            ))),
+        });
+    };
     let CliProcessRequest {
         command,
         prompt,
         correlation,
         decoder,
         terminal_text_capture,
-        exchange_timeout,
+        exchange_timeout: _,
         interrupt_grace,
         event_limit,
         stderr_limit,
@@ -276,13 +297,6 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 cause: UnsentCause::ConnectFailed(TransportFacts::new(error.to_string())),
             });
         }
-    };
-    let Some(deadline) = tokio::time::Instant::now().checked_add(exchange_timeout) else {
-        force_kill(&mut child).await;
-        return pre_exchange_transport_loss(format!(
-            "{} exchange timeout cannot be represented by the runtime clock",
-            labels.process
-        ));
     };
     let Some(mut stdin) = child.stdin.take() else {
         force_kill(&mut child).await;
@@ -1403,11 +1417,15 @@ fn pre_exchange_boundary_loss(cause: LossCause) -> TerminalEvidence {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundedOutput, CliProcessLabels, EnvironmentRejection, EnvironmentRejectionReason,
-        TRUNCATION_SUFFIX, absolute_credential_home, allowlisted_environment, read_bounded_line,
-        read_bounded_output, sanitized_stderr,
+        BoundedOutput, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
+        CliProcessRequest, CliSession, CliTerminalTextCapture, EnvironmentRejection,
+        EnvironmentRejectionReason, TRUNCATION_SUFFIX, absolute_credential_home,
+        allowlisted_environment, execute_cli_process, read_bounded_line, read_bounded_output,
+        sanitized_stderr,
     };
-    use crate::{REDACTED, RedactingSink};
+    use crate::{
+        CancellationSignal, LossCause, REDACTED, RedactingSink, TerminalEvidence, UnsentCause,
+    };
 
     const TEST_ENVIRONMENT_ALLOWLIST: &[&str] = &[
         "ALL_PROXY",
@@ -1428,6 +1446,142 @@ mod tests {
         decode_event: "Codex event",
         bounded_event: "Codex JSONL event",
     };
+
+    struct UnusedSession;
+
+    impl CliSession<u8> for UnusedSession {
+        fn terminal_observed(&self) -> bool {
+            false
+        }
+
+        fn push(
+            &mut self,
+            _line: &[u8],
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> Result<(), CliDecodeFailure> {
+            Ok(())
+        }
+
+        fn decode_failure(
+            self,
+            _class: CliDecodeFailureClass,
+            _detail: String,
+        ) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+
+        fn finish(self, _sink: &mut RedactingSink<'_, u8>) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+
+        fn boundary_loss(self, _cause: LossCause) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+
+        fn boundary_loss_unless_provider_failure(
+            self,
+            _cause: LossCause,
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+
+        fn provider_error_after_exit(
+            self,
+            _message: &str,
+            _classification: &str,
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+    }
+
+    fn unused_terminal_evidence() -> TerminalEvidence {
+        TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+            cause: UnsentCause::CancelledBeforeSend,
+        })
+    }
+
+    fn direct_request(
+        exchange_timeout: std::time::Duration,
+    ) -> CliProcessRequest<u8, UnusedSession> {
+        CliProcessRequest {
+            command: std::process::Command::new("signalbox-test-command-must-not-spawn"),
+            prompt: Vec::new(),
+            correlation: 7,
+            decoder: UnusedSession,
+            terminal_text_capture: CliTerminalTextCapture::Disabled,
+            exchange_timeout,
+            interrupt_grace: std::time::Duration::from_millis(1),
+            event_limit: 1_024,
+            stderr_limit: 1_024,
+            labels: TEST_LABELS,
+            environment_allowlist: &[],
+            credential_home_variables: &[],
+        }
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "cygwin",
+            target_os = "horizon",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "wasi"
+        ))
+    ))]
+    #[tokio::test]
+    async fn unrepresentable_public_deadline_is_rejected_before_send_or_spawn() {
+        let mut observed = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = execute_cli_process(
+            direct_request(std::time::Duration::MAX),
+            &mut observed,
+            &mut cancellation,
+        )
+        .await;
+
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(_),
+            })
+        ));
+        assert!(observed.is_empty());
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "cygwin",
+            target_os = "horizon",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "wasi"
+        ))
+    ))]
+    #[tokio::test]
+    async fn entry_cancellation_precedes_public_request_validation() {
+        let mut observed = Vec::new();
+        let mut cancellation = CancellationSignal::already_cancelled();
+
+        let evidence = execute_cli_process(
+            direct_request(std::time::Duration::MAX),
+            &mut observed,
+            &mut cancellation,
+        )
+        .await;
+
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::CancelledBeforeSend,
+            })
+        ));
+        assert!(observed.is_empty());
+    }
 
     #[test]
     fn stderr_is_sanitized_before_the_evidence_limit_is_applied() {

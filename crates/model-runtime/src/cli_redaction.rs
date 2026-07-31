@@ -2373,6 +2373,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         }
         let candidate = pending.candidate_starts_at_stored_origin();
         let unsafe_start = unsafe_stream_suffix_start(&pending.text);
+        let dirty = redact_text(&pending.text) != pending.text;
         match (candidate, unsafe_start) {
             (true, Some(_)) => {
                 // The original candidate continues to own every later suffix
@@ -2387,6 +2388,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                     split_stream_fragments(pending.fragments, pending.candidate_start);
                 self.emit_original(safe);
                 self.emit_redacted(redacted);
+            }
+            (false, Some(_)) if dirty => {
+                // The joined held text completed a credential before a nested
+                // unsafe suffix. Splitting at that suffix would detach the
+                // value and let it become a clean-looking terminal candidate.
+                // Claude's pre-lift sink failed closed over the joined
+                // fragments here; preserve that safer behavior.
+                self.emit_redacted(pending.fragments);
+                self.suppress_remaining();
             }
             (false, Some(unsafe_start)) => {
                 let (safe, unsafe_fragments) =
@@ -4425,6 +4435,14 @@ mod tests {
             "detail:'c",
             &format!("lient_secret': '{PLANTED_SYNTHETIC_SECRET}'"),
         );
+    }
+
+    /// Credential redaction: diagnostic prose split before a covered embedded member
+    /// cannot detach that member's value from the prefix the stateless scanner uses.
+    #[test]
+    fn credential_stream_redacts_an_embedded_member_after_a_split_diagnostic_prefix() {
+        let second = format!(r#"tail: "client_secret":"{PLANTED_SYNTHETIC_SECRET}""#);
+        assert_two_delta_split_redacts("de", &second);
     }
 
     /// The trailing credential context is the unsafe suffix; a clean-ending

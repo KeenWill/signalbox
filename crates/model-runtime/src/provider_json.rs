@@ -205,12 +205,14 @@ impl<'de> Visitor<'de> for DuplicateFreeVisitor<'_> {
     }
 }
 
-/// Reports whether valid or malformed provider JSON repeats an object member
-/// at any nesting depth.
+/// Reports whether a syntactically valid provider JSON value repeats an object
+/// member at any nesting depth.
 ///
-/// Other syntax failures remain the typed decoder's responsibility. This scan
-/// exists only to detect the ambiguity that serde's last-value-wins object
-/// projection would otherwise erase.
+/// Malformed input remains the typed decoder's responsibility and carries no
+/// duplicate-detection guarantee: parsing stops at the first syntax error, so
+/// a repeat after that point is not observed. This scan exists only to detect
+/// the ambiguity that serde's last-value-wins object projection would otherwise
+/// erase from valid input.
 pub fn provider_json_has_duplicate_members(text: &str) -> bool {
     let duplicate_found = Cell::new(false);
     let mut deserializer = serde_json::Deserializer::from_str(text);
@@ -294,5 +296,14 @@ mod tests {
         const PROVIDER_JSON: &str = r#"{"number":1e1000000,"event":"first","event":"second"}"#;
 
         assert!(provider_json_has_duplicate_members(PROVIDER_JSON));
+    }
+
+    #[test]
+    fn malformed_input_before_a_repeat_is_left_to_the_typed_decoder() {
+        const MALFORMED_PROVIDER_JSON: &str = r#"{"bad": tru, "dup": 1, "dup": 2}"#;
+
+        assert!(!provider_json_has_duplicate_members(
+            MALFORMED_PROVIDER_JSON
+        ));
     }
 }

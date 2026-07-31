@@ -140,7 +140,7 @@
 140 | REDACTED | runtime-substrate.md INV-035: structural close in a later delta cannot release a duplicate member.
 141 | REDACTED | runtime-substrate.md INV-035: a later duplicate member cannot release an earlier credential.
 142 | REDACTED | runtime-substrate.md INV-035: a malformed-prefix member split before its tail stays held.
-143 | KNOWN-FAILING | redaction.rs::delta_against_context: a quoted key after a released clean prefix is split from its value and released.
+143 | REDACTED | cli_redaction.rs::resolve_scanned_pending: a dirty joined prefix fails closed before its value can detach.
 144 | REDACTED | runtime-substrate.md INV-035: a truncated-log credential member split before its value stays held.
 145 | REDACTED | runtime-substrate.md INV-035: an escaped credential name split inside its escape stays held.
 146 | REDACTED | runtime-substrate.md INV-035: structural close after a balanced container cannot release a member.

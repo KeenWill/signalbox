@@ -9,11 +9,11 @@ const CLASSIFICATIONS: &str = include_str!("testdata/redaction-corpus.classifica
 const TWO_SPLIT_LEAK_LEDGER: &str = include_str!("testdata/redaction-two-split-leaks.txt");
 const SYNTHETIC_SECRET_MARKER: &str = "SYNTHETIC-SECRET";
 const CORPUS_LINE_COUNT: usize = 147;
-const EXPECTED_REDACTED_COUNT: usize = 118;
+const EXPECTED_REDACTED_COUNT: usize = 119;
 const EXPECTED_ACCEPTED_UNCOVERED_COUNT: usize = 28;
-const EXPECTED_KNOWN_FAILING_COUNT: usize = 1;
+const EXPECTED_KNOWN_FAILING_COUNT: usize = 0;
 /// The same defect ledger one delta deeper, recorded entry by entry below.
-const KNOWN_FAILING_TWO_SPLIT_CASES: usize = 1_095;
+const KNOWN_FAILING_TWO_SPLIT_CASES: usize = 168;
 /// The exact fragmentations that still leak, as `(corpus line, split)`.
 ///
 /// This is a defect ledger for shapes the contract COVERS and the sink leaks.
@@ -23,98 +23,7 @@ const KNOWN_FAILING_TWO_SPLIT_CASES: usize = 1_095;
 /// The match is exact in both directions. A split that appears and is not
 /// listed is a regression. A listed split that stops leaking is progress, and
 /// it must shrink this ledger rather than let it overstate the damage.
-const KNOWN_FAILING_SPLITS: [DivergentSplit; 30] = [
-    DivergentSplit { line: 79, split: 2 },
-    DivergentSplit { line: 79, split: 3 },
-    DivergentSplit { line: 79, split: 4 },
-    DivergentSplit { line: 79, split: 5 },
-    DivergentSplit { line: 79, split: 7 },
-    DivergentSplit { line: 83, split: 2 },
-    DivergentSplit { line: 83, split: 3 },
-    DivergentSplit { line: 83, split: 5 },
-    DivergentSplit { line: 83, split: 7 },
-    DivergentSplit { line: 83, split: 8 },
-    DivergentSplit {
-        line: 83,
-        split: 12,
-    },
-    DivergentSplit {
-        line: 83,
-        split: 15,
-    },
-    DivergentSplit {
-        line: 83,
-        split: 17,
-    },
-    DivergentSplit {
-        line: 83,
-        split: 18,
-    },
-    DivergentSplit {
-        line: 83,
-        split: 19,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 2,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 3,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 4,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 5,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 7,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 2,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 3,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 5,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 7,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 8,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 12,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 15,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 17,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 18,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 19,
-    },
-];
+const KNOWN_FAILING_SPLITS: [DivergentSplit; 0] = [];
 const CORRELATION: u8 = 7;
 const BOUNDARY_FRAGMENT: &str = "{}";
 const GENERATOR_SEED: u64 = 0x5eed_c0de_d15c_a11e;
@@ -137,13 +46,14 @@ const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 const ASCII_NOISE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
 /// Cases the original Claude engine redacted that were not represented by
 /// the Codex corpus, including its fail-closed control-character rule.
-const ORIGINAL_CLAUDE_REDACTION_CORPUS: [&str; 6] = [
+const ORIGINAL_CLAUDE_REDACTION_CORPUS: [&str; 7] = [
     "Authorization: SYNTHETIC-SECRET-CLAUDE-01",
     "api_key=SYNTHETIC-SECRET-CLAUDE-02",
     "api_\u{001b}[0mkey=SYNTHETIC-SECRET-CLAUDE-03",
     "api_\u{0007}key=SYNTHETIC-SECRET-CLAUDE-04",
     r#"{"text":"api_\u001b[0mkey=SYNTHETIC-SECRET-CLAUDE-05"}"#,
     "secret=SYNTHETIC-SECRET-CLAUDE-06",
+    r#"detail: "client_secret":"SYNTHETIC-SECRET-CLAUDE-07""#,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
