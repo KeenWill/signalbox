@@ -11,7 +11,10 @@ RESULT_BUNDLE_PATH="${SIGNALBOX_NATIVE_TEST_RESULT_BUNDLE_PATH:-$DERIVED_DATA_PA
 
 if [[ -n "${XCODE_DESTINATION:-}" ]]; then
 	DESTINATION="$XCODE_DESTINATION"
-	DEVICE_ID="$(simulator_resolve_iphone_ids "$MIN_IOS_VERSION" | head -n 1 || true)"
+	if simulator_destination_device_id "$XCODE_DESTINATION" >/dev/null ||
+		simulator_destination_device_name "$XCODE_DESTINATION" >/dev/null; then
+		DEVICE_ID="$(simulator_resolve_iphone_ids "$MIN_IOS_VERSION" | head -n 1 || true)"
+	fi
 else
 	DEVICE_ID="$(simulator_resolve_iphone_ids "$MIN_IOS_VERSION" | head -n 1)"
 
