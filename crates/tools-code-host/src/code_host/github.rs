@@ -47,16 +47,17 @@ const API_VERSION: &str = "2026-03-10";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
-// A standard contents entry can repeat a path in `name`, `path`, `target`,
-// four URL fields, and the three `_links` fields. Budget every occurrence at
-// the admitted path bound; the fixed allowance covers field syntax, hashes,
-// repository/ref material in URLs, and the enclosing object representation.
-const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 10;
+// A standard contents entry can repeat a path in `name`, `path`, four URL
+// fields, and the three `_links` fields. A symlink `target` is blob material,
+// so admit and budget it separately instead of treating it as a path.
+const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 9;
+const MAX_REPOSITORY_SYMLINK_TARGET_BYTES: usize = 4 * 1024;
 const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
 const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
     * (MAX_FILE_PATH_BYTES
         * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
         * MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY
+        + MAX_REPOSITORY_SYMLINK_TARGET_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
         + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
@@ -473,8 +474,12 @@ impl GitHubCodeHostTransport {
                 parse_repository_path_lookup(&value, path.as_str(), completeness)
             }
             StatusCode::NOT_FOUND => {
-                self.classify_missing_repository_path(repository, revision, credential)
-                    .await
+                if repository_contents_response_names_missing_revision(response, revision).await? {
+                    Ok(RepositoryPathLookup::RevisionNotFound)
+                } else {
+                    self.classify_missing_repository_path(repository, revision, credential)
+                        .await
+                }
             }
             status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
             _ => Err(CodeHostTransportFailure::DispatchUnknown),
@@ -493,17 +498,8 @@ impl GitHubCodeHostTransport {
             .await?;
         match response.status() {
             StatusCode::OK => Ok(RepositoryPathLookup::PathNotFound),
-            StatusCode::NOT_FOUND | StatusCode::CONFLICT => {
-                let url = self.repository_url(repository, &[], None)?;
-                let response = self
-                    .send_authenticated(Method::GET, url, None, credential)
-                    .await?;
-                match response.status() {
-                    StatusCode::OK => Ok(RepositoryPathLookup::RevisionNotFound),
-                    status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
-                    _ => Err(CodeHostTransportFailure::DispatchUnknown),
-                }
-            }
+            StatusCode::CONFLICT => Ok(RepositoryPathLookup::RevisionNotFound),
+            StatusCode::NOT_FOUND => Err(CodeHostTransportFailure::Rejected),
             status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
             _ => Err(CodeHostTransportFailure::DispatchUnknown),
         }
@@ -1592,6 +1588,30 @@ struct RepositoryFileBody {
     source_exhausted: bool,
 }
 
+async fn repository_contents_response_names_missing_revision(
+    response: Response,
+    revision: &super::CodeHostRevision,
+) -> Result<bool, CodeHostTransportFailure> {
+    let (body, completeness) =
+        read_bounded(response.bytes_stream(), MAX_JSON_RESPONSE_BYTES).await?;
+    if completeness == CodeHostResultCompleteness::Truncated {
+        return Err(CodeHostTransportFailure::ResponseTooLarge);
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return Ok(false);
+    };
+    let Some(message) = value
+        .as_object()
+        .and_then(|object| object.get("message"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(false);
+    };
+    Ok(message
+        .strip_prefix("No commit found for the ref ")
+        .is_some_and(|named_revision| named_revision == revision.as_str()))
+}
+
 async fn bounded_json_page(
     response: Response,
     expected: StatusCode,
@@ -1757,12 +1777,14 @@ fn parse_repository_directory_entry(
     if !is_immediate_repository_child(parent, &path) {
         return Err(CodeHostTransportFailure::InvalidResponse);
     }
-    RepositoryDirectoryEntry::try_new(
-        path,
-        parse_repository_object_kind(object)?,
-        omitted_optional_u64(object, "size")?,
-    )
-    .ok_or(CodeHostTransportFailure::InvalidResponse)
+    let kind = parse_repository_object_kind(object)?;
+    if kind == RepositoryObjectKind::Symlink
+        && required_string(object, "target")?.len() > MAX_REPOSITORY_SYMLINK_TARGET_BYTES
+    {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    RepositoryDirectoryEntry::try_new(path, kind, omitted_optional_u64(object, "size")?)
+        .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
 async fn select_repository_file_content<S, B, E>(
@@ -2594,6 +2616,8 @@ mod tests {
     const FILE_PATCH_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
     const REPOSITORY_REVISION: &str = "4444444444444444444444444444444444444444";
     const REPOSITORY_BLOB: &str = "5555555555555555555555555555555555555555";
+    const MISSING_REVISION_BODY: &[u8] =
+        br#"{"message":"No commit found for the ref 4444444444444444444444444444444444444444"}"#;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct FilePatchRevisionTransitionInput {
@@ -2732,31 +2756,14 @@ mod tests {
     async fn repository_missing_revision_is_typed_separately() {
         let (transport, listener) = repository_test_transport().await;
         let server = tokio::spawn(async move {
-            let path_request = serve_test_response(
+            serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
                     status: "404 Not Found",
-                    body: b"{}",
+                    body: MISSING_REVISION_BODY,
                 },
             )
-            .await;
-            let revision_request = serve_test_response(
-                &listener,
-                TestHttpResponse::Json {
-                    status: "404 Not Found",
-                    body: b"{}",
-                },
-            )
-            .await;
-            let repository_request = serve_test_response(
-                &listener,
-                TestHttpResponse::Json {
-                    status: "200 OK",
-                    body: b"{}",
-                },
-            )
-            .await;
-            [path_request, revision_request, repository_request]
+            .await
         });
         let arguments = repository_read_arguments("src/lib.rs", None);
         let result = transport
@@ -2774,14 +2781,11 @@ mod tests {
                 "truncated": false,
             })
         );
-        assert_eq!(
-            requests,
-            missing_revision_requests(arguments.path().as_str())
-        );
+        assert_eq!(requests, contents_request(arguments.path().as_str()));
     }
 
-    /// An empty visible repository returns a conflict for commit lookup but
-    /// still proves that the requested revision is absent.
+    /// An empty repository's commit probe returns the distinct conflict that
+    /// proves the requested revision is absent.
     #[tokio::test]
     async fn repository_empty_conflict_is_a_missing_revision_result() {
         let (transport, listener) = repository_test_transport().await;
@@ -2802,15 +2806,7 @@ mod tests {
                 },
             )
             .await;
-            let repository_request = serve_test_response(
-                &listener,
-                TestHttpResponse::Json {
-                    status: "200 OK",
-                    body: b"{}",
-                },
-            )
-            .await;
-            [path_request, revision_request, repository_request]
+            [path_request, revision_request]
         });
         let arguments = repository_read_arguments("src/lib.rs", None);
         let result = transport
@@ -2828,17 +2824,13 @@ mod tests {
                 "truncated": false,
             })
         );
-        assert_eq!(
-            requests,
-            missing_revision_requests(arguments.path().as_str())
-        );
+        assert_eq!(requests, missing_path_requests(arguments.path().as_str()));
     }
 
-    /// GitHub deliberately shares 404 across missing and inaccessible
-    /// repositories, so it cannot prove a revision absent without repository
-    /// visibility.
+    /// Metadata-only access leaves both content-bearing probes ambiguous, so a
+    /// generic 404 cannot prove revision absence.
     #[tokio::test]
-    async fn repository_inaccessible_request_is_not_a_missing_revision_result() {
+    async fn repository_metadata_only_access_is_not_a_missing_revision_result() {
         let (transport, listener) = repository_test_transport().await;
         let server = tokio::spawn(async move {
             let path_request = serve_test_response(
@@ -2857,15 +2849,7 @@ mod tests {
                 },
             )
             .await;
-            let repository_request = serve_test_response(
-                &listener,
-                TestHttpResponse::Json {
-                    status: "404 Not Found",
-                    body: b"{}",
-                },
-            )
-            .await;
-            [path_request, revision_request, repository_request]
+            [path_request, revision_request]
         });
         let failure = transport
             .repository_read_file(
@@ -2873,11 +2857,11 @@ mod tests {
                 &test_credential(),
             )
             .await
-            .expect_err("an inaccessible repository cannot prove revision absence");
+            .expect_err("metadata-only access cannot prove revision absence");
         let requests = repository_server_result(server).await;
 
         assert_eq!(failure, CodeHostTransportFailure::Rejected);
-        assert_eq!(requests, missing_revision_requests("src/lib.rs"));
+        assert_eq!(requests, missing_path_requests("src/lib.rs"));
     }
 
     /// A definitive host rejection remains failed execution rather than being
@@ -3356,6 +3340,25 @@ mod tests {
         );
     }
 
+    /// A symlink target is admitted under its own byte bound rather than being
+    /// silently charged as a repository path.
+    #[test]
+    fn repository_directory_rejects_symlink_target_over_ingress_bound() {
+        let value = repository_directory_value(
+            "src",
+            vec![serde_json::json!({
+                "path": "src/link",
+                "target": "x".repeat(MAX_REPOSITORY_SYMLINK_TARGET_BYTES + 1),
+                "type": "symlink",
+            })],
+        );
+
+        assert_eq!(
+            parse_repository_path_lookup(&value, "src", CodeHostResultCompleteness::Complete,),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
     /// A complete standard contents-entry shape can repeat every admitted
     /// escaped path and still reach bounded projection.
     #[tokio::test]
@@ -3605,16 +3608,6 @@ mod tests {
             format!(
                 "GET /repos/{FILE_PATCH_REPOSITORY}/git/commits/{REPOSITORY_REVISION} HTTP/1.1"
             ),
-        ]
-    }
-
-    fn missing_revision_requests(path: &str) -> [String; 3] {
-        [
-            contents_request(path),
-            format!(
-                "GET /repos/{FILE_PATCH_REPOSITORY}/git/commits/{REPOSITORY_REVISION} HTTP/1.1"
-            ),
-            format!("GET /repos/{FILE_PATCH_REPOSITORY} HTTP/1.1"),
         ]
     }
 
