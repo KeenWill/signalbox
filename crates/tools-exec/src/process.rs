@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -6,11 +8,6 @@ use std::{
     future::Future,
     path::{Component, Path, PathBuf},
     process::Stdio,
-    sync::{
-        Arc, Mutex, OnceLock, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread::JoinHandle,
     time::Duration,
 };
 
@@ -26,6 +23,8 @@ use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
 use tokio::{io::AsyncReadExt, process::Command};
+
+use crate::supervisor_protocol::{SupervisorSpawnFailure, SupervisorStatus};
 
 pub const SANDBOXED_EXEC_NAME: &str = "sandboxed_exec";
 pub const UNSANDBOXED_EXEC_NAME: &str = "unsandboxed_exec";
@@ -45,7 +44,11 @@ const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
-const SANDBOX_DISPATCH_SHELL: &str = "if command -v \"$1\" >/dev/null 2>&1 && [ -x \"$(command -v \"$1\")\" ]; then printf 'signalbox-exec:dispatched\\n' >&2; exec \"$@\"; fi; exit 127";
+#[cfg(target_os = "linux")]
+const SUPERVISOR_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
+#[cfg(target_os = "linux")]
+const SUPERVISOR_STATUS_TAIL_BYTES: usize = 1024;
+const SANDBOX_DISPATCH_SHELL: &str = "program=$1; shift; case $program in */*) target=$program ;; *) target=; old_ifs=$IFS; IFS=:; for directory in $PATH; do candidate=$directory/$program; if [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then target=$candidate; break; fi; done; IFS=$old_ifs ;; esac; if [ -z \"$target\" ] || [ ! -f \"$target\" ] || [ ! -x \"$target\" ]; then exit 127; fi; printf 'signalbox-exec:dispatched\\n' >&2; exec \"$target\" \"$@\"";
 
 fn default_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
@@ -435,7 +438,7 @@ pub trait ProcessRunner: Clone + Send {
     fn run(&mut self, request: ProcessRequest) -> impl Future<Output = ProcessRunResult> + Send;
 }
 
-/// Production Tokio process runner with Linux descendant adoption and reaping.
+/// Production Tokio process runner using an isolated Linux supervisor process.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TokioProcessRunner;
 
@@ -464,6 +467,8 @@ impl ProcessRunner for TokioProcessRunner {
 pub struct SandboxedCommandRunner<Runner> {
     runner: Runner,
     workspace_root: PathBuf,
+    #[cfg(target_os = "linux")]
+    workspace_identity: WorkspaceIdentity,
 }
 
 impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
@@ -472,9 +477,12 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         runner: Runner,
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         Ok(Self {
             runner,
-            workspace_root: canonical_workspace_root(workspace_root.as_ref())?,
+            #[cfg(target_os = "linux")]
+            workspace_identity: WorkspaceIdentity::capture(&workspace_root)?,
+            workspace_root,
         })
     }
 
@@ -492,6 +500,17 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         arguments: ExecArguments,
         capture_bytes: usize,
     ) -> ExecResult {
+        #[cfg(target_os = "linux")]
+        if !self.workspace_identity.matches(&self.workspace_root) {
+            return ExecResult {
+                confinement: ExecutionConfinement::SandboxSetupFailed,
+                outcome: ProcessOutcome::SpawnFailed {
+                    reason: ProcessSpawnFailure::SandboxSetup,
+                },
+                stdout: OutputCapture::empty(),
+                stderr: OutputCapture::empty(),
+            };
+        }
         let probe_program = sandbox_shell(&self.workspace_root)
             .to_string_lossy()
             .into_owned();
@@ -506,6 +525,17 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         let availability = self.runner.bwrap_availability(probe).await;
         match availability {
             BwrapAvailability::Available => {
+                #[cfg(target_os = "linux")]
+                if !self.workspace_identity.matches(&self.workspace_root) {
+                    return ExecResult {
+                        confinement: ExecutionConfinement::SandboxSetupFailed,
+                        outcome: ProcessOutcome::SpawnFailed {
+                            reason: ProcessSpawnFailure::SandboxSetup,
+                        },
+                        stdout: OutputCapture::empty(),
+                        stderr: OutputCapture::empty(),
+                    };
+                }
                 let request = bwrap_request(
                     &self.workspace_root,
                     &arguments.program,
@@ -525,6 +555,37 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 stderr: OutputCapture::empty(),
             },
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug)]
+struct WorkspaceIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl WorkspaceIdentity {
+    fn capture(path: &Path) -> Result<Self, ExecToolConstructionError> {
+        let metadata =
+            path.metadata()
+                .map_err(|source| ExecToolConstructionError::WorkspaceRoot {
+                    path: path.to_owned(),
+                    source: Some(source),
+                })?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn matches(self, path: &Path) -> bool {
+        path.symlink_metadata().is_ok_and(|metadata| {
+            metadata.file_type().is_dir()
+                && metadata.dev() == self.device
+                && metadata.ino() == self.inode
+        })
     }
 }
 
@@ -699,11 +760,13 @@ fn sandbox_path(workspace_root: &Path) -> OsString {
             SANDBOX_FALLBACK_PATH,
         )))
     {
-        if trusted_sandbox_path(&path, workspace_root) && seen.insert(path.clone()) {
-            components.push(path);
+        if let Some(canonical) = trusted_sandbox_path(&path, workspace_root)
+            && seen.insert(canonical.clone())
+        {
+            components.push(canonical);
         }
     }
-    std::env::join_paths(components).unwrap_or_else(|_| OsString::from(SANDBOX_FALLBACK_PATH))
+    std::env::join_paths(components).unwrap_or_default()
 }
 
 fn sandbox_shell(workspace_root: &Path) -> PathBuf {
@@ -713,19 +776,20 @@ fn sandbox_shell(workspace_root: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
 
-fn trusted_sandbox_path(path: &Path, workspace_root: &Path) -> bool {
-    path.is_absolute()
-        && !path.starts_with(workspace_root)
-        && [
-            Path::new("/bin"),
-            Path::new("/nix/store"),
-            Path::new("/nix/var/nix/profiles/default"),
-            Path::new("/run/current-system/sw"),
-            Path::new("/sbin"),
-            Path::new("/usr"),
-        ]
-        .into_iter()
-        .any(|trusted_root| path.starts_with(trusted_root))
+fn trusted_sandbox_path(path: &Path, workspace_root: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    let trusted = [
+        Path::new("/bin"),
+        Path::new("/nix/store"),
+        Path::new("/nix/var/nix/profiles/default"),
+        Path::new("/run/current-system/sw"),
+        Path::new("/sbin"),
+        Path::new("/usr"),
+    ]
+    .into_iter()
+    .filter_map(|trusted_root| trusted_root.canonicalize().ok())
+    .any(|trusted_root| canonical.starts_with(trusted_root));
+    (canonical.is_dir() && !canonical.starts_with(workspace_root) && trusted).then_some(canonical)
 }
 
 /// Structured result returned by either direct-command tool.
@@ -882,8 +946,17 @@ fn process_result(confinement: ExecutionConfinement, result: ProcessRunResult) -
 }
 
 fn sandbox_process_result(mut result: ProcessRunResult) -> ExecResult {
+    let dispatched = result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER)
+        && !matches!(
+            result.outcome,
+            ProcessOutcome::Exited {
+                code: Some(126 | 127)
+            }
+        );
     if result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER) {
         result.stderr.bytes.drain(..SANDBOX_DISPATCH_MARKER.len());
+    }
+    if dispatched {
         return process_result(ExecutionConfinement::FilesystemConfined, result);
     }
     ExecResult {
@@ -940,6 +1013,56 @@ async fn read_bounded(
     })
 }
 
+#[cfg(target_os = "linux")]
+async fn read_supervised_stdout(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    limit: usize,
+) -> std::io::Result<(BoundedBytes, SupervisorStatus)> {
+    let mut retained = Vec::with_capacity(limit);
+    let mut tail = Vec::with_capacity(SUPERVISOR_STATUS_TAIL_BYTES);
+    let mut buffer = [0_u8; 8192];
+    let mut total_bytes = 0_usize;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(read);
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..remaining.min(read)]);
+        tail.extend_from_slice(&buffer[..read]);
+        if tail.len() > SUPERVISOR_STATUS_TAIL_BYTES {
+            tail.drain(..tail.len() - SUPERVISOR_STATUS_TAIL_BYTES);
+        }
+    }
+    if tail.last() != Some(&b'\n') {
+        return Err(std::io::Error::other(
+            "supervisor status trailer is malformed",
+        ));
+    }
+    let marker = tail
+        .windows(SUPERVISOR_STATUS_TRAILER.len())
+        .rposition(|window| window == SUPERVISOR_STATUS_TRAILER)
+        .ok_or_else(|| std::io::Error::other("supervisor status trailer is missing"))?;
+    let encoded = &tail[marker + SUPERVISOR_STATUS_TRAILER.len()..tail.len() - 1];
+    let status = serde_json::from_slice(encoded)
+        .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
+    let trailer_bytes = tail.len() - marker;
+    let output_bytes = total_bytes.saturating_sub(trailer_bytes);
+    retained.truncate(output_bytes.min(limit));
+    Ok((
+        BoundedBytes {
+            bytes: retained,
+            completeness: if output_bytes > limit {
+                CaptureCompleteness::Truncated
+            } else {
+                CaptureCompleteness::Complete
+            },
+        },
+        status,
+    ))
+}
+
 async fn run_process(request: ProcessRequest) -> ProcessRunResult {
     #[cfg(not(target_os = "linux"))]
     {
@@ -955,30 +1078,22 @@ async fn run_process(request: ProcessRequest) -> ProcessRunResult {
 }
 
 #[cfg(target_os = "linux")]
-static PROCESS_RUN_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-
-#[cfg(target_os = "linux")]
 async fn run_process_linux(request: ProcessRequest) -> ProcessRunResult {
-    let _run_guard = PROCESS_RUN_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-    if rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT)).is_err() {
+    let Some(supervisor) = supervisor_program() else {
         return empty_process_result(ProcessOutcome::SpawnFailed {
             reason: ProcessSpawnFailure::ProcessTreeUnsupported,
         });
-    }
-    let supervisor = std::process::id();
-    let baseline_children = direct_children(supervisor);
-    let mut command = Command::new(&request.program);
+    };
+    let timeout_milliseconds = request.timeout.as_millis().min(u128::from(u64::MAX));
+    let mut command = Command::new(supervisor);
     command
+        .arg(timeout_milliseconds.to_string())
+        .arg(&request.program)
         .args(&request.arguments)
         .current_dir(&request.working_directory)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0);
+        .stderr(Stdio::piped());
     if request.environment_inheritance == ProcessEnvironment::Clear {
         command.env_clear();
     }
@@ -987,13 +1102,18 @@ async fn run_process_linux(request: ProcessRequest) -> ProcessRunResult {
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => return empty_process_result(spawn_failure(error)),
+        Err(_) => {
+            return empty_process_result(ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::ProcessTreeUnsupported,
+            });
+        }
     };
-    let mut process_tree = ProcessTreeGuard::new(child.id(), supervisor, baseline_children);
+    let control = child.stdin.take();
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            kill_and_reap(&mut child, &mut process_tree).await;
+            drop(control);
+            let _ = child.wait().await;
             return empty_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stdout,
             });
@@ -1002,29 +1122,36 @@ async fn run_process_linux(request: ProcessRequest) -> ProcessRunResult {
     let stderr = match child.stderr.take() {
         Some(stderr) => stderr,
         None => {
-            kill_and_reap(&mut child, &mut process_tree).await;
+            drop(control);
+            let _ = child.wait().await;
             return empty_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stderr,
             });
         }
     };
-    let stdout_task = tokio::spawn(read_bounded(stdout, request.capture_bytes));
+    let stdout_task = tokio::spawn(read_supervised_stdout(stdout, request.capture_bytes));
     let stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
-    let outcome = match tokio::time::timeout(request.timeout, child.wait()).await {
-        Ok(Ok(status)) => ProcessOutcome::Exited {
-            code: status.code(),
-        },
-        Ok(Err(_)) => ProcessOutcome::SupervisionFailed {
+    let outer_deadline = request.timeout.saturating_add(Duration::from_secs(2));
+    let waited = tokio::time::timeout(outer_deadline, child.wait()).await;
+    drop(control);
+    let wait_failure = match waited {
+        Ok(Ok(_)) => None,
+        Ok(Err(_)) => Some(ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Wait,
-        },
-        Err(_) => ProcessOutcome::TimedOut,
+        }),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Some(ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            })
+        }
     };
-    kill_and_reap(&mut child, &mut process_tree).await;
     let stdout = stdout_task.await;
     let stderr = stderr_task.await;
     match (stdout, stderr) {
-        (Ok(Ok(stdout)), Ok(Ok(stderr))) => ProcessRunResult {
-            outcome,
+        (Ok(Ok((stdout, status))), Ok(Ok(stderr))) => ProcessRunResult {
+            outcome: wait_failure.unwrap_or_else(|| supervisor_outcome(status)),
             stdout: ProcessOutput {
                 bytes: stdout.bytes,
                 completeness: stdout.completeness,
@@ -1044,205 +1171,43 @@ async fn run_process_linux(request: ProcessRequest) -> ProcessRunResult {
 }
 
 #[cfg(target_os = "linux")]
-async fn kill_and_reap(child: &mut tokio::process::Child, process_tree: &mut ProcessTreeGuard) {
-    process_tree.kill_all();
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    process_tree.finish();
-}
-
-#[cfg(target_os = "linux")]
-struct ProcessTreeGuard {
-    root: u32,
-    supervisor: u32,
-    baseline_children: BTreeSet<u32>,
-    descendants: Arc<Mutex<BTreeMap<u32, rustix::fd::OwnedFd>>>,
-    stop: Arc<AtomicBool>,
-    watcher: Option<JoinHandle<()>>,
-    armed: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl ProcessTreeGuard {
-    fn new(root: Option<u32>, supervisor: u32, baseline_children: BTreeSet<u32>) -> Self {
-        let root = root.unwrap_or_default();
-        let descendants = Arc::new(Mutex::new(BTreeMap::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let watcher_descendants = Arc::clone(&descendants);
-        let watcher_stop = Arc::clone(&stop);
-        let watcher_baseline = baseline_children.clone();
-        let watcher = std::thread::spawn(move || {
-            while !watcher_stop.load(Ordering::Acquire) {
-                observe_descendants(root, supervisor, &watcher_baseline, &watcher_descendants);
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        });
-        Self {
-            root,
-            supervisor,
-            baseline_children,
-            descendants,
-            stop,
-            watcher: Some(watcher),
-            armed: true,
-        }
-    }
-
-    fn kill_all(&mut self) {
-        self.stop_watcher();
-        observe_descendants(
-            self.root,
-            self.supervisor,
-            &self.baseline_children,
-            &self.descendants,
-        );
-        kill_process_group(Some(self.root));
-        let descendants = self
-            .descendants
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        for pidfd in descendants.values() {
-            let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
-        }
-    }
-
-    fn finish(&mut self) {
-        self.kill_all();
-        reap_descendants(&self.descendants);
-        self.armed = false;
-    }
-
-    fn stop_watcher(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(watcher) = self.watcher.take() {
-            let _ = watcher.join();
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for ProcessTreeGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            self.kill_all();
-            reap_descendants(&self.descendants);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn kill_process_group(process_group: Option<u32>) {
-    if let Some(pid) =
-        process_group.and_then(|raw_pid| rustix::process::Pid::from_raw(raw_pid as i32))
-    {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn observe_descendants(
-    root: u32,
-    supervisor: u32,
-    baseline_children: &BTreeSet<u32>,
-    descendants: &Arc<Mutex<BTreeMap<u32, rustix::fd::OwnedFd>>>,
-) {
-    let process_table = process_table();
-    let mut known = descendants
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .keys()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    known.insert(root);
-    loop {
-        let before = known.len();
-        for (pid, parent) in &process_table {
-            let adopted = *parent == supervisor && *pid != root && !baseline_children.contains(pid);
-            if known.contains(parent) || adopted {
-                known.insert(*pid);
-            }
-        }
-        if known.len() == before {
-            break;
-        }
-    }
-    known.remove(&root);
-    let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
-    for raw_pid in known {
-        if tracked.contains_key(&raw_pid) {
-            continue;
-        }
-        let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) else {
-            continue;
-        };
-        if let Ok(pidfd) = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
-            tracked.insert(raw_pid, pidfd);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn process_table() -> Vec<(u32, u32)> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
-        .filter_map(|pid| process_parent(pid).map(|parent| (pid, parent)))
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn process_parent(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(") ")?
-        .1
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
-}
-
-#[cfg(target_os = "linux")]
-fn direct_children(parent: u32) -> BTreeSet<u32> {
-    process_table()
+fn supervisor_program() -> Option<PathBuf> {
+    let current = std::env::current_exe().ok()?;
+    let directory = current.parent()?;
+    let beside_current = directory.join("signalbox-exec-supervisor");
+    let beside_target = directory
+        .file_name()
+        .is_some_and(|name| name == "deps")
+        .then(|| directory.parent())
+        .flatten()
+        .map(|parent| parent.join("signalbox-exec-supervisor"));
+    [Some(beside_current), beside_target]
         .into_iter()
-        .filter_map(|(pid, observed_parent)| (observed_parent == parent).then_some(pid))
-        .collect()
+        .flatten()
+        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(target_os = "linux")]
-fn reap_descendants(descendants: &Arc<Mutex<BTreeMap<u32, rustix::fd::OwnedFd>>>) {
-    let pids = descendants
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .keys()
-        .copied()
-        .collect::<Vec<_>>();
-    for _ in 0..1000 {
-        let mut remaining = false;
-        for raw_pid in &pids {
-            let Some(pid) = rustix::process::Pid::from_raw(*raw_pid as i32) else {
-                continue;
-            };
-            let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
-            remaining |= std::path::Path::new(&format!("/proc/{raw_pid}")).exists();
+fn supervisor_outcome(status: SupervisorStatus) -> ProcessOutcome {
+    match status {
+        SupervisorStatus::Exited { code } => ProcessOutcome::Exited { code },
+        SupervisorStatus::TimedOut => ProcessOutcome::TimedOut,
+        SupervisorStatus::SpawnFailed { reason } => ProcessOutcome::SpawnFailed {
+            reason: match reason {
+                SupervisorSpawnFailure::NotFound => ProcessSpawnFailure::NotFound,
+                SupervisorSpawnFailure::PermissionDenied => ProcessSpawnFailure::PermissionDenied,
+                SupervisorSpawnFailure::ProcessTreeUnsupported => {
+                    ProcessSpawnFailure::ProcessTreeUnsupported
+                }
+                SupervisorSpawnFailure::Other => ProcessSpawnFailure::Other,
+            },
+        },
+        SupervisorStatus::Cancelled | SupervisorStatus::SupervisionFailed => {
+            ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            }
         }
-        if !remaining {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(1));
     }
-}
-
-fn spawn_failure(error: std::io::Error) -> ProcessOutcome {
-    let reason = match error.kind() {
-        std::io::ErrorKind::NotFound => ProcessSpawnFailure::NotFound,
-        std::io::ErrorKind::PermissionDenied => ProcessSpawnFailure::PermissionDenied,
-        _ => ProcessSpawnFailure::Other,
-    };
-    ProcessOutcome::SpawnFailed { reason }
 }
 
 fn empty_process_result(outcome: ProcessOutcome) -> ProcessRunResult {
@@ -1268,6 +1233,40 @@ mod tests {
     use super::*;
 
     const SANDBOXED_STDOUT: &str = "checked";
+    const SANDBOXED_WORKING_DIRECTORY: &str = "crate";
+
+    struct ReplacementWorkspace {
+        path: PathBuf,
+        retired: PathBuf,
+    }
+
+    impl ReplacementWorkspace {
+        fn new() -> Result<Self, std::io::Error> {
+            let identity = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(std::io::Error::other)?
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "signalbox-exec-workspace-{}-{identity}",
+                std::process::id()
+            ));
+            let retired = path.with_extension("retired");
+            std::fs::create_dir(&path)?;
+            Ok(Self { path, retired })
+        }
+
+        fn replace(&self) -> Result<(), std::io::Error> {
+            std::fs::rename(&self.path, &self.retired)?;
+            std::fs::create_dir(&self.path)
+        }
+    }
+
+    impl Drop for ReplacementWorkspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+            let _ = std::fs::remove_dir_all(&self.retired);
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct FakeRunner {
@@ -1454,7 +1453,7 @@ mod tests {
         let arguments = ExecArguments {
             program: String::from("cargo"),
             arguments: vec![String::from("check")],
-            working_directory: String::from("crate"),
+            working_directory: String::from(SANDBOXED_WORKING_DIRECTORY),
             timeout_seconds: 30,
         };
 
@@ -1474,7 +1473,7 @@ mod tests {
         ];
         let chdir_arguments = [
             OsString::from("--chdir"),
-            OsString::from("/workspace/crate"),
+            OsString::from(format!("{SANDBOX_WORKSPACE}/{SANDBOXED_WORKING_DIRECTORY}")),
         ];
 
         assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
@@ -1484,7 +1483,6 @@ mod tests {
                 .arguments
                 .contains(&sandbox_shell(&root).into_os_string())
         );
-        assert!(!probe.arguments.contains(&OsString::from("/bin/true")));
         assert_eq!(request.environment_inheritance, ProcessEnvironment::Clear);
         assert_eq!(
             request.environment.get(&OsString::from("PATH")),
@@ -1506,6 +1504,39 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_runner_refuses_replaced_workspace_before_probe() -> Result<(), Box<dyn Error>>
+    {
+        let workspace = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, &workspace.path)?;
+        workspace.replace()?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            }
+        );
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn sandbox_wrapper_failure_is_typed_without_claiming_confinement()
     -> Result<(), Box<dyn Error>> {
@@ -1519,7 +1550,7 @@ mod tests {
                     completeness: CaptureCompleteness::Complete,
                 },
                 stderr: ProcessOutput {
-                    bytes: b"target missing".to_vec(),
+                    bytes: [SANDBOX_DISPATCH_MARKER, b"target missing"].concat(),
                     completeness: CaptureCompleteness::Complete,
                 },
             },

@@ -18,8 +18,14 @@
 //! A full profile providing both is a blocking condition before these tools may
 //! execute untrusted code. Shell sessions and PTYs are likewise outside this
 //! crate's contract.
+//!
+//! The real-bubblewrap containment check is an ignored integration test so
+//! unsupported hosts remain explicit at collection time. Run it with
+//! `cargo test -p signalbox-tools-exec --test bwrap -- --ignored` on a host
+//! where `/usr/bin/bwrap` can create the configured namespaces.
 
 mod process;
+mod supervisor_protocol;
 
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
