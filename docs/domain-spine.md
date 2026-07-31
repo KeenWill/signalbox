@@ -4774,7 +4774,6 @@ pub enum ModelCallExecutionOutcome {
     NoWork,
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
-    PendingSteering { accepted_input: AcceptedInputId },
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
     CapabilityFailureAlreadyCommitted(ModelCallId),
     ObservationCommitted(Box<ModelCallTerminalOutcome>),

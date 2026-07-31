@@ -29,14 +29,16 @@ operation was verified through PR #286 (`agent/session-system-prompt`).
 Provider-reported token evidence retention and exact commit-ambiguity comparison
 were verified through PR #301 (`agent/token-usage`); the empty-thinking
 completion rule was verified through PR #305 (`agent/sonnet-streamed-tool-use`).
-The context-summary projection and dedicated compaction-call evidence were
-verified through PR #312 (`agent/context-compaction-core`); the explicit
-trigger, pre-activation context guard, configured prompt, and provider-native
-input counting were verified through PR #314
-(`agent/context-compaction-protocol`). The runner-placement rendering and
-executable session-tool snapshot paragraphs are the foundation proposal at the
-bottom of their implementing stack and become verified only with those child
-pull requests. Invariant tags cite [docs/invariants.md](../invariants.md).
+The crate-shared commit-ambiguity helper home was verified against this PR
+(`agent/domain-cleanup`). The context-summary projection and dedicated
+compaction-call evidence were verified through PR #312
+(`agent/context-compaction-core`); the explicit trigger, pre-activation context
+guard, configured prompt, and provider-native input counting were verified
+through PR #314 (`agent/context-compaction-protocol`). The runner-placement
+rendering and executable session-tool snapshot paragraphs are the foundation
+proposal at the bottom of their implementing stack and become verified only with
+those child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -443,9 +445,9 @@ unique-violation rollback is the one failure that guarantees the transaction had
 no effect, so retrying it cannot duplicate anything.
 
 Commit ambiguity has an explicit detection rule (`commit_failure_is_ambiguous`,
-`crates/persistence/src/model_execution.rs`): a database error with SQLSTATE
-08007 or 40003, or any non-database error while awaiting `COMMIT`, is ambiguous;
-a server-rejected commit is a plain non-ambiguous failure. The identity
+`crates/persistence/src/lib.rs`): a database error with SQLSTATE 08007 or 40003,
+or any non-database error while awaiting `COMMIT`, is ambiguous; a
+server-rejected commit is a plain non-ambiguous failure. The identity
 constraints are immediate, so their unique violations surface during statement
 execution. `ModelCallRepositoryError::from_database` checks those named
 constraint violations before generic database or commit-ambiguity
