@@ -492,10 +492,13 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         arguments: ExecArguments,
         capture_bytes: usize,
     ) -> ExecResult {
+        let probe_program = sandbox_shell(&self.workspace_root)
+            .to_string_lossy()
+            .into_owned();
         let probe = bwrap_request(
             &self.workspace_root,
-            "/bin/true",
-            &[],
+            &probe_program,
+            &[String::from("-c"), String::from("exit 0")],
             ".",
             Duration::from_secs(5),
             8 * 1024,
@@ -662,7 +665,7 @@ fn bwrap_request(
         OsString::from("HOME"),
         OsString::from(SANDBOX_WORKSPACE),
         OsString::from("--"),
-        OsString::from("/bin/sh"),
+        sandbox_shell(root).into_os_string(),
         OsString::from("-c"),
         OsString::from(SANDBOX_DISPATCH_SHELL),
         OsString::from("signalbox-exec"),
@@ -701,6 +704,13 @@ fn sandbox_path(workspace_root: &Path) -> OsString {
         }
     }
     std::env::join_paths(components).unwrap_or_else(|_| OsString::from(SANDBOX_FALLBACK_PATH))
+}
+
+fn sandbox_shell(workspace_root: &Path) -> PathBuf {
+    std::env::split_paths(&sandbox_path(workspace_root))
+        .map(|directory| directory.join("sh"))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
 
 fn trusted_sandbox_path(path: &Path, workspace_root: &Path) -> bool {
@@ -1263,6 +1273,7 @@ mod tests {
     struct FakeRunner {
         availability: BwrapAvailability,
         results: Arc<Mutex<Vec<ProcessRunResult>>>,
+        probes: Arc<Mutex<Vec<ProcessRequest>>>,
         requests: Arc<Mutex<Vec<ProcessRequest>>>,
     }
 
@@ -1271,6 +1282,7 @@ mod tests {
             Self {
                 availability,
                 results: Arc::new(Mutex::new(vec![result])),
+                probes: Arc::new(Mutex::new(Vec::new())),
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -1281,10 +1293,21 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
         }
+
+        fn recorded_probes(&self) -> Vec<ProcessRequest> {
+            self.probes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
     }
 
     impl ProcessRunner for FakeRunner {
-        async fn bwrap_availability(&mut self, _probe: ProcessRequest) -> BwrapAvailability {
+        async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
+            self.probes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(probe);
             self.availability
         }
 
@@ -1437,9 +1460,13 @@ mod tests {
 
         let result = command_runner.execute(arguments).await;
         let requests = observation.recorded_requests();
+        let probes = observation.recorded_probes();
         let request = requests
             .first()
             .ok_or_else(|| std::io::Error::other("one requested process"))?;
+        let probe = probes
+            .first()
+            .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
         let bind_arguments = [
             OsString::from("--bind"),
             root.as_os_str().to_owned(),
@@ -1451,6 +1478,13 @@ mod tests {
         ];
 
         assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
+        assert_eq!(probe.program, OsString::from(BWRAP_PROGRAM));
+        assert!(
+            probe
+                .arguments
+                .contains(&sandbox_shell(&root).into_os_string())
+        );
+        assert!(!probe.arguments.contains(&OsString::from("/bin/true")));
         assert_eq!(request.environment_inheritance, ProcessEnvironment::Clear);
         assert_eq!(
             request.environment.get(&OsString::from("PATH")),
