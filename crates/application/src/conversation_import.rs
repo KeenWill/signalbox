@@ -53,6 +53,74 @@ pub trait ImportedConversationConverter {
         NextEntryId: FnMut() -> ImportedTranscriptEntryId;
 }
 
+/// One physical source record that a resilient converter did not import.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedConversationSkippedRecord<Failure> {
+    source_line: u64,
+    failure: Failure,
+}
+
+impl<Failure> ImportedConversationSkippedRecord<Failure> {
+    /// Records one typed failure at its one-based physical source line.
+    pub const fn new(source_line: u64, failure: Failure) -> Self {
+        Self {
+            source_line,
+            failure,
+        }
+    }
+
+    /// Returns the one-based physical source line that was skipped.
+    pub const fn source_line(&self) -> u64 {
+        self.source_line
+    }
+
+    /// Borrows the typed reason the record was skipped.
+    pub const fn failure(&self) -> &Failure {
+        &self.failure
+    }
+
+    /// Returns the physical source line and typed failure.
+    pub fn into_parts(self) -> (u64, Failure) {
+        (self.source_line, self.failure)
+    }
+}
+
+/// Checked accepted records together with every rejected physical record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImportedConversationConversionReport<Failure> {
+    /// At least one record converted into the checked aggregate.
+    Converted {
+        /// Aggregate containing only accepted records in physical order.
+        conversation: ImportedConversation,
+        /// Every rejected record in physical source order.
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    /// Every physical source record failed record-local validation.
+    NoValidRecords {
+        /// Every rejected record in physical source order.
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+}
+
+/// Opt-in record-resilient extension of the strict converter seam.
+pub trait ResilientImportedConversationConverter: ImportedConversationConverter {
+    /// Typed reason one physical record was skipped.
+    type RecordFailure;
+
+    /// Converts every valid physical record and reports every rejected record.
+    ///
+    /// Record-local failures do not consume entry identities. Failures that
+    /// prevent a checked aggregate or an exact report remain outer errors.
+    fn convert_resilient<NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: &[u8],
+        next_entry_id: NextEntryId,
+    ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
+    where
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId;
+}
+
 /// Checked result of one append-only store resolution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportedConversationStoreOutcome {
@@ -128,6 +196,23 @@ impl ImportConversationOutcome {
             }
         }
     }
+}
+
+/// Record-resilient import outcome and every rejected physical source record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImportConversationReport<Failure> {
+    /// At least one accepted record was durably resolved or inserted.
+    Imported {
+        /// Durable outcome for the checked accepted-record aggregate.
+        outcome: ImportConversationOutcome,
+        /// Every rejected record in physical source order.
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    /// Every physical source record failed record-local validation.
+    NoValidRecords {
+        /// Every rejected record in physical source order.
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
 }
 
 /// Conversation-ingestion orchestration failure.
@@ -318,6 +403,99 @@ where
     }
 }
 
+impl<Generator, Converter, Store> ImportConversationService<Generator, Converter, Store>
+where
+    Generator: ImportedConversationIdGenerator,
+    Converter: ResilientImportedConversationConverter,
+    Store: ImportedConversationStore,
+{
+    /// Converts valid records, reports rejected records, and stores at most one aggregate.
+    pub async fn execute_resilient(
+        &mut self,
+        source: &[u8],
+    ) -> Result<
+        ImportConversationReport<Converter::RecordFailure>,
+        ImportConversationError<Converter::Error, Store::Error>,
+    > {
+        let Self {
+            ids,
+            converter,
+            store,
+        } = self;
+        let candidate = ids.next_conversation_id();
+        let declared = converter.format();
+        let mut issued_entries = Vec::new();
+        let report = converter
+            .convert_resilient(candidate, source, || {
+                let entry = ids.next_entry_id();
+                issued_entries.push(entry);
+                entry
+            })
+            .map_err(ImportConversationError::Conversion)?;
+        let (converted, skipped_records) = match report {
+            ImportedConversationConversionReport::Converted {
+                conversation,
+                skipped_records,
+            } => (conversation, skipped_records),
+            ImportedConversationConversionReport::NoValidRecords { skipped_records } => {
+                if !issued_entries.is_empty() {
+                    return Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch);
+                }
+                return Ok(ImportConversationReport::NoValidRecords { skipped_records });
+            }
+        };
+        if converted.id() != candidate {
+            return Err(ImportConversationError::ConverterIdentityMismatch {
+                supplied: candidate,
+                converted: converted.id(),
+            });
+        }
+        if converted.format() != declared {
+            return Err(ImportConversationError::ConverterFormatMismatch {
+                declared,
+                converted: converted.format(),
+            });
+        }
+        if converted
+            .entries()
+            .iter()
+            .map(|entry| entry.identity())
+            .ne(issued_entries.iter().copied())
+        {
+            return Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch);
+        }
+        let expected_digest = converted.source_digest();
+        let stored = store
+            .resolve_or_insert(converted)
+            .await
+            .map_err(ImportConversationError::Store)?;
+        if stored.source_digest() != expected_digest {
+            return Err(ImportConversationError::StoreSourceDigestMismatch {
+                expected: expected_digest,
+                actual: stored.source_digest(),
+            });
+        }
+        let outcome = match stored {
+            ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
+                if conversation != candidate {
+                    return Err(ImportConversationError::StoreInsertedIdentityMismatch {
+                        expected: candidate,
+                        actual: conversation,
+                    });
+                }
+                ImportConversationOutcome::Inserted { conversation }
+            }
+            ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
+                ImportConversationOutcome::AlreadyImported { conversation }
+            }
+        };
+        Ok(ImportConversationReport::Imported {
+            outcome,
+            skipped_records,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -338,9 +516,12 @@ mod tests {
     use uuid::{Uuid, Variant, Version};
 
     use super::{
-        ImportConversationError, ImportConversationOutcome, ImportConversationService,
-        ImportedConversationConverter, ImportedConversationIdGenerator, ImportedConversationStore,
-        ImportedConversationStoreOutcome, UuidV7ImportedConversationIdGenerator,
+        ImportConversationError, ImportConversationOutcome, ImportConversationReport,
+        ImportConversationService, ImportedConversationConversionReport,
+        ImportedConversationConverter, ImportedConversationIdGenerator,
+        ImportedConversationSkippedRecord, ImportedConversationStore,
+        ImportedConversationStoreOutcome, ResilientImportedConversationConverter,
+        UuidV7ImportedConversationIdGenerator,
     };
 
     fn conversation(value: u128) -> ImportedConversationId {
@@ -502,6 +683,7 @@ mod tests {
         returned_entries: Option<[ImportedTranscriptEntryId; 2]>,
         request_extra_entry: bool,
         reject: bool,
+        resilient_no_valid_records: bool,
         observed: Vec<(ImportedConversationId, Vec<u8>)>,
     }
 
@@ -534,6 +716,40 @@ mod tests {
                 self.returned_entries.unwrap_or(issued_entries),
                 ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
             ))
+        }
+    }
+
+    impl ResilientImportedConversationConverter for FakeConverter {
+        type RecordFailure = FakeConversionError;
+
+        fn convert_resilient<NextEntryId>(
+            &mut self,
+            owner: ImportedConversationId,
+            source: &[u8],
+            next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            if self.resilient_no_valid_records {
+                self.observed.push((owner, source.to_vec()));
+                return Ok(ImportedConversationConversionReport::NoValidRecords {
+                    skipped_records: vec![ImportedConversationSkippedRecord::new(
+                        1,
+                        FakeConversionError::Rejected,
+                    )]
+                    .into_boxed_slice(),
+                });
+            }
+            let conversation = self.convert(owner, source, next_entry_id)?;
+            Ok(ImportedConversationConversionReport::Converted {
+                conversation,
+                skipped_records: vec![ImportedConversationSkippedRecord::new(
+                    2,
+                    FakeConversionError::Rejected,
+                )]
+                .into_boxed_slice(),
+            })
         }
     }
 
@@ -581,6 +797,7 @@ mod tests {
                 returned_entries: None,
                 request_extra_entry: false,
                 reject: false,
+                resilient_no_valid_records: false,
                 observed: Vec::new(),
             },
             FakeStore {
@@ -634,6 +851,89 @@ mod tests {
         );
         assert_eq!(store.observed.len(), 1);
         assert_eq!(store.observed[0].id(), candidate);
+    }
+
+    /// S28 / INV-038: partial ingestion commits only the checked accepted
+    /// aggregate and returns every record-local loss to its caller.
+    #[tokio::test]
+    async fn s28_inv038_resilient_ingestion_stores_and_reports_exact_skips() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, entries),
+            }),
+        );
+
+        let report = service
+            .execute_resilient(b"partial source")
+            .await
+            .expect("accepted records should be stored with exact skips");
+        let ImportConversationReport::Imported {
+            outcome,
+            skipped_records,
+        } = report
+        else {
+            panic!("fixture converter returns a checked aggregate")
+        };
+
+        assert_eq!(
+            outcome,
+            ImportConversationOutcome::Inserted {
+                conversation: candidate
+            }
+        );
+        assert_eq!(skipped_records.len(), 1);
+        assert_eq!(skipped_records[0].source_line(), 2);
+        assert_eq!(skipped_records[0].failure(), &FakeConversionError::Rejected);
+        let (ids, converter, store) = service.into_parts();
+        assert_eq!(ids.conversation_calls, 1);
+        assert_eq!(ids.entry_calls, 2);
+        assert_eq!(
+            converter.observed,
+            vec![(candidate, b"partial source".to_vec())]
+        );
+        assert_eq!(store.observed.len(), 1);
+    }
+
+    /// S28 / INV-038: all-invalid nonempty input reports every loss without
+    /// minting entry identities or attempting a durable write.
+    #[tokio::test]
+    async fn s28_inv038_resilient_ingestion_with_no_valid_records_never_stores() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, entries),
+            }),
+        );
+        service.converter.resilient_no_valid_records = true;
+
+        let report = service
+            .execute_resilient(b"rejected source")
+            .await
+            .expect("all-invalid input still returns its exact losses");
+        let ImportConversationReport::NoValidRecords { skipped_records } = report else {
+            panic!("fixture converter rejects every record")
+        };
+
+        assert_eq!(skipped_records.len(), 1);
+        assert_eq!(skipped_records[0].source_line(), 1);
+        assert_eq!(skipped_records[0].failure(), &FakeConversionError::Rejected);
+        let (ids, converter, store) = service.into_parts();
+        assert_eq!(ids.conversation_calls, 1);
+        assert_eq!(ids.entry_calls, 0);
+        assert_eq!(
+            converter.observed,
+            vec![(candidate, b"rejected source".to_vec())]
+        );
+        assert!(store.observed.is_empty());
     }
 
     /// INV-038: exact reingestion discards candidates and returns the existing

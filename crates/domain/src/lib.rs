@@ -72,9 +72,11 @@ pub use imported_conversation::{
     ImportedRawRecordHash, ImportedRawRecordPosition, ImportedRawSourceRecord,
     ImportedRawSourceRecordReconstitutionInput, ImportedRecordEntryPosition,
     ImportedSourceAttestation, ImportedSourceMetadata, ImportedSpeaker,
-    ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText, ImportedToolResultBlock,
-    ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntry,
-    ImportedTranscriptEntryInput, ImportedTranscriptFrontier, ImportedTranscriptPosition,
+    ImportedStructuredFieldError, ImportedStructuredObjectMember, ImportedStructuredValue,
+    ImportedText, ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
+    ImportedTranscriptEntry, ImportedTranscriptEntryInput, ImportedTranscriptFrontier,
+    ImportedTranscriptPosition, imported_bool_attestation, imported_string_structured_attestation,
+    imported_structured_attestation, imported_text_attestation, unique_imported_structured_field,
 };
 pub use imported_session::{
     BoundedImportedSessionReconstitutionError, BoundedImportedSessionReconstitutionFailure,

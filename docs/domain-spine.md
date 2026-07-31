@@ -168,6 +168,43 @@ pub enum ImportedStructuredValue {
     Object(Box<[ImportedStructuredObjectMember]>),
 }
 
+pub struct ImportedStructuredFieldError;
+// implements Error; content-silent.
+
+pub fn unique_imported_structured_field<'members>(
+    members: &'members [ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    Option<&'members ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
+
+pub fn imported_text_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedText>, ImportedStructuredFieldError>;
+
+pub fn imported_bool_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<bool>, ImportedStructuredFieldError>;
+
+pub fn imported_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    ImportedSourceAttestation<ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
+
+pub fn imported_string_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    ImportedSourceAttestation<ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
+
 pub enum ImportedSpeaker {
     User,
     Assistant,
@@ -7398,7 +7435,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | -------------------------------------------------- | -------------------- |
 | domain: lib.rs identities                          | 20                   |
 | domain: actor                                      | 1                    |
-| domain: imported_conversation                      | 31                   |
+| domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
@@ -7426,7 +7463,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 54                   |
-| **signalbox-domain total**                         | **556 (+2 free fn)** |
+| **signalbox-domain total**                         | **557 (+7 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
