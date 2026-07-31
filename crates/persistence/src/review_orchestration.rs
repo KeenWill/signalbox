@@ -21,7 +21,11 @@ use signalbox_domain::{
     ReviewPassId, ReviewPassRef, ReviewPolicy, ReviewPolicyVersion, ReviewRunEvidence, ReviewRunId,
     ReviewRunRef, ReviewTargetId, ReviewText,
 };
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
+use sqlx::{
+    AssertSqlSafe, PgPool, Postgres, Row, Transaction,
+    postgres::{PgPoolOptions, PgRow},
+    types::Uuid,
+};
 
 use crate::{
     command_registry::{self, CommandKind, REVIEW_ORCHESTRATION_KIND, RegistryInspectionError},
@@ -176,9 +180,11 @@ impl PostgresReviewOrchestrationStore {
             let interrupted = sqlx::query(
                 "SELECT 1 FROM review_orchestration_command
                   WHERE attempt_id = $1 AND result_stage = 'judgment_incomplete'
+                    AND judgment_effect_count = $2
                   LIMIT 1",
             )
             .bind(attempt.as_uuid())
+            .bind(count_i64(effects.len())?)
             .fetch_optional(&self.pool)
             .await?
             .is_some();
@@ -216,6 +222,70 @@ impl PostgresReviewOrchestrationStore {
                 ReviewOrchestrationCurrentStage::PublicationIncomplete
             },
         ))
+    }
+
+    /// Loads every daemon adapter fact from one exported repeatable-read snapshot.
+    ///
+    /// A dedicated single-connection pool imports the exported snapshot so the
+    /// existing canonical workflow reconstruction remains the only decoder for
+    /// run, pass, finding, event, and external-link values.
+    pub async fn load_snapshot(
+        &self,
+        attempt: ReviewOrchestrationAttemptId,
+    ) -> Result<Option<ReviewOrchestrationSnapshotFacts>, ReviewOrchestrationStoreError> {
+        let mut snapshot_keeper = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *snapshot_keeper)
+            .await?;
+        let snapshot: String = sqlx::query_scalar("SELECT pg_export_snapshot()")
+            .fetch_one(&mut *snapshot_keeper)
+            .await?;
+        let import = snapshot_import_statement(&snapshot)?;
+        let snapshot_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |connection, _metadata| {
+                let import = import.clone();
+                Box::pin(async move {
+                    sqlx::query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                        .execute(&mut *connection)
+                        .await?;
+                    sqlx::query(AssertSqlSafe(import))
+                        .execute(&mut *connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(self.pool.connect_options().as_ref().clone())
+            .await?;
+        let snapshot_store = Self::new(snapshot_pool.clone());
+        let result = snapshot_store
+            .load_snapshot_from_coherent_pool(attempt)
+            .await;
+        snapshot_pool.close().await;
+        snapshot_keeper.rollback().await?;
+        result
+    }
+
+    async fn load_snapshot_from_coherent_pool(
+        &self,
+        attempt: ReviewOrchestrationAttemptId,
+    ) -> Result<Option<ReviewOrchestrationSnapshotFacts>, ReviewOrchestrationStoreError> {
+        let Some(immutable) = self.load_attempt(attempt).await? else {
+            return Ok(None);
+        };
+        let current_stage = self
+            .current_stage(attempt)
+            .await?
+            .ok_or_else(|| corruption("snapshot attempt disappeared"))?;
+        Ok(Some(ReviewOrchestrationSnapshotFacts {
+            attempt: immutable,
+            current_stage,
+            concern_claims: self.load_concern_claims(attempt).await?,
+            judgment_plan: self.load_judgment_plan(attempt).await?,
+            applied_judgment_effects: self.load_applied_judgment_effects(attempt).await?,
+            repair_outcomes: self.load_repair_outcomes(attempt).await?,
+            publication_outcomes: self.load_publication_outcomes(attempt).await?,
+        }))
     }
 }
 
@@ -266,6 +336,18 @@ pub struct ReviewOrchestrationProgress {
     pub repair_outcomes_recorded: bool,
     pub publication_inventory_count: Option<usize>,
     pub publication_outcomes_recorded: bool,
+}
+
+/// Canonically reconstructed daemon adapter facts from one database snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewOrchestrationSnapshotFacts {
+    pub attempt: ReviewOrchestrationAttempt,
+    pub current_stage: ReviewOrchestrationCurrentStage,
+    pub concern_claims: Vec<ReviewConcernClaim>,
+    pub judgment_plan: Option<ReviewJudgmentPlan>,
+    pub applied_judgment_effects: Vec<ReviewJudgmentEffectId>,
+    pub repair_outcomes: Option<Vec<ReviewRepairMemberOutcome>>,
+    pub publication_outcomes: Option<Vec<ReviewPublicationMemberOutcome>>,
 }
 
 /// Closed owner-global command kinds for orchestration mutations.
@@ -366,9 +448,19 @@ impl PostgresReviewOrchestrationStore {
         .rows_affected()
             == 1;
         if !inserted {
-            return Err(corruption(
-                "orchestration command claim lost its registry race",
-            ));
+            return match inspect_command(&mut transaction, command).await? {
+                CommandInspection::Recorded(result) => {
+                    transaction.commit().await?;
+                    Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result))
+                }
+                CommandInspection::Conflicting => {
+                    transaction.rollback().await?;
+                    Ok(ReviewOrchestrationCommandClaim::Conflicting)
+                }
+                CommandInspection::New => Err(corruption(
+                    "orchestration command claim lost its registry race",
+                )),
+            };
         }
         Ok(ReviewOrchestrationCommandClaim::New(
             ReviewOrchestrationCommandGuard {
@@ -1659,7 +1751,8 @@ async fn insert_command_receipt(
     )
     .bind(result.progress.publication_outcomes_recorded)
     .execute(&mut **transaction)
-    .await?;
+    .await
+    .map_err(ReviewOrchestrationStoreError::CommitAmbiguous)?;
     Ok(())
 }
 
@@ -1744,6 +1837,27 @@ fn decode_stage(value: String) -> Result<ReviewOrchestrationStage, ReviewOrchest
             "orchestration command result stage is not closed",
         )),
     }
+}
+
+fn snapshot_import_statement(snapshot: &str) -> Result<String, ReviewOrchestrationStoreError> {
+    let mut parts = snapshot.split('-');
+    let valid = snapshot.len() <= 128
+        && parts.next().is_some_and(|part| {
+            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && parts.next().is_some_and(|part| {
+            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && parts.next().is_some_and(|part| {
+            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && parts.next().is_none();
+    if !valid {
+        return Err(corruption(
+            "exported PostgreSQL snapshot identity is invalid",
+        ));
+    }
+    Ok(format!("SET TRANSACTION SNAPSHOT '{snapshot}'"))
 }
 
 fn count_i64(value: usize) -> Result<i64, ReviewOrchestrationStoreError> {
