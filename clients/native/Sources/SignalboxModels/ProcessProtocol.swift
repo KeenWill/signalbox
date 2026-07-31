@@ -961,9 +961,23 @@ public struct SignalboxImportedConversationEntry: Decodable, Equatable, Sendable
       SignalboxImportedSourceSpeaker.self,
       forKey: .sourceSpeaker
     )
+    contentKind = try container.decode(SignalboxImportedContentKind.self, forKey: .contentKind)
+    textPreview = try container.decodeIfPresent(
+      SignalboxImportedTextPreview.self,
+      forKey: .textPreview
+    )
+    let requiresTextPreview: Bool
     switch sourceSpeaker {
-    case .notAttested, .attestedAbsent, .attested:
-      break
+    case .notAttested, .attestedAbsent:
+      requiresTextPreview = false
+    case .attested:
+      switch contentKind {
+      case .text:
+        requiresTextPreview = true
+      case .sourceEvent, .sourceMessageBlock, .toolCall, .toolResult, .thinking,
+        .redactedThinking, .document, .messageContentAbsent:
+        requiresTextPreview = false
+      }
     case .unknown(let kind, _):
       throw DecodingError.dataCorrupted(
         .init(
@@ -973,18 +987,20 @@ public struct SignalboxImportedConversationEntry: Decodable, Equatable, Sendable
         )
       )
     }
-    contentKind = try container.decode(SignalboxImportedContentKind.self, forKey: .contentKind)
-    textPreview = try container.decodeIfPresent(
-      SignalboxImportedTextPreview.self,
-      forKey: .textPreview
-    )
-    guard position.rawValue > 0,
-      textPreview == nil || contentKind == .text
-    else {
+    guard (textPreview != nil) == requiresTextPreview else {
       throw DecodingError.dataCorrupted(
         .init(
-          codingPath: decoder.codingPath,
-          debugDescription: "Imported conversation entry has a contradictory shape."
+          codingPath: decoder.codingPath + [CodingKeys.textPreview],
+          debugDescription:
+            "Imported conversation entry text_preview contradicts its content and speaker."
+        )
+      )
+    }
+    guard position.rawValue > 0 else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [CodingKeys.position],
+          debugDescription: "Imported conversation entry position must be positive."
         )
       )
     }
