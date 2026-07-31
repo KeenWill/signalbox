@@ -441,7 +441,7 @@ fn resolve<FileSystem: WorkspaceFileSystem>(
     root.resolve_existing(filesystem, path)
         .map_err(|error| match error {
             WorkspaceResolveError::Rejected(reason) => InvalidReadArguments::Path(reason),
-            WorkspaceResolveError::Io(_) => InvalidReadArguments::Filesystem,
+            WorkspaceResolveError::Io { .. } => InvalidReadArguments::Filesystem,
         })
 }
 
@@ -533,7 +533,7 @@ impl<FileSystem: WorkspaceFileSystem> ToolExecutor for WorkspaceReadExecutor<Fil
 fn map_resolve_failure(error: WorkspaceResolveError) -> ReadFailure {
     match error {
         WorkspaceResolveError::Rejected(_) => ReadFailure::PathRejected,
-        WorkspaceResolveError::Io(_) => ReadFailure::Filesystem,
+        WorkspaceResolveError::Io { .. } => ReadFailure::Filesystem,
     }
 }
 

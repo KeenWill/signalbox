@@ -47,24 +47,33 @@ impl Error for WorkspacePathRejection {}
 #[derive(Debug)]
 pub enum WorkspaceRootError {
     /// The injected root could not be opened without following a symlink.
-    Io(io::Error),
+    Io {
+        /// Injected root path associated with the failure.
+        path: PathBuf,
+        /// Underlying operating-system failure.
+        source: io::Error,
+    },
     /// The opened injected root is not a directory.
     NotDirectory,
 }
 
 impl fmt::Display for WorkspaceRootError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Io(_) => "injected workspace root could not be opened",
-            Self::NotDirectory => "injected workspace root is not a directory",
-        })
+        match self {
+            Self::Io { path, .. } => write!(
+                formatter,
+                "injected workspace root `{}` could not be opened",
+                path.display()
+            ),
+            Self::NotDirectory => formatter.write_str("injected workspace root is not a directory"),
+        }
     }
 }
 
 impl Error for WorkspaceRootError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::Io { source, .. } => Some(source),
             Self::NotDirectory => None,
         }
     }
@@ -100,11 +109,8 @@ impl WorkspaceRoot {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(io::Error::from)
-        .map_err(WorkspaceRootError::Io)?;
-        let status = fstat(&descriptor)
-            .map_err(io::Error::from)
-            .map_err(WorkspaceRootError::Io)?;
+        .map_err(|source| root_io(root, source))?;
+        let status = fstat(&descriptor).map_err(|source| root_io(root, source))?;
         if FileType::from_raw_mode(status.st_mode) != FileType::Directory {
             return Err(WorkspaceRootError::NotDirectory);
         }
@@ -176,7 +182,12 @@ pub enum WorkspaceResolveError {
     /// Typed evidence that the authority boundary rejected the path.
     Rejected(WorkspacePathRejection),
     /// The admitted path could not be resolved.
-    Io(io::Error),
+    Io {
+        /// Root-relative path associated with the failure.
+        path: PathBuf,
+        /// Underlying operating-system failure.
+        source: io::Error,
+    },
 }
 
 impl WorkspaceResolveError {
@@ -185,7 +196,7 @@ impl WorkspaceResolveError {
     pub const fn rejection(&self) -> Option<WorkspacePathRejection> {
         match self {
             Self::Rejected(reason) => Some(*reason),
-            Self::Io(_) => None,
+            Self::Io { .. } => None,
         }
     }
 }
@@ -194,7 +205,11 @@ impl fmt::Display for WorkspaceResolveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rejected(reason) => reason.fmt(formatter),
-            Self::Io(_) => formatter.write_str("workspace path could not be resolved"),
+            Self::Io { path, .. } => write!(
+                formatter,
+                "workspace path `{}` could not be resolved",
+                path.display()
+            ),
         }
     }
 }
@@ -203,7 +218,7 @@ impl Error for WorkspaceResolveError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Rejected(reason) => Some(reason),
-            Self::Io(error) => Some(error),
+            Self::Io { source, .. } => Some(source),
         }
     }
 }
@@ -293,7 +308,7 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         path: &Path,
     ) -> Result<WorkspaceEntryKind, WorkspaceResolveError> {
         let descriptor = open_relative(root, path, OFlags::RDONLY | OFlags::NONBLOCK)?;
-        let status = fstat(&descriptor).map_err(resolve_io)?;
+        let status = fstat(&descriptor).map_err(|source| resolve_io(path, source))?;
         Ok(entry_kind(FileType::from_raw_mode(status.st_mode)))
     }
 
@@ -304,29 +319,27 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         max_entries: usize,
     ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError> {
         let descriptor = open_relative(root, path, OFlags::RDONLY | OFlags::DIRECTORY)?;
-        let mut directory = Dir::new(descriptor).map_err(resolve_io)?;
+        let mut directory = Dir::new(descriptor).map_err(|source| resolve_io(path, source))?;
         let mut retained = BinaryHeap::with_capacity(max_entries);
         let mut observed = 0_usize;
         while let Some(entry) = directory.read() {
-            let entry = entry.map_err(resolve_io)?;
+            let entry = entry.map_err(|source| resolve_io(path, source))?;
             let name_bytes = entry.file_name().to_bytes();
             if name_bytes == b"." || name_bytes == b".." {
                 continue;
             }
             let name = OsStr::from_bytes(name_bytes);
-            let status = statat(
-                directory.fd().map_err(resolve_io)?,
-                name,
-                AtFlags::SYMLINK_NOFOLLOW,
-            )
-            .map_err(resolve_io)?;
+            let entry_path = if path == Path::new(".") {
+                PathBuf::from(name)
+            } else {
+                path.join(name)
+            };
+            let descriptor = directory.fd().map_err(|source| resolve_io(path, source))?;
+            let status = statat(descriptor, name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|source| resolve_io(&entry_path, source))?;
             observed = observed.saturating_add(1);
             let candidate = WorkspaceDirectoryEntry {
-                path: if path == Path::new(".") {
-                    PathBuf::from(name)
-                } else {
-                    path.join(name)
-                },
+                path: entry_path,
                 kind: entry_kind(FileType::from_raw_mode(status.st_mode)),
             };
             if retained.len() < max_entries {
@@ -352,12 +365,15 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         max_bytes: usize,
     ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
         let descriptor = open_relative(root, path, OFlags::RDONLY | OFlags::NONBLOCK)?;
-        let status = fstat(&descriptor).map_err(resolve_io)?;
+        let status = fstat(&descriptor).map_err(|source| resolve_io(path, source))?;
         if FileType::from_raw_mode(status.st_mode) != FileType::RegularFile {
-            return Err(WorkspaceResolveError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "workspace path is not a regular file",
-            )));
+            return Err(resolve_std_io(
+                path,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "workspace path is not a regular file",
+                ),
+            ));
         }
         let initial_total_bytes = status.st_size.max(0) as u64;
         let lookahead = max_bytes.saturating_add(4);
@@ -366,8 +382,11 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         (&mut file)
             .take(lookahead as u64)
             .read_to_end(&mut bytes)
-            .map_err(WorkspaceResolveError::Io)?;
-        let final_total_bytes = file.metadata().map_err(WorkspaceResolveError::Io)?.len();
+            .map_err(|source| resolve_std_io(path, source))?;
+        let final_total_bytes = file
+            .metadata()
+            .map_err(|source| resolve_std_io(path, source))?
+            .len();
         let total_bytes = initial_total_bytes
             .max(final_total_bytes)
             .max(bytes.len() as u64);
@@ -405,11 +424,14 @@ fn open_relative(
             final_flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(resolve_io);
+        .map_err(|source| resolve_io(path, source));
     }
+    let mut traversed = PathBuf::new();
     while let Some(name) = components.next() {
+        traversed.push(name);
         let parent = current.as_ref().unwrap_or(root.descriptor.as_ref());
-        let status = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(resolve_io)?;
+        let status = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|source| resolve_io(&traversed, source))?;
         if FileType::from_raw_mode(status.st_mode) == FileType::Symlink {
             return Err(WorkspaceResolveError::Rejected(
                 WorkspacePathRejection::Symlink,
@@ -420,16 +442,33 @@ fn open_relative(
         } else {
             final_flags | OFlags::NOFOLLOW | OFlags::CLOEXEC
         };
-        current = Some(openat(parent, name, flags, Mode::empty()).map_err(resolve_io)?);
+        current = Some(
+            openat(parent, name, flags, Mode::empty())
+                .map_err(|source| resolve_io(&traversed, source))?,
+        );
     }
-    current.ok_or_else(|| WorkspaceResolveError::Io(io::Error::other("empty workspace path")))
+    current.ok_or_else(|| resolve_std_io(path, io::Error::other("empty workspace path")))
 }
 
-fn resolve_io(error: rustix::io::Errno) -> WorkspaceResolveError {
-    if error == rustix::io::Errno::LOOP {
+fn root_io(root: &Path, source: rustix::io::Errno) -> WorkspaceRootError {
+    WorkspaceRootError::Io {
+        path: root.to_owned(),
+        source: io::Error::from(source),
+    }
+}
+
+fn resolve_io(path: &Path, source: rustix::io::Errno) -> WorkspaceResolveError {
+    if source == rustix::io::Errno::LOOP {
         WorkspaceResolveError::Rejected(WorkspacePathRejection::Symlink)
     } else {
-        WorkspaceResolveError::Io(io::Error::from(error))
+        resolve_std_io(path, io::Error::from(source))
+    }
+}
+
+fn resolve_std_io(path: &Path, source: io::Error) -> WorkspaceResolveError {
+    WorkspaceResolveError::Io {
+        path: path.to_owned(),
+        source,
     }
 }
 
@@ -573,7 +612,7 @@ mod tests {
 
         let result = filesystem.read_file_prefix(&root, Path::new("pipe"), 16);
 
-        assert!(matches!(result, Err(WorkspaceResolveError::Io(_))));
+        assert!(matches!(result, Err(WorkspaceResolveError::Io { .. })));
     }
 
     #[cfg(unix)]
@@ -634,5 +673,40 @@ mod tests {
                 WorkspacePathRejection::Symlink
             ))
         ));
+    }
+
+    #[test]
+    fn root_io_error_carries_injected_path_context() {
+        let parent = tempfile::tempdir().expect("parent fixture constructs");
+        let missing = parent.path().join("missing-workspace");
+        let error = WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, &missing)
+            .expect_err("missing root is rejected");
+        let rendered = error.to_string();
+        let WorkspaceRootError::Io { path, source: _ } = error else {
+            panic!("missing root reports an I/O error")
+        };
+
+        assert_eq!(path, missing);
+        assert!(rendered.contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn resolve_io_error_carries_root_relative_path_context() {
+        const MISSING_PATH: &str = "missing.txt";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root =
+            WorkspaceRoot::try_new(&filesystem, workspace.path()).expect("fixture root is valid");
+        let error = root
+            .resolve_existing(&filesystem, MISSING_PATH)
+            .expect_err("missing path is rejected");
+        let rendered = error.to_string();
+        let WorkspaceResolveError::Io { path, source: _ } = error else {
+            panic!("missing path reports an I/O error")
+        };
+
+        assert_eq!(path, Path::new(MISSING_PATH));
+        assert!(rendered.contains(path.to_string_lossy().as_ref()));
     }
 }
