@@ -316,8 +316,10 @@ impl PostgresReviewOrchestrationStore {
         }
         let snapshot_keeper = self.begin_snapshot_guard().await?;
         let result = self.load_snapshot_while_locked(attempt).await;
-        snapshot_keeper.rollback().await?;
-        result
+        let released = snapshot_keeper.rollback().await;
+        let facts = result?;
+        released?;
+        Ok(facts)
     }
 
     async fn begin_snapshot_guard(
