@@ -3,8 +3,11 @@
 //! [`SandboxedExecTool`] confines writable and project-visible filesystem
 //! authority to the injected workspace with bubblewrap (`bwrap`). The sandbox
 //! also exposes a small read-only operating-system runtime needed to start
-//! ordinary programs. Missing, unsupported, or unusable `bwrap` is typed
-//! refusal evidence and never falls back to unsandboxed execution.
+//! ordinary programs, clears the ambient environment, and admits only a
+//! bounded locale plus executable search paths rooted in that runtime.
+//! Production uses the trusted absolute `/usr/bin/bwrap`; missing, unsupported,
+//! or unusable `bwrap` is typed refusal evidence and never falls back to
+//! unsandboxed execution.
 //!
 //! [`UnsandboxedExecTool`] is a separate catalog-composable tool whose fixed
 //! permission default requires owner confirmation. This crate ships the two
@@ -21,8 +24,8 @@ mod process;
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
     ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
-    OutputCapture, OutputEncoding, ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunResult,
-    ProcessRunner, ProcessSpawnFailure, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME,
-    SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME,
-    UnsandboxedCommandRunner, UnsandboxedExecTool,
+    OutputCapture, OutputEncoding, ProcessEnvironment, ProcessOutcome, ProcessOutput,
+    ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure,
+    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
+    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };

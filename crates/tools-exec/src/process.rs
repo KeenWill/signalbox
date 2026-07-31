@@ -1,11 +1,16 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     ffi::OsString,
     fmt,
     future::Future,
     path::{Component, Path, PathBuf},
     process::Stdio,
+    sync::{
+        Arc, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
     time::Duration,
 };
 
@@ -36,8 +41,11 @@ const MAX_WORKING_DIRECTORY_CHARACTERS: usize = 4096;
 const MAX_WORKING_DIRECTORY_BYTES: usize = MAX_WORKING_DIRECTORY_CHARACTERS * 4;
 pub(crate) const EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
-const BWRAP_PROGRAM: &str = "bwrap";
+const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
+const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
+const SANDBOX_DISPATCH_SHELL: &str = "if command -v \"$1\" >/dev/null 2>&1 && [ -x \"$(command -v \"$1\")\" ]; then printf 'signalbox-exec:dispatched\\n' >&2; exec \"$@\"; fi; exit 127";
 
 fn default_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
@@ -390,6 +398,17 @@ pub struct ProcessRequest {
     pub capture_bytes: usize,
     /// Exact environment additions or overrides.
     pub environment: BTreeMap<OsString, OsString>,
+    /// Whether the ambient parent environment remains visible.
+    pub environment_inheritance: ProcessEnvironment,
+}
+
+/// Ambient-environment posture for an injected process request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessEnvironment {
+    /// Preserve the parent environment before applying explicit entries.
+    Inherit,
+    /// Clear the parent environment before applying explicit entries.
+    Clear,
 }
 
 /// Typed evidence from a bubblewrap usability probe.
@@ -416,7 +435,7 @@ pub trait ProcessRunner: Clone + Send {
     fn run(&mut self, request: ProcessRequest) -> impl Future<Output = ProcessRunResult> + Send;
 }
 
-/// Production Tokio process runner with Unix process-group cleanup.
+/// Production Tokio process runner with Linux descendant adoption and reaping.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TokioProcessRunner;
 
@@ -492,10 +511,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     Duration::from_secs(arguments.timeout_seconds),
                     capture_bytes,
                 );
-                process_result(
-                    ExecutionConfinement::FilesystemConfined,
-                    self.runner.run(request).await,
-                )
+                sandbox_process_result(self.runner.run(request).await)
             }
             BwrapAvailability::Missing | BwrapAvailability::Unusable => ExecResult {
                 confinement: ExecutionConfinement::SandboxRefused { availability },
@@ -569,6 +585,7 @@ fn direct_request(root: &Path, arguments: &ExecArguments, capture_bytes: usize) 
         timeout: Duration::from_secs(arguments.timeout_seconds),
         capture_bytes,
         environment: BTreeMap::new(),
+        environment_inheritance: ProcessEnvironment::Inherit,
     }
 }
 
@@ -580,6 +597,7 @@ fn bwrap_request(
     timeout: Duration,
     capture_bytes: usize,
 ) -> ProcessRequest {
+    let sandbox_path = sandbox_path(root);
     let sandbox_directory = if working_directory == "." {
         String::from(SANDBOX_WORKSPACE)
     } else {
@@ -644,6 +662,10 @@ fn bwrap_request(
         OsString::from("HOME"),
         OsString::from(SANDBOX_WORKSPACE),
         OsString::from("--"),
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from(SANDBOX_DISPATCH_SHELL),
+        OsString::from("signalbox-exec"),
         OsString::from(program),
     ]);
     bwrap_arguments.extend(arguments.iter().map(OsString::from));
@@ -653,8 +675,47 @@ fn bwrap_request(
         working_directory: root.to_owned(),
         timeout,
         capture_bytes,
-        environment: BTreeMap::new(),
+        environment: BTreeMap::from([
+            (OsString::from("LANG"), OsString::from("C.UTF-8")),
+            (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+            (OsString::from("PATH"), sandbox_path),
+        ]),
+        environment_inheritance: ProcessEnvironment::Clear,
     }
+}
+
+fn sandbox_path(workspace_root: &Path) -> OsString {
+    let inherited = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut seen = BTreeSet::new();
+    let mut components = Vec::new();
+    for path in inherited
+        .into_iter()
+        .chain(std::env::split_paths(&OsString::from(
+            SANDBOX_FALLBACK_PATH,
+        )))
+    {
+        if trusted_sandbox_path(&path, workspace_root) && seen.insert(path.clone()) {
+            components.push(path);
+        }
+    }
+    std::env::join_paths(components).unwrap_or_else(|_| OsString::from(SANDBOX_FALLBACK_PATH))
+}
+
+fn trusted_sandbox_path(path: &Path, workspace_root: &Path) -> bool {
+    path.is_absolute()
+        && !path.starts_with(workspace_root)
+        && [
+            Path::new("/bin"),
+            Path::new("/nix/store"),
+            Path::new("/nix/var/nix/profiles/default"),
+            Path::new("/run/current-system/sw"),
+            Path::new("/sbin"),
+            Path::new("/usr"),
+        ]
+        .into_iter()
+        .any(|trusted_root| path.starts_with(trusted_root))
 }
 
 /// Structured result returned by either direct-command tool.
@@ -683,25 +744,27 @@ pub enum ExecutionConfinement {
         /// Typed host evidence from the exact profile probe.
         availability: BwrapAvailability,
     },
+    /// Bubblewrap was available but did not confirm target dispatch.
+    SandboxSetupFailed,
 }
 
 /// Terminal process-tree outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProcessOutcome {
-    /// The process-group leader exited and remaining descendants were killed.
+    /// The supervised leader exited and all observed descendants were reaped.
     Exited {
         /// Portable exit code, absent when a signal ended the leader.
         code: Option<i32>,
     },
-    /// The bounded deadline elapsed and the entire process group was killed.
+    /// The bounded deadline elapsed and the entire observed process tree was killed.
     TimedOut,
     /// No process tree was started.
     SpawnFailed {
         /// Closed sanitized spawn classification.
         reason: ProcessSpawnFailure,
     },
-    /// Supervision failed and the process group was killed fail-closed.
+    /// Supervision failed and the observed process tree was killed fail-closed.
     SupervisionFailed {
         /// Closed failing supervision stage.
         reason: ProcessSupervisionFailure,
@@ -720,6 +783,8 @@ pub enum ProcessSpawnFailure {
     ProcessTreeUnsupported,
     /// Bubblewrap evidence refused sandboxed dispatch.
     SandboxUnavailable,
+    /// Bubblewrap did not confirm that it dispatched the requested target.
+    SandboxSetup,
     /// Another sanitized spawn failure occurred.
     Other,
 }
@@ -806,6 +871,21 @@ fn process_result(confinement: ExecutionConfinement, result: ProcessRunResult) -
     }
 }
 
+fn sandbox_process_result(mut result: ProcessRunResult) -> ExecResult {
+    if result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER) {
+        result.stderr.bytes.drain(..SANDBOX_DISPATCH_MARKER.len());
+        return process_result(ExecutionConfinement::FilesystemConfined, result);
+    }
+    ExecResult {
+        confinement: ExecutionConfinement::SandboxSetupFailed,
+        outcome: ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::SandboxSetup,
+        },
+        stdout: output_capture(result.stdout),
+        stderr: output_capture(result.stderr),
+    }
+}
+
 fn output_capture(output: ProcessOutput) -> OutputCapture {
     let encoding = if std::str::from_utf8(&output.bytes).is_ok() {
         OutputEncoding::Utf8
@@ -851,21 +931,35 @@ async fn read_bounded(
 }
 
 async fn run_process(request: ProcessRequest) -> ProcessRunResult {
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = request;
         empty_process_result(ProcessOutcome::SpawnFailed {
             reason: ProcessSpawnFailure::ProcessTreeUnsupported,
         })
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
-        run_process_unix(request).await
+        run_process_linux(request).await
     }
 }
 
-#[cfg(unix)]
-async fn run_process_unix(request: ProcessRequest) -> ProcessRunResult {
+#[cfg(target_os = "linux")]
+static PROCESS_RUN_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+async fn run_process_linux(request: ProcessRequest) -> ProcessRunResult {
+    let _run_guard = PROCESS_RUN_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    if rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT)).is_err() {
+        return empty_process_result(ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::ProcessTreeUnsupported,
+        });
+    }
+    let supervisor = std::process::id();
+    let baseline_children = direct_children(supervisor);
     let mut command = Command::new(&request.program);
     command
         .args(&request.arguments)
@@ -875,6 +969,9 @@ async fn run_process_unix(request: ProcessRequest) -> ProcessRunResult {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
+    if request.environment_inheritance == ProcessEnvironment::Clear {
+        command.env_clear();
+    }
     for (name, value) in request.environment {
         command.env(name, value);
     }
@@ -882,11 +979,11 @@ async fn run_process_unix(request: ProcessRequest) -> ProcessRunResult {
         Ok(child) => child,
         Err(error) => return empty_process_result(spawn_failure(error)),
     };
-    let mut process_group = ProcessGroupGuard::new(child.id());
+    let mut process_tree = ProcessTreeGuard::new(child.id(), supervisor, baseline_children);
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            kill_and_reap(&mut child, &mut process_group).await;
+            kill_and_reap(&mut child, &mut process_tree).await;
             return empty_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stdout,
             });
@@ -895,7 +992,7 @@ async fn run_process_unix(request: ProcessRequest) -> ProcessRunResult {
     let stderr = match child.stderr.take() {
         Some(stderr) => stderr,
         None => {
-            kill_and_reap(&mut child, &mut process_group).await;
+            kill_and_reap(&mut child, &mut process_tree).await;
             return empty_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stderr,
             });
@@ -912,7 +1009,7 @@ async fn run_process_unix(request: ProcessRequest) -> ProcessRunResult {
         },
         Err(_) => ProcessOutcome::TimedOut,
     };
-    kill_and_reap(&mut child, &mut process_group).await;
+    kill_and_reap(&mut child, &mut process_tree).await;
     let stdout = stdout_task.await;
     let stderr = stderr_task.await;
     match (stdout, stderr) {
@@ -936,42 +1033,196 @@ async fn run_process_unix(request: ProcessRequest) -> ProcessRunResult {
     }
 }
 
-#[cfg(unix)]
-async fn kill_and_reap(child: &mut tokio::process::Child, process_group: &mut ProcessGroupGuard) {
-    process_group.kill();
+#[cfg(target_os = "linux")]
+async fn kill_and_reap(child: &mut tokio::process::Child, process_tree: &mut ProcessTreeGuard) {
+    process_tree.kill_all();
     let _ = child.kill().await;
     let _ = child.wait().await;
+    process_tree.finish();
 }
 
-#[cfg(unix)]
-struct ProcessGroupGuard {
-    process_group: Option<u32>,
+#[cfg(target_os = "linux")]
+struct ProcessTreeGuard {
+    root: u32,
+    supervisor: u32,
+    baseline_children: BTreeSet<u32>,
+    descendants: Arc<Mutex<BTreeMap<u32, rustix::fd::OwnedFd>>>,
+    stop: Arc<AtomicBool>,
+    watcher: Option<JoinHandle<()>>,
+    armed: bool,
 }
 
-#[cfg(unix)]
-impl ProcessGroupGuard {
-    fn new(process_group: Option<u32>) -> Self {
-        Self { process_group }
+#[cfg(target_os = "linux")]
+impl ProcessTreeGuard {
+    fn new(root: Option<u32>, supervisor: u32, baseline_children: BTreeSet<u32>) -> Self {
+        let root = root.unwrap_or_default();
+        let descendants = Arc::new(Mutex::new(BTreeMap::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let watcher_descendants = Arc::clone(&descendants);
+        let watcher_stop = Arc::clone(&stop);
+        let watcher_baseline = baseline_children.clone();
+        let watcher = std::thread::spawn(move || {
+            while !watcher_stop.load(Ordering::Acquire) {
+                observe_descendants(root, supervisor, &watcher_baseline, &watcher_descendants);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        Self {
+            root,
+            supervisor,
+            baseline_children,
+            descendants,
+            stop,
+            watcher: Some(watcher),
+            armed: true,
+        }
     }
 
-    fn kill(&mut self) {
-        kill_process_group(self.process_group.take());
+    fn kill_all(&mut self) {
+        self.stop_watcher();
+        observe_descendants(
+            self.root,
+            self.supervisor,
+            &self.baseline_children,
+            &self.descendants,
+        );
+        kill_process_group(Some(self.root));
+        let descendants = self
+            .descendants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for pidfd in descendants.values() {
+            let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+        }
+    }
+
+    fn finish(&mut self) {
+        self.kill_all();
+        reap_descendants(&self.descendants);
+        self.armed = false;
+    }
+
+    fn stop_watcher(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
+        }
     }
 }
 
-#[cfg(unix)]
-impl Drop for ProcessGroupGuard {
+#[cfg(target_os = "linux")]
+impl Drop for ProcessTreeGuard {
     fn drop(&mut self) {
-        self.kill();
+        if self.armed {
+            self.kill_all();
+            reap_descendants(&self.descendants);
+        }
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn kill_process_group(process_group: Option<u32>) {
     if let Some(pid) =
         process_group.and_then(|raw_pid| rustix::process::Pid::from_raw(raw_pid as i32))
     {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn observe_descendants(
+    root: u32,
+    supervisor: u32,
+    baseline_children: &BTreeSet<u32>,
+    descendants: &Arc<Mutex<BTreeMap<u32, rustix::fd::OwnedFd>>>,
+) {
+    let process_table = process_table();
+    let mut known = descendants
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    known.insert(root);
+    loop {
+        let before = known.len();
+        for (pid, parent) in &process_table {
+            let adopted = *parent == supervisor && *pid != root && !baseline_children.contains(pid);
+            if known.contains(parent) || adopted {
+                known.insert(*pid);
+            }
+        }
+        if known.len() == before {
+            break;
+        }
+    }
+    known.remove(&root);
+    let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+    for raw_pid in known {
+        if tracked.contains_key(&raw_pid) {
+            continue;
+        }
+        let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) else {
+            continue;
+        };
+        if let Ok(pidfd) = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
+            tracked.insert(raw_pid, pidfd);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_table() -> Vec<(u32, u32)> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter_map(|pid| process_parent(pid).map(|parent| (pid, parent)))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn process_parent(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn direct_children(parent: u32) -> BTreeSet<u32> {
+    process_table()
+        .into_iter()
+        .filter_map(|(pid, observed_parent)| (observed_parent == parent).then_some(pid))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn reap_descendants(descendants: &Arc<Mutex<BTreeMap<u32, rustix::fd::OwnedFd>>>) {
+    let pids = descendants
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    for _ in 0..1000 {
+        let mut remaining = false;
+        for raw_pid in &pids {
+            let Some(pid) = rustix::process::Pid::from_raw(*raw_pid as i32) else {
+                continue;
+            };
+            let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
+            remaining |= std::path::Path::new(&format!("/proc/{raw_pid}")).exists();
+        }
+        if !remaining {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -1061,6 +1312,12 @@ mod tests {
                 completeness: CaptureCompleteness::Complete,
             },
         }
+    }
+
+    fn successful_sandbox_process(stdout: &[u8]) -> ProcessRunResult {
+        let mut result = successful_process(stdout);
+        result.stderr.bytes = SANDBOX_DISPATCH_MARKER.to_vec();
+        result
     }
 
     #[test]
@@ -1167,7 +1424,7 @@ mod tests {
         let root = std::env::current_dir()?;
         let runner = FakeRunner::returning(
             BwrapAvailability::Available,
-            successful_process(SANDBOXED_STDOUT.as_bytes()),
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
         );
         let observation = runner.clone();
         let mut command_runner = SandboxedCommandRunner::try_new(runner, &root)?;
@@ -1194,6 +1451,11 @@ mod tests {
         ];
 
         assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
+        assert_eq!(request.environment_inheritance, ProcessEnvironment::Clear);
+        assert_eq!(
+            request.environment.get(&OsString::from("PATH")),
+            Some(&sandbox_path(&root))
+        );
         assert!(
             request
                 .arguments
@@ -1207,6 +1469,44 @@ mod tests {
                 .any(|arguments| arguments == chdir_arguments)
         );
         assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandbox_wrapper_failure_is_typed_without_claiming_confinement()
+    -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            ProcessRunResult {
+                outcome: ProcessOutcome::Exited { code: Some(127) },
+                stdout: ProcessOutput {
+                    bytes: Vec::new(),
+                    completeness: CaptureCompleteness::Complete,
+                },
+                stderr: ProcessOutput {
+                    bytes: b"target missing".to_vec(),
+                    completeness: CaptureCompleteness::Complete,
+                },
+            },
+        );
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, root)?;
+        let arguments = ExecArguments {
+            program: String::from("missing-target"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            }
+        );
         Ok(())
     }
 }

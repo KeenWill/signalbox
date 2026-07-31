@@ -7,6 +7,8 @@ use signalbox_tools_exec::{
     TokioProcessRunner,
 };
 
+const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
+
 #[tokio::test]
 async fn real_bwrap_profile_hides_ambient_home_directory() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -16,7 +18,7 @@ async fn real_bwrap_profile_hides_ambient_home_directory() -> Result<(), Box<dyn
 async fn assert_profile_hides_ambient_home_if_bwrap_exists()
 -> Result<(), Box<dyn std::error::Error>> {
     if !host_supports_bwrap() {
-        return Ok(());
+        return skip_locally_or_require_ci_bwrap();
     }
     let root = std::env::current_dir()?;
     let mut runner = SandboxedCommandRunner::try_new(TokioProcessRunner, root)?;
@@ -35,10 +37,19 @@ async fn assert_profile_hides_ambient_home_if_bwrap_exists()
 }
 
 fn host_supports_bwrap() -> bool {
-    Command::new("bwrap")
+    Command::new(BWRAP_PROGRAM)
         .args(["--ro-bind", "/", "/", "--", "/bin/true"])
         .status()
         .is_ok_and(|status| status.success())
+}
+
+fn skip_locally_or_require_ci_bwrap() -> Result<(), Box<dyn std::error::Error>> {
+    match std::env::var_os("CI") {
+        None => Ok(()),
+        Some(_) => {
+            Err(std::io::Error::other("CI must provide a usable /usr/bin/bwrap profile").into())
+        }
+    }
 }
 
 #[test]
