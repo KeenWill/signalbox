@@ -41,6 +41,36 @@ final class ViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.errorMessage)
     }
 
+    func testImportedConversationViewModelPublishesUnavailableServiceFailure() async throws {
+        let service = SignalboxProcessService(
+            requester: SignalboxProcessClient(
+                connectionFactory: MockProcessProtocolConnectionFactory()
+            ),
+            policy: .nativeDefault
+        )
+        let conversations = try await service.listConversations(includeArchived: true)
+        let imported = try XCTUnwrap(
+            conversations.first {
+                $0.conversationID.rawValue == MockProcessProtocolFixtures.importedConversationID
+            }
+        )
+        let loadedViewModel = ProcessImportedConversationViewModel { service }
+        await loadedViewModel.load(conversation: imported)
+        let alias = try XCTUnwrap(loadedViewModel.aliases.first)
+        let position = try XCTUnwrap(loadedViewModel.transcript?.entries.last?.position)
+        let unavailableViewModel = ProcessImportedConversationViewModel { nil }
+
+        let sessionID = try? await unavailableViewModel.continueConversation(
+            conversation: imported,
+            throughPosition: position,
+            relationship: .resume,
+            aliasID: alias.aliasID
+        )
+
+        XCTAssertNil(sessionID)
+        XCTAssertEqual(unavailableViewModel.errorMessage, remoteTransportGateMessage)
+    }
+
     func testSessionListLoadsMockSessionsAndNeedsApprovalStatus() async {
         let service = MockSignalboxService()
         let viewModel = SessionListViewModel { service }

@@ -681,6 +681,7 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     aliasID: SignalboxCanonicalUUID
   ) async throws -> SignalboxCanonicalUUID {
     guard let service = serviceProvider(), !isContinuing else {
+      errorMessage = remoteTransportGateMessage
       throw SignalboxProcessServiceError.unexpectedMessage(remoteTransportGateMessage)
     }
     isContinuing = true
