@@ -80,6 +80,10 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'session model credential head is not deletable';
     END IF;
+    PERFORM 1
+      FROM session
+     WHERE session_id = NEW.session_id
+       FOR UPDATE;
     IF TG_OP = 'INSERT' AND NEW.current_event_ordinal <> 1 THEN
         RAISE EXCEPTION 'first session model credential head must name event 1';
     END IF;
@@ -133,6 +137,10 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    PERFORM 1
+      FROM session
+     WHERE session_id = NEW.session_id
+       FOR UPDATE;
     IF EXISTS (
         SELECT 1
           FROM session_current_model_credentials

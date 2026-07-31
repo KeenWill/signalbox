@@ -34,8 +34,9 @@ pull requests.
 
 ## Process configuration
 
-`signalboxd` reads exactly seven required deployment values from the process
-environment at startup and also consults `HOME`:
+`signalboxd` reads six unconditionally required deployment values from the
+process environment at startup, conditionally requires the Anthropic key path
+described below, and also consults `HOME`:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -50,7 +51,8 @@ environment at startup and also consults `HOME`:
   nonempty absolute path; absence, an empty value, or a relative value is a
   typed template-configuration failure.
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
-  key value.
+  key value. It is required only when at least one static model mapping selects
+  the Anthropic adapter; a Codex-only configuration does not consult it.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current GitHub code-host
   token value.
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one

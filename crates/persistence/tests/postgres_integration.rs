@@ -286,6 +286,110 @@ async fn session_model_credentials_are_an_append_only_creation_snapshot()
     Ok(())
 }
 
+/// Snapshot publication serializes with entry insertion, so a concurrent late
+/// family cannot pass an earlier MVCC visibility check and mutate the new head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_model_credential_publication_rejects_a_concurrent_late_entry()
+-> Result<(), Box<dyn Error>> {
+    const FIRST_FAMILY: &str = "first-family";
+    const FIRST_REFERENCE: &str = "first-reference";
+    const CURRENT_FAMILY: &str = "current-family";
+    const CURRENT_REFERENCE: &str = "current-reference";
+    const LATE_FAMILY: &str = "late-family";
+    const LATE_REFERENCE: &str = "late-reference";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xce11));
+    let session = SessionId::from_uuid(Uuid::from_u128(0xce12));
+    let request = CreateSessionRequest::try_new(
+        command_id,
+        SessionConfigurationDefaults::new(direct(0xce13)),
+    )?;
+    let pin = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        FIRST_FAMILY,
+        FIRST_REFERENCE,
+    )])
+    .expect("fixture credential snapshot is valid");
+    let mut service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone(), pin),
+    );
+    let CreateSessionOutcome::Applied(created) = service.execute(request).await? else {
+        panic!("fixture session creation applies");
+    };
+    assert_eq!(created.session(), session);
+
+    sqlx::query(
+        "INSERT INTO session_model_credential_record
+            (session_id, event_ordinal, event_kind, provenance_kind,
+             provenance_command_id, recorded_at)
+         VALUES ($1, 2, 'updated', 'credential_update', $2, transaction_timestamp())",
+    )
+    .bind(session.into_uuid())
+    .bind(command_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_model_credential_entry
+            (session_id, event_ordinal, model_family, credential_reference)
+         VALUES ($1, 2, $2, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(CURRENT_FAMILY)
+    .bind(CURRENT_REFERENCE)
+    .execute(&pool)
+    .await?;
+
+    let mut publication = pool.begin().await?;
+    sqlx::query(
+        "UPDATE session_current_model_credentials
+            SET current_event_ordinal = 2
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *publication)
+    .await?;
+    let late_pool = pool.clone();
+    let late_insert = tokio::spawn(async move {
+        sqlx::query(
+            "INSERT INTO session_model_credential_entry
+                (session_id, event_ordinal, model_family, credential_reference)
+             VALUES ($1, 2, $2, $3)",
+        )
+        .bind(session.into_uuid())
+        .bind(LATE_FAMILY)
+        .bind(LATE_REFERENCE)
+        .execute(&late_pool)
+        .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the late entry must block on the publication's session-row lock"
+    );
+    publication.commit().await?;
+    late_insert
+        .await?
+        .expect_err("publication makes the concurrent late entry invalid");
+    let current_snapshot: Vec<(String, String)> = sqlx::query_as(
+        "SELECT model_family, credential_reference
+           FROM session_model_credential_entry
+          WHERE session_id = $1 AND event_ordinal = 2
+          ORDER BY model_family",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        current_snapshot,
+        vec![(CURRENT_FAMILY.to_owned(), CURRENT_REFERENCE.to_owned())]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn complete_text_turn(
     pool: &PgPool,
     session: SessionId,
