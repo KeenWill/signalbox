@@ -47,10 +47,17 @@ const API_VERSION: &str = "2026-03-10";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
-const MAX_REPOSITORY_CONTENTS_ENTRY_OVERHEAD_BYTES: usize = 256;
+// A standard contents entry can repeat a path in `name`, `path`, `target`,
+// four URL fields, and the three `_links` fields. Budget every occurrence at
+// the admitted path bound; the fixed allowance covers field syntax, hashes,
+// repository/ref material in URLs, and the enclosing object representation.
+const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 10;
+const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
 const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
-    * (MAX_FILE_PATH_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
-        + MAX_REPOSITORY_CONTENTS_ENTRY_OVERHEAD_BYTES);
+    * (MAX_FILE_PATH_BYTES
+        * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
+        * MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY
+        + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
@@ -3327,11 +3334,13 @@ mod tests {
         );
     }
 
-    /// Contract-valid escaped directory paths can reach bounded projection
-    /// even when their encoded contents response exceeds the former 8 MiB cap.
+    /// A complete standard contents-entry shape can repeat every admitted
+    /// escaped path and still reach bounded projection.
     #[tokio::test]
     async fn repository_directory_ingress_admits_escaped_path_bound() {
-        const OBSERVED_ENTRIES: usize = 350;
+        const OBSERVED_ENTRIES: usize = MAX_RESULT_ITEMS + 10;
+        const PRIOR_RESPONSE_CAP: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
+            * (MAX_FILE_PATH_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE + 256);
         let (transport, listener) = repository_test_transport().await;
         let directory = repository_directory_value(
             "src",
@@ -3352,11 +3361,11 @@ mod tests {
         let result = transport
             .repository_list_directory(repository_list_arguments("src"), &test_credential())
             .await
-            .expect("escaped contract-valid paths reach bounded projection")
+            .expect("complete escaped contents entries reach bounded projection")
             .into_json_value();
         let request = repository_server_result(server).await;
 
-        assert!(encoded_bytes > 8 * 1024 * 1024);
+        assert!(encoded_bytes > PRIOR_RESPONSE_CAP);
         assert_eq!(result["outcome"], "entries");
         assert_eq!(result["observed_entries"], OBSERVED_ENTRIES);
         assert_eq!(result["truncated"], true);
@@ -3482,10 +3491,22 @@ mod tests {
         let entry_name = "\u{1}".repeat(super::super::arguments::MAX_FILE_PATH_BYTES - 7);
         (0..count)
             .map(|index| {
+                let path = format!("src/{entry_name}{index:03}");
                 serde_json::json!({
-                    "path": format!("src/{entry_name}{index:03}"),
+                    "_links": {
+                        "git": path,
+                        "html": path,
+                        "self": path,
+                    },
+                    "download_url": path,
+                    "git_url": path,
+                    "html_url": path,
+                    "name": path,
+                    "path": path,
                     "size": index,
-                    "type": "file",
+                    "target": path,
+                    "type": "symlink",
+                    "url": path,
                 })
             })
             .collect()
