@@ -270,6 +270,7 @@ impl HubModelConfiguration {
                 let executable = PathBuf::from(required_string(table, "executable")?);
                 let working_directory = PathBuf::from(required_string(table, "working_directory")?);
                 if !executable.is_absolute()
+                    || !executable.is_file()
                     || !working_directory.is_absolute()
                     || !working_directory.is_dir()
                 {
@@ -804,7 +805,10 @@ impl CredentialAccess for FileCredentialAccess {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use signalbox_domain::{DirectModelSelection, ModelAlias, ModelSelectionRequest};
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
@@ -844,6 +848,23 @@ context_window_tokens = 200000
 alias_id = "30000000-0000-4000-8000-000000000001"
 selection_id = "10000000-0000-4000-8000-000000000001"
 "#;
+
+    fn configuration_with_codex_paths(executable: &Path, working_directory: &Path) -> String {
+        format!(
+            r#"{CONFIGURATION}
+[[adapter_mappings]]
+model_family = "codex"
+adapter = "codex_cli"
+credential_profile = "codex-subscription-primary"
+
+[codex_cli]
+executable = "{}"
+working_directory = "{}"
+"#,
+            executable.display(),
+            working_directory.display(),
+        )
+    }
 
     #[test]
     fn static_configuration_builds_correlated_domain_runtime_and_alias_mappings() {
@@ -934,6 +955,29 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             Some(HubModelConfigurationError::UnmappedModelFamily {
                 model_family: Arc::from(unmapped_family),
             })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_missing_codex_executable() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let missing_executable = temporary.path().join("missing-codex");
+        let configuration = configuration_with_codex_paths(&missing_executable, temporary.path());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_codex_executable_that_is_not_a_file() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let configuration = configuration_with_codex_paths(temporary.path(), temporary.path());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
         );
     }
 

@@ -211,16 +211,22 @@ async fn session_model_credentials_are_an_append_only_creation_snapshot()
     .fetch_one(&pool)
     .await?;
     assert_eq!(replay_counts, (1, 2, 1));
-    assert!(
-        sqlx::query(
-            "INSERT INTO session_model_credential_entry
-                (session_id, event_ordinal, model_family, credential_reference)
-             VALUES ($1, 1, 'late-family', 'late-reference')",
-        )
-        .bind(session.into_uuid())
-        .execute(&pool)
-        .await
-        .is_err()
+    let late_entry_error = sqlx::query(
+        "INSERT INTO session_model_credential_entry
+            (session_id, event_ordinal, model_family, credential_reference)
+         VALUES ($1, 1, 'late-family', 'late-reference')",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a published credential snapshot rejects late entries");
+    let late_entry_database_error = late_entry_error
+        .as_database_error()
+        .expect("the snapshot guard returns a database error");
+    assert_eq!(late_entry_database_error.code(), Some("P0001".into()));
+    assert_eq!(
+        late_entry_database_error.message(),
+        "published session model credential snapshots are immutable"
     );
 
     sqlx::query(
@@ -258,27 +264,39 @@ async fn session_model_credentials_are_an_append_only_creation_snapshot()
             .as_str(),
         SECOND_CODEX
     );
-    assert!(
-        sqlx::query(
-            "UPDATE session_model_credential_entry
-                SET credential_reference = 'rewrite'
-              WHERE session_id = $1 AND event_ordinal = 1 AND model_family = $2",
-        )
-        .bind(session.into_uuid())
-        .bind(CODEX_FAMILY)
-        .execute(&pool)
-        .await
-        .is_err()
+    let rewrite_error = sqlx::query(
+        "UPDATE session_model_credential_entry
+            SET credential_reference = 'rewrite'
+          WHERE session_id = $1 AND event_ordinal = 1 AND model_family = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(CODEX_FAMILY)
+    .execute(&pool)
+    .await
+    .expect_err("historical credential entries reject rewrites");
+    let rewrite_database_error = rewrite_error
+        .as_database_error()
+        .expect("the history guard returns a database error");
+    assert_eq!(rewrite_database_error.code(), Some("P0001".into()));
+    assert_eq!(
+        rewrite_database_error.message(),
+        "session model credential history is append-only"
     );
-    assert!(
-        sqlx::query(
-            "DELETE FROM session_current_model_credentials
-              WHERE session_id = $1",
-        )
-        .bind(session.into_uuid())
-        .execute(&pool)
-        .await
-        .is_err()
+    let delete_head_error = sqlx::query(
+        "DELETE FROM session_current_model_credentials
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("the current credential projection rejects deletion");
+    let delete_head_database_error = delete_head_error
+        .as_database_error()
+        .expect("the current projection guard returns a database error");
+    assert_eq!(delete_head_database_error.code(), Some("P0001".into()));
+    assert_eq!(
+        delete_head_database_error.message(),
+        "session model credential head is not deletable"
     );
 
     pool.close().await;

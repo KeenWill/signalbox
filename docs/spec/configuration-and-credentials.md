@@ -416,11 +416,12 @@ Each `[[models]]` entry defines one direct selection:
 
 This build provides exactly `anthropic` with profile `anthropic-primary` and
 `codex_cli` with profile `codex-subscription-primary`. A Codex mapping also
-requires `[codex_cli]` with an absolute executable path and an absolute,
-existing `working_directory`; construction validates that shape and platform
-support without invoking Codex or inspecting login state. The Codex CLI
-continues to own its external subscription login exactly as the adapter contract
-specifies. OpenAI HTTP and Claude CLI mappings are not provided by this build.
+requires `[codex_cli]` with an absolute executable path naming an existing
+regular file and an absolute, existing `working_directory`; construction
+validates that shape and platform support without invoking Codex or inspecting
+login state. The Codex CLI continues to own its external subscription login
+exactly as the adapter contract specifies. OpenAI HTTP and Claude CLI mappings
+are not provided by this build.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling

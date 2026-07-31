@@ -4068,6 +4068,18 @@ where
         .await
         {
             Ok(reference) => reference.as_str().to_owned(),
+            Err(sqlx::Error::RowNotFound) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    internal_protocol_error(
+                        Some(session.into_uuid()),
+                        InternalDiagnostic::SessionModelCredentialMissing,
+                    ),
+                )
+                .await;
+            }
             Err(_) => {
                 return write_error(
                     writer,
@@ -4244,7 +4256,13 @@ where
         prepared.target(),
         result.usage,
     )
-    .unwrap_or(true);
+    .unwrap_or_else(|| {
+        record_internal_diagnostic(
+            Some(session.into_uuid()),
+            InternalDiagnostic::ContextCompactionUnconfiguredTarget,
+        );
+        true
+    });
     if exceeds_limits {
         if let Err(repository_error) = fail_context_compaction_with_usage_until_resolved(
             &repository,
@@ -8831,7 +8849,9 @@ enum InternalDiagnostic {
     ImportedConversationIdentityCollision,
     ImportedConversationCorruption,
     SessionDefaultsVersionMissing,
+    SessionModelCredentialMissing,
     ContextCompactionRangeCorruption,
+    ContextCompactionUnconfiguredTarget,
     ContextCompactionIdentityCollision,
     ContextCompactionRepositoryCorruption,
     ContextCompactionReadCorruption,
@@ -8890,6 +8910,7 @@ impl InternalDiagnostic {
             | Self::SessionCreationCommandKindMismatch
             | Self::SessionMetadataCommandKindMismatch
             | Self::SessionDefaultsCommandKindMismatch
+            | Self::ContextCompactionUnconfiguredTarget
             | Self::SystemPromptMemberMissing
             | Self::SubmitInputCommandKindMismatch
             | Self::SubmitInputModelExecutionNoLiveExecution
@@ -8908,6 +8929,7 @@ impl InternalDiagnostic {
             | Self::ImportedSessionCorruption
             | Self::ImportedConversationCorruption
             | Self::SessionDefaultsVersionMissing
+            | Self::SessionModelCredentialMissing
             | Self::ContextCompactionRangeCorruption
             | Self::ContextCompactionRepositoryCorruption
             | Self::ContextCompactionReadCorruption
@@ -8947,7 +8969,9 @@ impl InternalDiagnostic {
             }
             Self::ImportedConversationCorruption => "imported_conversation_corruption",
             Self::SessionDefaultsVersionMissing => "session_defaults_version_missing",
+            Self::SessionModelCredentialMissing => "session_model_credential_missing",
             Self::ContextCompactionRangeCorruption => "context_compaction_range_corruption",
+            Self::ContextCompactionUnconfiguredTarget => "context_compaction_unconfigured_target",
             Self::ContextCompactionIdentityCollision => {
                 "context_compaction_repository_identity_collision"
             }
@@ -8993,16 +9017,13 @@ impl InternalDiagnostic {
     }
 }
 
-/// Records a fail-closed Internal response before returning its wire shape.
+/// Records one typed internal diagnostic without choosing a wire response.
 ///
-/// Every Internal construction routes through this function. Present session
-/// identities use the same canonical UUID display as surrounding spans; absent
-/// identities leave an empty field. Typed evidence contains only closed labels,
-/// so request content, credentials, tool arguments, and nested prose stay out.
-fn internal_protocol_error(
-    session_id: Option<uuid::Uuid>,
-    diagnostic: InternalDiagnostic,
-) -> ProtocolError {
+/// Present session identities use the same canonical UUID display as surrounding
+/// spans; absent identities leave an empty field. Typed evidence contains only
+/// closed labels, so request content, credentials, tool arguments, and nested
+/// prose stay out.
+fn record_internal_diagnostic(session_id: Option<uuid::Uuid>, diagnostic: InternalDiagnostic) {
     let failure_class = diagnostic.failure_class();
     let cause_code = diagnostic.cause_code();
     match session_id {
@@ -9019,6 +9040,16 @@ fn internal_protocol_error(
             "request failed an internal integrity check"
         ),
     }
+}
+
+/// Records a fail-closed Internal response before returning its wire shape.
+///
+/// Every Internal construction routes through this function.
+fn internal_protocol_error(
+    session_id: Option<uuid::Uuid>,
+    diagnostic: InternalDiagnostic,
+) -> ProtocolError {
+    record_internal_diagnostic(session_id, diagnostic);
     ProtocolError::without_detail(ErrorCode::Internal)
 }
 
@@ -10029,6 +10060,14 @@ mod tests {
         assert_eq!(
             InternalDiagnostic::ContextCompactionRepositoryCorruption.cause_code(),
             "context_compaction_repository_corruption"
+        );
+        assert_eq!(
+            InternalDiagnostic::ContextCompactionUnconfiguredTarget.cause_code(),
+            "context_compaction_unconfigured_target"
+        );
+        assert_eq!(
+            InternalDiagnostic::SessionModelCredentialMissing.cause_code(),
+            "session_model_credential_missing"
         );
         assert_eq!(
             InternalDiagnostic::ToolLoopIdentityCollision.cause_code(),

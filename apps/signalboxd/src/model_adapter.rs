@@ -48,7 +48,10 @@ impl<A> std::fmt::Debug for ConfiguredModelRuntime<A> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ConfiguredModelRuntime")
-            .field("anthropic", &"[model adapter]")
+            .field(
+                "anthropic",
+                &self.anthropic.as_ref().map(|_| "[model adapter]"),
+            )
             .field(
                 "codex_cli",
                 &self.codex_cli.as_ref().map(|_| "[model adapter]"),
@@ -342,6 +345,7 @@ context_window_tokens = 200000
         .expect("Codex mapping and process paths are valid");
         let runtime = ConfiguredModelRuntime::new(None::<ScriptedModel<String>>, &configuration)
             .expect("configured adapters construct");
+        assert!(format!("{runtime:?}").contains("anthropic: None"));
         let operation = ModelOperation::new(
             String::from("codex-route"),
             CredentialReference::new("codex-subscription-primary"),
