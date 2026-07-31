@@ -420,8 +420,11 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
 }
 
 fn observe_model_call_metrics(metrics: &TelemetryMetrics, state: DispatchedModelCallState) {
-    let DispatchedModelCallState::Terminal(disposition) = state else {
-        return;
+    let disposition = match state {
+        DispatchedModelCallState::Terminal(disposition) => disposition,
+        DispatchedModelCallState::Prepared
+        | DispatchedModelCallState::InFlight
+        | DispatchedModelCallState::CancellationRequested => return,
     };
     let disposition = match disposition {
         DispatchedModelCallDisposition::Completed => ModelMetricDisposition::Completed,

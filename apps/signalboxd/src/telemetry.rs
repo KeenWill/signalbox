@@ -195,6 +195,12 @@ enum OtlpProtocol {
     HttpProtobuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EndpointTransport {
+    Plaintext,
+    TransportSecured,
+}
+
 struct OtlpHeader {
     name: String,
     value: String,
@@ -202,7 +208,7 @@ struct OtlpHeader {
 
 struct OtlpConfiguration {
     endpoint: String,
-    uses_tls: bool,
+    transport: EndpointTransport,
     protocol: OtlpProtocol,
     headers: Vec<OtlpHeader>,
     sampling_ratio: f64,
@@ -264,7 +270,7 @@ impl TelemetryConfiguration {
                 TelemetryConfigurationFailure::AmbientOtlpSetting,
             ));
         }
-        let uses_tls = validate_endpoint(&endpoint)?;
+        let transport = validate_endpoint(&endpoint)?;
         let protocol =
             match optional_unicode(OTLP_PROTOCOL_ENVIRONMENT, values.protocol)?.as_deref() {
                 None | Some("grpc") => OtlpProtocol::Grpc,
@@ -288,11 +294,11 @@ impl TelemetryConfiguration {
             .map(|path| read_headers(&path))
             .transpose()?
             .unwrap_or_default();
-        validate_header_transport(uses_tls, &headers)?;
+        validate_header_transport(transport, &headers)?;
         Ok(Self {
             otlp: Some(OtlpConfiguration {
                 endpoint,
-                uses_tls,
+                transport,
                 protocol,
                 headers,
                 sampling_ratio,
@@ -362,27 +368,29 @@ fn optional_path(
         .transpose()
 }
 
-fn validate_endpoint(endpoint: &str) -> Result<bool, TelemetryConfigurationError> {
-    let parsed = Url::parse(endpoint).map_err(|_| {
+fn validate_endpoint(endpoint: &str) -> Result<EndpointTransport, TelemetryConfigurationError> {
+    let invalid_endpoint = || {
         TelemetryConfigurationError::new(
             OTLP_ENDPOINT_ENVIRONMENT,
             TelemetryConfigurationFailure::InvalidEndpoint,
         )
-    })?;
+    };
+    let parsed = Url::parse(endpoint).map_err(|_| invalid_endpoint())?;
+    let transport = match parsed.scheme() {
+        "http" => EndpointTransport::Plaintext,
+        "https" => EndpointTransport::TransportSecured,
+        _ => return Err(invalid_endpoint()),
+    };
     let admitted = endpoint.len() <= MAX_ENDPOINT_BYTES
-        && matches!(parsed.scheme(), "http" | "https")
         && parsed.host_str().is_some()
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.query().is_none()
         && parsed.fragment().is_none();
     if admitted {
-        Ok(parsed.scheme() == "https")
+        Ok(transport)
     } else {
-        Err(TelemetryConfigurationError::new(
-            OTLP_ENDPOINT_ENVIRONMENT,
-            TelemetryConfigurationFailure::InvalidEndpoint,
-        ))
+        Err(invalid_endpoint())
     }
 }
 
@@ -458,15 +466,15 @@ fn parse_headers(content: &str) -> Result<Vec<OtlpHeader>, TelemetryConfiguratio
 }
 
 fn validate_header_transport(
-    uses_tls: bool,
+    transport: EndpointTransport,
     headers: &[OtlpHeader],
 ) -> Result<(), TelemetryConfigurationError> {
-    if uses_tls || headers.is_empty() {
-        Ok(())
-    } else {
-        Err(header_error(
+    match (transport, headers.is_empty()) {
+        (EndpointTransport::Plaintext, false) => Err(header_error(
             TelemetryConfigurationFailure::InsecureHeaderTransport,
-        ))
+        )),
+        (EndpointTransport::Plaintext | EndpointTransport::TransportSecured, true)
+        | (EndpointTransport::TransportSecured, false) => Ok(()),
     }
 }
 
@@ -588,10 +596,11 @@ fn build_grpc_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
         .with_tonic()
         .with_endpoint(configuration.endpoint.clone())
         .with_timeout(OTLP_EXPORT_TIMEOUT);
-    let builder = if configuration.uses_tls {
-        builder.with_tls_config(ClientTlsConfig::new().with_native_roots())
-    } else {
-        builder
+    let builder = match configuration.transport {
+        EndpointTransport::Plaintext => builder,
+        EndpointTransport::TransportSecured => {
+            builder.with_tls_config(ClientTlsConfig::new().with_native_roots())
+        }
     };
     builder
         .with_metadata(grpc_metadata(&configuration.headers)?)
@@ -1630,7 +1639,7 @@ mod tests {
         let headers = parse_headers(&format!("authorization=Bearer {SYNTHETIC_CREDENTIAL}"))
             .expect("synthetic collector header parses");
 
-        let error = super::validate_header_transport(false, &headers)
+        let error = super::validate_header_transport(super::EndpointTransport::Plaintext, &headers)
             .expect_err("custom headers require transport security");
         let displayed = error.to_string();
 
@@ -1640,7 +1649,10 @@ mod tests {
         );
         assert!(displayed.contains(super::OTLP_HEADERS_FILE_ENVIRONMENT));
         assert!(!displayed.contains(SYNTHETIC_CREDENTIAL));
-        assert!(super::validate_header_transport(true, &headers).is_ok());
+        assert!(
+            super::validate_header_transport(super::EndpointTransport::TransportSecured, &headers,)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1649,7 +1661,7 @@ mod tests {
             .expect("documented binary-suffix header is admitted");
         let configuration = OtlpConfiguration {
             endpoint: "https://127.0.0.1:4318".to_owned(),
-            uses_tls: true,
+            transport: super::EndpointTransport::TransportSecured,
             protocol: super::OtlpProtocol::HttpProtobuf,
             headers,
             sampling_ratio: 1.0,
@@ -1678,7 +1690,8 @@ mod tests {
 
     #[test]
     fn resource_contains_only_the_closed_service_name() {
-        let resource = super::telemetry_resource("signalboxd.production");
+        let service_name = "signalboxd.production";
+        let resource = super::telemetry_resource(service_name);
         let attributes = resource
             .iter()
             .map(|(key, value)| (key.as_str().to_owned(), value.to_string()))
@@ -1686,10 +1699,7 @@ mod tests {
 
         assert_eq!(
             attributes,
-            vec![(
-                "service.name".to_owned(),
-                "signalboxd.production".to_owned()
-            )]
+            vec![("service.name".to_owned(), service_name.to_owned())]
         );
     }
 
