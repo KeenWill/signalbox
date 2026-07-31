@@ -151,7 +151,10 @@ surface is:
   ending in `-bin` are binary gRPC metadata and remain ordinary HTTP header
   names under `http/protobuf`. Header values are sent only as OTLP transport
   metadata. They never become a span, event, resource attribute, metric, or log
-  field, and errors never render the path or contents.
+  field, and errors never render the path or contents. A nonempty header file
+  requires an HTTPS endpoint; a header-free local collector may use HTTP. This
+  prevents collector credentials from crossing the network without transport
+  protection.
 - `SIGNALBOX_OTLP_SAMPLING_RATIO` — optional finite number from `0` through `1`
   inclusive; omission selects `1`. Sampling is parent-based with the configured
   trace-id ratio.
@@ -163,7 +166,7 @@ surface is:
 For example, a gRPC collector configuration is:
 
 ```text
-SIGNALBOX_OTLP_ENDPOINT=http://otel-collector:4317
+SIGNALBOX_OTLP_ENDPOINT=https://otel-collector:4317
 SIGNALBOX_OTLP_PROTOCOL=grpc
 SIGNALBOX_OTLP_SAMPLING_RATIO=1
 SIGNALBOX_OTLP_SERVICE_NAME=signalboxd.production

@@ -122,6 +122,7 @@ pub enum TelemetryConfigurationFailure {
     HeaderFileUnreadable,
     HeaderFileTooLarge,
     InvalidHeader,
+    InsecureHeaderTransport,
     TooManyHeaders,
     DuplicateHeader,
     ExporterConstruction,
@@ -142,6 +143,7 @@ impl TelemetryConfigurationFailure {
             Self::HeaderFileUnreadable => "could not be read",
             Self::HeaderFileTooLarge => "exceeds the telemetry header-file bound",
             Self::InvalidHeader => "contains an invalid telemetry header",
+            Self::InsecureHeaderTransport => "requires an https OTLP endpoint",
             Self::TooManyHeaders => "contains too many telemetry headers",
             Self::DuplicateHeader => "contains a duplicate telemetry header",
             Self::ExporterConstruction => "could not construct the OTLP exporter",
@@ -286,6 +288,7 @@ impl TelemetryConfiguration {
             .map(|path| read_headers(&path))
             .transpose()?
             .unwrap_or_default();
+        validate_header_transport(uses_tls, &headers)?;
         Ok(Self {
             otlp: Some(OtlpConfiguration {
                 endpoint,
@@ -452,6 +455,19 @@ fn parse_headers(content: &str) -> Result<Vec<OtlpHeader>, TelemetryConfiguratio
         });
     }
     Ok(headers)
+}
+
+fn validate_header_transport(
+    uses_tls: bool,
+    headers: &[OtlpHeader],
+) -> Result<(), TelemetryConfigurationError> {
+    if uses_tls || headers.is_empty() {
+        Ok(())
+    } else {
+        Err(header_error(
+            TelemetryConfigurationFailure::InsecureHeaderTransport,
+        ))
+    }
 }
 
 fn header_error(failure: TelemetryConfigurationFailure) -> TelemetryConfigurationError {
@@ -1610,12 +1626,30 @@ mod tests {
     }
 
     #[test]
+    fn plaintext_otlp_rejects_custom_headers_without_rendering_them() {
+        let headers = parse_headers(&format!("authorization=Bearer {SYNTHETIC_CREDENTIAL}"))
+            .expect("synthetic collector header parses");
+
+        let error = super::validate_header_transport(false, &headers)
+            .expect_err("custom headers require transport security");
+        let displayed = error.to_string();
+
+        assert_eq!(
+            error.failure(),
+            super::TelemetryConfigurationFailure::InsecureHeaderTransport
+        );
+        assert!(displayed.contains(super::OTLP_HEADERS_FILE_ENVIRONMENT));
+        assert!(!displayed.contains(SYNTHETIC_CREDENTIAL));
+        assert!(super::validate_header_transport(true, &headers).is_ok());
+    }
+
+    #[test]
     fn binary_suffix_header_constructs_for_both_otlp_protocols() {
         let headers = parse_headers("trace-bin=synthetic-binary-metadata")
             .expect("documented binary-suffix header is admitted");
         let configuration = OtlpConfiguration {
-            endpoint: "http://127.0.0.1:4318".to_owned(),
-            uses_tls: false,
+            endpoint: "https://127.0.0.1:4318".to_owned(),
+            uses_tls: true,
             protocol: super::OtlpProtocol::HttpProtobuf,
             headers,
             sampling_ratio: 1.0,
