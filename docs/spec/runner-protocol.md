@@ -164,6 +164,79 @@ The closed version-one frame vocabulary is:
 | either          | `shutdown`                   | Current connection epoch and closed reason `daemon_shutdown` or `runner_shutdown`; creates no loss proof by itself.                                                                                                           |
 | daemon → runner | `rejected`                   | Offending frame kind, available correlation, and one closed code; no arbitrary peer text. Fatal codes close the connection.                                                                                                   |
 
+Every frame is one JSON object with exactly `version`, `kind`, and `payload`
+members. `version` is the integer `1`, `kind` is one table token, and `payload`
+is one object whose required members are fixed by that kind; none permits an
+additional member. Shared correlations are records rather than flattened
+prefixes. A lease correlation contains, in this order, registration revision,
+lease id, positive lease-lineage generation, runner, tool name, session, turn,
+tool request, physical tool attempt, issuing turn attempt, and positive tool
+dispatch generation. A provisioning correlation contains authorization id,
+session, positive placement revision, runner, registration revision, optional
+repository key, sandbox profile, and optional credential-profile name. A release
+correlation contains session, positive retired placement revision, runner, and
+stable workspace-manifest id. A leak-page correlation contains registration
+revision, report digest, and positive page. Repeating a shared correlation in an
+acknowledgement means repeating that complete record.
+
+A lease offer's result bounds record has exactly `success_text_bytes` and
+`failure_detail_bytes`, both unsigned integers. Version one requires 1,048,576
+and 4,096 respectively: a runner rejects any other pair rather than negotiating
+bounds. Its terminal result envelope is the closed union:
+
+- `success`, carrying exactly one `text` member whose UTF-8 value contains no
+  U+0000 and is within `success_text_bytes`;
+- `known_failure`, carrying exact `error_kind` and optional `detail`, where the
+  kind is `unknown_tool`, `invalid_arguments`, `execution_failed`,
+  `result_too_large`, or `crash_lost`, and a present detail is nonempty,
+  POSIX-trimmed, control-free UTF-8 within `failure_detail_bytes`; or
+- `ambiguous`, carrying no member beyond its union tag.
+
+The union tag is the `kind` member of the envelope object. A member belonging to
+another arm, an absent required member, or an extra member is malformed. These
+are the wire projection of `ToolAttemptEnd`, not a second terminal-state model.
+
+A reconnect inventory is one object with exactly five optional members: `lease`,
+`result`, `workspace_operation`, `operation_failure`, and `leak_page`. Each
+member is absent or carries one item; JSON null is never an absence. The lease
+item is the complete lease correlation plus one `phase` token
+`waiting_dispatch`, `dispatch_received`, or `execution_may_have_started`. The
+result item is that correlation plus the complete terminal envelope. A
+workspace-operation item is the closed union `provision` or `release` carrying
+its complete correlation and phase: provisioning admits `provisioning` or
+`ready_unrecorded`, while release admits `release_accepted` or
+`release_completed`. An operation-failure item carries its closed provision,
+release, or lease-offer correlation, its admissible failure category, and its
+bounded detail object. A leak-page item carries the complete leak-page frame
+payload. The count restrictions below apply after this structure is checked.
+
+`resumed` carries a `directives` object with those same five optional members,
+and its presence set must equal the received inventory's presence set. Each
+present member repeats the inventoried item's complete correlation and carries
+exactly one action: `resend`, `await`, `discard_as_recorded`, or `fail_stale`.
+The daemon may select an action only after matching durable state; neither the
+inventory order nor a missing member can stand in for the correlation.
+
+A heartbeat acknowledgement carries `lease_phase` and `workspace_phase`, each as
+an optional member rather than JSON null. A present lease phase is the same
+lease item admitted by reconnect. A present workspace phase is the same
+workspace-operation item admitted by reconnect, or that operation's exact
+correlation with `failure_unrecorded` after an operation failure is journaled.
+Thus a heartbeat phase can report progress but cannot create lease, result,
+provisioning, release, or failure authority.
+
+`rejected.available_correlation` is a required closed union so partial decode
+never guesses what the sender meant. Its arms are `none` with no correlation,
+`enrollment` with enrollment-request id, `registration` with registration
+revision, `lease` with the complete lease correlation, `provision` with the
+complete provisioning correlation, `release` with the complete release
+correlation, `leak_page` with the complete leak-page correlation, and
+`operation_failure` with the exact refused-operation correlation. `none` is
+admissible only when the frame failed before one complete arm was available.
+Every other arm is rejected if any of its required correlation members was
+unavailable; fragments are never padded with sentinels or borrowed from
+connection memory.
+
 An advertisement contains at most 16 capability classes, 256 tools, 64
 credential-profile names, and 64 repository entries; names are sorted and
 unique. A repository entry is one exact repository key paired with the exact
@@ -230,10 +303,17 @@ Each kind's field sequence is complete and fixed here:
 - `leak-page` — registration revision, report digest, page number, optional
   prior-page digest, final-page flag, then that page's facts as one inventory of
   those same nested records;
-- `workspace-manifest` — lifecycle, session, placement revision, runner,
-  optional repository key, optional canonical-clone-URL digest, optional
-  credential-profile name, sandbox profile, relative workspace path, then the
-  bounded recovery commit-or-branch facts
+- `workspace-manifest` — lifecycle, stable manifest id, session, placement
+  revision, runner, optional repository key, optional canonical-clone-URL
+  digest, optional credential-profile name, sandbox profile, relative workspace
+  path, then optional recovery. Present recovery is one nested record beginning
+  with the `commit` or `branch` token: `commit` is followed by its exact
+  revision, while `branch` is followed by its validated ref name and exact
+  revision. A revision is exactly 40 or 64 lowercase hexadecimal bytes, and a
+  branch name is within the existing 255-byte validated-ref cap. Repository key,
+  clone-URL digest, and recovery are present together for a repository worktree
+  and absent together for a private root; credential profile remains
+  independently optional
   ([workspace provisioning and recovery](#workspace-provisioning-and-recovery));
   and
 - `clone-url` — the single configuration-validated canonical URL text.
@@ -361,19 +441,20 @@ its durable acknowledgement boundary.
 
 Every message after `enrolled` or `replacement_pending` carries the exact active
 or pending connection registration revision. Lease messages additionally carry
-lease id, lease-lineage generation, runner, session, tool request, physical tool
-attempt, issuing turn attempt, and tool dispatch generation. An acknowledgement
-for another revision or correlation is stale evidence and cannot advance either
-side (INV-021, INV-043).
+lease id, lease-lineage generation, runner, tool name, session, turn, tool
+request, physical tool attempt, issuing turn attempt, and tool dispatch
+generation. An acknowledgement for another revision or correlation is stale
+evidence and cannot advance either side (INV-021, INV-043).
 
 The daemon sends a heartbeat challenge every five seconds. The runner replies
-with its monotonically increasing heartbeat sequence and exact outstanding lease
-phase. One missed acknowledgement fences new offers while the connection is
-suspect. Three consecutive misses, fifteen seconds after the last accepted
-acknowledgement, durably mark the connection lost. A reconnect before that
-deadline resumes continuity and, if a `suspect` owner event was emitted, emits
-the matching `connected` recovery event before offers resume; after `RunnerLost`
-commits, the old identity cannot revive or clear it.
+with its monotonically increasing heartbeat sequence and the exact optional
+lease and workspace phases defined above. One missed acknowledgement fences new
+offers while the connection is suspect. Three consecutive misses, fifteen
+seconds after the last accepted acknowledgement, durably mark the connection
+lost. A reconnect before that deadline resumes continuity and, if a `suspect`
+owner event was emitted, emits the matching `connected` recovery event before
+offers resume; after `RunnerLost` commits, the old identity cannot revive or
+clear it.
 
 Reconnect repeats resume and advertisement, then exchanges a bounded inventory
 containing at most the one serial outstanding lease, its fsynced local phase,
@@ -1314,20 +1395,29 @@ restricted session's writable root is where its file and shell tools put durable
 work, so a root the runner could not re-identify after a restart would discard
 that work silently while the session kept running.
 
-The manifest records lifecycle, session, placement revision, runner, optional
-repository key, the optional lowercase SHA-256 digest of the
-configuration-validated canonical clone URL, optional credential-profile name,
-sandbox profile, relative workspace path, and the bounded commit or branch facts
-needed for recovery; the repository-bound members are absent together for a
-private root. The canonical URL is credential-free, but its digest is sufficient
-identity and avoids repeating the operator configuration value. Recovery
-resolves the repository key again and requires the current canonical URL digest
-to equal the protected manifest value; a changed mapping is `manifest_conflict`
-and can never reinterpret an existing clone. The writable repository
-`.git/config` is not authority. The manifest records no credential path or
-value. The same runner state root durably spools one unacknowledged terminal
-result, one unacknowledged workspace release, and one unacknowledged operation
-failure per the serial wire protocol.
+The workspace-manifest id is one daemon-correlated canonical UUID stable across
+all lifecycle changes. It is distinct from the `workspace-manifest` content
+digest: the digest authenticates the exact lifecycle-specific manifest bytes,
+while ready, recorded, and release frames correlate the stable id. The manifest
+lifecycle is the closed vocabulary `staging`, `ready`, `active`, or `releasing`.
+Creation writes `staging`; the atomic publication rename writes `ready`; durable
+`workspace_recorded` admission writes `active`; and an accepted release writes
+`releasing` before the trash rename. Transitions only advance in that order,
+equal replay retains the same value, and deletion is represented by absence
+rather than a fifth lifecycle token. The manifest records that lifecycle, its
+stable id, session, placement revision, runner, optional repository key, the
+optional lowercase SHA-256 digest of the configuration-validated canonical clone
+URL, optional credential-profile name, sandbox profile, relative workspace path,
+and the bounded commit or branch facts needed for recovery; the repository-bound
+members are absent together for a private root. The canonical URL is
+credential-free, but its digest is sufficient identity and avoids repeating the
+operator configuration value. Recovery resolves the repository key again and
+requires the current canonical URL digest to equal the protected manifest value;
+a changed mapping is `manifest_conflict` and can never reinterpret an existing
+clone. The writable repository `.git/config` is not authority. The manifest
+records no credential path or value. The same runner state root durably spools
+one unacknowledged terminal result, one unacknowledged workspace release, and
+one unacknowledged operation failure per the serial wire protocol.
 
 Every Git invocation, in provisioning and in every Git tool alike, runs with its
 effective configuration forced by the runner rather than validated after the

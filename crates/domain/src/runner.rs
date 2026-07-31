@@ -16,11 +16,13 @@ use crate::{
     RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId, SessionId,
     ToolArgumentsKind, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolBatch,
     ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass, ToolName,
-    ToolPermissionDefault,
+    ToolPermissionDefault, WorkspaceManifestId,
 };
 
 const NAME_MAX_BYTES: usize = 64;
 const EXACT_VALUE_MAX_BYTES: usize = 4_096;
+const PERMISSION_OVERRIDE_MAX_ENTRIES: usize = 64;
+const WORKSPACE_BRANCH_MAX_BYTES: usize = 255;
 
 /// Why runner domain input or stored facts fail closed.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +35,12 @@ pub enum RunnerDomainError {
     TooLong,
     /// The supplied portable name has invalid syntax.
     InvalidName,
+    /// The supplied digest or revision is not canonical lowercase hexadecimal text.
+    InvalidHex,
+    /// The supplied Git branch name is not a canonical branch ref name.
+    InvalidBranchName,
+    /// The supplied runner-root-relative path is not canonical.
+    InvalidRelativePath,
     /// The tool input schema is not a normalized JSON object.
     InvalidToolInputSchema,
     /// A capability class appears more than once.
@@ -43,6 +51,10 @@ pub enum RunnerDomainError {
     DuplicateProfile(CredentialProfileName),
     /// A workspace capability appears more than once.
     DuplicateWorkspaceCapability(WorkspaceCapability),
+    /// A sandbox profile appears more than once.
+    DuplicateSandboxProfile(RunnerSandboxProfile),
+    /// The placement contains too many per-tool permission overrides.
+    TooManyPermissionOverrides,
     /// A credential profile names a tool absent from the catalog.
     UndeclaredProfileTool(ToolName),
     /// An idempotent tool is incorrectly admissible on the daemon.
@@ -59,6 +71,10 @@ pub enum RunnerDomainError {
     CredentialProfileUndeclared(CredentialProfileName),
     /// The runner advertised a workspace capability absent from the catalog.
     WorkspaceCapabilityNotAllowed(WorkspaceCapability),
+    /// The runner advertised a sandbox profile absent from the catalog.
+    SandboxProfileNotAllowed(RunnerSandboxProfile),
+    /// A repository entry requires a profile absent from the same advertisement.
+    RepositoryProfileUnavailable(CredentialProfileName),
     /// The requested transition is invalid from the current state.
     InvalidState,
     /// Supplied facts do not correlate with the authoritative aggregate.
@@ -75,6 +91,10 @@ pub enum RunnerDomainError {
     WorkingDirectoryMismatch,
     /// The selected runner lacks the required workspace capability.
     WorkspaceCapabilityUnavailable,
+    /// The selected runner lacks the required sandbox profile.
+    SandboxProfileUnavailable,
+    /// The selected runner lacks the requested repository entry.
+    RepositoryUnavailable,
     /// The provisioned workspace does not match the placement request.
     WorkspaceMismatch,
     /// A required tool is unavailable on the selected runner.
@@ -121,6 +141,17 @@ fn validate_exact(value: String) -> Result<String, RunnerDomainError> {
     }
     if value.len() > EXACT_VALUE_MAX_BYTES {
         return Err(RunnerDomainError::TooLong);
+    }
+    Ok(value)
+}
+
+fn validate_lower_hex(value: String, lengths: &[usize]) -> Result<String, RunnerDomainError> {
+    if !lengths.contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(RunnerDomainError::InvalidHex);
     }
     Ok(value)
 }
@@ -178,15 +209,123 @@ impl RunnerWorkingDirectory {
 pub struct WorkspaceRepositoryKey(String);
 
 impl WorkspaceRepositoryKey {
-    /// Validates and constructs an exact workspace repository key.
+    /// Validates and constructs a portable workspace repository key.
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
-        validate_exact(value).map(Self)
+        validate_name(value).map(Self)
     }
 
-    /// Returns the exact workspace repository key.
+    /// Returns the validated repository key.
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Canonical lowercase SHA-256 identity of one configuration-validated clone URL.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CanonicalCloneUrlDigest(String);
+
+impl CanonicalCloneUrlDigest {
+    /// Validates and constructs a canonical clone-URL digest.
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
+        validate_lower_hex(value, &[64]).map(Self)
+    }
+
+    /// Returns the canonical lowercase hexadecimal digest.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Canonical full Git object identity used to recover a workspace.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkspaceRevision(String);
+
+impl WorkspaceRevision {
+    /// Validates a full SHA-1 or SHA-256 Git object identity.
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
+        validate_lower_hex(value, &[40, 64]).map(Self)
+    }
+
+    /// Returns the canonical lowercase full object identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Validated Git branch name, without the `refs/heads/` prefix.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkspaceBranchName(String);
+
+impl WorkspaceBranchName {
+    /// Validates the branch as the complete `refs/heads/<name>` ref form.
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
+        let invalid_component = value.split('/').any(|component| {
+            component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
+        });
+        if value.is_empty()
+            || value.len() > WORKSPACE_BRANCH_MAX_BYTES
+            || value == "@"
+            || value.starts_with('-')
+            || value.ends_with('.')
+            || value.contains("..")
+            || value.contains("@{")
+            || value.bytes().any(|byte| {
+                byte <= 0x20
+                    || byte == 0x7f
+                    || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+            })
+            || invalid_component
+        {
+            return Err(RunnerDomainError::InvalidBranchName);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated branch name without `refs/heads/`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Runner-root-relative path recorded in a workspace manifest.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkspaceRelativePath(String);
+
+impl WorkspaceRelativePath {
+    /// Validates a bounded nonempty relative path without traversal components.
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
+        let exact = validate_exact(value)?;
+        if exact.starts_with('/')
+            || exact
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err(RunnerDomainError::InvalidRelativePath);
+        }
+        Ok(Self(exact))
+    }
+
+    /// Returns the exact runner-root-relative path.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Exclusive Git recovery facts retained by a repository workspace.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum WorkspaceRecovery {
+    /// Recovery checks out one exact detached commit.
+    Commit {
+        /// The exact commit to recover.
+        revision: WorkspaceRevision,
+    },
+    /// Recovery checks out one validated branch at its exact revision.
+    Branch {
+        /// The validated branch name without `refs/heads/`.
+        name: WorkspaceBranchName,
+        /// The exact revision the branch must name.
+        revision: WorkspaceRevision,
+    },
 }
 
 /// Class-or-identity runner targeting.
@@ -384,6 +523,86 @@ impl CredentialProfilePolicy {
     }
 }
 
+/// Closed sandbox profiles advertised by runners and selected by placements.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RunnerSandboxProfile {
+    /// Supervises execution without restricting the invoking user's filesystem or network.
+    Ambient,
+    /// Restricts execution to one placement-owned writable root.
+    WorkspaceRestricted,
+}
+
+/// Session-owned permission override for one exact runner tool.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RunnerToolPermissionOverride {
+    /// The exact tool may run without per-attempt confirmation.
+    Auto,
+    /// The exact tool requires confirmation by an exact owner command.
+    Confirm,
+}
+
+/// Checked bounded per-tool permission override inventory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerToolPermissionOverrides(BTreeMap<ToolName, RunnerToolPermissionOverride>);
+
+impl RunnerToolPermissionOverrides {
+    /// Constructs at most 64 exact overrides while rejecting duplicate tool names.
+    pub fn try_new(
+        overrides: impl IntoIterator<Item = (ToolName, RunnerToolPermissionOverride)>,
+    ) -> Result<Self, RunnerDomainError> {
+        let mut checked = BTreeMap::new();
+        for (tool, permission) in overrides {
+            if checked.insert(tool.clone(), permission).is_some() {
+                return Err(RunnerDomainError::DuplicateTool(tool));
+            }
+            if checked.len() > PERMISSION_OVERRIDE_MAX_ENTRIES {
+                return Err(RunnerDomainError::TooManyPermissionOverrides);
+            }
+        }
+        Ok(Self(checked))
+    }
+
+    /// Returns the explicit override for one tool, when present.
+    pub fn get(&self, tool: &ToolName) -> Option<RunnerToolPermissionOverride> {
+        self.0.get(tool).copied()
+    }
+
+    /// Iterates the exact sorted override inventory.
+    pub fn iter(&self) -> impl Iterator<Item = (&ToolName, RunnerToolPermissionOverride)> {
+        self.0.iter().map(|(tool, permission)| (tool, *permission))
+    }
+}
+
+/// One advertised repository and its configured credential requirement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerRepositoryEntry {
+    key: WorkspaceRepositoryKey,
+    credential_profile: Option<CredentialProfileName>,
+}
+
+impl RunnerRepositoryEntry {
+    /// Pairs one exact repository key with its optional required profile.
+    pub const fn new(
+        key: WorkspaceRepositoryKey,
+        credential_profile: Option<CredentialProfileName>,
+    ) -> Self {
+        Self {
+            key,
+            credential_profile,
+        }
+    }
+
+    /// Returns the advertised repository key.
+    pub const fn key(&self) -> &WorkspaceRepositoryKey {
+        &self.key
+    }
+
+    /// Returns the configured credential requirement; absence means anonymous HTTPS.
+    pub const fn credential_profile(&self) -> Option<&CredentialProfileName> {
+        self.credential_profile.as_ref()
+    }
+}
+
 /// Closed workspace capabilities advertised by runners.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum WorkspaceCapability {
@@ -398,6 +617,7 @@ pub struct RunnerCatalog {
     tools: BTreeMap<ToolName, RunnerToolDeclaration>,
     profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
     workspaces: BTreeSet<WorkspaceCapability>,
+    sandboxes: BTreeSet<RunnerSandboxProfile>,
 }
 
 impl RunnerCatalog {
@@ -407,6 +627,7 @@ impl RunnerCatalog {
         tools: impl IntoIterator<Item = RunnerToolDeclaration>,
         profiles: impl IntoIterator<Item = CredentialProfilePolicy>,
         workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+        sandboxes: impl IntoIterator<Item = RunnerSandboxProfile>,
     ) -> Result<Self, RunnerDomainError> {
         let mut checked_classes = BTreeSet::new();
         for class in classes {
@@ -453,11 +674,18 @@ impl RunnerCatalog {
                 return Err(RunnerDomainError::DuplicateWorkspaceCapability(workspace));
             }
         }
+        let mut checked_sandboxes = BTreeSet::new();
+        for sandbox in sandboxes {
+            if !checked_sandboxes.insert(sandbox) {
+                return Err(RunnerDomainError::DuplicateSandboxProfile(sandbox));
+            }
+        }
         Ok(Self {
             classes: checked_classes,
             tools: checked_tools,
             profiles: checked_profiles,
             workspaces: checked_workspaces,
+            sandboxes: checked_sandboxes,
         })
     }
 }
@@ -469,6 +697,8 @@ pub struct RunnerAdvertisement {
     tools: BTreeSet<ToolName>,
     profiles: BTreeSet<CredentialProfileName>,
     workspaces: BTreeSet<WorkspaceCapability>,
+    sandboxes: BTreeSet<RunnerSandboxProfile>,
+    repositories: BTreeMap<WorkspaceRepositoryKey, RunnerRepositoryEntry>,
 }
 
 impl RunnerAdvertisement {
@@ -478,13 +708,51 @@ impl RunnerAdvertisement {
         tools: impl IntoIterator<Item = ToolName>,
         profiles: impl IntoIterator<Item = CredentialProfileName>,
         workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+        sandboxes: impl IntoIterator<Item = RunnerSandboxProfile>,
+        repositories: impl IntoIterator<Item = RunnerRepositoryEntry>,
     ) -> Self {
+        let repositories = repositories
+            .into_iter()
+            .map(|entry| (entry.key.clone(), entry))
+            .collect();
         Self {
             classes: classes.into_iter().collect(),
             tools: tools.into_iter().collect(),
             profiles: profiles.into_iter().collect(),
             workspaces: workspaces.into_iter().collect(),
+            sandboxes: sandboxes.into_iter().collect(),
+            repositories,
         }
+    }
+
+    /// Iterates the advertised capability classes in canonical order.
+    pub fn classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
+        self.classes.iter()
+    }
+
+    /// Iterates the advertised tool names in canonical order.
+    pub fn tools(&self) -> impl Iterator<Item = &ToolName> {
+        self.tools.iter()
+    }
+
+    /// Iterates the advertised credential-profile names in canonical order.
+    pub fn profiles(&self) -> impl Iterator<Item = &CredentialProfileName> {
+        self.profiles.iter()
+    }
+
+    /// Iterates the advertised workspace capabilities in canonical order.
+    pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_ {
+        self.workspaces.iter().copied()
+    }
+
+    /// Iterates the advertised sandbox profiles in canonical order.
+    pub fn sandboxes(&self) -> impl Iterator<Item = RunnerSandboxProfile> + '_ {
+        self.sandboxes.iter().copied()
+    }
+
+    /// Iterates repository entries in canonical key order.
+    pub fn repositories(&self) -> impl Iterator<Item = &RunnerRepositoryEntry> {
+        self.repositories.values()
     }
 }
 
@@ -659,6 +927,23 @@ impl RunnerEnrollment {
         {
             return Err(RunnerDomainError::WorkspaceCapabilityNotAllowed(*workspace));
         }
+        if let Some(sandbox) = advertisement
+            .sandboxes
+            .iter()
+            .find(|sandbox| !catalog.sandboxes.contains(*sandbox))
+        {
+            return Err(RunnerDomainError::SandboxProfileNotAllowed(*sandbox));
+        }
+        if let Some(profile) = advertisement.repositories.values().find_map(|entry| {
+            entry
+                .credential_profile
+                .as_ref()
+                .filter(|profile| !advertisement.profiles.contains(*profile))
+        }) {
+            return Err(RunnerDomainError::RepositoryProfileUnavailable(
+                profile.clone(),
+            ));
+        }
         let mut tools = BTreeMap::new();
         for name in advertisement.tools {
             let Some(declaration) = catalog.tools.get(&name) else {
@@ -689,6 +974,8 @@ impl RunnerEnrollment {
                 tools,
                 profiles,
                 workspaces: advertisement.workspaces,
+                sandboxes: advertisement.sandboxes,
+                repositories: advertisement.repositories,
                 revision,
                 current_revision: Arc::clone(&self.registration_revision),
                 enrollment_active: Arc::clone(&self.registration_active),
@@ -840,6 +1127,8 @@ pub struct ValidatedRunnerRegistration {
     tools: BTreeMap<ToolName, RunnerToolDeclaration>,
     profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
     workspaces: BTreeSet<WorkspaceCapability>,
+    sandboxes: BTreeSet<RunnerSandboxProfile>,
+    repositories: BTreeMap<WorkspaceRepositoryKey, RunnerRepositoryEntry>,
     revision: RunnerGeneration,
     current_revision: Arc<AtomicU64>,
     enrollment_active: Arc<AtomicBool>,
@@ -854,6 +1143,8 @@ impl PartialEq for ValidatedRunnerRegistration {
             && self.tools == other.tools
             && self.profiles == other.profiles
             && self.workspaces == other.workspaces
+            && self.sandboxes == other.sandboxes
+            && self.repositories == other.repositories
             && self.revision == other.revision
     }
 }
@@ -909,6 +1200,16 @@ impl ValidatedRunnerRegistration {
         self.workspaces.contains(&capability)
     }
 
+    /// Reports whether the runner advertised the sandbox profile.
+    pub fn supports_sandbox(&self, profile: RunnerSandboxProfile) -> bool {
+        self.sandboxes.contains(&profile)
+    }
+
+    /// Returns the exact advertised repository entry, when present.
+    pub fn repository(&self, key: &WorkspaceRepositoryKey) -> Option<&RunnerRepositoryEntry> {
+        self.repositories.get(key)
+    }
+
     /// Iterates the registered tool names.
     pub fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
         self.tools.keys()
@@ -934,6 +1235,16 @@ impl ValidatedRunnerRegistration {
         self.workspaces.iter().copied()
     }
 
+    /// Iterates the advertised sandbox profiles.
+    pub fn sandboxes(&self) -> impl Iterator<Item = RunnerSandboxProfile> + '_ {
+        self.sandboxes.iter().copied()
+    }
+
+    /// Iterates the advertised repository entries in key order.
+    pub fn repositories(&self) -> impl Iterator<Item = &RunnerRepositoryEntry> {
+        self.repositories.values()
+    }
+
     /// Reconstitutes validated availability against the enrollment and current catalog.
     pub fn reconstitute(
         enrollment: &RunnerEnrollment,
@@ -952,6 +1263,8 @@ impl ValidatedRunnerRegistration {
             input.tools.iter().map(|tool| tool.name.clone()),
             input.profiles.iter().map(|profile| profile.name.clone()),
             input.workspaces.clone(),
+            input.sandboxes.clone(),
+            input.repositories.clone(),
         );
         let stored_tool_count = input.tools.len();
         let stored_tools: BTreeMap<_, _> = input
@@ -964,6 +1277,12 @@ impl ValidatedRunnerRegistration {
             .profiles
             .into_iter()
             .map(|profile| (profile.name.clone(), profile))
+            .collect();
+        let stored_repository_count = input.repositories.len();
+        let stored_repositories: BTreeMap<_, _> = input
+            .repositories
+            .into_iter()
+            .map(|entry| (entry.key.clone(), entry))
             .collect();
         let historical_authority = RunnerEnrollment {
             enrollment: enrollment.enrollment,
@@ -985,6 +1304,9 @@ impl ValidatedRunnerRegistration {
             || registration.tools != stored_tools
             || registration.profiles != stored_profiles
             || registration.workspaces != input.workspaces
+            || registration.sandboxes != input.sandboxes
+            || stored_repositories.len() != stored_repository_count
+            || registration.repositories != stored_repositories
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
@@ -1014,6 +1336,10 @@ pub struct ValidatedRunnerRegistrationReconstitutionInput {
     pub profiles: Vec<CredentialProfilePolicy>,
     /// The exact advertised workspace capabilities.
     pub workspaces: BTreeSet<WorkspaceCapability>,
+    /// The exact advertised sandbox profiles.
+    pub sandboxes: BTreeSet<RunnerSandboxProfile>,
+    /// The exact advertised repository entries.
+    pub repositories: Vec<RunnerRepositoryEntry>,
 }
 
 /// Positive runner lease, placement, or grant generation.
@@ -1789,12 +2115,26 @@ pub enum WorkspaceRequirement {
 pub struct ProvisionedWorkspace {
     /// The owning session identity.
     pub session: SessionId,
+    /// The placement revision that owns the workspace.
+    pub placement_revision: RunnerGeneration,
     /// The runner responsible for workspace cleanup.
     pub runner: RunnerId,
-    /// The runner-interpreted repository key.
-    pub repository: WorkspaceRepositoryKey,
+    /// The repository key for a worktree; absent for a managed private root.
+    pub repository: Option<WorkspaceRepositoryKey>,
+    /// The canonical clone-URL digest for a worktree; absent for a private root.
+    pub canonical_clone_url_digest: Option<CanonicalCloneUrlDigest>,
+    /// The profile used to clone a worktree; absent for a private root.
+    pub credential_profile: Option<CredentialProfileName>,
+    /// The sandbox profile under which the workspace was provisioned.
+    pub sandbox: RunnerSandboxProfile,
     /// The runner-interpreted working directory.
     pub working_directory: RunnerWorkingDirectory,
+    /// The runner-root-relative path named by the manifest.
+    pub relative_path: WorkspaceRelativePath,
+    /// The exact canonical workspace-manifest identity.
+    pub manifest_id: WorkspaceManifestId,
+    /// Git recovery facts for a worktree; absent for a private root.
+    pub recovery: Option<WorkspaceRecovery>,
 }
 
 /// Complete requested placement axes.
@@ -1808,6 +2148,10 @@ pub struct SessionRunnerPlacementRequest {
     pub credential_profile: Option<CredentialProfileName>,
     /// The workspace capability the placement must provide.
     pub workspace: WorkspaceRequirement,
+    /// The explicitly selected sandbox profile.
+    pub sandbox: RunnerSandboxProfile,
+    /// The exact bounded per-tool permission overrides.
+    pub permission_overrides: RunnerToolPermissionOverrides,
 }
 
 /// Last credential-grant identity carried by a pinned placement lineage.
@@ -1836,6 +2180,10 @@ pub struct PinnedRunnerPlacement {
     pub runner_required_tools: BTreeSet<ToolName>,
     /// The workspace provisioned for the pin, if any.
     pub workspace: Option<ProvisionedWorkspace>,
+    /// The immutable selected sandbox profile.
+    pub sandbox: RunnerSandboxProfile,
+    /// The immutable exact per-tool permission overrides.
+    pub permission_overrides: RunnerToolPermissionOverrides,
 }
 
 /// Session affinity lifecycle.
@@ -1904,6 +2252,7 @@ impl SessionRunnerPlacement {
         }
         let pinned = validate_placement(
             self.session,
+            self.revision,
             &self.request,
             registration,
             directory,
@@ -1916,6 +2265,10 @@ impl SessionRunnerPlacement {
                 registration,
                 profile,
                 registration.tool_names().cloned(),
+                RunnerApprovalPolicy {
+                    sandbox: pinned.sandbox,
+                    permission_overrides: &pinned.permission_overrides,
+                },
                 CredentialProfileGrantState::Active,
             )?),
             None => None,
@@ -1949,8 +2302,7 @@ impl SessionRunnerPlacement {
             self.session,
             &offer.tool,
             dispatch.effect,
-            dispatch.permission,
-            dispatch.credential_authorization.as_ref(),
+            dispatch.approval,
             authorization,
         )?;
         if retry_evidence.is_some() {
@@ -1994,8 +2346,7 @@ impl SessionRunnerPlacement {
             self.session,
             &lost.tool,
             dispatch.effect,
-            dispatch.permission,
-            dispatch.credential_authorization.as_ref(),
+            dispatch.approval,
             authorization,
         )?;
         match (retry.claimed_attempt, retry_evidence) {
@@ -2074,8 +2425,14 @@ impl SessionRunnerPlacement {
             .revision
             .checked_next()
             .ok_or(RunnerDomainError::GenerationExhausted)?;
-        let mut after =
-            validate_placement(self.session, &request, registration, directory, workspace)?;
+        let mut after = validate_placement(
+            self.session,
+            revision,
+            &request,
+            registration,
+            directory,
+            workspace,
+        )?;
         let prior_request = self.request;
         let (grant, grant_change) =
             successor_grant(self.session, &before, &after, registration, prior_grant)?;
@@ -2136,7 +2493,13 @@ impl SessionRunnerPlacement {
             .revision
             .checked_next()
             .ok_or(RunnerDomainError::GenerationExhausted)?;
-        let grant = grant.replace_for(registration, profile.clone(), tools)?;
+        let grant = grant.replace_for(
+            registration,
+            profile.clone(),
+            tools,
+            before.sandbox,
+            &before.permission_overrides,
+        )?;
         let mut after = before.clone();
         after.credential_profile = Some(profile.clone());
         after.grant_lineage = Some(RunnerCredentialGrantLineage {
@@ -2194,6 +2557,7 @@ impl SessionRunnerPlacement {
                     registration.ok_or(RunnerDomainError::CorruptStoredFacts)?;
                 let mut checked = validate_placement(
                     placement.session,
+                    placement.revision,
                     &placement.request,
                     pinned_registration,
                     stored.working_directory.clone(),
@@ -2246,7 +2610,7 @@ pub struct SessionRunnerPlacementReconstitutionInput {
 
 struct ValidatedRunnerDispatch {
     runner: RunnerId,
-    permission: ToolPermissionDefault,
+    approval: CredentialToolApproval,
     effect: RunnerToolEffectClass,
     credential_authorization: Option<CredentialDispatchAuthorization>,
 }
@@ -2278,9 +2642,21 @@ fn validate_dispatch(
         }
         _ => return Err(RunnerDomainError::CredentialProfileUnavailable),
     };
+    let approval = resolve_runner_approval(
+        declaration.effect,
+        pinned.sandbox,
+        &pinned.permission_overrides,
+        tool,
+    );
+    if credential_authorization
+        .as_ref()
+        .is_some_and(|authorization| authorization.approval != approval)
+    {
+        return Err(RunnerDomainError::CorrelationMismatch);
+    }
     Ok(ValidatedRunnerDispatch {
         runner: pinned.runner,
-        permission: declaration.permission,
+        approval,
         effect: declaration.effect,
         credential_authorization,
     })
@@ -2290,8 +2666,7 @@ fn validate_authorized_attempt(
     session: SessionId,
     tool: &ToolName,
     effect: RunnerToolEffectClass,
-    permission: ToolPermissionDefault,
-    credential_authorization: Option<&CredentialDispatchAuthorization>,
+    approval: CredentialToolApproval,
     authorization: RunnerToolAttemptAuthorization,
 ) -> Result<
     (
@@ -2310,19 +2685,9 @@ fn validate_authorized_attempt(
         || attempt.session() != session
         || attempt.effect_class() != expected_effect
         || attempt.attempt() != correlation.attempt()
-        || (credential_authorization.is_none()
-            && permission == ToolPermissionDefault::Confirm
-            && !matches!(
-                approved.approval().source(),
-                ToolDecisionSource::OwnerCommand | ToolDecisionSource::SessionBlanket
-            ))
-        || credential_authorization.is_some_and(|authorization| {
-            authorization.approval == CredentialToolApproval::SessionPolicy
-                && !matches!(
-                    approved.approval().source(),
-                    ToolDecisionSource::OwnerCommand | ToolDecisionSource::SessionBlanket
-                )
-        })
+        || approved.approval().source() == ToolDecisionSource::SessionBlanket
+        || (approval == CredentialToolApproval::SessionPolicy
+            && approved.approval().source() != ToolDecisionSource::OwnerCommand)
     {
         return Err(RunnerDomainError::CorrelationMismatch);
     }
@@ -2344,25 +2709,36 @@ fn registration_preserves_snapshot(
     registration: &ValidatedRunnerRegistration,
 ) -> bool {
     pinned.runner == registration.runner
+        && pinned.sandbox == request.sandbox
+        && pinned.permission_overrides == request.permission_overrides
         && registration.satisfies(&request.selector)
+        && registration.supports_sandbox(request.sandbox)
         && pinned
             .runner_required_tools
             .iter()
             .all(|tool| registration.tool(tool).is_some())
+        && request
+            .permission_overrides
+            .iter()
+            .all(|(tool, _)| registration.tool(tool).is_some())
         && pinned
             .credential_profile
             .as_ref()
             .is_none_or(|profile| registration.profile(profile).is_some())
         && match &request.workspace {
             WorkspaceRequirement::None => true,
-            WorkspaceRequirement::RepositoryWorktree { .. } => {
+            WorkspaceRequirement::RepositoryWorktree { repository } => {
                 registration.supports_workspace(WorkspaceCapability::WorktreePerSession)
+                    && registration.repository(repository).is_some_and(|entry| {
+                        entry.credential_profile() == request.credential_profile.as_ref()
+                    })
             }
         }
 }
 
 fn validate_placement(
     session: SessionId,
+    revision: RunnerGeneration,
     request: &SessionRunnerPlacementRequest,
     registration: &ValidatedRunnerRegistration,
     directory: RunnerWorkingDirectory,
@@ -2371,6 +2747,16 @@ fn validate_placement(
     if !registration.satisfies(&request.selector) {
         return Err(RunnerDomainError::SelectorMismatch);
     }
+    if !registration.supports_sandbox(request.sandbox) {
+        return Err(RunnerDomainError::SandboxProfileUnavailable);
+    }
+    if let Some((tool, _)) = request
+        .permission_overrides
+        .iter()
+        .find(|(tool, _)| registration.tool(tool).is_none())
+    {
+        return Err(RunnerDomainError::ToolUndeclared(tool.clone()));
+    }
     if request
         .credential_profile
         .as_ref()
@@ -2378,19 +2764,54 @@ fn validate_placement(
     {
         return Err(RunnerDomainError::CredentialProfileUnavailable);
     }
+    if let WorkspaceRequirement::RepositoryWorktree { repository } = &request.workspace {
+        let entry = registration
+            .repository(repository)
+            .ok_or(RunnerDomainError::RepositoryUnavailable)?;
+        if entry.credential_profile() != request.credential_profile.as_ref() {
+            return Err(RunnerDomainError::CredentialProfileUnavailable);
+        }
+    }
     if let WorkingDirectorySelection::Exact(required) = &request.working_directory
         && required != &directory
     {
         return Err(RunnerDomainError::WorkingDirectoryMismatch);
     }
+    let common_workspace_facts_match = |actual: &ProvisionedWorkspace| {
+        actual.session == session
+            && actual.placement_revision == revision
+            && actual.runner == registration.runner
+            && actual.sandbox == request.sandbox
+            && actual.working_directory == directory
+    };
     match (&request.workspace, &workspace) {
-        (WorkspaceRequirement::None, None) => {}
+        (WorkspaceRequirement::None, None)
+            if matches!(
+                request.working_directory,
+                WorkingDirectorySelection::Exact(_) | WorkingDirectorySelection::RunnerDefault
+            ) && (request.sandbox == RunnerSandboxProfile::Ambient
+                || matches!(
+                    request.working_directory,
+                    WorkingDirectorySelection::Exact(_)
+                )) => {}
+        (WorkspaceRequirement::None, Some(actual))
+            if request.sandbox == RunnerSandboxProfile::WorkspaceRestricted
+                && common_workspace_facts_match(actual)
+                && actual.repository.is_none()
+                && actual.canonical_clone_url_digest.is_none()
+                && actual.credential_profile.is_none()
+                && actual.recovery.is_none()
+                && matches!(
+                    request.working_directory,
+                    WorkingDirectorySelection::RunnerDefault
+                ) => {}
         (WorkspaceRequirement::RepositoryWorktree { repository }, Some(actual))
             if registration.supports_workspace(WorkspaceCapability::WorktreePerSession)
-                && actual.session == session
-                && actual.runner == registration.runner
-                && &actual.repository == repository
-                && actual.working_directory == directory => {}
+                && common_workspace_facts_match(actual)
+                && actual.repository.as_ref() == Some(repository)
+                && actual.canonical_clone_url_digest.is_some()
+                && actual.credential_profile.as_ref() == request.credential_profile.as_ref()
+                && actual.recovery.is_some() => {}
         (WorkspaceRequirement::RepositoryWorktree { .. }, _)
             if !registration.supports_workspace(WorkspaceCapability::WorktreePerSession) =>
         {
@@ -2419,6 +2840,8 @@ fn validate_placement(
             .map(|(tool, _)| tool.clone())
             .collect(),
         workspace,
+        sandbox: request.sandbox,
+        permission_overrides: request.permission_overrides.clone(),
     })
 }
 
@@ -2606,6 +3029,8 @@ impl CredentialProfileGrant {
         registration: &ValidatedRunnerRegistration,
         profile: CredentialProfileName,
         tools: impl IntoIterator<Item = ToolName>,
+        sandbox: RunnerSandboxProfile,
+        permission_overrides: &RunnerToolPermissionOverrides,
     ) -> Result<CredentialProfileGrantReplacement, RunnerDomainError> {
         if self.state != CredentialProfileGrantState::Active {
             return Err(RunnerDomainError::InvalidState);
@@ -2623,6 +3048,10 @@ impl CredentialProfileGrant {
             registration,
             profile,
             tools,
+            RunnerApprovalPolicy {
+                sandbox,
+                permission_overrides,
+            },
             CredentialProfileGrantState::Active,
         )?;
         Ok(CredentialProfileGrantReplacement {
@@ -2653,6 +3082,8 @@ impl CredentialProfileGrant {
         input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
         registration: &ValidatedRunnerRegistration,
+        sandbox: RunnerSandboxProfile,
+        permission_overrides: &RunnerToolPermissionOverrides,
     ) -> Result<Self, RunnerDomainError> {
         if input.session != expected_session {
             return Err(RunnerDomainError::CorruptStoredFacts);
@@ -2663,6 +3094,10 @@ impl CredentialProfileGrant {
             registration,
             input.profile,
             input.tools,
+            RunnerApprovalPolicy {
+                sandbox,
+                permission_overrides,
+            },
             input.state,
         )?;
         if checked.runner == input.runner && checked.approvals == input.approvals {
@@ -2749,6 +3184,10 @@ fn successor_grant(
                     registration,
                     profile,
                     registration.tool_names().cloned(),
+                    RunnerApprovalPolicy {
+                        sandbox: after.sandbox,
+                        permission_overrides: &after.permission_overrides,
+                    },
                     CredentialProfileGrantState::Active,
                 )
             })
@@ -2765,6 +3204,10 @@ fn successor_grant(
                     registration,
                     profile,
                     registration.tool_names().cloned(),
+                    RunnerApprovalPolicy {
+                        sandbox: after.sandbox,
+                        permission_overrides: &after.permission_overrides,
+                    },
                     CredentialProfileGrantState::Active,
                 )?),
                 None => Some(CredentialProfileGrant {
@@ -2786,15 +3229,38 @@ fn successor_grant(
     Ok((grant, grant_change))
 }
 
+fn resolve_runner_approval(
+    effect: RunnerToolEffectClass,
+    sandbox: RunnerSandboxProfile,
+    permission_overrides: &RunnerToolPermissionOverrides,
+    tool: &ToolName,
+) -> CredentialToolApproval {
+    match permission_overrides.get(tool) {
+        Some(RunnerToolPermissionOverride::Auto) => CredentialToolApproval::Automatic,
+        Some(RunnerToolPermissionOverride::Confirm) => CredentialToolApproval::SessionPolicy,
+        None if sandbox == RunnerSandboxProfile::WorkspaceRestricted => {
+            CredentialToolApproval::Automatic
+        }
+        None if effect == RunnerToolEffectClass::Pure => CredentialToolApproval::Automatic,
+        None => CredentialToolApproval::SessionPolicy,
+    }
+}
+
+struct RunnerApprovalPolicy<'a> {
+    sandbox: RunnerSandboxProfile,
+    permission_overrides: &'a RunnerToolPermissionOverrides,
+}
+
 fn build_grant(
     session: SessionId,
     revision: RunnerGeneration,
     registration: &ValidatedRunnerRegistration,
     profile: CredentialProfileName,
     tools: impl IntoIterator<Item = ToolName>,
+    policy: RunnerApprovalPolicy<'_>,
     state: CredentialProfileGrantState,
 ) -> Result<CredentialProfileGrant, RunnerDomainError> {
-    let policy = registration
+    registration
         .profile(&profile)
         .ok_or(RunnerDomainError::CredentialProfileUnavailable)?;
     let tools: BTreeSet<_> = tools.into_iter().collect();
@@ -2803,7 +3269,18 @@ fn build_grant(
     }
     let approvals = tools
         .iter()
-        .map(|tool| (tool.clone(), policy.approval_for(tool)))
+        .map(|tool| {
+            let declaration = &registration.tools[tool];
+            (
+                tool.clone(),
+                resolve_runner_approval(
+                    declaration.effect,
+                    policy.sandbox,
+                    policy.permission_overrides,
+                    tool,
+                ),
+            )
+        })
         .collect();
     Ok(CredentialProfileGrant {
         session,
@@ -2901,12 +3378,29 @@ mod tests {
         ToolName::try_new(name.to_owned()).expect("fixture tool names are valid")
     }
 
+    fn repository_key() -> WorkspaceRepositoryKey {
+        WorkspaceRepositoryKey::try_new("signalbox".to_owned())
+            .expect("the fixture repository key is valid")
+    }
+
     fn model_definition(name: &str) -> RunnerToolModelDefinition {
         RunnerToolModelDefinition::try_new(
             format!("Run the {name} fixture operation"),
             r#"{"type":"object"}"#.to_owned(),
         )
         .expect("fixture model definitions are valid")
+    }
+
+    fn sandbox_profiles() -> [RunnerSandboxProfile; 2] {
+        [
+            RunnerSandboxProfile::Ambient,
+            RunnerSandboxProfile::WorkspaceRestricted,
+        ]
+    }
+
+    fn no_permission_overrides() -> RunnerToolPermissionOverrides {
+        RunnerToolPermissionOverrides::try_new([])
+            .expect("the empty permission override fixture is valid")
     }
 
     fn catalog() -> RunnerCatalog {
@@ -2955,6 +3449,7 @@ mod tests {
             [inspect, deploy, sync],
             [readonly, admin],
             [WorkspaceCapability::WorktreePerSession],
+            sandbox_profiles(),
         )
         .expect("the canonical catalog is internally consistent")
     }
@@ -2991,6 +3486,8 @@ mod tests {
             [tool("inspect"), tool("deploy"), tool("sync")],
             [profile("readonly"), profile("admin")],
             [WorkspaceCapability::WorktreePerSession],
+            sandbox_profiles(),
+            [RunnerRepositoryEntry::new(repository_key(), None)],
         )
     }
 
@@ -3010,6 +3507,8 @@ mod tests {
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         }
     }
 
@@ -3019,6 +3518,8 @@ mod tests {
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: None,
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         }
     }
 
@@ -3240,6 +3741,33 @@ mod tests {
         (registration, pin)
     }
 
+    fn pinned_with_confirm_override(
+        profile_name: &str,
+    ) -> (ValidatedRunnerRegistration, SessionRunnerPin) {
+        let registration = registration();
+        let mut request = placement_request(profile(profile_name));
+        request.permission_overrides = RunnerToolPermissionOverrides::try_new([(
+            tool("inspect"),
+            RunnerToolPermissionOverride::Confirm,
+        )])
+        .expect("the exact confirmation override is valid");
+        let pin = SessionRunnerPlacement::new(session_id(SESSION), request)
+            .pin_and_offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("the confirmation override accepts an exact owner decision");
+        (registration, pin)
+    }
+
     fn omit_runner_required_tool(placement: &mut SessionRunnerPlacement, omitted: &ToolName) {
         let SessionRunnerPlacementState::Pinned(stored) = &mut placement.state else {
             panic!("the fixture placement is pinned")
@@ -3438,6 +3966,122 @@ mod tests {
     }
 
     #[test]
+    fn s30_clone_url_digest_rejects_nonhex_text() {
+        assert_eq!(
+            CanonicalCloneUrlDigest::try_new("g".repeat(64)),
+            Err(RunnerDomainError::InvalidHex)
+        );
+    }
+
+    #[test]
+    fn s30_clone_url_digest_rejects_wrong_length() {
+        assert_eq!(
+            CanonicalCloneUrlDigest::try_new("a".repeat(65)),
+            Err(RunnerDomainError::InvalidHex)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_revision_rejects_abbreviated_or_overlong_object_ids() {
+        assert_eq!(
+            WorkspaceRevision::try_new("a".repeat(39)),
+            Err(RunnerDomainError::InvalidHex)
+        );
+        assert_eq!(
+            WorkspaceRevision::try_new("a".repeat(41)),
+            Err(RunnerDomainError::InvalidHex)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_revision_rejects_uppercase_object_id() {
+        assert_eq!(
+            WorkspaceRevision::try_new("A".repeat(40)),
+            Err(RunnerDomainError::InvalidHex)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_branch_rejects_dot_dot() {
+        assert_eq!(
+            WorkspaceBranchName::try_new("bad..branch".to_owned()),
+            Err(RunnerDomainError::InvalidBranchName)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_branch_rejects_lock_suffix() {
+        assert_eq!(
+            WorkspaceBranchName::try_new("component.lock".to_owned()),
+            Err(RunnerDomainError::InvalidBranchName)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_branch_rejects_reflog_syntax() {
+        assert_eq!(
+            WorkspaceBranchName::try_new("bad@{branch".to_owned()),
+            Err(RunnerDomainError::InvalidBranchName)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_branch_rejects_single_at() {
+        assert!(matches!(
+            WorkspaceBranchName::try_new("@".to_owned()),
+            Err(RunnerDomainError::InvalidBranchName)
+        ));
+    }
+
+    #[test]
+    fn s30_workspace_relative_path_rejects_absolute_value() {
+        assert_eq!(
+            WorkspaceRelativePath::try_new("/sessions/one".to_owned()),
+            Err(RunnerDomainError::InvalidRelativePath)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_relative_path_rejects_parent_traversal() {
+        assert_eq!(
+            WorkspaceRelativePath::try_new("sessions/../one".to_owned()),
+            Err(RunnerDomainError::InvalidRelativePath)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_relative_path_rejects_empty_component() {
+        assert_eq!(
+            WorkspaceRelativePath::try_new("sessions//one".to_owned()),
+            Err(RunnerDomainError::InvalidRelativePath)
+        );
+    }
+
+    #[test]
+    fn s30_permission_overrides_reject_duplicate_tools() {
+        assert_eq!(
+            RunnerToolPermissionOverrides::try_new([
+                (tool("inspect"), RunnerToolPermissionOverride::Auto),
+                (tool("inspect"), RunnerToolPermissionOverride::Confirm),
+            ]),
+            Err(RunnerDomainError::DuplicateTool(tool("inspect")))
+        );
+    }
+
+    #[test]
+    fn s30_permission_overrides_reject_more_than_sixty_four_tools() {
+        assert_eq!(
+            RunnerToolPermissionOverrides::try_new((0..=PERMISSION_OVERRIDE_MAX_ENTRIES).map(
+                |index| (
+                    tool(&format!("tool_{index}")),
+                    RunnerToolPermissionOverride::Auto,
+                )
+            ),),
+            Err(RunnerDomainError::TooManyPermissionOverrides)
+        );
+    }
+
+    #[test]
     fn s30_runner_tool_model_definition_requires_a_json_object_schema() {
         assert_eq!(
             RunnerToolModelDefinition::try_new("Inspect the workspace".to_owned(), "[]".to_owned()),
@@ -3446,22 +4090,42 @@ mod tests {
     }
 
     #[test]
-    fn s30_workspace_repository_keys_have_one_exact_byte_bound() {
-        let accepted = WorkspaceRepositoryKey::try_new("r".repeat(EXACT_VALUE_MAX_BYTES))
-            .expect("the exact maximum is accepted");
+    fn s30_workspace_repository_keys_use_the_catalog_name_contract() {
+        let accepted = WorkspaceRepositoryKey::try_new("r".repeat(NAME_MAX_BYTES))
+            .expect("the catalog-name maximum is accepted");
 
-        assert_eq!(accepted.as_str().len(), EXACT_VALUE_MAX_BYTES);
+        assert_eq!(accepted.as_str().len(), NAME_MAX_BYTES);
         assert_eq!(
-            WorkspaceRepositoryKey::try_new("r".repeat(EXACT_VALUE_MAX_BYTES + 1)),
+            WorkspaceRepositoryKey::try_new("r".repeat(NAME_MAX_BYTES + 1)),
             Err(RunnerDomainError::TooLong)
+        );
+        assert_eq!(
+            WorkspaceRepositoryKey::try_new("contains space".to_owned()),
+            Err(RunnerDomainError::InvalidName)
         );
     }
 
     #[test]
     fn s30_inv042_catalog_rejects_duplicate_capability_class() {
         assert_eq!(
-            RunnerCatalog::try_new([class(), class()], [], [], []),
+            RunnerCatalog::try_new([class(), class()], [], [], [], []),
             Err(RunnerDomainError::DuplicateCapabilityClass(class()))
+        );
+    }
+
+    #[test]
+    fn s30_inv042_catalog_rejects_duplicate_sandbox_profile() {
+        assert_eq!(
+            RunnerCatalog::try_new(
+                [],
+                [],
+                [],
+                [],
+                [RunnerSandboxProfile::Ambient, RunnerSandboxProfile::Ambient],
+            ),
+            Err(RunnerDomainError::DuplicateSandboxProfile(
+                RunnerSandboxProfile::Ambient
+            ))
         );
     }
 
@@ -3476,6 +4140,7 @@ mod tests {
                     WorkspaceCapability::WorktreePerSession,
                     WorkspaceCapability::WorktreePerSession,
                 ],
+                [],
             ),
             Err(RunnerDomainError::DuplicateWorkspaceCapability(
                 WorkspaceCapability::WorktreePerSession
@@ -3510,7 +4175,7 @@ mod tests {
             runner_authentication_id(AUTHENTICATION),
             [class()],
         );
-        let advertisement = RunnerAdvertisement::new([class()], [tool("unknown")], [], []);
+        let advertisement = RunnerAdvertisement::new([class()], [tool("unknown")], [], [], [], []);
 
         assert_eq!(
             enrollment.register(advertisement, &catalog()),
@@ -3531,7 +4196,7 @@ mod tests {
         );
 
         assert_eq!(
-            RunnerCatalog::try_new([], [declaration], [], []),
+            RunnerCatalog::try_new([], [declaration], [], [], []),
             Err(RunnerDomainError::CapabilityClassNotAllowed(class()))
         );
     }
@@ -3549,7 +4214,7 @@ mod tests {
         );
 
         assert_eq!(
-            RunnerCatalog::try_new([class()], [declaration], [], []),
+            RunnerCatalog::try_new([class()], [declaration], [], [], []),
             Err(RunnerDomainError::UnsupportedDaemonIdempotency(tool(
                 "sync"
             )))
@@ -3564,9 +4229,9 @@ mod tests {
             runner_authentication_id(AUTHENTICATION),
             [class()],
         );
-        let catalog = RunnerCatalog::try_new([], [], [], [])
+        let catalog = RunnerCatalog::try_new([], [], [], [], [])
             .expect("the empty catalog is internally consistent");
-        let advertisement = RunnerAdvertisement::new([class()], [], [], []);
+        let advertisement = RunnerAdvertisement::new([class()], [], [], [], [], []);
 
         assert_eq!(
             enrollment.register(advertisement, &catalog),
@@ -3589,9 +4254,9 @@ mod tests {
             RunnerToolEffectClass::Pure,
             ToolAdmissibleLoci::DaemonOnly,
         );
-        let catalog = RunnerCatalog::try_new([], [daemon_only], [], [])
+        let catalog = RunnerCatalog::try_new([], [daemon_only], [], [], [])
             .expect("the daemon-only declaration is internally consistent");
-        let advertisement = RunnerAdvertisement::new([], [tool("daemon")], [], []);
+        let advertisement = RunnerAdvertisement::new([], [tool("daemon")], [], [], [], []);
 
         assert_eq!(
             enrollment.register(advertisement, &catalog),
@@ -3616,13 +4281,56 @@ mod tests {
                 selector: RunnerSelector::Identity(runner_id(REPLACEMENT_RUNNER)),
             },
         );
-        let catalog = RunnerCatalog::try_new([], [declaration], [], [])
+        let catalog = RunnerCatalog::try_new([], [declaration], [], [], [])
             .expect("the identity-targeted declaration is internally consistent");
-        let advertisement = RunnerAdvertisement::new([], [tool("specialized")], [], []);
+        let advertisement = RunnerAdvertisement::new([], [tool("specialized")], [], [], [], []);
 
         assert_eq!(
             enrollment.register(advertisement, &catalog),
             Err(RunnerDomainError::ToolLocusNotAllowed(tool("specialized")))
+        );
+    }
+
+    #[test]
+    fn s30_inv042_registration_rejects_unadvertised_sandbox_profile() {
+        let advertisement =
+            RunnerAdvertisement::new([class()], [], [], [], [RunnerSandboxProfile::Ambient], []);
+        let restricted_catalog = RunnerCatalog::try_new(
+            [class()],
+            [],
+            [],
+            [],
+            [RunnerSandboxProfile::WorkspaceRestricted],
+        )
+        .expect("the restricted catalog is internally consistent");
+
+        assert_eq!(
+            enrollment().register(advertisement, &restricted_catalog),
+            Err(RunnerDomainError::SandboxProfileNotAllowed(
+                RunnerSandboxProfile::Ambient
+            ))
+        );
+    }
+
+    #[test]
+    fn s30_inv042_registration_rejects_repository_profile_outside_advertisement() {
+        let advertisement = RunnerAdvertisement::new(
+            [class()],
+            [],
+            [],
+            [],
+            [],
+            [RunnerRepositoryEntry::new(
+                repository_key(),
+                Some(profile("readonly")),
+            )],
+        );
+
+        assert_eq!(
+            enrollment().register(advertisement, &catalog()),
+            Err(RunnerDomainError::RepositoryProfileUnavailable(profile(
+                "readonly"
+            )))
         );
     }
 
@@ -3638,7 +4346,7 @@ mod tests {
         .expect("an active enrollment can be revoked");
 
         assert_eq!(
-            enrollment.register(RunnerAdvertisement::new([], [], [], []), &catalog()),
+            enrollment.register(RunnerAdvertisement::new([], [], [], [], [], []), &catalog()),
             Err(RunnerDomainError::EnrollmentRevoked)
         );
     }
@@ -4552,6 +5260,8 @@ mod tests {
             tools: BTreeSet::from([tool("deploy"), tool("inspect"), tool("sync")]),
             runner_required_tools: BTreeSet::from([tool("deploy"), tool("sync")]),
             workspace: None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         });
         assert_eq!(pinned.placement.state(), &expected);
         assert_eq!(expected_grant.profile(), &profile("readonly"));
@@ -4734,6 +5444,8 @@ mod tests {
                     [tool("inspect")],
                     [profile("readonly")],
                     [WorkspaceCapability::WorktreePerSession],
+                    sandbox_profiles(),
+                    [],
                 ),
                 &catalog(),
             )
@@ -4789,6 +5501,8 @@ mod tests {
                     [tool("inspect"), tool("deploy")],
                     [profile("readonly")],
                     [WorkspaceCapability::WorktreePerSession],
+                    sandbox_profiles(),
+                    [],
                 ),
                 &catalog(),
             )
@@ -4851,6 +5565,8 @@ mod tests {
                     [tool("inspect")],
                     [profile("readonly")],
                     [WorkspaceCapability::WorktreePerSession],
+                    sandbox_profiles(),
+                    [],
                 ),
                 &catalog(),
             )
@@ -4886,6 +5602,8 @@ mod tests {
                     [tool("deploy"), tool("sync")],
                     [profile("readonly")],
                     [WorkspaceCapability::WorktreePerSession],
+                    sandbox_profiles(),
+                    [],
                 ),
                 &catalog(),
             )
@@ -5280,16 +5998,30 @@ mod tests {
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: None,
             workspace: WorkspaceRequirement::RepositoryWorktree {
-                repository: WorkspaceRepositoryKey::try_new("signalbox".to_owned())
-                    .expect("the repository key is valid"),
+                repository: repository_key(),
             },
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         };
         let foreign_workspace = ProvisionedWorkspace {
             session: session_id(SESSION),
+            placement_revision: RunnerGeneration::one(),
             runner: runner_id(REPLACEMENT_RUNNER),
-            repository: WorkspaceRepositoryKey::try_new("signalbox".to_owned())
-                .expect("the repository key is valid"),
+            repository: Some(repository_key()),
+            canonical_clone_url_digest: Some(
+                CanonicalCloneUrlDigest::try_new("b".repeat(64))
+                    .expect("the fixture clone URL digest is canonical"),
+            ),
+            credential_profile: None,
+            sandbox: RunnerSandboxProfile::Ambient,
             working_directory: directory("/workspace/session"),
+            relative_path: WorkspaceRelativePath::try_new("sessions/session/1/repo".to_owned())
+                .expect("the fixture relative path is valid"),
+            manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b00)),
+            recovery: Some(WorkspaceRecovery::Commit {
+                revision: WorkspaceRevision::try_new("c".repeat(40))
+                    .expect("the fixture recovery revision is canonical"),
+            }),
         };
 
         assert_eq!(
@@ -5321,8 +6053,51 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_pair_session_policy_overrides_tool_only_auto_default() {
-        let (registration, pin) = pinned("admin");
+    fn s32_ambient_runner_default_rejects_a_managed_private_root() {
+        let registration = registration();
+        let request = SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        };
+        let private_root = ProvisionedWorkspace {
+            session: session_id(SESSION),
+            placement_revision: RunnerGeneration::one(),
+            runner: registration.runner(),
+            repository: None,
+            canonical_clone_url_digest: None,
+            credential_profile: None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            working_directory: directory("/workspace/session"),
+            relative_path: WorkspaceRelativePath::try_new("sessions/session/1/work".to_owned())
+                .expect("the fixture relative path is valid"),
+            manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b01)),
+            recovery: None,
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::new(session_id(SESSION), request).pin_and_offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                directory("/workspace/session"),
+                Some(private_root),
+                authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            ),
+            Err(RunnerDomainError::WorkspaceMismatch)
+        );
+    }
+
+    #[test]
+    fn s32_inv045_exact_confirm_override_precedes_ambient_pure_auto() {
+        let (registration, pin) = pinned_with_confirm_override("admin");
         let lease = pin
             .placement
             .offer_lease(
@@ -5348,8 +6123,8 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_pair_session_policy_rejects_tool_only_automatic_approval() {
-        let (registration, pin) = pinned("admin");
+    fn s32_inv045_exact_confirm_override_rejects_automatic_approval() {
+        let (registration, pin) = pinned_with_confirm_override("admin");
 
         assert_eq!(
             pin.placement.offer_lease(
@@ -5395,11 +6170,11 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_pair_session_policy_accepts_session_blanket_approval() {
-        let (registration, pin) = pinned("admin");
-        let lease = pin
-            .placement
-            .offer_lease(
+    fn s32_inv035_inv045_exact_confirm_override_rejects_session_blanket_approval() {
+        let (registration, pin) = pinned_with_confirm_override("admin");
+
+        assert_eq!(
+            pin.placement.offer_lease(
                 &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
@@ -5409,15 +6184,8 @@ mod tests {
                     RunnerToolEffectClass::Pure,
                 ),
                 lease_offer_request("inspect"),
-            )
-            .expect("the frozen dangerous blanket precedes pair posture");
-
-        assert_eq!(
-            lease
-                .credential_authorization()
-                .expect("the lease freezes pair authorization")
-                .approval,
-            catalog().profiles[&profile("admin")].approval_for(&tool("inspect"))
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
         );
     }
 
@@ -5527,6 +6295,8 @@ mod tests {
                     [tool("inspect"), tool("deploy")],
                     [profile("readonly"), profile("admin")],
                     [WorkspaceCapability::WorktreePerSession],
+                    sandbox_profiles(),
+                    [],
                 ),
                 &catalog(),
             )
@@ -5550,9 +6320,14 @@ mod tests {
         let expected_profile = grant.profile().clone();
         let input = grant_reconstitution_input(grant);
 
-        let reconstituted =
-            CredentialProfileGrant::reconstitute(input, session_id(SESSION), &registration)
-                .expect("complete active grant facts reconstitute");
+        let reconstituted = CredentialProfileGrant::reconstitute(
+            input,
+            session_id(SESSION),
+            &registration,
+            RunnerSandboxProfile::Ambient,
+            &no_permission_overrides(),
+        )
+        .expect("complete active grant facts reconstitute");
 
         assert_eq!(reconstituted.profile(), &expected_profile);
     }
@@ -5567,7 +6342,13 @@ mod tests {
             .insert(tool("inspect"), CredentialToolApproval::SessionPolicy);
 
         assert_eq!(
-            CredentialProfileGrant::reconstitute(input, session_id(SESSION), &registration),
+            CredentialProfileGrant::reconstitute(
+                input,
+                session_id(SESSION),
+                &registration,
+                RunnerSandboxProfile::Ambient,
+                &no_permission_overrides(),
+            ),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -5579,7 +6360,13 @@ mod tests {
         let input = grant_reconstitution_input(grant);
 
         assert_eq!(
-            CredentialProfileGrant::reconstitute(input, session_id(SESSION + 1), &registration,),
+            CredentialProfileGrant::reconstitute(
+                input,
+                session_id(SESSION + 1),
+                &registration,
+                RunnerSandboxProfile::Ambient,
+                &no_permission_overrides(),
+            ),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -5618,7 +6405,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_profileless_confirm_accepts_session_blanket_authorization() {
+    fn s31_inv035_inv043_profileless_confirm_rejects_session_blanket_authorization() {
         let registration = registration();
         let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
             .pin_and_offer_lease(
@@ -5635,8 +6422,8 @@ mod tests {
             )
             .expect("automatic profileless work can pin the runner");
 
-        pin.placement
-            .offer_lease(
+        assert_eq!(
+            pin.placement.offer_lease(
                 &enrollment_for_registration(&registration),
                 &registration,
                 None,
@@ -5646,8 +6433,9 @@ mod tests {
                     RunnerToolEffectClass::Idempotent,
                 ),
                 lease_offer_request("sync"),
-            )
-            .expect("the frozen session blanket overrides profileless confirmation");
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
     }
 
     #[test]
