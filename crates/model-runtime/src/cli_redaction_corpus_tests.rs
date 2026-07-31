@@ -1,4 +1,6 @@
-use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink, TokenUsage};
+use std::collections::BTreeSet;
+
+use crate::{Observation, ObservationFact, ObservationSink, TokenUsage};
 
 use super::{RedactingSink, redact_json, redact_text};
 
@@ -6,14 +8,12 @@ const CORPUS: &str = include_str!("testdata/redaction-corpus.txt");
 const CLASSIFICATIONS: &str = include_str!("testdata/redaction-corpus.classifications");
 const SYNTHETIC_SECRET_MARKER: &str = "SYNTHETIC-SECRET";
 const CORPUS_LINE_COUNT: usize = 147;
-const EXPECTED_REDACTED_COUNT: usize = 118;
+const EXPECTED_REDACTED_COUNT: usize = 119;
 const EXPECTED_ACCEPTED_UNCOVERED_COUNT: usize = 28;
-const EXPECTED_KNOWN_FAILING_COUNT: usize = 1;
-/// The same defect ledger one delta deeper, as a canonical digest and count.
-const KNOWN_FAILING_TWO_SPLIT_CASES: usize = 1_095;
-const KNOWN_FAILING_TWO_SPLIT_DIGEST: u64 = 15_991_929_383_981_218_051;
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+const EXPECTED_KNOWN_FAILING_COUNT: usize = 0;
+/// The same defect ledger one delta deeper, now empty after exhaustive
+/// enumeration of every guarded two-split case.
+const KNOWN_FAILING_TWO_SPLIT_CASES: usize = 0;
 /// The exact fragmentations that still leak, as `(corpus line, split)`.
 ///
 /// This is a defect ledger for shapes the contract COVERS and the sink leaks.
@@ -23,98 +23,7 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// The match is exact in both directions. A split that appears and is not
 /// listed is a regression. A listed split that stops leaking is progress, and
 /// it must shrink this ledger rather than let it overstate the damage.
-const KNOWN_FAILING_SPLITS: [DivergentSplit; 30] = [
-    DivergentSplit { line: 79, split: 2 },
-    DivergentSplit { line: 79, split: 3 },
-    DivergentSplit { line: 79, split: 4 },
-    DivergentSplit { line: 79, split: 5 },
-    DivergentSplit { line: 79, split: 7 },
-    DivergentSplit { line: 83, split: 2 },
-    DivergentSplit { line: 83, split: 3 },
-    DivergentSplit { line: 83, split: 5 },
-    DivergentSplit { line: 83, split: 7 },
-    DivergentSplit { line: 83, split: 8 },
-    DivergentSplit {
-        line: 83,
-        split: 12,
-    },
-    DivergentSplit {
-        line: 83,
-        split: 15,
-    },
-    DivergentSplit {
-        line: 83,
-        split: 17,
-    },
-    DivergentSplit {
-        line: 83,
-        split: 18,
-    },
-    DivergentSplit {
-        line: 83,
-        split: 19,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 2,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 3,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 4,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 5,
-    },
-    DivergentSplit {
-        line: 139,
-        split: 7,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 2,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 3,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 5,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 7,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 8,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 12,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 15,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 17,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 18,
-    },
-    DivergentSplit {
-        line: 143,
-        split: 19,
-    },
-];
+const KNOWN_FAILING_SPLITS: [DivergentSplit; 0] = [];
 const CORRELATION: u8 = 7;
 const BOUNDARY_FRAGMENT: &str = "{}";
 const GENERATOR_SEED: u64 = 0x5eed_c0de_d15c_a11e;
@@ -135,6 +44,17 @@ const EXHAUSTIVE_TWO_SPLIT_GUARDED_CASES: usize = 126_024;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 const ASCII_NOISE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
+/// Cases the original Claude engine redacted that were not represented by
+/// the Codex corpus, including its fail-closed control-character rule.
+const ORIGINAL_CLAUDE_REDACTION_CORPUS: [&str; 7] = [
+    "Authorization: SYNTHETIC-SECRET-CLAUDE-01",
+    "api_key=SYNTHETIC-SECRET-CLAUDE-02",
+    "api_\u{001b}[0mkey=SYNTHETIC-SECRET-CLAUDE-03",
+    "api_\u{0007}key=SYNTHETIC-SECRET-CLAUDE-04",
+    r#"{"text":"api_\u001b[0mkey=SYNTHETIC-SECRET-CLAUDE-05"}"#,
+    "secret=SYNTHETIC-SECRET-CLAUDE-06",
+    r#"detail: "client_secret":"SYNTHETIC-SECRET-CLAUDE-07""#,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CorpusStatus {
@@ -230,6 +150,13 @@ struct DivergentSplit {
     split: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DivergentTwoSplit {
+    line: usize,
+    first_split: usize,
+    second_split: usize,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct SplitLeak {
     line: usize,
@@ -261,19 +188,44 @@ impl SplitSummary {
         inventory
     }
 
-    /// A canonical digest of the divergent fragmentations, for a ledger too
-    /// large to carry case by case. Any added, removed, or moved split
-    /// changes it, so the match stays exact in both directions.
-    fn divergent_splits_digest(&self) -> u64 {
-        let mut digest = FNV_OFFSET_BASIS;
-        for leak in &self.leaks {
-            for byte in format!("{}:{:?};", leak.line, leak.splits).bytes() {
-                digest ^= u64::from(byte);
-                digest = digest.wrapping_mul(FNV_PRIME);
-            }
-        }
-        digest
+    fn divergent_two_splits(&self) -> Vec<DivergentTwoSplit> {
+        let mut inventory = self
+            .leaks
+            .iter()
+            .map(|leak| DivergentTwoSplit {
+                line: leak.line,
+                first_split: leak.splits[0],
+                second_split: leak.splits[1],
+            })
+            .collect::<Vec<_>>();
+        inventory.sort_unstable();
+        inventory
     }
+}
+
+fn recorded_two_split_leaks() -> BTreeSet<DivergentTwoSplit> {
+    BTreeSet::new()
+}
+
+fn assert_exact_two_split_leak_ledger(summary: &SplitSummary) {
+    let actual = summary
+        .divergent_two_splits()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let recorded = recorded_two_split_leaks();
+    let added = actual.difference(&recorded).copied().collect::<Vec<_>>();
+    let removed = recorded.difference(&actual).copied().collect::<Vec<_>>();
+
+    assert_eq!(
+        recorded.len(),
+        KNOWN_FAILING_TWO_SPLIT_CASES,
+        "the recorded two-split ledger count drifted"
+    );
+    assert!(
+        added.is_empty() && removed.is_empty(),
+        "two-split leak ledger changed\nadded leaks (regressions): {added:#?}\n\
+         removed leaks (fixes): {removed:#?}"
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -538,7 +490,7 @@ fn stateful_outputs(case: CorpusCase) -> Vec<ObservedOutput> {
     let terminal_capture;
     {
         let mut sink = RedactingSink::new(&mut observed);
-        sink.begin_terminal_text_capture();
+        sink.begin_terminal_text_capture(true);
         let mut text = String::new();
         let mut index = 0_u32;
         let mut terminal_context = None;
@@ -603,7 +555,7 @@ fn stateful_outputs(case: CorpusCase) -> Vec<ObservedOutput> {
             None => {}
         }
         sink.finish();
-        terminal_capture = sink.take_terminal_text_capture();
+        terminal_capture = sink.take_terminal_text_capture().into_text();
     }
     let mut outputs = observed_stream_outputs(observed);
     outputs.push(ObservedOutput {
@@ -710,6 +662,49 @@ fn run_corpus() -> CorpusSummary {
     }
 }
 
+fn assert_original_codex_corpus_is_still_covered() {
+    let summary = run_corpus();
+    assert!(
+        summary.mismatches.is_empty(),
+        "original Codex corpus coverage regressed: {:#?}",
+        summary.mismatches
+    );
+}
+
+fn assert_original_claude_corpus_is_still_covered() {
+    for text in ORIGINAL_CLAUDE_REDACTION_CORPUS {
+        assert!(
+            !redact_text(text).contains(SYNTHETIC_SECRET_MARKER),
+            "merged stateless engine redacts less than the original Claude engine for {text:?}"
+        );
+        let boundaries = split_boundaries(text);
+        for split in boundaries {
+            let output =
+                fragmented_stateful_output(&[text[..split].to_string(), text[split..].to_string()]);
+            assert!(
+                !output.contains(SYNTHETIC_SECRET_MARKER),
+                "merged stateful engine redacts less than the original Claude engine for \
+                 {text:?} at split {split}"
+            );
+        }
+        let boundaries = split_boundaries(text);
+        for (first_position, first) in boundaries.iter().copied().enumerate() {
+            for second in boundaries[first_position..].iter().copied() {
+                let output = fragmented_stateful_output(&[
+                    text[..first].to_string(),
+                    text[first..second].to_string(),
+                    text[second..].to_string(),
+                ]);
+                assert!(
+                    !output.contains(SYNTHETIC_SECRET_MARKER),
+                    "merged stateful engine redacts less than the original Claude engine for \
+                     {text:?} at splits {first} and {second}"
+                );
+            }
+        }
+    }
+}
+
 /// The joined text a corpus line denotes, with its committed event schedule
 /// dropped: split enumeration supplies its own fragmentation, so a line's
 /// pinned delta positions must not constrain the boundaries enumerated here.
@@ -745,13 +740,13 @@ fn fragmented_stateful_output(fragments: &[String]) -> String {
     let terminal_capture;
     {
         let mut sink = RedactingSink::new(&mut observed);
-        sink.begin_terminal_text_capture();
+        sink.begin_terminal_text_capture(true);
         let mut index = 0_u32;
         for fragment in fragments {
             emit_text_delta(&mut sink, &mut index, fragment.clone());
         }
         sink.finish();
-        terminal_capture = sink.take_terminal_text_capture();
+        terminal_capture = sink.take_terminal_text_capture().into_text();
     }
     let mut emitted = observed_stream_outputs(observed)
         .into_iter()
@@ -933,7 +928,7 @@ fn generated_stateful_output(case: &GeneratedCase) -> String {
     let terminal_capture;
     {
         let mut sink = RedactingSink::new(&mut observed);
-        sink.begin_terminal_text_capture();
+        sink.begin_terminal_text_capture(true);
         for (index, (chunk, interlude)) in case
             .chunks
             .iter()
@@ -950,7 +945,7 @@ fn generated_stateful_output(case: &GeneratedCase) -> String {
             observe_generated_interlude(&mut sink, interlude, index as u32);
         }
         sink.finish();
-        terminal_capture = sink.take_terminal_text_capture();
+        terminal_capture = sink.take_terminal_text_capture().into_text();
     }
     let mut output = observed_stream_outputs(observed)
         .into_iter()
@@ -1035,7 +1030,7 @@ fn assert_suppression_is_absorbing(seed: u64, case_count: usize) {
         let terminal_capture;
         {
             let mut sink = RedactingSink::new(&mut observed);
-            sink.begin_terminal_text_capture();
+            sink.begin_terminal_text_capture(true);
             sink.suppress_remaining();
             assert!(
                 sink.is_suppressing(),
@@ -1061,7 +1056,7 @@ fn assert_suppression_is_absorbing(seed: u64, case_count: usize) {
                 case.ordinal,
                 case.family
             );
-            terminal_capture = sink.take_terminal_text_capture();
+            terminal_capture = sink.take_terminal_text_capture().into_text();
         }
         let mut output = observed_stream_outputs(observed)
             .into_iter()
@@ -1217,6 +1212,14 @@ fn redaction_corpus_classification_is_exact() {
     );
 }
 
+/// The merged engine is monotone over the union of both original adapters'
+/// recorded behavior: no case either original redacted may become visible.
+#[test]
+fn merged_engine_redacts_at_least_the_original_engine_union() {
+    assert_original_codex_corpus_is_still_covered();
+    assert_original_claude_corpus_is_still_covered();
+}
+
 #[test]
 fn deterministic_generator_replays_the_pinned_seed() {
     let replay = generator_replay(GENERATOR_SEED);
@@ -1276,11 +1279,7 @@ fn stateful_equals_stateless_for_every_two_corpus_splits() {
     assert_eq!(summary.lines, CORPUS_LINE_COUNT);
     assert_eq!(summary.cases, EXHAUSTIVE_TWO_SPLIT_CASES);
     assert_eq!(summary.guarded_cases, EXHAUSTIVE_TWO_SPLIT_GUARDED_CASES);
-    assert_eq!(summary.leaks.len(), KNOWN_FAILING_TWO_SPLIT_CASES);
-    assert_eq!(
-        summary.divergent_splits_digest(),
-        KNOWN_FAILING_TWO_SPLIT_DIGEST
-    );
+    assert_exact_two_split_leak_ledger(&summary);
 }
 
 /// Deterministic long-run coverage for STATEFUL-EQUALS-STATELESS.

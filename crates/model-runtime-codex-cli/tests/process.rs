@@ -28,6 +28,10 @@ mod fixtures;
 const CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 const RESOLVED_TARGET: &str = "gpt-offline-exact";
 const OFFLINE_HARNESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// Provider text carried by the terminal half of the boundary extractor fixture.
+const BOUNDARY_FIXTURE_TERMINAL_TEXT: &str = "synthetic-terminal-boundary-text";
+/// Provider text carried by the observation half of the boundary extractor fixture.
+const BOUNDARY_FIXTURE_OBSERVATION_TEXT: &str = "synthetic-observation-boundary-text";
 
 #[derive(Clone, Copy)]
 enum OperationShape {
@@ -42,6 +46,222 @@ struct ExecutionResult {
     spawns: usize,
     argv: String,
     prompt: String,
+}
+
+/// Flattens only the typed, provider-controlled strings that actually cross
+/// the adapter boundary. Unlike a `Debug` dump, every included value is an
+/// emitted observation or terminal-evidence field and every such field is
+/// visited explicitly.
+fn boundary_material(result: &ExecutionResult) -> String {
+    boundary_material_from(&result.evidence, &result.observations)
+}
+
+fn boundary_material_from(
+    evidence: &TerminalEvidence,
+    observations: &[Observation<String>],
+) -> String {
+    let mut material = Vec::new();
+    collect_terminal_evidence(evidence, &mut material);
+    for observation in observations {
+        collect_observation(&observation.fact, &mut material);
+    }
+    material.join("\n")
+}
+
+fn collect_terminal_evidence(evidence: &TerminalEvidence, material: &mut Vec<String>) {
+    match evidence {
+        TerminalEvidence::Completed(completed) => {
+            collect_exchange(&completed.exchange, material);
+            collect_message_id(completed.message_id.as_ref(), material);
+            collect_reported_model(completed.reported_model.as_ref(), material);
+            collect_completion_finish(&completed.finish, material);
+            collect_assistant_parts(&completed.content, material);
+        }
+        TerminalEvidence::Refused(refused) => {
+            collect_exchange(&refused.exchange, material);
+            collect_message_id(refused.message_id.as_ref(), material);
+            collect_reported_model(refused.reported_model.as_ref(), material);
+            collect_assistant_parts(&refused.content, material);
+        }
+        TerminalEvidence::ProviderError(error) => {
+            collect_exchange(&error.exchange, material);
+            collect_reported_model(error.reported_model.as_ref(), material);
+            collect_native_error(&error.native, material);
+        }
+        TerminalEvidence::CancellationConfirmed(cancelled) => {
+            collect_exchange(&cancelled.exchange, material);
+            collect_reported_model(cancelled.reported_model.as_ref(), material);
+            collect_native_error(&cancelled.native, material);
+        }
+        TerminalEvidence::ProvenUnsent(unsent) => collect_unsent_cause(&unsent.cause, material),
+        TerminalEvidence::BoundaryLoss(loss) => {
+            collect_exchange(&loss.exchange, material);
+            collect_reported_model(loss.reported_model.as_ref(), material);
+            if let Some(finish) = &loss.finish_reported {
+                collect_finish_reason(finish, material);
+            }
+            collect_loss_cause(&loss.cause, material);
+        }
+    }
+}
+
+fn collect_observation(fact: &ObservationFact, material: &mut Vec<String>) {
+    match fact {
+        ObservationFact::SendCommenced | ObservationFact::UsageReported(_) => {}
+        ObservationFact::ExchangeEstablished(exchange) => collect_exchange(exchange, material),
+        ObservationFact::ProviderModelReported(model) => material.push(model.as_str().to_string()),
+        ObservationFact::TextDelta { text, .. } | ObservationFact::ThinkingDelta { text, .. } => {
+            material.push(text.clone())
+        }
+        ObservationFact::ToolArgumentsDelta { fragment, .. } => material.push(fragment.clone()),
+        ObservationFact::ToolCallProposed(proposal) => collect_tool_proposal(proposal, material),
+        ObservationFact::FinishReported(finish) => collect_finish_reason(finish, material),
+    }
+}
+
+fn collect_exchange(exchange: &signalbox_model_runtime::ExchangeFacts, material: &mut Vec<String>) {
+    if let Some(request_id) = &exchange.provider_request_id {
+        material.push(request_id.as_str().to_string());
+    }
+}
+
+fn collect_message_id(
+    message_id: Option<&signalbox_model_runtime::ProviderMessageId>,
+    material: &mut Vec<String>,
+) {
+    if let Some(message_id) = message_id {
+        material.push(message_id.as_str().to_string());
+    }
+}
+
+fn collect_reported_model(
+    model: Option<&signalbox_model_runtime::ProviderReportedModel>,
+    material: &mut Vec<String>,
+) {
+    if let Some(model) = model {
+        material.push(model.as_str().to_string());
+    }
+}
+
+fn collect_assistant_parts(parts: &[AssistantPart], material: &mut Vec<String>) {
+    for part in parts {
+        match part {
+            AssistantPart::Text(text) => material.push(text.clone()),
+            AssistantPart::Thinking { text, signature } => {
+                material.push(text.clone());
+                if let Some(signature) = signature {
+                    material.push(signature.clone());
+                }
+            }
+            AssistantPart::RedactedThinking { data } => material.push(data.clone()),
+            AssistantPart::ToolCall(proposal) => collect_tool_proposal(proposal, material),
+        }
+    }
+}
+
+fn collect_tool_proposal(proposal: &ToolCallProposal, material: &mut Vec<String>) {
+    material.push(proposal.id.as_str().to_string());
+    material.push(proposal.name.as_str().to_string());
+    material.push(proposal.arguments_json.clone());
+}
+
+fn collect_native_error(
+    native: &signalbox_model_runtime::NativeErrorFacts,
+    material: &mut Vec<String>,
+) {
+    material.extend(native.error_token.iter().cloned());
+    material.extend(native.error_code.iter().cloned());
+    material.extend(native.message.iter().cloned());
+}
+
+fn collect_completion_finish(finish: &CompletionFinish, material: &mut Vec<String>) {
+    match finish {
+        CompletionFinish::StopSequence { sequence } => material.extend(sequence.iter().cloned()),
+        CompletionFinish::Unrecognized { provider_token } => {
+            material.push(provider_token.clone());
+        }
+        CompletionFinish::EndTurn
+        | CompletionFinish::MaxOutputTokens
+        | CompletionFinish::ContextWindowExceeded
+        | CompletionFinish::ToolUse => {}
+    }
+}
+
+fn collect_finish_reason(
+    finish: &signalbox_model_runtime::FinishReason,
+    material: &mut Vec<String>,
+) {
+    match finish {
+        signalbox_model_runtime::FinishReason::StopSequence { sequence } => {
+            material.extend(sequence.iter().cloned());
+        }
+        signalbox_model_runtime::FinishReason::Unrecognized { provider_token } => {
+            material.push(provider_token.clone());
+        }
+        signalbox_model_runtime::FinishReason::EndTurn
+        | signalbox_model_runtime::FinishReason::MaxOutputTokens
+        | signalbox_model_runtime::FinishReason::ContextWindowExceeded
+        | signalbox_model_runtime::FinishReason::ToolUse
+        | signalbox_model_runtime::FinishReason::Refusal => {}
+    }
+}
+
+fn collect_unsent_cause(cause: &signalbox_model_runtime::UnsentCause, material: &mut Vec<String>) {
+    match cause {
+        signalbox_model_runtime::UnsentCause::CancelledBeforeSend => {}
+        signalbox_model_runtime::UnsentCause::ConnectFailed(facts)
+        | signalbox_model_runtime::UnsentCause::SendIncompleteProvenUnacceptable(facts) => {
+            material.push(facts.detail.clone());
+        }
+    }
+}
+
+fn collect_loss_cause(cause: &LossCause, material: &mut Vec<String>) {
+    match cause {
+        LossCause::CancellationRequested
+        | LossCause::UnexpectedHttpStatus
+        | LossCause::StreamEndedWithoutTerminalMarker {
+            interruption: StreamInterruption::EndOfStream,
+        } => {}
+        LossCause::TimedOut(facts)
+        | LossCause::TransportFailed(facts)
+        | LossCause::ResponseBodyLost(facts)
+        | LossCause::StreamEndedWithoutTerminalMarker {
+            interruption:
+                StreamInterruption::TransportFailure(facts) | StreamInterruption::TimedOut(facts),
+        } => material.push(facts.detail.clone()),
+        LossCause::ResponseUnintelligible { detail }
+        | LossCause::StreamProtocolViolation { detail } => material.push(detail.clone()),
+    }
+}
+
+#[test]
+fn boundary_material_reads_terminal_and_observation_text() {
+    let result = ExecutionResult {
+        evidence: TerminalEvidence::BoundaryLoss(signalbox_model_runtime::BoundaryLossEvidence {
+            cause: LossCause::StreamProtocolViolation {
+                detail: BOUNDARY_FIXTURE_TERMINAL_TEXT.to_string(),
+            },
+            exchange: signalbox_model_runtime::ExchangeFacts::default(),
+            reported_model: None,
+            finish_reported: None,
+            usage: TokenUsage::unreported(),
+        }),
+        observations: vec![Observation {
+            correlation: "boundary-fixture".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: BOUNDARY_FIXTURE_OBSERVATION_TEXT.to_string(),
+            },
+        }],
+        spawns: 0,
+        argv: String::new(),
+        prompt: String::new(),
+    };
+    let material = boundary_material(&result);
+
+    assert!(material.contains(BOUNDARY_FIXTURE_TERMINAL_TEXT));
+    assert!(material.contains(BOUNDARY_FIXTURE_OBSERVATION_TEXT));
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
@@ -225,9 +445,10 @@ async fn inv_035_buffered_reasoning_marker_suppresses_the_final_text_value() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -243,9 +464,10 @@ async fn inv_035_buffered_reasoning_marker_suppresses_tool_arguments() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -262,7 +484,7 @@ async fn inv_035_split_authorization_value_before_tool_arguments_is_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(diagnostic.contains("[redacted]"));
@@ -281,9 +503,10 @@ async fn inv_035_split_authorization_value_before_tool_id_is_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -299,7 +522,7 @@ async fn inv_035_final_text_marker_before_tool_arguments_is_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(diagnostic.contains("[redacted]"));
@@ -319,9 +542,10 @@ async fn inv_035_final_text_marker_before_message_id_is_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -339,7 +563,7 @@ async fn inv_035_thread_id_marker_prefix_suppresses_streamed_continuation() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_THREAD_CONTINUATION));
     assert!(!diagnostic.contains("opaque-thread-continuation"));
@@ -361,7 +585,7 @@ async fn inv_035_thread_id_marker_prefix_suppresses_buffered_continuation() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_THREAD_CONTINUATION));
     assert!(!diagnostic.contains("opaque-thread-continuation"));
@@ -380,9 +604,10 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -398,9 +623,10 @@ async fn inv_035_two_independent_sibling_markers_fail_closed() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -415,9 +641,10 @@ async fn inv_035_thread_started_additive_field_marker_suppresses_the_value() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -505,9 +732,10 @@ async fn inv_035_sibling_object_field_marker_is_not_erased() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -522,9 +750,10 @@ async fn inv_035_turn_started_additive_field_marker_suppresses_the_value() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -540,9 +769,10 @@ async fn inv_035_retained_agent_message_folds_before_failure() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -558,9 +788,10 @@ async fn inv_035_superseded_agent_message_marker_suppresses_the_value() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -575,9 +806,10 @@ async fn inv_035_lifecycle_event_marker_suppresses_the_value() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -592,9 +824,10 @@ async fn inv_035_unknown_event_marker_suppresses_the_value() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -610,9 +843,10 @@ async fn inv_035_ordered_unsupported_leaves_form_a_marker() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -628,7 +862,7 @@ async fn inv_035_message_id_prefixing_final_text_is_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     // The unsafe id prefix is redacted, so neither the `api_` marker prefix
     // nor the reconstructed `api_key=` marker survives across the id and
@@ -652,9 +886,10 @@ async fn inv_035_streamed_unsupported_item_marker_suppresses_the_continuation() 
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -669,9 +904,10 @@ async fn inv_035_buffered_unsupported_item_marker_suppresses_the_continuation() 
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -688,9 +924,10 @@ async fn inv_035_context_dependent_held_bytes_stay_in_the_dropped_chain() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -706,9 +943,10 @@ async fn inv_035_unsupported_item_nonstandard_field_seeds_the_lookbehind() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -724,9 +962,10 @@ async fn inv_035_unsupported_item_benign_field_does_not_erase_a_marker() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -744,9 +983,10 @@ async fn inv_035_held_prefix_suppresses_value_across_unrelated_error_item() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -764,9 +1004,10 @@ async fn inv_035_credential_reassembles_across_held_reasoning_and_error_item() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -784,9 +1025,10 @@ async fn inv_035_error_item_separator_folds_through_held_reasoning() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -801,9 +1043,10 @@ async fn inv_035_error_item_marker_suppresses_buffered_continuation() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -819,9 +1062,10 @@ async fn inv_035_split_authorization_value_before_message_id_is_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -836,9 +1080,10 @@ async fn inv_035_split_authorization_value_before_tool_name_is_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -858,7 +1103,10 @@ async fn inv_035_decode_failure_detail_is_silent_while_a_dropped_marker_is_held(
     .await;
     let error = provider_error(&result.evidence);
 
-    assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    let diagnostic = boundary_material(&result);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(
         error.native.message.as_deref(),
         Some("undecodable Codex event: [redacted]")
@@ -883,7 +1131,10 @@ async fn inv_035_decode_failure_detail_consults_held_redaction_state() {
     .await;
     let error = provider_error(&result.evidence);
 
-    assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    let diagnostic = boundary_material(&result);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(
         error.native.message.as_deref(),
         Some("undecodable Codex event: [redacted]")
@@ -1236,9 +1487,10 @@ async fn inv_035_agent_message_additive_field_marker_suppresses_the_continuation
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -1254,9 +1506,10 @@ async fn inv_035_turn_failed_additive_field_marker_suppresses_the_message() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -1272,9 +1525,10 @@ async fn inv_035_superseded_message_marker_survives_a_clean_id() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -1290,9 +1544,10 @@ async fn inv_035_object_inside_an_array_keeps_its_fields_independent() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -1309,9 +1564,10 @@ async fn inv_035_unknown_event_metadata_marker_suppresses_the_continuation() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -2213,7 +2469,10 @@ async fn inv_035_stderr_exit_detail_consults_held_redaction_state() {
     .await;
     let error = provider_error(&result.evidence);
 
-    assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
+    let diagnostic = boundary_material(&result);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
     assert!(
         error
             .native
@@ -2386,7 +2645,7 @@ async fn inv_035_drifted_thread_id_is_redacted_against_held_state() {
     let report = runtime
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
-    let diagnostic = format!("{:?}{:?}", report.evidence, observations);
+    let diagnostic = boundary_material_from(&report.evidence, &observations);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(diagnostic.contains("[redacted]"));
@@ -2699,7 +2958,7 @@ async fn inv_035_cli_output_is_credential_shape_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_OUTPUT_TOKEN));
     assert!(!diagnostic.contains(fixtures::SENSITIVE_REFRESH_TOKEN));
@@ -2718,7 +2977,7 @@ async fn inv_035_bare_credential_member_is_redacted() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}", result.evidence);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_COMPOSITE_SECRET));
     assert!(diagnostic.contains("[redacted]"));
@@ -2736,7 +2995,7 @@ async fn inv_035_structured_credential_value_is_redacted_whole() {
         CancellationSignal::never(),
     )
     .await;
-    let diagnostic = format!("{:?}", result.evidence);
+    let diagnostic = boundary_material(&result);
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_STRUCTURED_SECRET));
     assert!(diagnostic.contains("[redacted]"));
@@ -2809,7 +3068,7 @@ async fn inv_035_redacted_tool_ids_receive_distinct_safe_surrogates() {
     )
     .await;
     let content = &completed(&result.evidence).content;
-    let diagnostic = format!("{:?}", result.evidence);
+    let diagnostic = boundary_material(&result);
 
     assert_eq!(
         tool_ids(content),

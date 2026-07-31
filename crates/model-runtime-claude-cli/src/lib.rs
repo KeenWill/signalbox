@@ -16,7 +16,6 @@
 mod bridge;
 mod config;
 mod event;
-mod redaction;
 mod runtime;
 mod status;
 mod translate;

@@ -43,11 +43,14 @@ use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, CODE_HOST_CREDENTIAL_REFERENCE, ContextGuardedTurnPass,
     DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
     FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
-    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    HubModelConfigurationError, LocalProcessListener, LocalSocketError, OtlpRuntime,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics,
 };
+use tracing_subscriber::prelude::*;
+
 use tokio::{
     pin, select,
     sync::{oneshot, watch},
@@ -262,6 +265,7 @@ enum SanitizedStartupCause<'a> {
     Configuration(&'a HubConfigurationError),
     ModelConfiguration(&'a HubModelConfigurationError),
     TemplateConfiguration(&'a SessionTemplateConfigurationError),
+    TelemetryConfiguration(&'a TelemetryConfigurationError),
     Database(&'a FencedHubDatabaseError),
     Tools(&'a DaemonToolsConstructionError),
     Socket(&'a LocalSocketError),
@@ -274,6 +278,7 @@ impl fmt::Display for SanitizedStartupCause<'_> {
             Self::Configuration(error) => error.fmt(formatter),
             Self::ModelConfiguration(error) => error.fmt(formatter),
             Self::TemplateConfiguration(error) => error.fmt(formatter),
+            Self::TelemetryConfiguration(error) => error.fmt(formatter),
             Self::Database(error) => error.fmt(formatter),
             Self::Tools(error) => error.fmt(formatter),
             Self::Socket(error) => error.fmt(formatter),
@@ -697,13 +702,51 @@ async fn shutdown_requested() -> bool {
     }
 }
 
-async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
+async fn initialize_prometheus(
+    configuration: &TelemetryConfiguration,
+) -> Option<(TelemetryMetrics, PrometheusServer)> {
+    let address = configuration.prometheus_bind()?;
+    let metrics = match TelemetryMetrics::new() {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            tracing::warn!(
+                target: "signalbox_telemetry_internal",
+                setting = error.setting(),
+                failure = ?error.failure(),
+                "Prometheus metrics were disabled after registry construction failed"
+            );
+            return None;
+        }
+    };
+    match PrometheusServer::bind(address, metrics.clone()).await {
+        Ok(server) => {
+            tracing::info!(
+                target: "signalbox_telemetry_internal",
+                "Prometheus scrape listener enabled"
+            );
+            Some((metrics, server))
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "signalbox_telemetry_internal",
+                cause_code = "prometheus_bind_failed",
+                "Prometheus metrics were disabled after the scrape socket could not be bound"
+            );
+            None
+        }
+    }
+}
+
+async fn run_hub(
+    telemetry_configuration: &TelemetryConfiguration,
+) -> Result<ShutdownOutcome, HubRuntimeError> {
     let configuration = HubConfiguration::from_environment().map_err(|error| {
         erase_startup_cause(
             RuntimePhase::Configuration,
             SanitizedStartupCause::Configuration(&error),
         )
     })?;
+    let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
     let model_configuration = HubModelConfiguration::read(configuration.model_configuration_file())
         .map_err(|error| {
             erase_startup_cause(
@@ -887,6 +930,10 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         Arc::clone(&context_compaction_model),
         context_compaction_credential_reference.clone(),
     );
+    let process_runtime = match prometheus_runtime.as_ref() {
+        Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
+        None => process_runtime,
+    };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let model_repository = PostgresModelCallRepository::new(
@@ -1091,20 +1138,7 @@ fn signalbox_level_filter(
 /// The setting value itself is never logged. Rejection records only the public
 /// setting name, and third-party targets never exceed the selected level or the
 /// INFO default.
-fn install_tracing_subscriber() {
-    let configured = env::var(LOG_FILTER_ENVIRONMENT);
-    let (filter, disposition) = match configured.as_deref() {
-        Ok(value) => operator_filter(Some(value)),
-        Err(env::VarError::NotPresent) => operator_filter(None),
-        Err(env::VarError::NotUnicode(_)) => (
-            tracing_subscriber::EnvFilter::new("info"),
-            OperatorFilterDisposition::Rejected,
-        ),
-    };
-    tracing_subscriber::fmt()
-        .compact()
-        .with_env_filter(filter)
-        .init();
+fn report_operator_filter(disposition: OperatorFilterDisposition) {
     match disposition {
         OperatorFilterDisposition::Accepted => {}
         OperatorFilterDisposition::Rejected => tracing::warn!(
@@ -1114,11 +1148,83 @@ fn install_tracing_subscriber() {
     }
 }
 
+fn install_tracing_subscriber(
+    telemetry_configuration: &TelemetryConfiguration,
+) -> Result<Option<OtlpRuntime>, TelemetryConfigurationError> {
+    let configured = env::var(LOG_FILTER_ENVIRONMENT);
+    let (filter, disposition) = match configured.as_deref() {
+        Ok(value) => operator_filter(Some(value)),
+        Err(env::VarError::NotPresent) => operator_filter(None),
+        Err(env::VarError::NotUnicode(_)) => (
+            tracing_subscriber::EnvFilter::new("info"),
+            OperatorFilterDisposition::Rejected,
+        ),
+    };
+    let otlp_runtime = match telemetry_configuration.build_otlp_runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .compact()
+                        .with_filter(filter),
+                )
+                .init();
+            report_operator_filter(disposition);
+            return Err(error);
+        }
+    };
+    let otlp_layer = otlp_runtime
+        .as_ref()
+        .map(|runtime| runtime.layer().with_filter(TelemetryExportFilter));
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_filter(filter),
+        )
+        .with(otlp_layer)
+        .init();
+    report_operator_filter(disposition);
+    Ok(otlp_runtime)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    install_tracing_subscriber();
+    let telemetry_configuration = match TelemetryConfiguration::from_environment() {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            let disabled = TelemetryConfiguration::disabled();
+            let _ = install_tracing_subscriber(&disabled);
+            let startup_error = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::TelemetryConfiguration(&error),
+            );
+            tracing::error!(
+                phase = ?startup_error.phase,
+                failure_class = ?startup_error.failure_class,
+                "daemon startup failed"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let otlp_runtime = match install_tracing_subscriber(&telemetry_configuration) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let startup_error = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::TelemetryConfiguration(&error),
+            );
+            tracing::error!(
+                phase = ?startup_error.phase,
+                failure_class = ?startup_error.failure_class,
+                "daemon startup failed"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
-    match run_hub().await {
+    let exit_code = match run_hub(&telemetry_configuration).await {
         Ok(ShutdownOutcome::Clean) => {
             tracing::info!("daemon shutdown completed");
             ExitCode::SUCCESS
@@ -1213,7 +1319,11 @@ async fn main() -> ExitCode {
             );
             ExitCode::FAILURE
         }
+    };
+    if let Some(runtime) = otlp_runtime {
+        runtime.shutdown();
     }
+    exit_code
 }
 
 #[cfg(test)]
