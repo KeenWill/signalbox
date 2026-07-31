@@ -467,7 +467,8 @@ impl GitHubCodeHostTransport {
         let (resolved_revision, revision_visible) = match resolution {
             RepositoryRevisionResolution::Exact(resolved_revision) => (resolved_revision, true),
             RepositoryRevisionResolution::Missing => (revision.clone(), false),
-            RepositoryRevisionResolution::EmptyRepository => {
+            RepositoryRevisionResolution::DefinitiveMissing
+            | RepositoryRevisionResolution::EmptyRepository => {
                 return Ok(RepositoryPathLookup::RevisionNotFound);
             }
         };
@@ -521,6 +522,13 @@ impl GitHubCodeHostTransport {
                 .map(RepositoryRevisionResolution::Exact),
             StatusCode::NOT_FOUND => Ok(RepositoryRevisionResolution::Missing),
             StatusCode::CONFLICT => Ok(RepositoryRevisionResolution::EmptyRepository),
+            StatusCode::UNPROCESSABLE_ENTITY => {
+                if repository_commit_response_names_missing_revision(response, revision).await? {
+                    Ok(RepositoryRevisionResolution::DefinitiveMissing)
+                } else {
+                    Err(CodeHostTransportFailure::Rejected)
+                }
+            }
             status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
             _ => Err(CodeHostTransportFailure::DispatchUnknown),
         }
@@ -1567,6 +1575,7 @@ impl CodeHostTransport for GitHubCodeHostTransport {
 enum RepositoryRevisionResolution {
     Exact(super::CodeHostRevision),
     Missing,
+    DefinitiveMissing,
     EmptyRepository,
 }
 
@@ -1637,6 +1646,23 @@ async fn repository_contents_response_names_missing_revision(
     response: Response,
     revision: &super::CodeHostRevision,
 ) -> Result<bool, CodeHostTransportFailure> {
+    repository_response_message_names_revision(response, revision, "No commit found for the ref ")
+        .await
+}
+
+async fn repository_commit_response_names_missing_revision(
+    response: Response,
+    revision: &super::CodeHostRevision,
+) -> Result<bool, CodeHostTransportFailure> {
+    repository_response_message_names_revision(response, revision, "No commit found for SHA: ")
+        .await
+}
+
+async fn repository_response_message_names_revision(
+    response: Response,
+    revision: &super::CodeHostRevision,
+    prefix: &str,
+) -> Result<bool, CodeHostTransportFailure> {
     let (body, completeness) =
         read_bounded(response.bytes_stream(), MAX_JSON_RESPONSE_BYTES).await?;
     if completeness == CodeHostResultCompleteness::Truncated {
@@ -1653,7 +1679,7 @@ async fn repository_contents_response_names_missing_revision(
         return Ok(false);
     };
     Ok(message
-        .strip_prefix("No commit found for the ref ")
+        .strip_prefix(prefix)
         .is_some_and(|named_revision| named_revision == revision.as_str()))
 }
 
@@ -2674,6 +2700,14 @@ mod tests {
         .into_bytes()
     }
 
+    fn missing_revision_sha_body() -> Vec<u8> {
+        serde_json::json!({
+            "message": format!("No commit found for SHA: {REPOSITORY_REVISION}"),
+        })
+        .to_string()
+        .into_bytes()
+    }
+
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct FilePatchRevisionTransitionInput {
         before: ChangeRequestDiffRevision,
@@ -2867,6 +2901,69 @@ mod tests {
             })
         );
         assert_eq!(requests, path_lookup_requests(arguments.path().as_str()));
+    }
+
+    /// GitHub commit lookup can report an unknown well-formed SHA as a
+    /// bounded 422 whose message names that exact SHA.
+    #[tokio::test]
+    async fn repository_commit_unprocessable_missing_sha_is_typed_separately() {
+        let (transport, listener) = repository_test_transport().await;
+        let response_body = missing_revision_sha_body();
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "422 Unprocessable Entity",
+                    body: &response_body,
+                },
+            )
+            .await
+        });
+        let arguments = repository_read_arguments("src/lib.rs", None);
+        let result = transport
+            .repository_read_file(arguments.clone(), &test_credential())
+            .await
+            .expect("an exactly named absent commit is a typed result");
+        let request = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({
+                "outcome": "revision_not_found",
+                "path": arguments.path().as_str(),
+                "revision": arguments.revision().as_str(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(request, revision_request());
+    }
+
+    /// An unrelated validation response remains a host rejection rather than
+    /// being converted into evidence that the requested revision is absent.
+    #[tokio::test]
+    async fn repository_unrelated_commit_unprocessable_is_rejected() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "422 Unprocessable Entity",
+                    body: br#"{"message":"Validation Failed"}"#,
+                },
+            )
+            .await
+        });
+        let failure = transport
+            .repository_read_file(
+                repository_read_arguments("src/lib.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect_err("an unrelated validation failure cannot prove revision absence");
+        let request = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::Rejected);
+        assert_eq!(request, revision_request());
     }
 
     /// An empty repository's commit probe returns the distinct conflict that
