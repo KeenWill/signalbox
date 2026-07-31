@@ -16,7 +16,7 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 `web_fetch` egress policy and complete bounded file-patch lookup through PR #330
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
-`2b81fe3a80a8992b59faee5fa78d3e76118ed6a2`. The runner executable stack rooted
+`b062e6c9a826fd664292df440b82e420c7317cfe`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. This page
 owns logical tool requests, approval policy and decisions, physical tool
 attempts, result admission, intra-turn continuation, crash classification, the
@@ -877,15 +877,29 @@ The declarations and compact result objects are:
   `line_range_unavailable` outcome with the requested range, source bytes, scan
   limit, and `truncated: true` without fetching the blob. Complete bounded
   ranged inspection classifies a NUL-bearing or non-UTF-8 blob as binary even
-  when those bytes lie outside the selected lines. `path_not_found`,
+  when those bytes lie outside the selected lines. A ranged content result can
+  claim truncation only when the exact source bytes observed inside the selected
+  lines exceed the retained bytes; source bytes before the selection cannot
+  impersonate discarded selected content. `path_not_found`,
   `revision_not_found`, `not_a_file` with the observed repository-object type,
   and `binary_file` with source bytes are separate non-content outcomes; every
-  file outcome carries `truncated`. A contents 404 whose bounded body exactly
-  names the requested revision as an absent ref becomes `revision_not_found`.
-  Otherwise, an exact commit probe returning success makes the original response
-  `path_not_found`, while the empty-repository conflict makes it
-  `revision_not_found`. A generic contents 404 followed by a commit 404 remains
-  failed execution: metadata visibility alone cannot prove revision absence.
+  file outcome carries `truncated`. Before any Contents request, the GitHub
+  adapter requests the bounded SHA representation of `/commits/{revision}`.
+  Success must return the exact required revision; a different resolution,
+  including a forty-hex branch or tag name that resolves to another commit,
+  fails execution before repository content is read. An exact resolution pins
+  the Contents request to that commit, and a Contents 404 then means
+  `path_not_found`. A commit conflict proves an empty repository and returns
+  `revision_not_found` without a Contents request. A commit 404 permits one
+  Contents visibility probe pinned to the requested revision: only a bounded 404
+  body that exactly names that revision as an absent ref returns
+  `revision_not_found`; a generic 404 remains failed execution because metadata
+  visibility alone cannot prove absence. A successful text or binary file read
+  therefore uses three requests (commit resolution, Contents metadata, immutable
+  blob), a directory result or path absence uses two (commit resolution and
+  Contents), and revision absence uses one or two. Every request shares one
+  30-second transaction budget, and every request after resolution names the
+  resolved commit or immutable blob rather than a moving reference.
 - `repository_list_directory` accepts `repository`, one repository-relative
   directory `path`, and the same required exact commit `revision`. An entries
   outcome retains at most 100 immediate children with path, repository-object
