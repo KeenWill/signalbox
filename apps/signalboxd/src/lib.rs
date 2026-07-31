@@ -32,6 +32,7 @@ mod local_socket;
 mod process_runtime;
 mod session_template_configuration;
 mod single_hub;
+mod telemetry;
 
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
@@ -87,6 +88,13 @@ pub use signalbox_tools_code_host::{
     ThreadResolveArguments, ThreadResolveResult,
 };
 pub use single_hub::{SingleHubGuard, SingleHubGuardError};
+pub use telemetry::{
+    OTLP_ENDPOINT_ENVIRONMENT, OTLP_HEADERS_FILE_ENVIRONMENT, OTLP_MAX_EXPORT_BATCH,
+    OTLP_MAX_QUEUED_SPANS, OTLP_PROTOCOL_ENVIRONMENT, OTLP_SAMPLING_RATIO_ENVIRONMENT,
+    OTLP_SERVICE_NAME_ENVIRONMENT, OtlpRuntime, PROMETHEUS_BIND_ENVIRONMENT, PrometheusServer,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryConfigurationFailure,
+    TelemetryExportFilter, TelemetryExportLayer, TelemetryMetrics,
+};
 
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {

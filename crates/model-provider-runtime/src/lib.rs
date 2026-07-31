@@ -343,6 +343,81 @@ fn is_dated_snapshot_qualifier(qualifier: &str) -> bool {
     }
 }
 
+/// Declares the runtime-owned model-call telemetry token vocabulary once.
+macro_rules! model_call_cause_tokens {
+    ($( $variant:ident => $token:literal ),+ $(,)?) => {
+        /// One closed, content-free token admitted to model-call telemetry.
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        pub enum ModelCallCauseToken {
+            $(
+                #[doc = concat!("The `", $token, "` cause token.")]
+                $variant,
+            )+
+        }
+
+        impl ModelCallCauseToken {
+            /// Parses only a token declared by the runtime-owned vocabulary.
+            pub fn parse(value: &str) -> Option<Self> {
+                match value {
+                    $($token => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            /// Returns the fixed operator-facing spelling.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $token,)+
+                }
+            }
+        }
+    };
+}
+
+model_call_cause_tokens! {
+    Completed => "completed",
+    ProviderRefused => "provider_refused",
+    ProviderCredentialRejected => "provider_credential_rejected",
+    ProviderPermissionDenied => "provider_permission_denied",
+    ProviderInvalidRequest => "provider_invalid_request",
+    ProviderTargetNotFound => "provider_target_not_found",
+    ProviderRequestTooLarge => "provider_request_too_large",
+    ProviderRateLimited => "provider_rate_limited",
+    ProviderQuotaExhausted => "provider_quota_exhausted",
+    ProviderOverloaded => "provider_overloaded",
+    ProviderInternal => "provider_internal",
+    ProviderUnrecognizedError => "provider_unrecognized_error",
+    ProviderCancellationConfirmed => "provider_cancellation_confirmed",
+    CancelledBeforeSend => "cancelled_before_send",
+    ConnectFailed => "connect_failed",
+    SendIncompleteProvenUnacceptable => "send_incomplete_proven_unacceptable",
+    BoundaryLossCancellationRequested => "boundary_loss_cancellation_requested",
+    BoundaryLossTimedOut => "boundary_loss_timed_out",
+    BoundaryLossTransportFailed => "boundary_loss_transport_failed",
+    BoundaryLossResponseBodyLost => "boundary_loss_response_body_lost",
+    BoundaryLossResponseUnintelligible => "boundary_loss_response_unintelligible",
+    BoundaryLossUnexpectedHttpStatus => "boundary_loss_unexpected_http_status",
+    BoundaryLossStreamIncomplete => "boundary_loss_stream_incomplete",
+    BoundaryLossStreamProtocolViolation => "boundary_loss_stream_protocol_violation",
+    UnsupportedOperation => "unsupported_operation",
+    CredentialUnmapped => "credential_unmapped",
+    CredentialUnavailable => "credential_unavailable",
+    CredentialUnreadable => "credential_unreadable",
+    CredentialUnusable => "credential_unusable",
+    ProviderTargetSubstituted => "provider_target_substituted",
+    UnrepresentableToolMaterial => "unrepresentable_tool_material",
+    FinishContradictsContent => "finish_contradicts_content",
+    UnconfiguredTarget => "unconfigured_target",
+    PreparationDefect => "preparation_defect",
+    CorrelationMismatch => "correlation_mismatch",
+    AuthorizationMismatch => "authorization_mismatch",
+    ObservationCorrelationMismatch => "observation_correlation_mismatch",
+    UnsupportedCompletionMaterial => "unsupported_completion_material",
+    InvalidAssistantText => "invalid_assistant_text",
+    InvalidToolSchema => "invalid_tool_schema",
+    InvalidToolProposal => "invalid_tool_proposal",
+}
+
 /// Why one exchange ended without a definitive provider response.
 ///
 /// A projection of the runtime's `LossCause` down to a stable token: the
@@ -371,15 +446,23 @@ pub enum BoundaryLossCode {
 impl BoundaryLossCode {
     /// The stable operator-facing token for this loss.
     pub const fn as_str(self) -> &'static str {
+        self.token().as_str()
+    }
+
+    const fn token(self) -> ModelCallCauseToken {
         match self {
-            Self::CancellationRequested => "boundary_loss_cancellation_requested",
-            Self::TimedOut => "boundary_loss_timed_out",
-            Self::TransportFailed => "boundary_loss_transport_failed",
-            Self::ResponseBodyLost => "boundary_loss_response_body_lost",
-            Self::ResponseUnintelligible => "boundary_loss_response_unintelligible",
-            Self::UnexpectedHttpStatus => "boundary_loss_unexpected_http_status",
-            Self::StreamEndedWithoutTerminalMarker => "boundary_loss_stream_incomplete",
-            Self::StreamProtocolViolation => "boundary_loss_stream_protocol_violation",
+            Self::CancellationRequested => ModelCallCauseToken::BoundaryLossCancellationRequested,
+            Self::TimedOut => ModelCallCauseToken::BoundaryLossTimedOut,
+            Self::TransportFailed => ModelCallCauseToken::BoundaryLossTransportFailed,
+            Self::ResponseBodyLost => ModelCallCauseToken::BoundaryLossResponseBodyLost,
+            Self::ResponseUnintelligible => ModelCallCauseToken::BoundaryLossResponseUnintelligible,
+            Self::UnexpectedHttpStatus => ModelCallCauseToken::BoundaryLossUnexpectedHttpStatus,
+            Self::StreamEndedWithoutTerminalMarker => {
+                ModelCallCauseToken::BoundaryLossStreamIncomplete
+            }
+            Self::StreamProtocolViolation => {
+                ModelCallCauseToken::BoundaryLossStreamProtocolViolation
+            }
         }
     }
 
@@ -465,30 +548,41 @@ pub enum ModelCallCauseCode {
 impl ModelCallCauseCode {
     /// The stable operator-facing token for this cause.
     pub const fn as_str(self) -> &'static str {
+        self.token().as_str()
+    }
+
+    /// Projects this cause through a compiler-checked closed token.
+    pub const fn token(self) -> ModelCallCauseToken {
         match self {
-            Self::Completed => "completed",
-            Self::Refused => "provider_refused",
+            Self::Completed => ModelCallCauseToken::Completed,
+            Self::Refused => ModelCallCauseToken::ProviderRefused,
             Self::ProviderError(kind) => provider_error_token(kind),
-            Self::CancellationConfirmed => "provider_cancellation_confirmed",
-            Self::CancelledBeforeSend => "cancelled_before_send",
-            Self::ConnectFailed => "connect_failed",
-            Self::SendIncompleteProvenUnacceptable => "send_incomplete_proven_unacceptable",
-            Self::BoundaryLoss(code) => code.as_str(),
-            Self::UnsupportedOperation => "unsupported_operation",
-            Self::CredentialUnavailable(code) => code.as_str(),
-            Self::CredentialUnusable => "credential_unusable",
-            Self::ProviderTargetSubstituted => "provider_target_substituted",
-            Self::UnrepresentableToolMaterial => "unrepresentable_tool_material",
-            Self::FinishContradictsContent => "finish_contradicts_content",
-            Self::UnconfiguredTarget => "unconfigured_target",
-            Self::PreparationDefect => "preparation_defect",
-            Self::CorrelationMismatch => "correlation_mismatch",
-            Self::AuthorizationMismatch => "authorization_mismatch",
-            Self::ObservationCorrelationMismatch => "observation_correlation_mismatch",
-            Self::UnsupportedCompletionMaterial => "unsupported_completion_material",
-            Self::InvalidAssistantText => "invalid_assistant_text",
-            Self::InvalidToolSchema => "invalid_tool_schema",
-            Self::InvalidToolProposal => "invalid_tool_proposal",
+            Self::CancellationConfirmed => ModelCallCauseToken::ProviderCancellationConfirmed,
+            Self::CancelledBeforeSend => ModelCallCauseToken::CancelledBeforeSend,
+            Self::ConnectFailed => ModelCallCauseToken::ConnectFailed,
+            Self::SendIncompleteProvenUnacceptable => {
+                ModelCallCauseToken::SendIncompleteProvenUnacceptable
+            }
+            Self::BoundaryLoss(code) => code.token(),
+            Self::UnsupportedOperation => ModelCallCauseToken::UnsupportedOperation,
+            Self::CredentialUnavailable(code) => code.token(),
+            Self::CredentialUnusable => ModelCallCauseToken::CredentialUnusable,
+            Self::ProviderTargetSubstituted => ModelCallCauseToken::ProviderTargetSubstituted,
+            Self::UnrepresentableToolMaterial => ModelCallCauseToken::UnrepresentableToolMaterial,
+            Self::FinishContradictsContent => ModelCallCauseToken::FinishContradictsContent,
+            Self::UnconfiguredTarget => ModelCallCauseToken::UnconfiguredTarget,
+            Self::PreparationDefect => ModelCallCauseToken::PreparationDefect,
+            Self::CorrelationMismatch => ModelCallCauseToken::CorrelationMismatch,
+            Self::AuthorizationMismatch => ModelCallCauseToken::AuthorizationMismatch,
+            Self::ObservationCorrelationMismatch => {
+                ModelCallCauseToken::ObservationCorrelationMismatch
+            }
+            Self::UnsupportedCompletionMaterial => {
+                ModelCallCauseToken::UnsupportedCompletionMaterial
+            }
+            Self::InvalidAssistantText => ModelCallCauseToken::InvalidAssistantText,
+            Self::InvalidToolSchema => ModelCallCauseToken::InvalidToolSchema,
+            Self::InvalidToolProposal => ModelCallCauseToken::InvalidToolProposal,
         }
     }
 }
@@ -512,10 +606,14 @@ pub enum CredentialAccessCode {
 impl CredentialAccessCode {
     /// The stable operator-facing token for this access failure.
     pub const fn as_str(self) -> &'static str {
+        self.token().as_str()
+    }
+
+    const fn token(self) -> ModelCallCauseToken {
         match self {
-            Self::Unmapped => "credential_unmapped",
-            Self::Unavailable => "credential_unavailable",
-            Self::Unreadable => "credential_unreadable",
+            Self::Unmapped => ModelCallCauseToken::CredentialUnmapped,
+            Self::Unavailable => ModelCallCauseToken::CredentialUnavailable,
+            Self::Unreadable => ModelCallCauseToken::CredentialUnreadable,
         }
     }
 
@@ -563,18 +661,18 @@ const fn provider_failure_cause(kind: ProviderErrorKind) -> ProviderModelCallFai
 ///
 /// Kept as an exhaustive `match` so a new `ProviderErrorKind` cannot reach
 /// operator telemetry without a deliberate token.
-const fn provider_error_token(kind: ProviderErrorKind) -> &'static str {
+const fn provider_error_token(kind: ProviderErrorKind) -> ModelCallCauseToken {
     match kind {
-        ProviderErrorKind::CredentialRejected => "provider_credential_rejected",
-        ProviderErrorKind::PermissionDenied => "provider_permission_denied",
-        ProviderErrorKind::InvalidRequest => "provider_invalid_request",
-        ProviderErrorKind::TargetNotFound => "provider_target_not_found",
-        ProviderErrorKind::RequestTooLarge => "provider_request_too_large",
-        ProviderErrorKind::RateLimited => "provider_rate_limited",
-        ProviderErrorKind::QuotaExhausted => "provider_quota_exhausted",
-        ProviderErrorKind::Overloaded => "provider_overloaded",
-        ProviderErrorKind::ProviderInternal => "provider_internal",
-        ProviderErrorKind::Unrecognized => "provider_unrecognized_error",
+        ProviderErrorKind::CredentialRejected => ModelCallCauseToken::ProviderCredentialRejected,
+        ProviderErrorKind::PermissionDenied => ModelCallCauseToken::ProviderPermissionDenied,
+        ProviderErrorKind::InvalidRequest => ModelCallCauseToken::ProviderInvalidRequest,
+        ProviderErrorKind::TargetNotFound => ModelCallCauseToken::ProviderTargetNotFound,
+        ProviderErrorKind::RequestTooLarge => ModelCallCauseToken::ProviderRequestTooLarge,
+        ProviderErrorKind::RateLimited => ModelCallCauseToken::ProviderRateLimited,
+        ProviderErrorKind::QuotaExhausted => ModelCallCauseToken::ProviderQuotaExhausted,
+        ProviderErrorKind::Overloaded => ModelCallCauseToken::ProviderOverloaded,
+        ProviderErrorKind::ProviderInternal => ModelCallCauseToken::ProviderInternal,
+        ProviderErrorKind::Unrecognized => ModelCallCauseToken::ProviderUnrecognizedError,
     }
 }
 

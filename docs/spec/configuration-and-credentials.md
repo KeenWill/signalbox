@@ -21,11 +21,12 @@ credential-file value narrowing and the credential-shaped code-host detail were
 verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
 copy-on-create session-template catalog was verified through PR #311
 (`agent/session-templates-spec`). The static web-fetch egress allowlist is
-verified through PR #330 (`agent/audit-verified-fixes`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag. The runner
-configuration and credential paragraphs are the foundation proposal at the
-bottom of their implementing stack and become verified only with those child
-pull requests.
+verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
+export contract is verified through PR #347 (`agent/telemetry-export`).
+Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
+tag. The runner configuration and credential paragraphs are the foundation
+proposal at the bottom of their implementing stack and become verified only with
+those child pull requests.
 
 ## Process configuration
 
@@ -116,6 +117,189 @@ The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL`,
 `SIGNALBOX_CONFIG_FILE`, and `ANTHROPIC_API_KEY_FILE` in its `--anthropic` mode.
 It does not compose the daemon tool catalog and does not read
 `GITHUB_TOKEN_FILE`; it is a development driver, not the client protocol.
+
+## Telemetry export
+
+Telemetry export is implemented but opt-in. With every setting below absent,
+`signalboxd` constructs neither an OpenTelemetry provider nor a Prometheus
+registry or listener: local compact tracing, startup, request handling, and
+network egress are unchanged. When Signalbox OTLP is enabled, presence of any
+standard general `OTEL_EXPORTER_OTLP_` or trace-specific
+`OTEL_EXPORTER_OTLP_TRACES_` setting with the suffix `ENDPOINT`, `HEADERS`,
+`TIMEOUT`, `PROTOCOL`, or `COMPRESSION` fails sanitized configuration without
+accepting or rendering its value; the explicit process settings are the only
+telemetry configuration channel. With Signalbox OTLP disabled, those unrelated
+ambient settings are ignored.
+
+Presence of `SIGNALBOX_OTLP_ENDPOINT` enables span export. The complete OTLP
+surface is:
+
+- `SIGNALBOX_OTLP_ENDPOINT` — an HTTP or HTTPS collector base URL, at most 2,048
+  bytes, with a host and without user information, query, or fragment. For
+  `http/protobuf`, the exporter appends `/v1/traces`; for gRPC it uses the
+  configured authority. HTTPS authenticates the collector against the platform
+  trust roots. The HTTP client ignores ambient proxy configuration and refuses
+  redirects; the derived traces endpoint is its only route. Its absence disables
+  OTLP and causes all other OTLP settings to be ignored.
+- `SIGNALBOX_OTLP_PROTOCOL` — optional exact `grpc` or `http/protobuf`; omission
+  selects `grpc`.
+- `SIGNALBOX_OTLP_HEADERS_FILE` — optional path to a file read once at startup.
+  Each line is one `name=value` collector transport header. The file is at most
+  16 KiB and 16 headers; names are at most 64 ASCII alphanumeric, hyphen, dot,
+  or underscore bytes and are case-normalized, values are 1 through 1,024
+  printable ASCII bytes, and duplicate or malformed names fail startup. Names
+  ending in `-bin` are binary gRPC metadata and remain ordinary HTTP header
+  names under `http/protobuf`. Header values are sent only as OTLP transport
+  metadata. They never become a span, event, resource attribute, metric, or log
+  field, and errors never render the path or contents. A nonempty header file
+  requires an HTTPS endpoint; a header-free local collector may use HTTP. This
+  prevents collector credentials from crossing the network without transport
+  protection.
+- `SIGNALBOX_OTLP_SAMPLING_RATIO` — optional finite number from `0` through `1`
+  inclusive; omission selects `1`. Sampling is parent-based with the configured
+  trace-id ratio.
+- `SIGNALBOX_OTLP_SERVICE_NAME` — optional `service.name`; omission selects
+  `signalboxd`. The admitted overrides are exactly `signalboxd.development`,
+  `signalboxd.staging`, and `signalboxd.production`. This closed deployment
+  vocabulary cannot encode a credential, prompt, completion, or tool material.
+
+For example, a gRPC collector configuration is:
+
+```text
+SIGNALBOX_OTLP_ENDPOINT=https://otel-collector:4317
+SIGNALBOX_OTLP_PROTOCOL=grpc
+SIGNALBOX_OTLP_SAMPLING_RATIO=1
+SIGNALBOX_OTLP_SERVICE_NAME=signalboxd.production
+SIGNALBOX_OTLP_HEADERS_FILE=/run/secrets/signalbox-otlp-headers
+```
+
+An OTLP/HTTP deployment instead sets the endpoint base, conventionally port
+4318, and `SIGNALBOX_OTLP_PROTOCOL=http/protobuf`. A collector may route the
+vendor-neutral OTLP stream to Tempo, Jaeger, or another tracing backend; the
+daemon contains no backend-specific protocol or attribute.
+
+Presence of `SIGNALBOX_PROMETHEUS_BIND` enables Prometheus independently. Its
+value is an exact IP socket address such as `127.0.0.1:9464`; hostnames are not
+resolved. The daemon binds a distinct plaintext HTTP listener, never the process
+protocol socket. `GET /metrics` returns the registry, other paths return 404,
+and there is no authentication or TLS. Therefore every peer that can reach the
+configured address can read the metrics, and deployment network policy owns that
+reachability. At most 16 connections are served concurrently; an excess
+connection is dropped immediately. Each request is bounded to 8 KiB, and a
+connection is abandoned after two seconds. A bind failure disables only metrics;
+it does not fail request handling. An accept failure emits one static warning
+per failure streak and retries after 250 milliseconds, so sustained failure is
+rate-limited and a transient failure does not stop later scrapes.
+
+```text
+SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
+```
+
+The initial registry contains exactly three metric names:
+
+- `signalbox_turns_started_total`, with no labels, counts durable turn
+  activations. An operator graphs it as the workload-rate denominator and
+  compares it with terminalization to spot work that is not closing.
+- `signalbox_turns_terminalized_total{outcome}`, whose only label values are
+  `completed`, `failed`, `refused`, `cancelled`, and `reconciliation_required`,
+  counts durable terminal turn outcomes. It earns its place as the user-visible
+  success, failure, refusal, cancellation, and owner-intervention rate.
+- `signalbox_model_calls_terminalized_total{disposition}`, whose only label
+  values are `completed`, `known_failed`, `refused`, `cancelled`, and
+  `ambiguous`, counts durable terminal model calls. It separates provider-call
+  health and refusal from ambiguity that requires recovery handling.
+
+All label children are allocated from those closed enums at registry
+construction. The metric API accepts no string, session id, turn id, model-call
+id, prompt, completion, or tool value. The source is the already-committed typed
+outbox transition, and content-bearing input events are ignored. The dispatcher
+retains only the last observed durable sequence, so a retry of that sequence is
+not counted twice and deduplication has constant memory. Metric help and type
+lines are fixed strings; sample values are counters. There are no tool,
+scheduler, queue-depth, or database-duration metrics in this initial surface:
+the daemon-owned durable transition path can state the three metrics above
+without inventing an inexact observation or instrumenting an adapter or another
+crate's boundary.
+
+The complete OTLP record inventory is:
+
+- Span name `session_work`, with the sole `session_id` attribute, and span name
+  `turn_work`, with `session_id` and `turn_id`. These are daemon-minted UUIDs.
+  OpenTelemetry-generated trace id, span id, optional parent span id,
+  timestamps, internal span kind, and unset status are protocol structure, not
+  application values. Source location, thread fields, target, level, tracked
+  busy/idle time, links, and arbitrary error conversion are disabled. The fixed
+  instrumentation scope name is `signalboxd`; it has no version or schema URL. A
+  per-layer export filter registers interest only in candidate Signalbox schemas
+  at `DEBUG` or above, so dependency trace callsites remain disabled and do not
+  evaluate their fields while non-exported records remain available to the local
+  compact tracing layer.
+- The sole resource attribute is `service.name`, admitted by the checked
+  `SIGNALBOX_OTLP_SERVICE_NAME` grammar above and never derived from a
+  credential, request, provider response, model content, or tool material. The
+  resource starts empty, so host, process, environment, and SDK attributes are
+  not added.
+- Event name `turn activated`, with `session_id` and `turn_id`;
+  `turn terminalized`, with those ids and the closed `terminal_outcome`;
+  `turn parked awaiting owner reconciliation`, with those ids;
+  `model call dispatched`, with `session_id`, `turn_id`, `model_call_id`, and
+  `turn_attempt_id`; and the event names
+  `model runtime reported a trustworthy capability-preparation failure`,
+  `model call completed`, and `model call produced no assistant material`, each
+  with `session_id`, `turn_id`, `model_call_id`, and the closed `cause_code`.
+  Every exported event additionally has OpenTelemetry's `level` and `target`:
+  level is a tracing enum, while target is one of the exact compile-time
+  Signalbox module names admitted by the value-validating layer.
+- `terminal_outcome` is one of `completed`, `failed`, `refused`, `cancelled`,
+  `cancelled_with_tool_response`, `target_unavailable`,
+  `capability_known_failure`, or `continuation_target_unavailable`. `cause_code`
+  is one of the fixed tokens produced by `ModelCallCauseCode`: `completed`,
+  `provider_refused`, `provider_credential_rejected`,
+  `provider_permission_denied`, `provider_invalid_request`,
+  `provider_target_not_found`, `provider_request_too_large`,
+  `provider_rate_limited`, `provider_quota_exhausted`, `provider_overloaded`,
+  `provider_internal`, `provider_unrecognized_error`,
+  `provider_cancellation_confirmed`, `cancelled_before_send`, `connect_failed`,
+  `send_incomplete_proven_unacceptable`, `boundary_loss_cancellation_requested`,
+  `boundary_loss_timed_out`, `boundary_loss_transport_failed`,
+  `boundary_loss_response_body_lost`, `boundary_loss_response_unintelligible`,
+  `boundary_loss_unexpected_http_status`, `boundary_loss_stream_incomplete`,
+  `boundary_loss_stream_protocol_violation`, `unsupported_operation`,
+  `credential_unmapped`, `credential_unavailable`, `credential_unreadable`,
+  `credential_unusable`, `provider_target_substituted`,
+  `unrepresentable_tool_material`, `finish_contradicts_content`,
+  `unconfigured_target`, `preparation_defect`, `correlation_mismatch`,
+  `authorization_mismatch`, `observation_correlation_mismatch`,
+  `unsupported_completion_material`, `invalid_assistant_text`,
+  `invalid_tool_schema`, or `invalid_tool_proposal`. These are closed enum
+  projections, never error messages. Admission parses the runtime-owned
+  `ModelCallCauseToken` vocabulary, and the exhaustive `ModelCallCauseCode`
+  projection makes a new cause require a deliberate compiler-checked token. The
+  event message is the fixed event name and is not repeated as an attribute. Any
+  other event name, module target, field set, malformed UUID, token value, or
+  any `error` field is rejected before the OpenTelemetry layer.
+
+Consequently no admitted dynamic value can be a credential, prompt, completion,
+or tool argument: dynamic event and span values are UUIDs or exhaustive enum
+tokens, the one resource value has a dedicated checked namespace, and metrics
+have only preallocated closed labels. Tests capture the actual OpenTelemetry
+`SpanData` and Prometheus text boundary, inject synthetic credential- and
+content-shaped values into otherwise matching event fields and span identifier
+fields, plus a content-bearing outbox event, and require their absence while a
+valid record still exports. They also require arbitrary `error` fields to be
+absent and reduce a synthetic exporter error to logged success.
+
+Completed spans enter a dedicated batch worker through a bounded 512-span queue.
+Exports are serial, at most 128 spans per batch, every five seconds or when the
+batch fills, with a five-second export timeout. Queue insertion is nonblocking;
+when full, the just-completed newest span is dropped and the SDK records the
+overflow rather than evicting old work or waiting on the daemon. Collector and
+transport errors emit one static, content-free local warning and the failed
+batch is dropped; they are returned to the SDK as success and never reach a turn
+or request. Shutdown waits at most one second for the provider and then logs and
+abandons remaining export work. Thus an unreachable collector can consume at
+most the fixed queue and one serial in-flight batch, cannot block a turn, and
+cannot fail the daemon.
 
 ## Runner configuration
 
