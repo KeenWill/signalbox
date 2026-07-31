@@ -994,10 +994,7 @@ async fn run_hub(
         PostgresProviderModelExecution::new(
             model_repository,
             InProcessAttemptDispatchGate::default(),
-            UsageLimitedModelCallProvider::new(
-                provider,
-                model_configuration.runtime_model_catalog(),
-            ),
+            UsageLimitedModelCallProvider::new(provider, &model_configuration),
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor),
     );
