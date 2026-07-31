@@ -4178,6 +4178,10 @@ impl ImportConversationOutcome {
 }
 
 pub enum ImportConversationReport<Failure> {
+    Converted {
+        conversation: ImportedConversation,
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
     Imported {
         outcome: ImportConversationOutcome,
         skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,

@@ -201,11 +201,18 @@ impl ImportConversationOutcome {
 /// Record-resilient import outcome and every rejected physical source record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportConversationReport<Failure> {
-    /// At least one accepted record was durably resolved or inserted.
-    Imported {
-        /// Durable outcome for the checked accepted-record aggregate.
-        outcome: ImportConversationOutcome,
+    /// At least one record converted, but rejected source evidence prevents storage.
+    Converted {
+        /// Checked aggregate containing the accepted records.
+        conversation: ImportedConversation,
         /// Every rejected record in physical source order.
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    /// Every record converted and the complete source was durably resolved or inserted.
+    Imported {
+        /// Durable outcome for the complete checked aggregate.
+        outcome: ImportConversationOutcome,
+        /// Empty rejected-record set, retained for one uniform report shape.
         skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
     /// Every physical source record failed record-local validation.
@@ -464,6 +471,12 @@ where
         {
             return Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch);
         }
+        if !skipped_records.is_empty() {
+            return Ok(ImportConversationReport::Converted {
+                conversation: converted,
+                skipped_records,
+            });
+        }
         let expected_digest = converted.source_digest();
         let stored = store
             .resolve_or_insert(converted)
@@ -684,6 +697,7 @@ mod tests {
         request_extra_entry: bool,
         reject: bool,
         resilient_no_valid_records: bool,
+        resilient_no_skips: bool,
         observed: Vec<(ImportedConversationId, Vec<u8>)>,
     }
 
@@ -742,13 +756,17 @@ mod tests {
                 });
             }
             let conversation = self.convert(owner, source, next_entry_id)?;
-            Ok(ImportedConversationConversionReport::Converted {
-                conversation,
-                skipped_records: vec![ImportedConversationSkippedRecord::new(
+            let skipped_records = if self.resilient_no_skips {
+                Vec::new()
+            } else {
+                vec![ImportedConversationSkippedRecord::new(
                     2,
                     FakeConversionError::Rejected,
                 )]
-                .into_boxed_slice(),
+            };
+            Ok(ImportedConversationConversionReport::Converted {
+                conversation,
+                skipped_records: skipped_records.into_boxed_slice(),
             })
         }
     }
@@ -798,6 +816,7 @@ mod tests {
                 request_extra_entry: false,
                 reject: false,
                 resilient_no_valid_records: false,
+                resilient_no_skips: false,
                 observed: Vec::new(),
             },
             FakeStore {
@@ -853,10 +872,10 @@ mod tests {
         assert_eq!(store.observed[0].id(), candidate);
     }
 
-    /// S28 / INV-038: partial ingestion commits only the checked accepted
-    /// aggregate and returns every record-local loss to its caller.
+    /// S28 / INV-038: partial ingestion returns the checked accepted aggregate
+    /// and every loss without claiming the incomplete source is durable.
     #[tokio::test]
-    async fn s28_inv038_resilient_ingestion_stores_and_reports_exact_skips() {
+    async fn s28_inv038_resilient_ingestion_reports_exact_skips_without_storage() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -871,21 +890,16 @@ mod tests {
         let report = service
             .execute_resilient(b"partial source")
             .await
-            .expect("accepted records should be stored with exact skips");
-        let ImportConversationReport::Imported {
-            outcome,
+            .expect("accepted records should be returned with exact skips");
+        let ImportConversationReport::Converted {
+            conversation,
             skipped_records,
         } = report
         else {
-            panic!("fixture converter returns a checked aggregate")
+            panic!("fixture converter returns a partial checked aggregate")
         };
 
-        assert_eq!(
-            outcome,
-            ImportConversationOutcome::Inserted {
-                conversation: candidate
-            }
-        );
+        assert_eq!(conversation.id(), candidate);
         assert_eq!(skipped_records.len(), 1);
         assert_eq!(skipped_records[0].source_line(), 2);
         assert_eq!(skipped_records[0].failure(), &FakeConversionError::Rejected);
@@ -895,6 +909,51 @@ mod tests {
         assert_eq!(
             converter.observed,
             vec![(candidate, b"partial source".to_vec())]
+        );
+        assert!(store.observed.is_empty());
+    }
+
+    /// S28 / INV-038: a resilient conversion with no losses may use the same
+    /// exact-source durable resolution as strict conversion.
+    #[tokio::test]
+    async fn s28_inv038_resilient_complete_ingestion_stores_with_no_skips() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, entries),
+            }),
+        );
+        service.converter.resilient_no_skips = true;
+
+        let report = service
+            .execute_resilient(b"complete source")
+            .await
+            .expect("complete resilient conversion should be stored");
+        let ImportConversationReport::Imported {
+            outcome,
+            skipped_records,
+        } = report
+        else {
+            panic!("fixture converter returns a complete checked aggregate")
+        };
+
+        assert_eq!(
+            outcome,
+            ImportConversationOutcome::Inserted {
+                conversation: candidate
+            }
+        );
+        assert!(skipped_records.is_empty());
+        let (ids, converter, store) = service.into_parts();
+        assert_eq!(ids.conversation_calls, 1);
+        assert_eq!(ids.entry_calls, 2);
+        assert_eq!(
+            converter.observed,
+            vec![(candidate, b"complete source".to_vec())]
         );
         assert_eq!(store.observed.len(), 1);
     }
