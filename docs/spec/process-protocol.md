@@ -3,7 +3,7 @@
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface at commit `4ab5807d`. This page is the normative boundary between a
+surface at commit `f4f28800`. This page is the normative boundary between a
 local client process and `signalboxd`; domain values, PostgreSQL records, and
 wire messages remain distinct representations.
 
@@ -679,11 +679,13 @@ The complete-pass receipt accepts only the terminal pass states `succeeded`,
 read-only-review pass; `record_review_findings` is its only success admission,
 including for an empty inventory. Finding-event status is the exact state
 derived from the submitted event. Every orchestration acknowledgement must name
-the same attempt and the exact state implied by the submitted facts: incomplete
-concerns cannot reach judgment, an incomplete judgment effect is
-`judgment_incomplete`, any blocked repair is `repair_incomplete`, and
-publication is `complete` exactly when every submitted member is published. The
-terminal refuses any contradictory acknowledgement.
+the same attempt and a state compatible with the submitted facts and earlier
+attempt members. A successful concern may close `fanout_incomplete` when an
+earlier concern did not succeed, but an incomplete concern submission cannot
+reach judgment. An incomplete judgment effect is `judgment_incomplete`, any
+blocked repair is `repair_incomplete`, and publication is `complete` exactly
+when every submitted member is published. The terminal refuses any contradictory
+acknowledgement.
 
 Single-aggregate reads return `review_target { target }`,
 `review_run { run, pass }`, `review_finding { finding }`, or
