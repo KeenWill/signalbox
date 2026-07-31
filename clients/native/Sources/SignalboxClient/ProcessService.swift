@@ -110,6 +110,8 @@ public struct SignalboxProcessApplicationPolicy: Equatable, Sendable {
   )
 }
 
+/// A mutation is prepared once so every outcome-unknown retry reuses the exact
+/// command identity and payload the daemon may already have committed.
 public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
   public let commandID: SignalboxCommandID
   public let sessionID: SignalboxCanonicalUUID
@@ -437,6 +439,9 @@ extension SignalboxProcessServiceProtocol {
   }
 }
 
+/// Converts pull-framed wire sequences into bounded application values and
+/// validates every identity, ordering, terminator, and capacity claim before
+/// publishing a result. Partial sequences never escape this actor.
 public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   private let requester: any SignalboxProcessRequesting
   private let policy: SignalboxProcessApplicationPolicy
