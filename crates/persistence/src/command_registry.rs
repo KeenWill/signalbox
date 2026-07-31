@@ -23,6 +23,8 @@ pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str =
     durable_command_kind_to_str(CommandKind::DecideToolRequest);
 pub(crate) const REVIEW_WORKFLOW_KIND: &str =
     durable_command_kind_to_str(CommandKind::ReviewWorkflow);
+pub(crate) const REVIEW_ORCHESTRATION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReviewOrchestration);
 pub(crate) const COMPACT_SESSION_KIND: &str =
     durable_command_kind_to_str(CommandKind::CompactSession);
 
@@ -35,7 +37,7 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 8] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 9] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -82,6 +84,13 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 8] = [
         kind: CommandKind::ReviewWorkflow,
         spelling: REVIEW_WORKFLOW_KIND,
         typed_table: "review_workflow_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::ReviewOrchestration,
+        spelling: REVIEW_ORCHESTRATION_KIND,
+        typed_table: "review_orchestration_command",
         minimum_version: 1,
         maximum_version: 1,
     },

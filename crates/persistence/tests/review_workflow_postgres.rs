@@ -10,10 +10,16 @@ mod support;
 use std::error::Error;
 
 use signalbox_application::{
-    AuthorizeModelCallOutcome, ModelCallCredentialReference, ReviewWorkflowCommand,
-    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
-    ReviewWorkflowOperation, ReviewWorkflowOperationKind, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService,
+    AuthorizeModelCallOutcome, ModelCallCredentialReference, ReviewConcernClaim,
+    ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess, ReviewDurableSealOutcome,
+    ReviewImportOutcome, ReviewImportedContextEvidence, ReviewJudgmentEffectId, ReviewJudgmentPlan,
+    ReviewJudgmentPlanMember, ReviewOrchestrationAttempt, ReviewOrchestrationAttemptId,
+    ReviewOrchestrationAttemptStore, ReviewPassCompletionStatus, ReviewPlannedDisposition,
+    ReviewRepairMemberOutcome, ReviewRepairSuccess, ReviewStageTemplateDigests,
+    ReviewTemplateDigest, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
+    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
+    ReviewWorkflowOperationKind, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService,
 };
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
@@ -46,6 +52,12 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    review_orchestration::{
+        PostgresReviewOrchestrationStore, ReviewOrchestrationCommand,
+        ReviewOrchestrationCommandClaim, ReviewOrchestrationCommandGuard,
+        ReviewOrchestrationCommandKind, ReviewOrchestrationCommandResult,
+        ReviewOrchestrationCurrentStage, ReviewOrchestrationStage,
+    },
     review_workflow::{
         ReserveExternalLinkOutcome, ReviewWorkflowInsertionError, ReviewWorkflowStore,
         ReviewWorkflowStoreError, ReviewWorkflowTransitionError,
@@ -8763,5 +8775,353 @@ async fn inv012_findings_receipt_recovers_after_later_disposition() -> Result<()
     let mut service = ReviewWorkflowCommandService::new(fixture.store);
     assert_eq!(service.execute(command.clone()).await?, expected);
     assert_eq!(service.execute(command).await?, expected);
+    Ok(())
+}
+
+/// INV-012: the generic result-free terminal command commits and replays one
+/// exact run/pass completion receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_complete_pass_commits_and_replays_terminal_status() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x790;
+    const PASS_IDENTITY: u128 = 0x791;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let pass_ref = insert_fixture_pass(&fixture, PASS_IDENTITY, ReviewPassKind::Judge).await;
+    let (running_pass, turn) = start_review_pass(&fixture.store, pass_ref).await;
+    let running_run = fixture
+        .store
+        .load_run(pass_ref.run().run())
+        .await?
+        .expect("running run exists");
+    let output_frontier = complete_review_turn(&pool, turn).await;
+    let session = running_pass.session();
+    let accepted_input = running_pass.accepted_input();
+    let policy = running_run.policy();
+    let terminal_pass = running_pass
+        .transition(
+            ReviewPassState::Succeeded {
+                turn,
+                output_frontier,
+                result: None,
+            },
+            Some(ReviewPassTurnEvidence::new(
+                turn,
+                session,
+                accepted_input,
+                ReviewPassTurnOutcome::Completed,
+                Some(output_frontier),
+            )),
+        )
+        .expect("terminal fixture pass is valid");
+    let terminal_run = running_run
+        .transition(
+            ReviewRunState::Succeeded {
+                concluding_pass: pass_ref,
+            },
+            Some(ReviewPassEvidence::from_pass(&terminal_pass, policy)),
+        )
+        .expect("terminal fixture run is valid");
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [0x79; 32],
+        ReviewWorkflowOperation::CompletePass {
+            run: terminal_run.clone(),
+            pass: terminal_pass.clone(),
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::PassCompleted {
+            run: pass_ref.run().run(),
+            pass: pass_ref.pass(),
+            status: ReviewPassCompletionStatus::Succeeded,
+        });
+    let mut service = ReviewWorkflowCommandService::new(fixture.store.clone());
+
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
+    assert_eq!(
+        fixture.store.load_run(pass_ref.run().run()).await?,
+        Some(terminal_run)
+    );
+    assert_eq!(
+        fixture.store.load_pass(pass_ref.pass()).await?,
+        Some(terminal_pass)
+    );
+    Ok(())
+}
+
+#[track_caller]
+fn expect_new_orchestration_claim(
+    claim: ReviewOrchestrationCommandClaim,
+) -> ReviewOrchestrationCommandGuard {
+    match claim {
+        ReviewOrchestrationCommandClaim::New(guard) => guard,
+        ReviewOrchestrationCommandClaim::ExistingRecorded(_) => {
+            panic!("fresh orchestration command unexpectedly replayed")
+        }
+        ReviewOrchestrationCommandClaim::Conflicting => {
+            panic!("fresh orchestration command unexpectedly conflicted")
+        }
+    }
+}
+
+#[track_caller]
+fn expect_recorded_orchestration_claim(
+    claim: ReviewOrchestrationCommandClaim,
+) -> ReviewOrchestrationCommandResult {
+    match claim {
+        ReviewOrchestrationCommandClaim::ExistingRecorded(result) => result,
+        ReviewOrchestrationCommandClaim::New(_) => {
+            panic!("recorded orchestration command unexpectedly acquired a new fence")
+        }
+        ReviewOrchestrationCommandClaim::Conflicting => {
+            panic!("recorded orchestration command unexpectedly conflicted")
+        }
+    }
+}
+
+/// Durable orchestration facts reconstruct losslessly, seal each stage, replay
+/// equally, reject conflicting immutable input, and retain fenced command
+/// response state.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
+-> Result<(), Box<dyn Error>> {
+    const IMPORT_PASS_IDENTITY: u128 = 0x7a0;
+    const ANALYSIS_PASS_IDENTITY: u128 = 0x7a1;
+    const EFFECT_PASS_IDENTITY: u128 = 0x7a2;
+    const FIX_PASS_IDENTITY: u128 = 0x7a3;
+    const FINDING_IDENTITY: u128 = 0x7a4;
+    const ATTEMPT_IDENTITY: u128 = 0x7a5;
+    const COMMAND_IDENTITY: u128 = 0x7a6;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let import_pass = insert_fixture_pass(
+        &fixture,
+        IMPORT_PASS_IDENTITY,
+        ReviewPassKind::ImportExternalContext,
+    )
+    .await;
+    let analysis_pass =
+        insert_fixture_pass(&fixture, ANALYSIS_PASS_IDENTITY, ReviewPassKind::Judge).await;
+    let effect_pass =
+        insert_fixture_pass(&fixture, EFFECT_PASS_IDENTITY, ReviewPassKind::Judge).await;
+    let fix_pass = insert_fixture_pass(&fixture, FIX_PASS_IDENTITY, ReviewPassKind::Fix).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[
+            fixture.pass,
+            import_pass,
+            analysis_pass,
+            effect_pass,
+            fix_pass,
+        ],
+    )
+    .await;
+    let finding_ref = ReviewFindingRef::new(
+        fixture.pass,
+        ReviewFindingId::from_uuid(uuid(FINDING_IDENTITY)),
+    );
+    let producer = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
+    let proposed = finding(finding_ref, producer.clone(), &fixture.target_snapshot);
+    fixture
+        .store
+        .insert_findings(&producer, std::slice::from_ref(&proposed))
+        .await?;
+    let canonical_finding = fixture
+        .store
+        .load_finding(finding_ref.finding())
+        .await?
+        .expect("canonical finding exists");
+
+    let attempt_id = ReviewOrchestrationAttemptId::from_uuid(uuid(ATTEMPT_IDENTITY));
+    let attempt = ReviewOrchestrationAttempt::try_new(
+        attempt_id,
+        fixture.target,
+        ReviewPolicy::version_one(),
+        key("initial-five-v1"),
+        ReviewStageTemplateDigests::new(
+            ReviewTemplateDigest::new([1; 32]),
+            ReviewTemplateDigest::new([2; 32]),
+            ReviewTemplateDigest::new([3; 32]),
+            ReviewTemplateDigest::new([4; 32]),
+        ),
+        vec![ReviewConcernSpec::new(
+            key("correctness"),
+            ReviewTemplateDigest::new([5; 32]),
+        )],
+    )?;
+    let import = ReviewImportOutcome::Succeeded {
+        pass: Box::new(evidence[1].clone()),
+        run: run_evidence_for_pass(evidence[1].clone()),
+        external_link: None,
+        template_digest: ReviewTemplateDigest::new([1; 32]),
+        context: ReviewImportedContextEvidence::new(import_pass, [6; 32]),
+    };
+    let claim = ReviewConcernClaim::new(
+        key("correctness"),
+        ReviewTemplateDigest::new([5; 32]),
+        ReviewConcernOutcome::Succeeded(Box::new(ReviewConcernSuccess::new(
+            producer,
+            run_evidence_for_pass(evidence[0].clone()),
+            ReviewTemplateDigest::new([5; 32]),
+            vec![canonical_finding],
+        ))),
+    );
+    let plan = ReviewJudgmentPlan::new(
+        evidence[2].clone(),
+        run_evidence_for_pass(evidence[2].clone()),
+        ReviewTemplateDigest::new([2; 32]),
+        vec![ReviewJudgmentPlanMember::new(
+            finding_ref,
+            ReviewPlannedDisposition::Accepted,
+        )],
+    );
+    let mut store = PostgresReviewOrchestrationStore::new(pool.clone());
+    assert_eq!(
+        store.record_attempt(attempt.clone()).await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store.record_attempt(attempt.clone()).await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
+    assert_eq!(store.load_attempt(attempt_id).await?, Some(attempt.clone()));
+    assert_eq!(
+        store.record_import(attempt_id, import.clone()).await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store.record_import(attempt_id, import).await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
+    assert_eq!(
+        store
+            .record_concern_claim(attempt_id, claim.clone())
+            .await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store.seal_complete_fanout(attempt_id, vec![claim]).await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store.seal_judgment_plan(attempt_id, plan.clone()).await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store.seal_judgment_plan(attempt_id, plan).await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
+    let accepted = fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            finding_event(
+                finding_ref,
+                ReviewEventOrdinal::one(),
+                evidence[3].clone(),
+                ReviewFindingEventKind::Accepted,
+            ),
+        )
+        .await?
+        .expect("accepted finding exists");
+    let fixed = fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            finding_event(
+                finding_ref,
+                ReviewEventOrdinal::try_new(2).expect("two is positive"),
+                evidence[4].clone(),
+                ReviewFindingEventKind::Fixed,
+            ),
+        )
+        .await?
+        .expect("fixed finding exists");
+    assert_eq!(accepted.status(), ReviewFindingStatus::Accepted);
+    let repair = ReviewRepairMemberOutcome::Fixed(Box::new(ReviewRepairSuccess::new(
+        fixed.events()[1].clone(),
+        ReviewTemplateDigest::new([3; 32]),
+    )));
+    assert_eq!(
+        store
+            .record_applied_judgment_effect(ReviewJudgmentEffectId::new(attempt_id, finding_ref))
+            .await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store
+            .seal_repair_inventory(attempt_id, vec![finding_ref])
+            .await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store
+            .record_repair_outcomes(attempt_id, vec![repair])
+            .await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store
+            .seal_publication_inventory(attempt_id, Vec::new())
+            .await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store
+            .record_publication_outcomes(attempt_id, Vec::new())
+            .await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store.current_stage(attempt_id).await?,
+        Some(ReviewOrchestrationCurrentStage::Complete)
+    );
+
+    let command = ReviewOrchestrationCommand {
+        command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        semantic_digest: [7; 32],
+        attempt: attempt_id,
+        kind: ReviewOrchestrationCommandKind::Publication,
+    };
+    let progress = store
+        .load_progress(attempt_id)
+        .await?
+        .expect("progress exists");
+    let result = ReviewOrchestrationCommandResult {
+        attempt: attempt_id,
+        stage: ReviewOrchestrationStage::Complete,
+        progress,
+    };
+    let guard = expect_new_orchestration_claim(store.begin_command(command).await?);
+    assert_eq!(guard.record(result.clone()).await?, result);
+    let replayed = expect_recorded_orchestration_claim(store.begin_command(command).await?);
+    assert_eq!(replayed, result);
+    let conflicting = ReviewOrchestrationCommand {
+        semantic_digest: [8; 32],
+        ..command
+    };
+    assert!(matches!(
+        store.begin_command(conflicting).await?,
+        ReviewOrchestrationCommandClaim::Conflicting
+    ));
+
+    let conflicting_attempt = ReviewOrchestrationAttempt::try_new(
+        attempt_id,
+        fixture.target,
+        ReviewPolicy::version_one(),
+        key("different-version"),
+        attempt.stage_templates(),
+        attempt.concerns().to_vec(),
+    )?;
+    assert_eq!(
+        store.record_attempt(conflicting_attempt).await?,
+        ReviewDurableSealOutcome::Conflict
+    );
     Ok(())
 }
