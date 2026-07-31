@@ -169,6 +169,43 @@ pub enum ImportedStructuredValue {
     Object(Box<[ImportedStructuredObjectMember]>),
 }
 
+pub struct ImportedStructuredFieldError;
+// implements Error; content-silent.
+
+pub fn unique_imported_structured_field<'members>(
+    members: &'members [ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    Option<&'members ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
+
+pub fn imported_text_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedText>, ImportedStructuredFieldError>;
+
+pub fn imported_bool_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<bool>, ImportedStructuredFieldError>;
+
+pub fn imported_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    ImportedSourceAttestation<ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
+
+pub fn imported_string_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    ImportedSourceAttestation<ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
+
 pub enum ImportedSpeaker {
     User,
     Assistant,
@@ -4072,6 +4109,39 @@ pub trait ImportedConversationConverter {
         NextEntryId: FnMut() -> ImportedTranscriptEntryId;
 }
 
+pub struct ImportedConversationSkippedRecord<Failure> { /* private */ }
+impl<Failure> ImportedConversationSkippedRecord<Failure> {
+    pub const fn new(source_line: u64, failure: Failure) -> Self;
+    // accessors: source_line(), failure(), into_parts()
+}
+
+pub enum ImportedConversationConversionReport<Failure> {
+    Converted {
+        conversation: ImportedConversation,
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    NoValidRecords {
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+}
+
+pub trait ResilientImportedConversationConverter:
+    ImportedConversationConverter
+{
+    type RecordFailure;
+    fn convert_resilient<NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: &[u8],
+        next_entry_id: NextEntryId,
+    ) -> Result<
+        ImportedConversationConversionReport<Self::RecordFailure>,
+        Self::Error,
+    >
+    where
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId;
+}
+
 pub enum ImportedConversationStoreOutcome {
     Inserted {
         conversation: ImportedConversationId,
@@ -4106,6 +4176,20 @@ pub enum ImportConversationOutcome {
 }
 impl ImportConversationOutcome {
     // accessor: conversation()
+}
+
+pub enum ImportConversationReport<Failure> {
+    Converted {
+        conversation: ImportedConversation,
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    Imported {
+        outcome: ImportConversationOutcome,
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    NoValidRecords {
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
 }
 
 pub enum ImportConversationError<ConverterError, StoreError> {
@@ -4149,6 +4233,20 @@ impl<
         source: &[u8],
     ) -> Result<
         ImportConversationOutcome,
+        ImportConversationError<Converter::Error, Store::Error>,
+    >;
+}
+impl<
+    Generator: ImportedConversationIdGenerator,
+    Converter: ResilientImportedConversationConverter,
+    Store: ImportedConversationStore,
+> ImportConversationService<Generator, Converter, Store>
+{
+    pub async fn execute_resilient(
+        &mut self,
+        source: &[u8],
+    ) -> Result<
+        ImportConversationReport<Converter::RecordFailure>,
         ImportConversationError<Converter::Error, Store::Error>,
     >;
 }
@@ -7503,7 +7601,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | -------------------------------------------------- | -------------------- |
 | domain: lib.rs identities                          | 21                   |
 | domain: actor                                      | 1                    |
-| domain: imported_conversation                      | 31                   |
+| domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
@@ -7531,8 +7629,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **566 (+2 free fn)** |
-| application: conversation_import                   | 8 (incl. 3 traits)   |
+| **signalbox-domain total**                         | **567 (+7 free fn)** |
+| application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
 | application: list_conversations                    | 8 (incl. 2 traits)   |
@@ -7550,4 +7648,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **193**              |
+| **signalbox-application total**                    | **197**              |

@@ -6,16 +6,23 @@
 
 use std::{error::Error, fmt};
 
-use signalbox_application::ImportedConversationConverter;
-use signalbox_conversation_import_json::{JsonFailure, parse_record};
+use signalbox_application::{
+    ImportedConversationConversionReport, ImportedConversationConverter,
+    ImportedConversationSkippedRecord, ResilientImportedConversationConverter,
+};
+use signalbox_conversation_import_json::{
+    JsonFailure, one_based_ordinal, parse_record, split_jsonl_records,
+};
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedMediaSource, ImportedMessageContentAbsence,
     ImportedRawRecordPosition, ImportedRawSourceRecord, ImportedRecordEntryPosition,
     ImportedSourceAttestation, ImportedSourceMetadata, ImportedSpeaker,
-    ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText, ImportedToolResultBlock,
-    ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntryId,
-    ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    ImportedStructuredFieldError, ImportedStructuredObjectMember, ImportedStructuredValue,
+    ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
+    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    imported_bool_attestation, imported_structured_attestation, imported_text_attestation,
+    unique_imported_structured_field,
 };
 
 const FORMAT: ImportedConversationFormat = ImportedConversationFormat::ClaudeCodeSessionJsonlV2;
@@ -138,64 +145,155 @@ impl ImportedConversationConverter for ClaudeCodeJsonlConverter {
         &mut self,
         conversation: ImportedConversationId,
         source: &[u8],
-        mut next_entry_id: NextEntryId,
+        next_entry_id: NextEntryId,
     ) -> Result<ImportedConversation, Self::Error>
     where
         NextEntryId: FnMut() -> ImportedTranscriptEntryId,
     {
-        let records = split_records(source)?;
-        let mut raws = Vec::with_capacity(records.len());
-        let mut pending_records = Vec::with_capacity(records.len());
-        for (index, bytes) in records.into_iter().enumerate() {
-            let line = ordinal(index)?;
-            let normalized = parse_record(bytes).map_err(|failure| json_error(line, failure))?;
-            let pending = normalize_record(&normalized, line)?;
-            raws.push(ImportedRawSourceRecord::from_converted(
-                bytes.to_vec(),
-                normalized,
+        let records = split_jsonl_records(source).map_err(|_| position_error())?;
+        if records.is_empty() {
+            return Err(conversion_error(
+                ClaudeCodeJsonlConversionFailure::EmptySource,
             ));
-            pending_records.push(pending);
         }
+        if let Some(blank) = records.iter().find(|record| record.bytes().is_empty()) {
+            return Err(conversion_error(
+                ClaudeCodeJsonlConversionFailure::BlankLine { line: blank.line() },
+            ));
+        }
+        let prepared = records
+            .into_iter()
+            .map(|record| prepare_record(record.line(), record.bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        build_conversation(conversation, prepared, next_entry_id)
+    }
+}
 
-        let entry_capacity = pending_records
-            .iter()
-            .try_fold(0_usize, |total, record| total.checked_add(record.len()));
-        let entry_count = entry_capacity.ok_or_else(position_error)?;
-        let mut entries = Vec::with_capacity(entry_count);
-        let mut global_position = ImportedTranscriptPosition::first();
-        let mut emitted_entries = 0_usize;
-        for (raw_index, pending) in pending_records.into_iter().enumerate() {
-            let raw_position = ImportedRawRecordPosition::try_from_u64(ordinal(raw_index)?)
-                .ok_or_else(position_error)?;
-            let pending_count = pending.len();
-            let mut within_position = ImportedRecordEntryPosition::first();
-            for (entry_index, pending_entry) in pending.into_iter().enumerate() {
-                entries.push(ImportedTranscriptEntryInput::new(
-                    next_entry_id(),
-                    conversation,
-                    global_position,
-                    raw_position,
-                    within_position,
-                    pending_entry.source_speaker,
-                    pending_entry.content,
-                    pending_entry.source,
+impl ResilientImportedConversationConverter for ClaudeCodeJsonlConverter {
+    type RecordFailure = ClaudeCodeJsonlConversionFailure;
+
+    fn convert_resilient<NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: &[u8],
+        next_entry_id: NextEntryId,
+    ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
+    where
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+    {
+        let records = split_jsonl_records(source).map_err(|_| position_error())?;
+        if records.is_empty() {
+            return Err(conversion_error(
+                ClaudeCodeJsonlConversionFailure::EmptySource,
+            ));
+        }
+        let mut prepared = Vec::with_capacity(records.len());
+        let mut skipped_records = Vec::new();
+        for record in records {
+            let line = record.line();
+            if record.bytes().is_empty() {
+                skipped_records.push(ImportedConversationSkippedRecord::new(
+                    line,
+                    ClaudeCodeJsonlConversionFailure::BlankLine { line },
                 ));
-                emitted_entries = emitted_entries.checked_add(1).ok_or_else(position_error)?;
-                if entry_index + 1 < pending_count {
-                    within_position = within_position.checked_next().ok_or_else(position_error)?;
-                }
-                if emitted_entries < entry_count {
-                    global_position = global_position.checked_next().ok_or_else(position_error)?;
-                }
+                continue;
+            }
+            match prepare_record(line, record.bytes()) {
+                Ok(record) => prepared.push(record),
+                Err(error) => skipped_records.push(ImportedConversationSkippedRecord::new(
+                    line,
+                    record_local_failure(error)?,
+                )),
             }
         }
-
-        ImportedConversation::from_converted_records(conversation, FORMAT, raws, entries).map_err(
-            |error| ClaudeCodeJsonlConversionError {
-                failure: ClaudeCodeJsonlConversionFailure::InvalidAggregate(error.failure()),
-            },
-        )
+        if prepared.is_empty() {
+            return Ok(ImportedConversationConversionReport::NoValidRecords {
+                skipped_records: skipped_records.into_boxed_slice(),
+            });
+        }
+        let conversation = build_conversation(conversation, prepared, next_entry_id)?;
+        Ok(ImportedConversationConversionReport::Converted {
+            conversation,
+            skipped_records: skipped_records.into_boxed_slice(),
+        })
     }
+}
+
+fn record_local_failure(
+    error: ClaudeCodeJsonlConversionError,
+) -> Result<ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConversionError> {
+    match error.failure() {
+        ClaudeCodeJsonlConversionFailure::EmptySource
+        | ClaudeCodeJsonlConversionFailure::PositionExhausted
+        | ClaudeCodeJsonlConversionFailure::InvalidAggregate(_) => Err(error),
+        failure => Ok(failure),
+    }
+}
+
+struct PreparedRecord {
+    raw: ImportedRawSourceRecord,
+    pending: Vec<PendingEntry>,
+}
+
+fn prepare_record(
+    line: u64,
+    bytes: &[u8],
+) -> Result<PreparedRecord, ClaudeCodeJsonlConversionError> {
+    let normalized = parse_record(bytes).map_err(|failure| json_error(line, failure))?;
+    let pending = normalize_record(&normalized, line)?;
+    Ok(PreparedRecord {
+        raw: ImportedRawSourceRecord::from_converted(bytes.to_vec(), normalized),
+        pending,
+    })
+}
+
+fn build_conversation<NextEntryId>(
+    conversation: ImportedConversationId,
+    prepared: Vec<PreparedRecord>,
+    mut next_entry_id: NextEntryId,
+) -> Result<ImportedConversation, ClaudeCodeJsonlConversionError>
+where
+    NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+{
+    let entry_capacity = prepared.iter().try_fold(0_usize, |total, record| {
+        total.checked_add(record.pending.len())
+    });
+    let entry_count = entry_capacity.ok_or_else(position_error)?;
+    let mut raws = Vec::with_capacity(prepared.len());
+    let mut entries = Vec::with_capacity(entry_count);
+    let mut global_position = ImportedTranscriptPosition::first();
+    let mut emitted_entries = 0_usize;
+    for (raw_index, record) in prepared.into_iter().enumerate() {
+        let raw_position = ImportedRawRecordPosition::try_from_u64(ordinal(raw_index)?)
+            .ok_or_else(position_error)?;
+        let pending_count = record.pending.len();
+        let mut within_position = ImportedRecordEntryPosition::first();
+        raws.push(record.raw);
+        for (entry_index, pending_entry) in record.pending.into_iter().enumerate() {
+            entries.push(ImportedTranscriptEntryInput::new(
+                next_entry_id(),
+                conversation,
+                global_position,
+                raw_position,
+                within_position,
+                pending_entry.source_speaker,
+                pending_entry.content,
+                pending_entry.source,
+            ));
+            emitted_entries = emitted_entries.checked_add(1).ok_or_else(position_error)?;
+            if entry_index + 1 < pending_count {
+                within_position = within_position.checked_next().ok_or_else(position_error)?;
+            }
+            if emitted_entries < entry_count {
+                global_position = global_position.checked_next().ok_or_else(position_error)?;
+            }
+        }
+    }
+    ImportedConversation::from_converted_records(conversation, FORMAT, raws, entries).map_err(
+        |error| ClaudeCodeJsonlConversionError {
+            failure: ClaudeCodeJsonlConversionFailure::InvalidAggregate(error.failure()),
+        },
+    )
 }
 
 fn position_error() -> ClaudeCodeJsonlConversionError {
@@ -205,10 +303,7 @@ fn position_error() -> ClaudeCodeJsonlConversionError {
 }
 
 fn ordinal(index: usize) -> Result<u64, ClaudeCodeJsonlConversionError> {
-    u64::try_from(index)
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or_else(position_error)
+    one_based_ordinal(index).ok_or_else(position_error)
 }
 
 fn json_error(line: u64, failure: JsonFailure) -> ClaudeCodeJsonlConversionError {
@@ -222,47 +317,6 @@ fn json_error(line: u64, failure: JsonFailure) -> ClaudeCodeJsonlConversionError
 
 fn conversion_error(failure: ClaudeCodeJsonlConversionFailure) -> ClaudeCodeJsonlConversionError {
     ClaudeCodeJsonlConversionError { failure }
-}
-
-fn split_records(source: &[u8]) -> Result<Vec<&[u8]>, ClaudeCodeJsonlConversionError> {
-    if source.is_empty() {
-        return Err(conversion_error(
-            ClaudeCodeJsonlConversionFailure::EmptySource,
-        ));
-    }
-    let mut records = Vec::new();
-    let mut start = 0_usize;
-    let mut line_index = 0_usize;
-    loop {
-        let remaining = source.get(start..).ok_or_else(position_error)?;
-        let newline = remaining.iter().position(|byte| *byte == b'\n');
-        let (end, terminal) = match newline {
-            Some(offset) => (start.checked_add(offset).ok_or_else(position_error)?, false),
-            None => (source.len(), true),
-        };
-        let record_end = if !terminal && end > start && source.get(end - 1) == Some(&b'\r') {
-            end - 1
-        } else {
-            end
-        };
-        if record_end == start {
-            return Err(conversion_error(
-                ClaudeCodeJsonlConversionFailure::BlankLine {
-                    line: ordinal(line_index)?,
-                },
-            ));
-        }
-        records.push(source.get(start..record_end).ok_or_else(position_error)?);
-        line_index = line_index.checked_add(1).ok_or_else(position_error)?;
-        if terminal {
-            break;
-        }
-        start = end.checked_add(1).ok_or_else(position_error)?;
-        if start == source.len() {
-            break;
-        }
-    }
-    Ok(records)
 }
 
 struct PendingEntry {
@@ -280,7 +334,7 @@ fn normalize_record(
             ClaudeCodeJsonlConversionFailure::TopLevelNotObject { line },
         ));
     };
-    let source_type = text_attestation(record, "type").map_err(|()| {
+    let source_type = imported_text_attestation(record, "type").map_err(|_| {
         conversion_error(ClaudeCodeJsonlConversionFailure::InvalidRecordType { line })
     })?;
     let speaker = match &source_type {
@@ -310,7 +364,7 @@ fn normalize_message_record(
     line: u64,
     speaker: ImportedSpeaker,
 ) -> Result<Vec<PendingEntry>, ClaudeCodeJsonlConversionError> {
-    let message = unique_field(record, "message").map_err(|()| {
+    let message = unique_imported_structured_field(record, "message").map_err(|_| {
         conversion_error(ClaudeCodeJsonlConversionFailure::InvalidMessageEnvelope { line })
     })?;
     let (content, message_role) = match message {
@@ -358,7 +412,7 @@ fn message_role(
     message: &[ImportedStructuredObjectMember],
     line: u64,
 ) -> Result<ImportedSourceAttestation<ImportedSpeaker>, ClaudeCodeJsonlConversionError> {
-    match unique_field(message, "role").map_err(|()| {
+    match unique_imported_structured_field(message, "role").map_err(|_| {
         conversion_error(ClaudeCodeJsonlConversionFailure::InvalidMessageRole { line })
     })? {
         None => Ok(ImportedSourceAttestation::NotAttested),
@@ -379,7 +433,7 @@ fn message_content(
     message: &[ImportedStructuredObjectMember],
     line: u64,
 ) -> Result<Vec<ImportedTranscriptContent>, ClaudeCodeJsonlConversionError> {
-    match unique_field(message, "content").map_err(|()| {
+    match unique_imported_structured_field(message, "content").map_err(|_| {
         conversion_error(ClaudeCodeJsonlConversionFailure::InvalidMessageContent { line })
     })? {
         None => Ok(vec![ImportedTranscriptContent::MessageContentAbsent(
@@ -417,25 +471,25 @@ fn normalize_content_block(
     let ImportedStructuredValue::Object(members) = value else {
         return Err(invalid_content_block(line, block));
     };
-    let source_type =
-        text_attestation(members, "type").map_err(|()| invalid_content_block(line, block))?;
+    let source_type = imported_text_attestation(members, "type")
+        .map_err(|_| invalid_content_block(line, block))?;
     match &source_type {
         ImportedSourceAttestation::Attested(value) if value.as_str() == "text" => {
             Ok(ImportedTranscriptContent::Text(
-                text_attestation(members, "text")
-                    .map_err(|()| invalid_content_block(line, block))?,
+                imported_text_attestation(members, "text")
+                    .map_err(|_| invalid_content_block(line, block))?,
             ))
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_use" => {
             Ok(ImportedTranscriptContent::ToolCall {
-                source_call_id: text_attestation(members, "id")
-                    .map_err(|()| invalid_content_block(line, block))?,
-                name: text_attestation(members, "name")
-                    .map_err(|()| invalid_content_block(line, block))?,
-                input: structured_attestation(members, "input")
-                    .map_err(|()| invalid_content_block(line, block))?,
-                caller: structured_attestation(members, "caller")
-                    .map_err(|()| invalid_content_block(line, block))?,
+                source_call_id: imported_text_attestation(members, "id")
+                    .map_err(|_| invalid_content_block(line, block))?,
+                name: imported_text_attestation(members, "name")
+                    .map_err(|_| invalid_content_block(line, block))?,
+                input: imported_structured_attestation(members, "input")
+                    .map_err(|_| invalid_content_block(line, block))?,
+                caller: imported_structured_attestation(members, "caller")
+                    .map_err(|_| invalid_content_block(line, block))?,
             })
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_result" => {
@@ -443,22 +497,22 @@ fn normalize_content_block(
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "thinking" => {
             Ok(ImportedTranscriptContent::Thinking {
-                thinking: text_attestation(members, "thinking")
-                    .map_err(|()| invalid_content_block(line, block))?,
-                signature: text_attestation(members, "signature")
-                    .map_err(|()| invalid_content_block(line, block))?,
+                thinking: imported_text_attestation(members, "thinking")
+                    .map_err(|_| invalid_content_block(line, block))?,
+                signature: imported_text_attestation(members, "signature")
+                    .map_err(|_| invalid_content_block(line, block))?,
             })
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "redacted_thinking" => {
             Ok(ImportedTranscriptContent::RedactedThinking {
-                data: text_attestation(members, "data")
-                    .map_err(|()| invalid_content_block(line, block))?,
+                data: imported_text_attestation(members, "data")
+                    .map_err(|_| invalid_content_block(line, block))?,
             })
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "document" => {
             Ok(ImportedTranscriptContent::Document {
                 source: media_source_attestation(members, "source")
-                    .map_err(|()| invalid_content_block(line, block))?,
+                    .map_err(|_| invalid_content_block(line, block))?,
             })
         }
         ImportedSourceAttestation::Attested(_)
@@ -474,31 +528,32 @@ fn normalize_tool_result(
     line: u64,
     block: u64,
 ) -> Result<ImportedTranscriptContent, ClaudeCodeJsonlConversionError> {
-    let source_call_id = text_attestation(members, "tool_use_id")
-        .map_err(|()| invalid_content_block(line, block))?;
-    let is_error =
-        bool_attestation(members, "is_error").map_err(|()| invalid_content_block(line, block))?;
-    let content =
-        match unique_field(members, "content").map_err(|()| invalid_content_block(line, block))? {
-            None => ImportedSourceAttestation::NotAttested,
-            Some(ImportedStructuredValue::Null) => ImportedSourceAttestation::AttestedAbsent,
-            Some(ImportedStructuredValue::String(value)) => {
-                ImportedSourceAttestation::Attested(ImportedToolResultValue::Text(value.clone()))
-            }
-            Some(ImportedStructuredValue::Array(blocks)) => {
-                let blocks = blocks
-                    .iter()
-                    .enumerate()
-                    .map(|(index, result)| {
-                        normalize_tool_result_block(result, line, block, ordinal(index)?)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
-                    blocks.into_boxed_slice(),
-                ))
-            }
-            Some(_) => return Err(invalid_content_block(line, block)),
-        };
+    let source_call_id = imported_text_attestation(members, "tool_use_id")
+        .map_err(|_| invalid_content_block(line, block))?;
+    let is_error = imported_bool_attestation(members, "is_error")
+        .map_err(|_| invalid_content_block(line, block))?;
+    let content = match unique_imported_structured_field(members, "content")
+        .map_err(|_| invalid_content_block(line, block))?
+    {
+        None => ImportedSourceAttestation::NotAttested,
+        Some(ImportedStructuredValue::Null) => ImportedSourceAttestation::AttestedAbsent,
+        Some(ImportedStructuredValue::String(value)) => {
+            ImportedSourceAttestation::Attested(ImportedToolResultValue::Text(value.clone()))
+        }
+        Some(ImportedStructuredValue::Array(blocks)) => {
+            let blocks = blocks
+                .iter()
+                .enumerate()
+                .map(|(index, result)| {
+                    normalize_tool_result_block(result, line, block, ordinal(index)?)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                blocks.into_boxed_slice(),
+            ))
+        }
+        Some(_) => return Err(invalid_content_block(line, block)),
+    };
     Ok(ImportedTranscriptContent::ToolResult {
         source_call_id,
         content,
@@ -515,25 +570,25 @@ fn normalize_tool_result_block(
     let ImportedStructuredValue::Object(members) = value else {
         return Err(invalid_tool_result_block(line, block, result_block));
     };
-    let source_type = text_attestation(members, "type")
-        .map_err(|()| invalid_tool_result_block(line, block, result_block))?;
+    let source_type = imported_text_attestation(members, "type")
+        .map_err(|_| invalid_tool_result_block(line, block, result_block))?;
     match &source_type {
         ImportedSourceAttestation::Attested(value) if value.as_str() == "text" => {
             Ok(ImportedToolResultBlock::Text(
-                text_attestation(members, "text")
-                    .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
+                imported_text_attestation(members, "text")
+                    .map_err(|_| invalid_tool_result_block(line, block, result_block))?,
             ))
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "image" => {
             Ok(ImportedToolResultBlock::Image(
                 media_source_attestation(members, "source")
-                    .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
+                    .map_err(|_| invalid_tool_result_block(line, block, result_block))?,
             ))
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_reference" => {
             Ok(ImportedToolResultBlock::ToolReference {
-                tool_name: text_attestation(members, "tool_name")
-                    .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
+                tool_name: imported_text_attestation(members, "tool_name")
+                    .map_err(|_| invalid_tool_result_block(line, block, result_block))?,
             })
         }
         ImportedSourceAttestation::Attested(_)
@@ -566,96 +621,44 @@ fn source_metadata(
     line: u64,
 ) -> Result<ImportedSourceMetadata, ClaudeCodeJsonlConversionError> {
     let invalid =
-        |()| conversion_error(ClaudeCodeJsonlConversionFailure::InvalidSourceMetadata { line });
+        |_| conversion_error(ClaudeCodeJsonlConversionFailure::InvalidSourceMetadata { line });
     Ok(ImportedSourceMetadata::new(
-        text_attestation(record, "uuid").map_err(invalid)?,
-        text_attestation(record, "parentUuid").map_err(invalid)?,
-        text_attestation(record, "sessionId").map_err(invalid)?,
-        text_attestation(record, "timestamp").map_err(invalid)?,
-        bool_attestation(record, "isSidechain").map_err(invalid)?,
-        bool_attestation(record, "isMeta").map_err(invalid)?,
+        imported_text_attestation(record, "uuid").map_err(invalid)?,
+        imported_text_attestation(record, "parentUuid").map_err(invalid)?,
+        imported_text_attestation(record, "sessionId").map_err(invalid)?,
+        imported_text_attestation(record, "timestamp").map_err(invalid)?,
+        imported_bool_attestation(record, "isSidechain").map_err(invalid)?,
+        imported_bool_attestation(record, "isMeta").map_err(invalid)?,
         message_role,
     ))
-}
-
-fn text_attestation(
-    members: &[ImportedStructuredObjectMember],
-    name: &str,
-) -> Result<ImportedSourceAttestation<ImportedText>, ()> {
-    match unique_field(members, name)? {
-        None => Ok(ImportedSourceAttestation::NotAttested),
-        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
-        Some(ImportedStructuredValue::String(value)) => {
-            Ok(ImportedSourceAttestation::Attested(value.clone()))
-        }
-        Some(_) => Err(()),
-    }
-}
-
-fn bool_attestation(
-    members: &[ImportedStructuredObjectMember],
-    name: &str,
-) -> Result<ImportedSourceAttestation<bool>, ()> {
-    match unique_field(members, name)? {
-        None => Ok(ImportedSourceAttestation::NotAttested),
-        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
-        Some(ImportedStructuredValue::Boolean(value)) => {
-            Ok(ImportedSourceAttestation::Attested(*value))
-        }
-        Some(_) => Err(()),
-    }
-}
-
-fn structured_attestation(
-    members: &[ImportedStructuredObjectMember],
-    name: &str,
-) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
-    match unique_field(members, name)? {
-        None => Ok(ImportedSourceAttestation::NotAttested),
-        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
-        Some(value) => Ok(ImportedSourceAttestation::Attested(value.clone())),
-    }
 }
 
 fn media_source_attestation(
     members: &[ImportedStructuredObjectMember],
     name: &str,
-) -> Result<ImportedSourceAttestation<ImportedMediaSource>, ()> {
-    match unique_field(members, name)? {
+) -> Result<ImportedSourceAttestation<ImportedMediaSource>, ImportedStructuredFieldError> {
+    match unique_imported_structured_field(members, name)? {
         None => Ok(ImportedSourceAttestation::NotAttested),
         Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
         Some(ImportedStructuredValue::Object(source)) => Ok(ImportedSourceAttestation::Attested(
             ImportedMediaSource::new(
-                text_attestation(source, "type")?,
-                text_attestation(source, "media_type")?,
-                text_attestation(source, "data")?,
+                imported_text_attestation(source, "type")?,
+                imported_text_attestation(source, "media_type")?,
+                imported_text_attestation(source, "data")?,
             ),
         )),
-        Some(_) => Err(()),
+        Some(_) => Err(ImportedStructuredFieldError),
     }
-}
-
-fn unique_field<'members>(
-    members: &'members [ImportedStructuredObjectMember],
-    name: &str,
-) -> Result<Option<&'members ImportedStructuredValue>, ()> {
-    let mut found = None;
-    for member in members {
-        if member.name().as_str() == name {
-            if found.is_some() {
-                return Err(());
-            }
-            found = Some(member.value());
-        }
-    }
-    Ok(found)
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
-    use signalbox_application::ImportedConversationConverter;
+    use signalbox_application::{
+        ImportedConversationConversionReport, ImportedConversationConverter,
+        ResilientImportedConversationConverter,
+    };
     use signalbox_domain::{
         ImportedConversation, ImportedConversationFormat, ImportedConversationId,
         ImportedMessageContentAbsence, ImportedSourceAttestation, ImportedSpeaker,
@@ -1190,5 +1193,122 @@ mod tests {
                 signalbox_domain::ImportedConversationReconstitutionFailure::DuplicateEntry { .. }
             )
         ));
+    }
+
+    #[test]
+    fn s28_inv038_resilient_conversion_reports_every_distinct_skipped_record() {
+        const FIRST: &[u8] = br#"{"type":"system","subtype":"first"}"#;
+        const FIFTH: &[u8] = br#"{"type":"assistant","message":{"content":"kept"}}"#;
+        let source = [
+            FIRST,
+            b"\n\xff\n",
+            br#"{"type":"user","type":"assistant"}"#,
+            b"\n",
+            br#"{"type":"user","message":{"content":17}}"#,
+            b"\n",
+            FIFTH,
+            b"\n",
+            br#"{"type":"assistant"#,
+        ]
+        .concat();
+        let mut next_identity = 100_u128;
+
+        let report = ClaudeCodeJsonlConverter
+            .convert_resilient(conversation(), &source, || {
+                let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(next_identity));
+                next_identity = next_identity
+                    .checked_add(1)
+                    .expect("fixture identity range is bounded");
+                identity
+            })
+            .expect("record-local failures must not abort resilient conversion");
+        let ImportedConversationConversionReport::Converted {
+            conversation: imported,
+            skipped_records,
+        } = report
+        else {
+            panic!("two fixture records should convert")
+        };
+
+        assert_eq!(imported.raw_records().len(), 2);
+        assert_eq!(imported.raw_records()[0].bytes(), FIRST);
+        assert_eq!(imported.raw_records()[1].bytes(), FIFTH);
+        assert_eq!(imported.entries()[0].raw_record_position().as_u64(), 1);
+        assert_eq!(imported.entries()[1].raw_record_position().as_u64(), 2);
+        assert_eq!(next_identity, 102);
+        assert_eq!(skipped_records.len(), 4);
+        assert_eq!(skipped_records[0].source_line(), 2);
+        assert_eq!(
+            skipped_records[0].failure(),
+            &ClaudeCodeJsonlConversionFailure::InvalidUtf8 { line: 2 }
+        );
+        assert_eq!(skipped_records[1].source_line(), 3);
+        assert_eq!(
+            skipped_records[1].failure(),
+            &ClaudeCodeJsonlConversionFailure::InvalidRecordType { line: 3 }
+        );
+        assert_eq!(skipped_records[2].source_line(), 4);
+        assert_eq!(
+            skipped_records[2].failure(),
+            &ClaudeCodeJsonlConversionFailure::InvalidMessageContent { line: 4 }
+        );
+        assert_eq!(skipped_records[3].source_line(), 6);
+        assert_eq!(
+            skipped_records[3].failure(),
+            &ClaudeCodeJsonlConversionFailure::InvalidJson { line: 6 }
+        );
+    }
+
+    #[test]
+    fn s28_inv038_resilient_conversion_reports_when_no_record_is_valid() {
+        let report = ClaudeCodeJsonlConverter
+            .convert_resilient(conversation(), b"\n{", || {
+                panic!("rejected records must not consume an entry identity")
+            })
+            .expect("all-invalid nonempty source still has an exact report");
+        let ImportedConversationConversionReport::NoValidRecords { skipped_records } = report
+        else {
+            panic!("no fixture record should convert")
+        };
+
+        assert_eq!(skipped_records.len(), 2);
+        assert_eq!(skipped_records[0].source_line(), 1);
+        assert_eq!(
+            skipped_records[0].failure(),
+            &ClaudeCodeJsonlConversionFailure::BlankLine { line: 1 }
+        );
+        assert_eq!(skipped_records[1].source_line(), 2);
+        assert_eq!(
+            skipped_records[1].failure(),
+            &ClaudeCodeJsonlConversionFailure::InvalidJson { line: 2 }
+        );
+    }
+
+    #[test]
+    fn s28_inv038_resilient_empty_source_remains_a_fatal_error() {
+        let error = ClaudeCodeJsonlConverter
+            .convert_resilient(conversation(), b"", || {
+                panic!("empty source must not consume an entry identity")
+            })
+            .expect_err("empty source has no physical record to report");
+
+        assert_eq!(
+            error.failure(),
+            ClaudeCodeJsonlConversionFailure::EmptySource
+        );
+    }
+
+    #[test]
+    fn s28_inv038_strict_conversion_preserves_blank_line_error_precedence() {
+        let error = ClaudeCodeJsonlConverter
+            .convert(conversation(), b"not-json\n\n{\"type\":\"system\"}", || {
+                panic!("strict parse rejection must not consume an entry identity")
+            })
+            .expect_err("strict conversion scans for blank records before JSON parsing");
+
+        assert_eq!(
+            error.failure(),
+            ClaudeCodeJsonlConversionFailure::BlankLine { line: 2 }
+        );
     }
 }

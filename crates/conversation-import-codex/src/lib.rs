@@ -6,16 +6,23 @@
 
 use std::{error::Error, fmt};
 
-use signalbox_application::ImportedConversationConverter;
-use signalbox_conversation_import_json::{JsonFailure, parse_record};
+use signalbox_application::{
+    ImportedConversationConversionReport, ImportedConversationConverter,
+    ImportedConversationSkippedRecord, ResilientImportedConversationConverter,
+};
+use signalbox_conversation_import_json::{
+    JsonFailure, one_based_ordinal, parse_record, split_jsonl_records,
+};
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedMediaSource, ImportedMessageContentAbsence,
     ImportedRawRecordPosition, ImportedRawSourceRecord, ImportedRecordEntryPosition,
     ImportedSourceAttestation, ImportedSourceMetadata, ImportedSpeaker,
-    ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText, ImportedToolResultBlock,
-    ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntryId,
-    ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    ImportedStructuredFieldError, ImportedStructuredObjectMember, ImportedStructuredValue,
+    ImportedText, ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
+    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    imported_string_structured_attestation, imported_structured_attestation,
+    imported_text_attestation, unique_imported_structured_field,
 };
 
 const FORMAT: ImportedConversationFormat = ImportedConversationFormat::CodexRolloutJsonlV1;
@@ -158,64 +165,155 @@ impl ImportedConversationConverter for CodexRolloutJsonlConverter {
         &mut self,
         conversation: ImportedConversationId,
         source: &[u8],
-        mut next_entry_id: NextEntryId,
+        next_entry_id: NextEntryId,
     ) -> Result<ImportedConversation, Self::Error>
     where
         NextEntryId: FnMut() -> ImportedTranscriptEntryId,
     {
-        let records = split_records(source)?;
-        let mut raws = Vec::with_capacity(records.len());
-        let mut pending_records = Vec::with_capacity(records.len());
-        for (index, bytes) in records.into_iter().enumerate() {
-            let line = ordinal(index)?;
-            let normalized = parse_record(bytes).map_err(|failure| json_error(line, failure))?;
-            let pending = normalize_record(&normalized, line)?;
-            raws.push(ImportedRawSourceRecord::from_converted(
-                bytes.to_vec(),
-                normalized,
+        let records = split_jsonl_records(source).map_err(|_| position_error())?;
+        if records.is_empty() {
+            return Err(conversion_error(
+                CodexRolloutJsonlConversionFailure::EmptySource,
             ));
-            pending_records.push(pending);
         }
+        if let Some(blank) = records.iter().find(|record| record.bytes().is_empty()) {
+            return Err(conversion_error(
+                CodexRolloutJsonlConversionFailure::BlankLine { line: blank.line() },
+            ));
+        }
+        let prepared = records
+            .into_iter()
+            .map(|record| prepare_record(record.line(), record.bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        build_conversation(conversation, prepared, next_entry_id)
+    }
+}
 
-        let entry_capacity = pending_records
-            .iter()
-            .try_fold(0_usize, |total, record| total.checked_add(record.len()));
-        let entry_count = entry_capacity.ok_or_else(position_error)?;
-        let mut entries = Vec::with_capacity(entry_count);
-        let mut global_position = ImportedTranscriptPosition::first();
-        let mut emitted_entries = 0_usize;
-        for (raw_index, pending) in pending_records.into_iter().enumerate() {
-            let raw_position = ImportedRawRecordPosition::try_from_u64(ordinal(raw_index)?)
-                .ok_or_else(position_error)?;
-            let pending_count = pending.len();
-            let mut within_position = ImportedRecordEntryPosition::first();
-            for (entry_index, pending_entry) in pending.into_iter().enumerate() {
-                entries.push(ImportedTranscriptEntryInput::new(
-                    next_entry_id(),
-                    conversation,
-                    global_position,
-                    raw_position,
-                    within_position,
-                    pending_entry.source_speaker,
-                    pending_entry.content,
-                    pending_entry.source,
+impl ResilientImportedConversationConverter for CodexRolloutJsonlConverter {
+    type RecordFailure = CodexRolloutJsonlConversionFailure;
+
+    fn convert_resilient<NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: &[u8],
+        next_entry_id: NextEntryId,
+    ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
+    where
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+    {
+        let records = split_jsonl_records(source).map_err(|_| position_error())?;
+        if records.is_empty() {
+            return Err(conversion_error(
+                CodexRolloutJsonlConversionFailure::EmptySource,
+            ));
+        }
+        let mut prepared = Vec::with_capacity(records.len());
+        let mut skipped_records = Vec::new();
+        for record in records {
+            let line = record.line();
+            if record.bytes().is_empty() {
+                skipped_records.push(ImportedConversationSkippedRecord::new(
+                    line,
+                    CodexRolloutJsonlConversionFailure::BlankLine { line },
                 ));
-                emitted_entries = emitted_entries.checked_add(1).ok_or_else(position_error)?;
-                if entry_index + 1 < pending_count {
-                    within_position = within_position.checked_next().ok_or_else(position_error)?;
-                }
-                if emitted_entries < entry_count {
-                    global_position = global_position.checked_next().ok_or_else(position_error)?;
-                }
+                continue;
+            }
+            match prepare_record(line, record.bytes()) {
+                Ok(record) => prepared.push(record),
+                Err(error) => skipped_records.push(ImportedConversationSkippedRecord::new(
+                    line,
+                    record_local_failure(error)?,
+                )),
             }
         }
-
-        ImportedConversation::from_converted_records(conversation, FORMAT, raws, entries).map_err(
-            |error| CodexRolloutJsonlConversionError {
-                failure: CodexRolloutJsonlConversionFailure::InvalidAggregate(error.failure()),
-            },
-        )
+        if prepared.is_empty() {
+            return Ok(ImportedConversationConversionReport::NoValidRecords {
+                skipped_records: skipped_records.into_boxed_slice(),
+            });
+        }
+        let conversation = build_conversation(conversation, prepared, next_entry_id)?;
+        Ok(ImportedConversationConversionReport::Converted {
+            conversation,
+            skipped_records: skipped_records.into_boxed_slice(),
+        })
     }
+}
+
+fn record_local_failure(
+    error: CodexRolloutJsonlConversionError,
+) -> Result<CodexRolloutJsonlConversionFailure, CodexRolloutJsonlConversionError> {
+    match error.failure() {
+        CodexRolloutJsonlConversionFailure::EmptySource
+        | CodexRolloutJsonlConversionFailure::PositionExhausted
+        | CodexRolloutJsonlConversionFailure::InvalidAggregate(_) => Err(error),
+        failure => Ok(failure),
+    }
+}
+
+struct PreparedRecord {
+    raw: ImportedRawSourceRecord,
+    pending: Vec<PendingEntry>,
+}
+
+fn prepare_record(
+    line: u64,
+    bytes: &[u8],
+) -> Result<PreparedRecord, CodexRolloutJsonlConversionError> {
+    let normalized = parse_record(bytes).map_err(|failure| json_error(line, failure))?;
+    let pending = normalize_record(&normalized, line)?;
+    Ok(PreparedRecord {
+        raw: ImportedRawSourceRecord::from_converted(bytes.to_vec(), normalized),
+        pending,
+    })
+}
+
+fn build_conversation<NextEntryId>(
+    conversation: ImportedConversationId,
+    prepared: Vec<PreparedRecord>,
+    mut next_entry_id: NextEntryId,
+) -> Result<ImportedConversation, CodexRolloutJsonlConversionError>
+where
+    NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+{
+    let entry_capacity = prepared.iter().try_fold(0_usize, |total, record| {
+        total.checked_add(record.pending.len())
+    });
+    let entry_count = entry_capacity.ok_or_else(position_error)?;
+    let mut raws = Vec::with_capacity(prepared.len());
+    let mut entries = Vec::with_capacity(entry_count);
+    let mut global_position = ImportedTranscriptPosition::first();
+    let mut emitted_entries = 0_usize;
+    for (raw_index, record) in prepared.into_iter().enumerate() {
+        let raw_position = ImportedRawRecordPosition::try_from_u64(ordinal(raw_index)?)
+            .ok_or_else(position_error)?;
+        let pending_count = record.pending.len();
+        let mut within_position = ImportedRecordEntryPosition::first();
+        raws.push(record.raw);
+        for (entry_index, pending_entry) in record.pending.into_iter().enumerate() {
+            entries.push(ImportedTranscriptEntryInput::new(
+                next_entry_id(),
+                conversation,
+                global_position,
+                raw_position,
+                within_position,
+                pending_entry.source_speaker,
+                pending_entry.content,
+                pending_entry.source,
+            ));
+            emitted_entries = emitted_entries.checked_add(1).ok_or_else(position_error)?;
+            if entry_index + 1 < pending_count {
+                within_position = within_position.checked_next().ok_or_else(position_error)?;
+            }
+            if emitted_entries < entry_count {
+                global_position = global_position.checked_next().ok_or_else(position_error)?;
+            }
+        }
+    }
+    ImportedConversation::from_converted_records(conversation, FORMAT, raws, entries).map_err(
+        |error| CodexRolloutJsonlConversionError {
+            failure: CodexRolloutJsonlConversionFailure::InvalidAggregate(error.failure()),
+        },
+    )
 }
 
 fn position_error() -> CodexRolloutJsonlConversionError {
@@ -223,10 +321,7 @@ fn position_error() -> CodexRolloutJsonlConversionError {
 }
 
 fn ordinal(index: usize) -> Result<u64, CodexRolloutJsonlConversionError> {
-    u64::try_from(index)
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or_else(position_error)
+    one_based_ordinal(index).ok_or_else(position_error)
 }
 
 fn json_error(line: u64, failure: JsonFailure) -> CodexRolloutJsonlConversionError {
@@ -246,47 +341,6 @@ fn conversion_error(
     CodexRolloutJsonlConversionError { failure }
 }
 
-fn split_records(source: &[u8]) -> Result<Vec<&[u8]>, CodexRolloutJsonlConversionError> {
-    if source.is_empty() {
-        return Err(conversion_error(
-            CodexRolloutJsonlConversionFailure::EmptySource,
-        ));
-    }
-    let mut records = Vec::new();
-    let mut start = 0_usize;
-    let mut line_index = 0_usize;
-    loop {
-        let remaining = source.get(start..).ok_or_else(position_error)?;
-        let newline = remaining.iter().position(|byte| *byte == b'\n');
-        let (end, terminal) = match newline {
-            Some(offset) => (start.checked_add(offset).ok_or_else(position_error)?, false),
-            None => (source.len(), true),
-        };
-        let record_end = if !terminal && end > start && source.get(end - 1) == Some(&b'\r') {
-            end - 1
-        } else {
-            end
-        };
-        if record_end == start {
-            return Err(conversion_error(
-                CodexRolloutJsonlConversionFailure::BlankLine {
-                    line: ordinal(line_index)?,
-                },
-            ));
-        }
-        records.push(source.get(start..record_end).ok_or_else(position_error)?);
-        line_index = line_index.checked_add(1).ok_or_else(position_error)?;
-        if terminal {
-            break;
-        }
-        start = end.checked_add(1).ok_or_else(position_error)?;
-        if start == source.len() {
-            break;
-        }
-    }
-    Ok(records)
-}
-
 struct PendingEntry {
     source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
     content: ImportedTranscriptContent,
@@ -302,7 +356,7 @@ fn normalize_record(
             CodexRolloutJsonlConversionFailure::TopLevelNotObject { line },
         ));
     };
-    let source_type = text_attestation(record, "type").map_err(|()| {
+    let source_type = imported_text_attestation(record, "type").map_err(|_| {
         conversion_error(CodexRolloutJsonlConversionFailure::InvalidRecordType { line })
     })?;
     if matches!(
@@ -326,13 +380,15 @@ fn normalize_response_item(
     source_type: ImportedSourceAttestation<ImportedText>,
     line: u64,
 ) -> Result<Vec<PendingEntry>, CodexRolloutJsonlConversionError> {
-    let payload = match unique_field(record, "payload").map_err(|()| invalid_response(line))? {
+    let payload = match unique_imported_structured_field(record, "payload")
+        .map_err(|_| invalid_response(line))?
+    {
         Some(ImportedStructuredValue::Object(payload)) => payload,
         None | Some(ImportedStructuredValue::Null) | Some(_) => {
             return Err(invalid_response(line));
         }
     };
-    let payload_type = text_attestation(payload, "type").map_err(|()| {
+    let payload_type = imported_text_attestation(payload, "type").map_err(|_| {
         conversion_error(CodexRolloutJsonlConversionFailure::InvalidResponseItemType { line })
     })?;
     match &payload_type {
@@ -386,7 +442,7 @@ fn normalize_message(
     source_type: ImportedSourceAttestation<ImportedText>,
     line: u64,
 ) -> Result<Vec<PendingEntry>, CodexRolloutJsonlConversionError> {
-    let role = text_attestation(payload, "role").map_err(|()| {
+    let role = imported_text_attestation(payload, "role").map_err(|_| {
         conversion_error(CodexRolloutJsonlConversionFailure::InvalidMessageRole { line })
     })?;
     let speaker = match &role {
@@ -410,7 +466,9 @@ fn normalize_message(
         )
         .map(|entry| vec![entry]);
     };
-    let content = match unique_field(payload, "content").map_err(|()| invalid_message(line))? {
+    let content = match unique_imported_structured_field(payload, "content")
+        .map_err(|_| invalid_message(line))?
+    {
         None => vec![ImportedTranscriptContent::MessageContentAbsent(
             ImportedMessageContentAbsence::ContentNotAttested,
         )],
@@ -474,15 +532,15 @@ fn normalize_message_block(
     let ImportedStructuredValue::Object(members) = value else {
         return Err(invalid_message_block(line, block));
     };
-    let source_type =
-        text_attestation(members, "type").map_err(|()| invalid_message_block(line, block))?;
+    let source_type = imported_text_attestation(members, "type")
+        .map_err(|_| invalid_message_block(line, block))?;
     match &source_type {
         ImportedSourceAttestation::Attested(value)
             if matches!(value.as_str(), "input_text" | "output_text") =>
         {
             Ok(ImportedTranscriptContent::Text(
-                text_attestation(members, "text")
-                    .map_err(|()| invalid_message_block(line, block))?,
+                imported_text_attestation(members, "text")
+                    .map_err(|_| invalid_message_block(line, block))?,
             ))
         }
         ImportedSourceAttestation::Attested(_)
@@ -502,7 +560,9 @@ fn normalize_reasoning(
     let mut content = Vec::new();
     append_reasoning_blocks(payload, "summary", line, &mut content)?;
     append_reasoning_blocks(payload, "content", line, &mut content)?;
-    match unique_field(payload, "encrypted_content").map_err(|()| invalid_reasoning(line))? {
+    match unique_imported_structured_field(payload, "encrypted_content")
+        .map_err(|_| invalid_reasoning(line))?
+    {
         None => {}
         Some(ImportedStructuredValue::Null) => {
             content.push(ImportedTranscriptContent::RedactedThinking {
@@ -548,7 +608,9 @@ fn append_reasoning_blocks(
     line: u64,
     content: &mut Vec<ImportedTranscriptContent>,
 ) -> Result<(), CodexRolloutJsonlConversionError> {
-    let Some(value) = unique_field(payload, field).map_err(|()| invalid_reasoning(line))? else {
+    let Some(value) =
+        unique_imported_structured_field(payload, field).map_err(|_| invalid_reasoning(line))?
+    else {
         return Ok(());
     };
     let blocks = match value {
@@ -561,15 +623,15 @@ fn append_reasoning_blocks(
         let ImportedStructuredValue::Object(members) = block else {
             return Err(invalid_reasoning_block(line, block_position));
         };
-        let source_type = text_attestation(members, "type")
-            .map_err(|()| invalid_reasoning_block(line, block_position))?;
+        let source_type = imported_text_attestation(members, "type")
+            .map_err(|_| invalid_reasoning_block(line, block_position))?;
         let normalized = match &source_type {
             ImportedSourceAttestation::Attested(value)
                 if matches!(value.as_str(), "summary_text" | "reasoning_text" | "text") =>
             {
                 ImportedTranscriptContent::Thinking {
-                    thinking: text_attestation(members, "text")
-                        .map_err(|()| invalid_reasoning_block(line, block_position))?,
+                    thinking: imported_text_attestation(members, "text")
+                        .map_err(|_| invalid_reasoning_block(line, block_position))?,
                     signature: ImportedSourceAttestation::NotAttested,
                 }
             }
@@ -589,7 +651,8 @@ fn normalize_named_tool_call(
     payload: &[ImportedStructuredObjectMember],
     line: u64,
 ) -> Result<Vec<PendingEntry>, CodexRolloutJsonlConversionError> {
-    let payload_type = text_attestation(payload, "type").map_err(|()| invalid_tool_call(line))?;
+    let payload_type =
+        imported_text_attestation(payload, "type").map_err(|_| invalid_tool_call(line))?;
     let input_field = match &payload_type {
         ImportedSourceAttestation::Attested(value) if value.as_str() == "function_call" => {
             "arguments"
@@ -600,11 +663,11 @@ fn normalize_named_tool_call(
         _ => return Err(invalid_tool_call(line)),
     };
     let content = ImportedTranscriptContent::ToolCall {
-        source_call_id: text_attestation(payload, "call_id")
-            .map_err(|()| invalid_tool_call(line))?,
-        name: text_attestation(payload, "name").map_err(|()| invalid_tool_call(line))?,
-        input: string_structured_attestation(payload, input_field)
-            .map_err(|()| invalid_tool_call(line))?,
+        source_call_id: imported_text_attestation(payload, "call_id")
+            .map_err(|_| invalid_tool_call(line))?,
+        name: imported_text_attestation(payload, "name").map_err(|_| invalid_tool_call(line))?,
+        input: imported_string_structured_attestation(payload, input_field)
+            .map_err(|_| invalid_tool_call(line))?,
         caller: ImportedSourceAttestation::NotAttested,
     };
     typed_response_entry(record, payload, content, line).map(|entry| vec![entry])
@@ -617,11 +680,11 @@ fn normalize_structured_tool_call(
     line: u64,
 ) -> Result<Vec<PendingEntry>, CodexRolloutJsonlConversionError> {
     let content = ImportedTranscriptContent::ToolCall {
-        source_call_id: text_attestation(payload, "call_id")
-            .map_err(|()| invalid_tool_call(line))?,
+        source_call_id: imported_text_attestation(payload, "call_id")
+            .map_err(|_| invalid_tool_call(line))?,
         name: ImportedSourceAttestation::NotAttested,
-        input: structured_attestation(payload, input_field)
-            .map_err(|()| invalid_tool_call(line))?,
+        input: imported_structured_attestation(payload, input_field)
+            .map_err(|_| invalid_tool_call(line))?,
         caller: ImportedSourceAttestation::NotAttested,
     };
     typed_response_entry(record, payload, content, line).map(|entry| vec![entry])
@@ -633,9 +696,11 @@ fn normalize_web_search_call(
     line: u64,
 ) -> Result<Vec<PendingEntry>, CodexRolloutJsonlConversionError> {
     let content = ImportedTranscriptContent::ToolCall {
-        source_call_id: text_attestation(payload, "id").map_err(|()| invalid_tool_call(line))?,
+        source_call_id: imported_text_attestation(payload, "id")
+            .map_err(|_| invalid_tool_call(line))?,
         name: ImportedSourceAttestation::NotAttested,
-        input: structured_attestation(payload, "action").map_err(|()| invalid_tool_call(line))?,
+        input: imported_structured_attestation(payload, "action")
+            .map_err(|_| invalid_tool_call(line))?,
         caller: ImportedSourceAttestation::NotAttested,
     };
     typed_response_entry(record, payload, content, line).map(|entry| vec![entry])
@@ -646,7 +711,9 @@ fn normalize_tool_result(
     payload: &[ImportedStructuredObjectMember],
     line: u64,
 ) -> Result<Vec<PendingEntry>, CodexRolloutJsonlConversionError> {
-    let content = match unique_field(payload, "output").map_err(|()| invalid_tool_result(line))? {
+    let content = match unique_imported_structured_field(payload, "output")
+        .map_err(|_| invalid_tool_result(line))?
+    {
         None => ImportedSourceAttestation::NotAttested,
         Some(ImportedStructuredValue::Null) => ImportedSourceAttestation::AttestedAbsent,
         Some(ImportedStructuredValue::String(value)) => {
@@ -665,8 +732,8 @@ fn normalize_tool_result(
         Some(_) => return Err(invalid_tool_result(line)),
     };
     let content = ImportedTranscriptContent::ToolResult {
-        source_call_id: text_attestation(payload, "call_id")
-            .map_err(|()| invalid_tool_result(line))?,
+        source_call_id: imported_text_attestation(payload, "call_id")
+            .map_err(|_| invalid_tool_result(line))?,
         content,
         is_error: ImportedSourceAttestation::NotAttested,
     };
@@ -681,19 +748,19 @@ fn normalize_tool_result_block(
     let ImportedStructuredValue::Object(members) = value else {
         return Err(invalid_tool_result_block(line, block));
     };
-    let source_type =
-        text_attestation(members, "type").map_err(|()| invalid_tool_result_block(line, block))?;
+    let source_type = imported_text_attestation(members, "type")
+        .map_err(|_| invalid_tool_result_block(line, block))?;
     match &source_type {
         ImportedSourceAttestation::Attested(value) if value.as_str() == "input_text" => {
             Ok(ImportedToolResultBlock::Text(
-                text_attestation(members, "text")
-                    .map_err(|()| invalid_tool_result_block(line, block))?,
+                imported_text_attestation(members, "text")
+                    .map_err(|_| invalid_tool_result_block(line, block))?,
             ))
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "input_image" => {
             Ok(ImportedToolResultBlock::Image(
                 media_attestation(members, source_type.clone())
-                    .map_err(|()| invalid_tool_result_block(line, block))?,
+                    .map_err(|_| invalid_tool_result_block(line, block))?,
             ))
         }
         ImportedSourceAttestation::Attested(_)
@@ -709,7 +776,9 @@ fn normalize_tool_search_result(
     payload: &[ImportedStructuredObjectMember],
     line: u64,
 ) -> Result<Vec<PendingEntry>, CodexRolloutJsonlConversionError> {
-    let content = match unique_field(payload, "tools").map_err(|()| invalid_tool_result(line))? {
+    let content = match unique_imported_structured_field(payload, "tools")
+        .map_err(|_| invalid_tool_result(line))?
+    {
         None => ImportedSourceAttestation::NotAttested,
         Some(ImportedStructuredValue::Null) => ImportedSourceAttestation::AttestedAbsent,
         Some(ImportedStructuredValue::Array(tools)) => {
@@ -718,8 +787,8 @@ fn normalize_tool_search_result(
                 .map(|tool| {
                     let source_type = match tool {
                         ImportedStructuredValue::Object(members) => {
-                            text_attestation(members, "type")
-                                .map_err(|()| invalid_tool_result(line))?
+                            imported_text_attestation(members, "type")
+                                .map_err(|_| invalid_tool_result(line))?
                         }
                         _ => ImportedSourceAttestation::NotAttested,
                     };
@@ -733,8 +802,8 @@ fn normalize_tool_search_result(
         Some(_) => return Err(invalid_tool_result(line)),
     };
     let content = ImportedTranscriptContent::ToolResult {
-        source_call_id: text_attestation(payload, "call_id")
-            .map_err(|()| invalid_tool_result(line))?,
+        source_call_id: imported_text_attestation(payload, "call_id")
+            .map_err(|_| invalid_tool_result(line))?,
         content,
         is_error: ImportedSourceAttestation::NotAttested,
     };
@@ -765,7 +834,7 @@ fn source_event(
     message_role: ImportedSourceAttestation<ImportedSpeaker>,
     line: u64,
 ) -> Result<PendingEntry, CodexRolloutJsonlConversionError> {
-    let payload = optional_object(record, "payload").map_err(|()| {
+    let payload = optional_object(record, "payload").map_err(|_| {
         conversion_error(CodexRolloutJsonlConversionFailure::InvalidSourceMetadata { line })
     })?;
     source_event_with_optional_payload(record, payload, source_type, message_role, line)
@@ -802,14 +871,14 @@ fn source_metadata(
     line: u64,
 ) -> Result<ImportedSourceMetadata, CodexRolloutJsonlConversionError> {
     let invalid =
-        |()| conversion_error(CodexRolloutJsonlConversionFailure::InvalidSourceMetadata { line });
+        |_| conversion_error(CodexRolloutJsonlConversionFailure::InvalidSourceMetadata { line });
     let record_id = payload
-        .map(|payload| text_attestation(payload, "id"))
+        .map(|payload| imported_text_attestation(payload, "id"))
         .transpose()
         .map_err(invalid)?
         .unwrap_or(ImportedSourceAttestation::NotAttested);
     let source_session_id = payload
-        .map(|payload| text_attestation(payload, "session_id"))
+        .map(|payload| imported_text_attestation(payload, "session_id"))
         .transpose()
         .map_err(invalid)?
         .unwrap_or(ImportedSourceAttestation::NotAttested);
@@ -817,7 +886,7 @@ fn source_metadata(
         record_id,
         ImportedSourceAttestation::NotAttested,
         source_session_id,
-        text_attestation(record, "timestamp").map_err(invalid)?,
+        imported_text_attestation(record, "timestamp").map_err(invalid)?,
         ImportedSourceAttestation::NotAttested,
         ImportedSourceAttestation::NotAttested,
         message_role,
@@ -827,57 +896,18 @@ fn source_metadata(
 fn optional_object<'members>(
     members: &'members [ImportedStructuredObjectMember],
     name: &str,
-) -> Result<Option<&'members [ImportedStructuredObjectMember]>, ()> {
-    match unique_field(members, name)? {
+) -> Result<Option<&'members [ImportedStructuredObjectMember]>, ImportedStructuredFieldError> {
+    match unique_imported_structured_field(members, name)? {
         Some(ImportedStructuredValue::Object(value)) => Ok(Some(value)),
         None | Some(ImportedStructuredValue::Null) | Some(_) => Ok(None),
-    }
-}
-
-fn text_attestation(
-    members: &[ImportedStructuredObjectMember],
-    name: &str,
-) -> Result<ImportedSourceAttestation<ImportedText>, ()> {
-    match unique_field(members, name)? {
-        None => Ok(ImportedSourceAttestation::NotAttested),
-        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
-        Some(ImportedStructuredValue::String(value)) => {
-            Ok(ImportedSourceAttestation::Attested(value.clone()))
-        }
-        Some(_) => Err(()),
-    }
-}
-
-fn structured_attestation(
-    members: &[ImportedStructuredObjectMember],
-    name: &str,
-) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
-    match unique_field(members, name)? {
-        None => Ok(ImportedSourceAttestation::NotAttested),
-        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
-        Some(value) => Ok(ImportedSourceAttestation::Attested(value.clone())),
-    }
-}
-
-fn string_structured_attestation(
-    members: &[ImportedStructuredObjectMember],
-    name: &str,
-) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
-    match unique_field(members, name)? {
-        None => Ok(ImportedSourceAttestation::NotAttested),
-        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
-        Some(value @ ImportedStructuredValue::String(_)) => {
-            Ok(ImportedSourceAttestation::Attested(value.clone()))
-        }
-        Some(_) => Err(()),
     }
 }
 
 fn media_attestation(
     members: &[ImportedStructuredObjectMember],
     source_type: ImportedSourceAttestation<ImportedText>,
-) -> Result<ImportedSourceAttestation<ImportedMediaSource>, ()> {
-    let image_url = text_attestation(members, "image_url")?;
+) -> Result<ImportedSourceAttestation<ImportedMediaSource>, ImportedStructuredFieldError> {
+    let image_url = imported_text_attestation(members, "image_url")?;
     Ok(ImportedSourceAttestation::Attested(
         ImportedMediaSource::new(
             source_type,
@@ -885,22 +915,6 @@ fn media_attestation(
             image_url,
         ),
     ))
-}
-
-fn unique_field<'members>(
-    members: &'members [ImportedStructuredObjectMember],
-    name: &str,
-) -> Result<Option<&'members ImportedStructuredValue>, ()> {
-    let mut found = None;
-    for member in members {
-        if member.name().as_str() == name {
-            if found.is_some() {
-                return Err(());
-            }
-            found = Some(member.value());
-        }
-    }
-    Ok(found)
 }
 
 fn invalid_response(line: u64) -> CodexRolloutJsonlConversionError {
@@ -937,7 +951,10 @@ fn invalid_tool_result_block(line: u64, block: u64) -> CodexRolloutJsonlConversi
 
 #[cfg(test)]
 mod tests {
-    use signalbox_application::ImportedConversationConverter;
+    use signalbox_application::{
+        ImportedConversationConversionReport, ImportedConversationConverter,
+        ResilientImportedConversationConverter,
+    };
     use signalbox_domain::{
         ImportedConversation, ImportedConversationFormat, ImportedConversationId,
         ImportedMessageContentAbsence, ImportedSourceAttestation, ImportedSpeaker,
@@ -1337,5 +1354,124 @@ mod tests {
                 CodexRolloutJsonlConversionFailure::InvalidToolCall { line: 1 }
             );
         }
+    }
+
+    #[test]
+    fn s28_inv038_resilient_conversion_reports_every_distinct_skipped_record() {
+        const FIRST: &[u8] = br#"{"type":"session_meta","payload":{"id":"first"}}"#;
+        const FIFTH: &[u8] = br#"{"type":"event_msg","payload":{"type":"notice"}}"#;
+        let source = [
+            FIRST,
+            b"\n\xff\n",
+            br#"{"type":"response_item","payload":{"type":"message","role":"user","role":"assistant","content":[]}}"#,
+            b"\n",
+            br#"{"type":"response_item","payload":{"type":"message","role":"user","content":17}}"#,
+            b"\n",
+            FIFTH,
+            b"\n",
+            br#"{"type":"response_item"#,
+        ]
+        .concat();
+        let mut next_identity = 100_u128;
+
+        let report = CodexRolloutJsonlConverter
+            .convert_resilient(conversation(), &source, || {
+                let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(next_identity));
+                next_identity = next_identity
+                    .checked_add(1)
+                    .expect("fixture identity range is bounded");
+                identity
+            })
+            .expect("record-local failures must not abort resilient conversion");
+        let ImportedConversationConversionReport::Converted {
+            conversation: imported,
+            skipped_records,
+        } = report
+        else {
+            panic!("two fixture records should convert")
+        };
+
+        assert_eq!(imported.raw_records().len(), 2);
+        assert_eq!(imported.raw_records()[0].bytes(), FIRST);
+        assert_eq!(imported.raw_records()[1].bytes(), FIFTH);
+        assert_eq!(imported.entries()[0].raw_record_position().as_u64(), 1);
+        assert_eq!(imported.entries()[1].raw_record_position().as_u64(), 2);
+        assert_eq!(next_identity, 102);
+        assert_eq!(skipped_records.len(), 4);
+        assert_eq!(skipped_records[0].source_line(), 2);
+        assert_eq!(
+            skipped_records[0].failure(),
+            &CodexRolloutJsonlConversionFailure::InvalidUtf8 { line: 2 }
+        );
+        assert_eq!(skipped_records[1].source_line(), 3);
+        assert_eq!(
+            skipped_records[1].failure(),
+            &CodexRolloutJsonlConversionFailure::InvalidMessageRole { line: 3 }
+        );
+        assert_eq!(skipped_records[2].source_line(), 4);
+        assert_eq!(
+            skipped_records[2].failure(),
+            &CodexRolloutJsonlConversionFailure::InvalidMessageContent { line: 4 }
+        );
+        assert_eq!(skipped_records[3].source_line(), 6);
+        assert_eq!(
+            skipped_records[3].failure(),
+            &CodexRolloutJsonlConversionFailure::InvalidJson { line: 6 }
+        );
+    }
+
+    #[test]
+    fn s28_inv038_resilient_conversion_reports_when_no_record_is_valid() {
+        let report = CodexRolloutJsonlConverter
+            .convert_resilient(conversation(), b"\n{", || {
+                panic!("rejected records must not consume an entry identity")
+            })
+            .expect("all-invalid nonempty source still has an exact report");
+        let ImportedConversationConversionReport::NoValidRecords { skipped_records } = report
+        else {
+            panic!("no fixture record should convert")
+        };
+
+        assert_eq!(skipped_records.len(), 2);
+        assert_eq!(skipped_records[0].source_line(), 1);
+        assert_eq!(
+            skipped_records[0].failure(),
+            &CodexRolloutJsonlConversionFailure::BlankLine { line: 1 }
+        );
+        assert_eq!(skipped_records[1].source_line(), 2);
+        assert_eq!(
+            skipped_records[1].failure(),
+            &CodexRolloutJsonlConversionFailure::InvalidJson { line: 2 }
+        );
+    }
+
+    #[test]
+    fn s28_inv038_resilient_empty_source_remains_a_fatal_error() {
+        let error = CodexRolloutJsonlConverter
+            .convert_resilient(conversation(), b"", || {
+                panic!("empty source must not consume an entry identity")
+            })
+            .expect_err("empty source has no physical record to report");
+
+        assert_eq!(
+            error.failure(),
+            CodexRolloutJsonlConversionFailure::EmptySource
+        );
+    }
+
+    #[test]
+    fn s28_inv038_strict_conversion_preserves_blank_line_error_precedence() {
+        let error = CodexRolloutJsonlConverter
+            .convert(
+                conversation(),
+                b"not-json\n\n{\"type\":\"session_meta\"}",
+                || panic!("strict parse rejection must not consume an entry identity"),
+            )
+            .expect_err("strict conversion scans for blank records before JSON parsing");
+
+        assert_eq!(
+            error.failure(),
+            CodexRolloutJsonlConversionFailure::BlankLine { line: 2 }
+        );
     }
 }
