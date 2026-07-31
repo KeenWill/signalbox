@@ -857,9 +857,16 @@ fn scrub_result_value(
     scrubber: &CredentialScrubber,
     value: &mut serde_json::Value,
 ) -> Option<()> {
+    let repository_structure = repository_result_structure(kind, value);
     let is_file_content = kind == CodeHostToolKind::ReadFile
         && value.get("outcome").and_then(serde_json::Value::as_str) == Some("content");
     scrubber.redact_value(value);
+    if repository_structure
+        .as_ref()
+        .is_some_and(|expected| repository_result_structure(kind, value).as_ref() != Some(expected))
+    {
+        return None;
+    }
     if !is_file_content {
         return Some(());
     }
@@ -873,6 +880,26 @@ fn scrub_result_value(
         serde_json::Value::from(returned_bytes),
     );
     Some(())
+}
+
+fn repository_result_structure(
+    kind: CodeHostToolKind,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if kind == CodeHostToolKind::ListDirectory {
+        return Some(value.clone());
+    }
+    if kind != CodeHostToolKind::ReadFile {
+        return None;
+    }
+
+    let mut structure = value.clone();
+    let object = structure.as_object_mut()?;
+    if object.get("outcome").and_then(serde_json::Value::as_str) == Some("content") {
+        object.remove("content")?;
+        object.remove("returned_bytes")?;
+    }
+    Some(structure)
 }
 
 #[cfg(test)]
@@ -2004,6 +2031,45 @@ mod tests {
         let mut value = CodeHostResult::ReadFile(result).into_json_value();
 
         let scrubbed = scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value);
+
+        assert!(scrubbed.is_none());
+    }
+
+    /// Credential redaction cannot collapse distinct directory entry
+    /// identities after the typed result validates their uniqueness.
+    #[test]
+    fn repository_directory_scrubbing_rejects_entry_identity_collision() {
+        const CREDENTIAL: &str = "token";
+        const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let arguments: RepositoryListDirectoryArguments =
+            serde_json::from_value(serde_json::json!({
+                "path": "src",
+                "repository": "owner/repository",
+                "revision": REVISION,
+            }))
+            .expect("fixture directory arguments are admitted");
+        let credential_path = format!("{}/{CREDENTIAL}", arguments.path().as_str());
+        let redacted_path = format!("{}/[redacted]", arguments.path().as_str());
+        let entries = vec![
+            RepositoryDirectoryEntry::try_new(credential_path, RepositoryObjectKind::File, Some(1))
+                .expect("fixture credential-bearing entry is admitted"),
+            RepositoryDirectoryEntry::try_new(redacted_path, RepositoryObjectKind::File, Some(2))
+                .expect("fixture redacted-spelling entry is admitted"),
+        ];
+        let observed_entries = entries.len();
+        let result = RepositoryListDirectoryResult::try_entries(
+            &arguments,
+            entries,
+            observed_entries,
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("fixture directory result is admitted before scrubbing");
+        let mut value = CodeHostResult::ListDirectory(result).into_json_value();
+
+        let scrubbed = scrub_result_value(CodeHostToolKind::ListDirectory, &scrubber, &mut value);
 
         assert!(scrubbed.is_none());
     }
