@@ -5,6 +5,7 @@
 //! domain reconstitution gates.
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
@@ -79,6 +80,204 @@ impl RunnerRegistrationRevision {
 pub struct StoredValidatedRunnerRegistration {
     revision: RunnerRegistrationRevision,
     registration: ValidatedRunnerRegistration,
+}
+
+/// Stable runner-created identity for one pristine enrollment request.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RunnerEnrollmentRequestId(Uuid);
+
+impl RunnerEnrollmentRequestId {
+    /// Creates an enrollment-request identity from its UUID value.
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    /// Borrows the UUID value.
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+
+    /// Returns the UUID value.
+    pub const fn into_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+/// Identities issued by the daemon for one logical runner enrollment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IssuedRunnerEnrollmentIdentities {
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    authentication: RunnerAuthenticationId,
+}
+
+impl IssuedRunnerEnrollmentIdentities {
+    /// Labels the three independently issued runner identities.
+    pub const fn new(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+    ) -> Self {
+        Self {
+            enrollment,
+            runner,
+            authentication,
+        }
+    }
+
+    /// Returns the logical enrollment identity.
+    pub const fn enrollment(self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the logical runner identity.
+    pub const fn runner(self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the daemon-owned authentication-reference identity.
+    pub const fn authentication(self) -> RunnerAuthenticationId {
+        self.authentication
+    }
+}
+
+/// Complete labeled input for one pristine runner enrollment attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PristineRunnerEnrollmentRequest {
+    request: RunnerEnrollmentRequestId,
+    issued: IssuedRunnerEnrollmentIdentities,
+    allowed_classes: Vec<RunnerCapabilityClass>,
+    advertisement: RunnerAdvertisement,
+}
+
+impl PristineRunnerEnrollmentRequest {
+    /// Separates daemon-issued identity and policy from peer-advertised availability.
+    pub fn new(
+        request: RunnerEnrollmentRequestId,
+        issued: IssuedRunnerEnrollmentIdentities,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        advertisement: RunnerAdvertisement,
+    ) -> Self {
+        Self {
+            request,
+            issued,
+            allowed_classes: allowed_classes.into_iter().collect(),
+            advertisement,
+        }
+    }
+
+    /// Returns the runner-created stable request identity.
+    pub const fn request(&self) -> RunnerEnrollmentRequestId {
+        self.request
+    }
+
+    /// Returns the candidate daemon-issued identities.
+    pub const fn issued(&self) -> IssuedRunnerEnrollmentIdentities {
+        self.issued
+    }
+
+    /// Iterates daemon-owned allowed capability classes.
+    pub fn allowed_classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
+        self.allowed_classes.iter()
+    }
+
+    /// Returns peer-advertised availability.
+    pub const fn advertisement(&self) -> &RunnerAdvertisement {
+        &self.advertisement
+    }
+}
+
+/// Whether pristine enrollment created authority or replayed its exact receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerEnrollmentDisposition {
+    /// This request atomically created the enrollment and first registration.
+    Created,
+    /// This request returned the identities and registration it created earlier.
+    Replayed,
+}
+
+/// Durable response facts for enrollment or registration resume.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerEnrollmentReceipt {
+    request: RunnerEnrollmentRequestId,
+    enrollment: RunnerEnrollment,
+    registration: StoredValidatedRunnerRegistration,
+}
+
+impl RunnerEnrollmentReceipt {
+    /// Returns the stable enrollment-request identity.
+    pub const fn request(&self) -> RunnerEnrollmentRequestId {
+        self.request
+    }
+
+    /// Returns the canonical enrollment authority.
+    pub const fn enrollment(&self) -> &RunnerEnrollment {
+        &self.enrollment
+    }
+
+    /// Returns the exact identities issued for this request.
+    pub const fn identities(&self) -> IssuedRunnerEnrollmentIdentities {
+        IssuedRunnerEnrollmentIdentities::new(
+            self.enrollment.enrollment(),
+            self.enrollment.runner(),
+            self.enrollment.authentication(),
+        )
+    }
+
+    /// Returns the canonical validated registration and durable revision.
+    pub const fn registration(&self) -> &StoredValidatedRunnerRegistration {
+        &self.registration
+    }
+
+    /// Reconstructs the complete availability-only advertisement.
+    pub fn advertisement(&self) -> RunnerAdvertisement {
+        let registration = self.registration.registration();
+        RunnerAdvertisement::new(
+            registration.classes().cloned(),
+            registration.tool_names().cloned(),
+            registration
+                .profiles()
+                .map(|profile| profile.name().clone()),
+            registration.workspaces(),
+            registration.sandboxes(),
+            registration.repositories().cloned(),
+        )
+    }
+
+    /// Separates the canonical enrollment authority and registration receipt.
+    pub fn into_parts(
+        self,
+    ) -> (
+        RunnerEnrollmentRequestId,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+    ) {
+        (self.request, self.enrollment, self.registration)
+    }
+}
+
+/// Evidence-bearing result of a pristine enrollment request.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerEnrollmentOutcome {
+    disposition: RunnerEnrollmentDisposition,
+    receipt: RunnerEnrollmentReceipt,
+}
+
+impl RunnerEnrollmentOutcome {
+    /// Reports whether the durable authority was created or replayed.
+    pub const fn disposition(&self) -> RunnerEnrollmentDisposition {
+        self.disposition
+    }
+
+    /// Returns the exact durable receipt.
+    pub const fn receipt(&self) -> &RunnerEnrollmentReceipt {
+        &self.receipt
+    }
+
+    /// Consumes the outcome into its exact durable receipt.
+    pub fn into_receipt(self) -> RunnerEnrollmentReceipt {
+        self.receipt
+    }
 }
 
 impl StoredValidatedRunnerRegistration {
@@ -163,6 +362,259 @@ impl RunnerProtocolStore {
         }
     }
 
+    /// Atomically creates one pristine enrollment and first registration, or
+    /// returns the exact durable receipt for an equal request replay.
+    pub async fn enroll_pristine(
+        &self,
+        request: PristineRunnerEnrollmentRequest,
+    ) -> Result<RunnerEnrollmentOutcome, RunnerProtocolStoreError> {
+        let PristineRunnerEnrollmentRequest {
+            request,
+            issued,
+            allowed_classes,
+            advertisement,
+        } = request;
+        if advertisement.repositories().count() > RunnerAdvertisement::MAX_REPOSITORIES {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::TooManyAdvertisedRepositories,
+            ));
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        // This admission path takes a share-row-exclusive table lock to make
+        // request replay and the version-one active-enrollment check one
+        // serial decision. Domain persistence remains capable of representing
+        // predecessor and replacement facts required by runner replacement.
+        sqlx::query("LOCK TABLE runner_enrollment IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await?;
+        if let Some(receipt) =
+            load_enrollment_request_receipt_in(transaction.as_mut(), request, &self.catalog).await?
+        {
+            let stored_allowed: BTreeSet<_> =
+                receipt.enrollment().allowed_classes().cloned().collect();
+            let replayed_allowed: BTreeSet<_> = allowed_classes.iter().cloned().collect();
+            if stored_allowed != replayed_allowed {
+                transaction.rollback().await?;
+                return Err(
+                    RunnerEnrollmentRequestFailure::ReplayPolicyMismatch { request }.into(),
+                );
+            }
+            if receipt.advertisement() != advertisement {
+                transaction.rollback().await?;
+                return Err(
+                    RunnerEnrollmentRequestFailure::ReplayAdvertisementMismatch { request }.into(),
+                );
+            }
+            transaction.commit().await?;
+            return Ok(RunnerEnrollmentOutcome {
+                disposition: RunnerEnrollmentDisposition::Replayed,
+                receipt,
+            });
+        }
+
+        let active: Option<Uuid> = sqlx::query_scalar(
+            "SELECT enrollment_id
+               FROM runner_enrollment
+              WHERE state_kind = 'active'",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(active) = active {
+            transaction.rollback().await?;
+            return Err(RunnerEnrollmentRequestFailure::ActiveEnrollmentExists {
+                request,
+                active_enrollment: runner_enrollment_id(active),
+            }
+            .into());
+        }
+
+        let enrollment = RunnerEnrollment::new(
+            issued.enrollment(),
+            issued.runner(),
+            issued.authentication(),
+            allowed_classes,
+        );
+        let pending = enrollment
+            .prepare_registration(advertisement, &self.catalog)
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        let revision = RunnerRegistrationRevision::first();
+        if pending.registration().revision().get() != revision.get() {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::RegistrationChanged,
+            ));
+        }
+
+        insert_enrollment_rows(&mut transaction, &enrollment).await?;
+        insert_registration(&mut transaction, revision, pending.registration()).await?;
+        sqlx::query(
+            "INSERT INTO runner_current_registration
+                (enrollment_id, registration_revision)
+             VALUES ($1, $2)",
+        )
+        .bind(issued.enrollment().into_uuid())
+        .bind(Decimal::from(revision.get()))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO runner_enrollment_request_receipt
+                (request_id, enrollment_id, runner_id,
+                 authentication_reference_id, registration_revision)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(request.into_uuid())
+        .bind(issued.enrollment().into_uuid())
+        .bind(issued.runner().into_uuid())
+        .bind(issued.authentication().into_uuid())
+        .bind(Decimal::from(revision.get()))
+        .execute(&mut *transaction)
+        .await?;
+        commit_mutation(transaction).await?;
+
+        let registration = pending.commit().map_err(RunnerProtocolStoreError::Domain)?;
+        Ok(RunnerEnrollmentOutcome {
+            disposition: RunnerEnrollmentDisposition::Created,
+            receipt: RunnerEnrollmentReceipt {
+                request,
+                enrollment,
+                registration: StoredValidatedRunnerRegistration {
+                    revision,
+                    registration,
+                },
+            },
+        })
+    }
+
+    /// Validates a reconnect and durably appends changed availability when the
+    /// runner names the current registration revision.
+    pub async fn resume_registration(
+        &self,
+        request: RunnerEnrollmentRequestId,
+        observed: IssuedRunnerEnrollmentIdentities,
+        prior_revision: RunnerRegistrationRevision,
+        advertisement: RunnerAdvertisement,
+    ) -> Result<RunnerEnrollmentReceipt, RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let stored = load_enrollment_request_facts(transaction.as_mut(), request)
+            .await?
+            .ok_or(RunnerEnrollmentRequestFailure::UnknownRequest { request })?;
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(stored.identities.enrollment().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        if stored.identities != observed {
+            transaction.rollback().await?;
+            return Err(RunnerEnrollmentRequestFailure::ResumeIdentityMismatch {
+                request,
+                expected: stored.identities,
+                observed,
+            }
+            .into());
+        }
+        let enrollment = load_enrollment_in(transaction.as_mut(), stored.identities.enrollment())
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        if enrollment.state() == RunnerEnrollmentState::Revoked {
+            transaction.rollback().await?;
+            return Err(RunnerEnrollmentRequestFailure::EnrollmentRevoked {
+                request,
+                enrollment: enrollment.enrollment(),
+            }
+            .into());
+        }
+        let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment.enrollment().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let current = current.ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let current = decode_registration_revision(current)?;
+        let registration = load_registration_in(
+            transaction.as_mut(),
+            enrollment.enrollment(),
+            current,
+            Some(&enrollment),
+            &self.catalog,
+        )
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let receipt = RunnerEnrollmentReceipt {
+            request,
+            enrollment,
+            registration,
+        };
+        let advertisement_matches = receipt.advertisement() == advertisement;
+        match prior_revision.cmp(&current) {
+            Ordering::Less if advertisement_matches => {
+                transaction.commit().await?;
+                Ok(receipt)
+            }
+            Ordering::Less => {
+                transaction.rollback().await?;
+                Err(RunnerEnrollmentRequestFailure::StaleResumeAdvertisement {
+                    request,
+                    prior: prior_revision,
+                    current,
+                }
+                .into())
+            }
+            Ordering::Equal if advertisement_matches => {
+                transaction.commit().await?;
+                Ok(receipt)
+            }
+            Ordering::Equal => {
+                let (_, enrollment, _) = receipt.into_parts();
+                let pending = enrollment
+                    .prepare_registration(advertisement, &self.catalog)
+                    .map_err(RunnerProtocolStoreError::Domain)?;
+                let revision =
+                    current
+                        .checked_next()
+                        .ok_or(RunnerProtocolStoreError::Corruption(
+                            RunnerProtocolCorruption::GenerationExhausted,
+                        ))?;
+                if pending.registration().revision().get() != revision.get() {
+                    transaction.rollback().await?;
+                    return Err(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::RegistrationChanged,
+                    ));
+                }
+                insert_registration(&mut transaction, revision, pending.registration()).await?;
+                sqlx::query(
+                    "UPDATE runner_current_registration
+                        SET registration_revision = $2
+                      WHERE enrollment_id = $1",
+                )
+                .bind(enrollment.enrollment().into_uuid())
+                .bind(Decimal::from(revision.get()))
+                .execute(&mut *transaction)
+                .await?;
+                commit_mutation(transaction).await?;
+                let registration = pending.commit().map_err(RunnerProtocolStoreError::Domain)?;
+                Ok(RunnerEnrollmentReceipt {
+                    request,
+                    enrollment,
+                    registration: StoredValidatedRunnerRegistration {
+                        revision,
+                        registration,
+                    },
+                })
+            }
+            Ordering::Greater => {
+                transaction.rollback().await?;
+                Err(RunnerEnrollmentRequestFailure::ResumeRevisionMismatch {
+                    request,
+                    expected: current,
+                    observed: prior_revision,
+                }
+                .into())
+            }
+        }
+    }
+
     /// Inserts one pristine active logical enrollment and its exact allowed
     /// classes. An enrollment that already issued a registration through the
     /// domain-only path is rejected: persisting only its enrollment rows
@@ -179,52 +631,8 @@ impl RunnerProtocolStore {
                 RunnerDomainError::InvalidState,
             ));
         }
-        let classes: Vec<_> = enrollment.allowed_classes().collect();
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO runner_enrollment_audit
-                (enrollment_id, revision, runner_id,
-                 authentication_reference_id, allowed_class_count, state_kind)
-             VALUES ($1, 1, $2, $3, $4, 'active')",
-        )
-        .bind(enrollment.enrollment().into_uuid())
-        .bind(enrollment.runner().into_uuid())
-        .bind(enrollment.authentication().into_uuid())
-        .bind(count_decimal(classes.len())?)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "INSERT INTO runner_enrollment
-                (enrollment_id, runner_id, authentication_reference_id,
-                 allowed_class_count, revision, state_kind)
-             VALUES ($1, $2, $3, $4, 1, 'active')",
-        )
-        .bind(enrollment.enrollment().into_uuid())
-        .bind(enrollment.runner().into_uuid())
-        .bind(enrollment.authentication().into_uuid())
-        .bind(count_decimal(classes.len())?)
-        .execute(&mut *transaction)
-        .await?;
-        for class in classes {
-            sqlx::query(
-                "INSERT INTO runner_enrollment_allowed_class
-                    (enrollment_id, capability_class)
-                 VALUES ($1, $2)",
-            )
-            .bind(enrollment.enrollment().into_uuid())
-            .bind(class.as_str())
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query(
-                "INSERT INTO runner_enrollment_audit_allowed_class
-                    (enrollment_id, revision, capability_class)
-                 VALUES ($1, 1, $2)",
-            )
-            .bind(enrollment.enrollment().into_uuid())
-            .bind(class.as_str())
-            .execute(&mut *transaction)
-            .await?;
-        }
+        insert_enrollment_rows(&mut transaction, enrollment).await?;
         commit_mutation(transaction).await
     }
 
@@ -1231,6 +1639,136 @@ impl RunnerProtocolStore {
             .map(Some)
             .map_err(RunnerProtocolStoreError::Domain)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StoredEnrollmentRequestFacts {
+    identities: IssuedRunnerEnrollmentIdentities,
+    registration_revision: RunnerRegistrationRevision,
+}
+
+async fn load_enrollment_request_facts(
+    connection: &mut PgConnection,
+    request: RunnerEnrollmentRequestId,
+) -> Result<Option<StoredEnrollmentRequestFacts>, RunnerProtocolStoreError> {
+    let row = sqlx::query(
+        "SELECT enrollment_id, runner_id, authentication_reference_id,
+                registration_revision
+           FROM runner_enrollment_request_receipt
+          WHERE request_id = $1
+          FOR SHARE",
+    )
+    .bind(request.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    row.map(|row| {
+        Ok(StoredEnrollmentRequestFacts {
+            identities: IssuedRunnerEnrollmentIdentities::new(
+                runner_enrollment_id(row.decode_column("enrollment_id")?),
+                runner_id(row.decode_column("runner_id")?),
+                runner_authentication_id(row.decode_column("authentication_reference_id")?),
+            ),
+            registration_revision: decode_registration_revision(
+                row.decode_column("registration_revision")?,
+            )?,
+        })
+    })
+    .transpose()
+}
+
+async fn load_enrollment_request_receipt_in(
+    connection: &mut PgConnection,
+    request: RunnerEnrollmentRequestId,
+    catalog: &RunnerCatalog,
+) -> Result<Option<RunnerEnrollmentReceipt>, RunnerProtocolStoreError> {
+    let Some(stored) = load_enrollment_request_facts(connection, request).await? else {
+        return Ok(None);
+    };
+    let locked = sqlx::query(RUNNER_ENROLLMENT)
+        .bind(stored.identities.enrollment().into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
+    if locked.is_none() {
+        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    }
+    let enrollment = load_enrollment_in(connection, stored.identities.enrollment())
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+    if stored.identities
+        != IssuedRunnerEnrollmentIdentities::new(
+            enrollment.enrollment(),
+            enrollment.runner(),
+            enrollment.authentication(),
+        )
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let registration = load_registration_in(
+        connection,
+        enrollment.enrollment(),
+        stored.registration_revision,
+        Some(&enrollment),
+        catalog,
+    )
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    Ok(Some(RunnerEnrollmentReceipt {
+        request,
+        enrollment,
+        registration,
+    }))
+}
+
+async fn insert_enrollment_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    enrollment: &RunnerEnrollment,
+) -> Result<(), RunnerProtocolStoreError> {
+    let classes: Vec<_> = enrollment.allowed_classes().collect();
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit
+            (enrollment_id, revision, runner_id,
+             authentication_reference_id, allowed_class_count, state_kind)
+         VALUES ($1, 1, $2, $3, $4, 'active')",
+    )
+    .bind(enrollment.enrollment().into_uuid())
+    .bind(enrollment.runner().into_uuid())
+    .bind(enrollment.authentication().into_uuid())
+    .bind(count_decimal(classes.len())?)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment
+            (enrollment_id, runner_id, authentication_reference_id,
+             allowed_class_count, revision, state_kind)
+         VALUES ($1, $2, $3, $4, 1, 'active')",
+    )
+    .bind(enrollment.enrollment().into_uuid())
+    .bind(enrollment.runner().into_uuid())
+    .bind(enrollment.authentication().into_uuid())
+    .bind(count_decimal(classes.len())?)
+    .execute(&mut **transaction)
+    .await?;
+    for class in classes {
+        sqlx::query(
+            "INSERT INTO runner_enrollment_allowed_class
+                (enrollment_id, capability_class)
+             VALUES ($1, $2)",
+        )
+        .bind(enrollment.enrollment().into_uuid())
+        .bind(class.as_str())
+        .execute(&mut **transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO runner_enrollment_audit_allowed_class
+                (enrollment_id, revision, capability_class)
+             VALUES ($1, 1, $2)",
+        )
+        .bind(enrollment.enrollment().into_uuid())
+        .bind(class.as_str())
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn load_enrollment_in(
@@ -3507,6 +4045,146 @@ const fn session_id(value: Uuid) -> SessionId {
     SessionId::from_uuid(value)
 }
 
+/// Why a pristine enrollment or registration resume fails before mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerEnrollmentRequestFailure {
+    /// Another active version-one enrollment already occupies the singleton slot.
+    ActiveEnrollmentExists {
+        /// The rejected stable request identity.
+        request: RunnerEnrollmentRequestId,
+        /// The enrollment currently occupying the active slot.
+        active_enrollment: RunnerEnrollmentId,
+    },
+    /// A replay changed the availability payload bound to its request identity.
+    ReplayAdvertisementMismatch {
+        /// The replayed stable request identity.
+        request: RunnerEnrollmentRequestId,
+    },
+    /// A replay changed daemon-owned allowed classes bound to the enrollment.
+    ReplayPolicyMismatch {
+        /// The replayed stable request identity.
+        request: RunnerEnrollmentRequestId,
+    },
+    /// Resume named no durable enrollment request.
+    UnknownRequest {
+        /// The unknown request identity.
+        request: RunnerEnrollmentRequestId,
+    },
+    /// Resume supplied identities other than those durably issued for the request.
+    ResumeIdentityMismatch {
+        /// The stable enrollment request identity.
+        request: RunnerEnrollmentRequestId,
+        /// The identities stored by pristine enrollment.
+        expected: IssuedRunnerEnrollmentIdentities,
+        /// The identities supplied by the reconnecting runner.
+        observed: IssuedRunnerEnrollmentIdentities,
+    },
+    /// Resume attempted to use terminally revoked enrollment authority.
+    EnrollmentRevoked {
+        /// The stable enrollment request identity.
+        request: RunnerEnrollmentRequestId,
+        /// The terminally revoked enrollment.
+        enrollment: RunnerEnrollmentId,
+    },
+    /// Resume supplied a registration revision other than the durable current head.
+    ResumeRevisionMismatch {
+        /// The stable enrollment request identity.
+        request: RunnerEnrollmentRequestId,
+        /// The durable current registration revision.
+        expected: RunnerRegistrationRevision,
+        /// The revision supplied by the reconnecting runner.
+        observed: RunnerRegistrationRevision,
+    },
+    /// A stale resume also diverged from the durable current advertisement.
+    StaleResumeAdvertisement {
+        /// The stable enrollment request identity.
+        request: RunnerEnrollmentRequestId,
+        /// The stale registration revision supplied by the runner.
+        prior: RunnerRegistrationRevision,
+        /// The durable current registration revision.
+        current: RunnerRegistrationRevision,
+    },
+}
+
+impl fmt::Display for RunnerEnrollmentRequestFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActiveEnrollmentExists {
+                request,
+                active_enrollment,
+            } => write!(
+                formatter,
+                "runner enrollment request {} conflicts with active enrollment {}",
+                request.as_uuid(),
+                active_enrollment.as_uuid()
+            ),
+            Self::ReplayAdvertisementMismatch { request } => write!(
+                formatter,
+                "runner enrollment request {} replayed with different availability",
+                request.as_uuid()
+            ),
+            Self::ReplayPolicyMismatch { request } => write!(
+                formatter,
+                "runner enrollment request {} replayed with different allowed classes",
+                request.as_uuid()
+            ),
+            Self::UnknownRequest { request } => write!(
+                formatter,
+                "runner resume names unknown enrollment request {}",
+                request.as_uuid()
+            ),
+            Self::ResumeIdentityMismatch {
+                request,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "runner resume {} identity mismatch: expected enrollment {}, runner {}, authentication {}; observed enrollment {}, runner {}, authentication {}",
+                request.as_uuid(),
+                expected.enrollment().as_uuid(),
+                expected.runner().as_uuid(),
+                expected.authentication().as_uuid(),
+                observed.enrollment().as_uuid(),
+                observed.runner().as_uuid(),
+                observed.authentication().as_uuid()
+            ),
+            Self::EnrollmentRevoked {
+                request,
+                enrollment,
+            } => write!(
+                formatter,
+                "runner resume {} names revoked enrollment {}",
+                request.as_uuid(),
+                enrollment.as_uuid()
+            ),
+            Self::ResumeRevisionMismatch {
+                request,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "runner resume {} revision mismatch: expected {}, observed {}",
+                request.as_uuid(),
+                expected.get(),
+                observed.get()
+            ),
+            Self::StaleResumeAdvertisement {
+                request,
+                prior,
+                current,
+            } => write!(
+                formatter,
+                "runner resume {} at stale revision {} diverges from current registration revision {}",
+                request.as_uuid(),
+                prior.get(),
+                current.get()
+            ),
+        }
+    }
+}
+
+impl Error for RunnerEnrollmentRequestFailure {}
+
 /// A durable runner-protocol shape that cannot reconstruct domain state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerProtocolCorruption {
@@ -3588,6 +4266,8 @@ pub enum RunnerProtocolStoreError {
     Corruption(RunnerProtocolCorruption),
     /// Complete values fail a domain-owned runner transition or invariant.
     Domain(RunnerDomainError),
+    /// Enrollment or resume input conflicts with durable request authority.
+    EnrollmentRequest(RunnerEnrollmentRequestFailure),
 }
 
 impl fmt::Display for RunnerProtocolStoreError {
@@ -3602,6 +4282,7 @@ impl fmt::Display for RunnerProtocolStoreError {
             }
             Self::Corruption(error) => error.fmt(formatter),
             Self::Domain(error) => write!(formatter, "runner-protocol domain failure: {error:?}"),
+            Self::EnrollmentRequest(error) => error.fmt(formatter),
         }
     }
 }
@@ -3611,6 +4292,7 @@ impl Error for RunnerProtocolStoreError {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::Corruption(error) => Some(error),
+            Self::EnrollmentRequest(error) => Some(error),
             Self::Domain(_) => None,
         }
     }
@@ -3625,5 +4307,11 @@ impl From<sqlx::Error> for RunnerProtocolStoreError {
 impl From<RunnerProtocolCorruption> for RunnerProtocolStoreError {
     fn from(error: RunnerProtocolCorruption) -> Self {
         Self::Corruption(error)
+    }
+}
+
+impl From<RunnerEnrollmentRequestFailure> for RunnerProtocolStoreError {
+    fn from(error: RunnerEnrollmentRequestFailure) -> Self {
+        Self::EnrollmentRequest(error)
     }
 }
