@@ -60,8 +60,7 @@ const GITHUB_API_ORIGIN: &str = "https://api.github.com";
 const API_VERSION: &str = "2026-03-10";
 const USER_AGENT_VALUE: &str = "signalbox";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const PAGE_SIZE: &str = "100";
-const MAX_GRAPHQL_PAGE_ITEMS: usize = 100;
+const PAGE_SIZE: usize = 100;
 const MAX_FILE_PAGES: u16 = 30;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const JSON_NULL_BYTES: usize = 4;
@@ -1071,9 +1070,7 @@ fn truncate_diff_result(value: &mut serde_json::Value) -> Result<(), InvalidGitH
         let encoded_size = serde_json::to_vec(&patch)
             .map_err(|_| InvalidGitHubArguments)?
             .len();
-        let additional_size = encoded_size
-            .checked_sub(JSON_NULL_BYTES)
-            .ok_or(InvalidGitHubArguments)?;
+        let additional_size = encoded_size.saturating_sub(JSON_NULL_BYTES);
         if additional_size > remaining {
             continue;
         }
@@ -1452,11 +1449,12 @@ impl GitHubApiTransport {
         let mut patch_extent = FilePatchExtent::Complete;
         for page in 1..=MAX_FILE_PAGES {
             let page_text = page.to_string();
+            let page_size_text = PAGE_SIZE.to_string();
             let number = arguments.number().get().to_string();
             let url = self.repository_url(
                 arguments.repository(),
                 &["pulls", &number, "files"],
-                Some(&[("per_page", PAGE_SIZE), ("page", &page_text)]),
+                Some(&[("per_page", &page_size_text), ("page", &page_text)]),
             )?;
             let response = self
                 .send_with_timeout(
@@ -1887,9 +1885,13 @@ fn normalize_metadata(
 }
 
 fn normalize_files(value: &serde_json::Value) -> Result<NormalizedFiles, GitHubTransportFailure> {
+    let values = required_array(value)?;
+    if values.len() > PAGE_SIZE {
+        return Err(invalid_response(None));
+    }
     let mut files = Vec::new();
     let mut patch_extent = FilePatchExtent::Complete;
-    for value in required_array(value)? {
+    for value in values {
         let object = required_object(value)?;
         let previous = optional_string(object, "previous_filename")?
             .map(checked_path)
@@ -1954,7 +1956,7 @@ fn bounded_connection_nodes(
 ) -> Result<&Vec<serde_json::Value>, GitHubTransportFailure> {
     let object = required_object(connection)?;
     let nodes = required_array(required(object, "nodes")?)?;
-    (nodes.len() <= MAX_GRAPHQL_PAGE_ITEMS)
+    (nodes.len() <= PAGE_SIZE)
         .then_some(nodes)
         .ok_or_else(|| invalid_response(None))
 }
@@ -2191,9 +2193,10 @@ mod tests {
     const DIFF_FILES_FOR_RESULT_OVERFLOW: usize = 64;
     const LAST_OVERFLOW_FILE_INDEX: usize = DIFF_FILES_FOR_RESULT_OVERFLOW - 1;
     const AGGREGATE_PATCH_BYTES: usize = MAX_TEXT_BYTES / 4;
-    const GRAPHQL_ITEMS_BEYOND_BOUND: usize = MAX_GRAPHQL_PAGE_ITEMS + 1;
+    const ITEMS_BEYOND_PAGE_BOUND: usize = PAGE_SIZE + 1;
     const PROVIDER_ERROR_TEXT: &str = "private provider detail";
     const PATCH_FILLER: &str = "x";
+    const SHORT_PATCH: &str = "";
 
     struct SyntheticCredentials;
     struct SyntheticTransport;
@@ -2435,6 +2438,15 @@ mod tests {
     }
 
     #[test]
+    fn rest_rejects_more_than_requested_files() {
+        let mut response = files_response();
+        let file = response[0].clone();
+        response = serde_json::Value::Array(vec![file; ITEMS_BEYOND_PAGE_BOUND]);
+
+        assert!(normalize_files(&response).is_err());
+    }
+
+    #[test]
     fn aggregate_diff_evidence_is_truncated_to_result_bound() {
         let mut response = files_response();
         response[0]["patch"] =
@@ -2474,6 +2486,38 @@ mod tests {
             result["files"][LAST_OVERFLOW_FILE_INDEX]["patch"],
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn aggregate_diff_truncation_retains_short_patch() {
+        let mut response = files_response();
+        response[0]["patch"] =
+            serde_json::Value::String(PATCH_FILLER.repeat(AGGREGATE_PATCH_BYTES));
+        let file = normalize_files(&response)
+            .expect("bounded response is retained")
+            .files
+            .pop()
+            .expect("recorded response contains one file");
+        let mut short_file = file.clone();
+        short_file["patch"] = serde_json::Value::String(SHORT_PATCH.to_owned());
+        let mut files = vec![file; DIFF_FILES_FOR_RESULT_OVERFLOW];
+        files[0] = short_file;
+        let mut result = serde_json::json!({
+            "base_revision": BASE_REVISION,
+            "head_revision": HEAD_REVISION,
+            "files": files,
+            "truncated": false,
+        });
+
+        assert!(
+            serde_json::to_vec(&result)
+                .expect("fixture serializes")
+                .len()
+                > MAX_RESULT_BYTES
+        );
+        truncate_diff_result(&mut result).expect("short patch can be retained");
+
+        assert_eq!(result["files"][0]["patch"], SHORT_PATCH);
     }
 
     #[test]
@@ -2584,7 +2628,7 @@ mod tests {
         let thread =
             response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0].clone();
         response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
-            serde_json::Value::Array(vec![thread; GRAPHQL_ITEMS_BEYOND_BOUND]);
+            serde_json::Value::Array(vec![thread; ITEMS_BEYOND_PAGE_BOUND]);
 
         assert!(normalize_threads(&response).is_err());
     }
@@ -2597,7 +2641,7 @@ mod tests {
                 ["nodes"][0]
                 .clone();
         response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"] =
-            serde_json::Value::Array(vec![comment; GRAPHQL_ITEMS_BEYOND_BOUND]);
+            serde_json::Value::Array(vec![comment; ITEMS_BEYOND_PAGE_BOUND]);
 
         assert!(normalize_threads(&response).is_err());
     }
