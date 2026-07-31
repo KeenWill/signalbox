@@ -827,7 +827,7 @@ mod tests {
     };
 
     use super::{
-        ReviewLibraryResolutionError, SessionTemplateConfiguration,
+        REVIEW_CONCERNS, ReviewLibraryResolutionError, SessionTemplateConfiguration,
         SessionTemplateConfigurationError,
     };
     use crate::HubModelConfiguration;
@@ -837,6 +837,8 @@ mod tests {
     const ALIAS_ID: &str = "30000000-0000-4000-8000-000000000003";
     const TEMPLATE_NAME: &str = "reviewer";
     const TEMPLATE_VERSION: u64 = 7;
+    const REVIEW_SOURCE_VERSION: u64 = 3;
+    const REVIEW_CONCERN_SET_VERSION: &str = "initial-v1";
     const INLINE_PROMPT: &str = "Review the change and report concrete findings.";
     const EXPECTED_TEMPLATE_DIGEST: [u8; 32] = [
         0x00, 0xc0, 0x82, 0x75, 0x57, 0x7e, 0x73, 0xf1, 0x56, 0x57, 0x16, 0xb5, 0xc8, 0x86, 0x86,
@@ -890,8 +892,8 @@ dangerous_tool_auto_approval = true
 version = 1
 
 [review_library]
-source_version = 3
-concern_set_version = "initial-v1"
+source_version = {REVIEW_SOURCE_VERSION}
+concern_set_version = "{REVIEW_CONCERN_SET_VERSION}"
 alias = "{ALIAS_ID}"
 dangerous_tool_auto_approval = false
 shared_header = "Shared header."
@@ -1285,8 +1287,8 @@ dangerous_tool_auto_approval = false
             .resolve(&name)
             .expect("generated template resolves");
 
-        assert_eq!(configuration.summaries().len(), 9);
-        assert_eq!(template.version().as_u64(), 3);
+        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 4);
+        assert_eq!(template.version().as_u64(), REVIEW_SOURCE_VERSION);
         assert_eq!(
             template
                 .defaults()
@@ -1322,19 +1324,16 @@ dangerous_tool_auto_approval = false
             )
             .expect("matching selection constructs an attempt");
 
-        assert_eq!(attempt.concern_set_version().as_str(), "initial-v1");
-        assert_eq!(attempt.concerns().len(), 5);
-        assert_eq!(attempt.concerns()[0].key().as_str(), "correctness");
         assert_eq!(
-            attempt.concerns()[1].key().as_str(),
-            "interface-and-type-design"
+            attempt.concern_set_version().as_str(),
+            REVIEW_CONCERN_SET_VERSION
         );
-        assert_eq!(attempt.concerns()[2].key().as_str(), "test-quality");
-        assert_eq!(attempt.concerns()[3].key().as_str(), "security");
-        assert_eq!(
-            attempt.concerns()[4].key().as_str(),
-            "documentation-code-drift"
-        );
+        assert_eq!(attempt.concerns().len(), selection.concerns.len());
+        assert_eq!(attempt.concerns()[0].key(), &selection.concerns[0].key);
+        assert_eq!(attempt.concerns()[1].key(), &selection.concerns[1].key);
+        assert_eq!(attempt.concerns()[2].key(), &selection.concerns[2].key);
+        assert_eq!(attempt.concerns()[3].key(), &selection.concerns[3].key);
+        assert_eq!(attempt.concerns()[4].key(), &selection.concerns[4].key);
     }
 
     #[test]
@@ -1500,7 +1499,7 @@ dangerous_tool_auto_approval = false
         )
         .expect("example review library is valid");
 
-        assert_eq!(configuration.summaries().len(), 9);
+        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 4);
     }
     #[test]
     fn review_attempt_rejects_a_reordered_concern_selection() {
