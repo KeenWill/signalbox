@@ -491,25 +491,30 @@ impl RunnerProtocolStore {
         enrollment: RunnerEnrollmentId,
     ) -> Result<RunnerConnectionSnapshot, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let state: Option<String> = sqlx::query_scalar(
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        let state: String = sqlx::query_scalar(
             "SELECT state_kind
                FROM runner_enrollment
-              WHERE enrollment_id = $1
-              FOR UPDATE",
+              WHERE enrollment_id = $1",
         )
         .bind(enrollment.into_uuid())
-        .fetch_optional(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
-        match state.as_deref() {
-            None => return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into()),
-            Some("active") => {}
-            Some("revoked") => {
+        match state.as_str() {
+            "active" => {}
+            "revoked" => {
                 transaction.rollback().await?;
                 return Err(RunnerProtocolStoreError::Domain(
                     RunnerDomainError::EnrollmentRevoked,
                 ));
             }
-            Some(_) => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
         let prior = load_connection_head_in(transaction.as_mut(), enrollment).await?;
         let epoch = match prior {
