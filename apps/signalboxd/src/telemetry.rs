@@ -33,20 +33,23 @@ use opentelemetry_sdk::{
     },
 };
 use prometheus::{IntCounter, IntCounterVec, Opts, Registry, TextEncoder};
+use signalbox_model_provider_runtime::ModelCallCauseToken;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     task::JoinHandle,
     time::timeout,
 };
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap};
 use tonic::transport::ClientTlsConfig;
 use tracing::{
-    Event, Metadata, Subscriber,
+    Event, Level, Metadata, Subscriber,
     field::{Field, Visit},
     span::{Attributes, Id},
+    subscriber::Interest,
 };
-use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
+use tracing_subscriber::{Layer, filter::LevelFilter, layer::Context, registry::LookupSpan};
 use url::Url;
 
 /// Presence of this setting enables OTLP span export.
@@ -75,6 +78,7 @@ const MAX_HEADER_COUNT: usize = 16;
 const MAX_HEADER_NAME_BYTES: usize = 64;
 const MAX_HEADER_VALUE_BYTES: usize = 1_024;
 const MAX_SCRAPE_REQUEST_BYTES: usize = 8 * 1024;
+const MAX_SCRAPE_CONNECTIONS: usize = 16;
 const SCRAPE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_SERVICE_NAME: &str = "signalboxd";
 const SERVICE_NAMES: &[&str] = &[
@@ -533,6 +537,14 @@ impl OtlpRuntime {
     }
 }
 
+fn http_trace_endpoint(endpoint: &str) -> Result<String, ()> {
+    let mut endpoint = Url::parse(endpoint).map_err(|_| ())?;
+    let base_path = endpoint.path().trim_end_matches('/');
+    let trace_path = format!("{base_path}/v1/traces");
+    endpoint.set_path(&trace_path);
+    Ok(endpoint.into())
+}
+
 fn build_http_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter, ()> {
     let headers = configuration
         .headers
@@ -548,7 +560,7 @@ fn build_http_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
     SpanExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(configuration.endpoint.clone())
+        .with_endpoint(http_trace_endpoint(&configuration.endpoint)?)
         .with_timeout(OTLP_EXPORT_TIMEOUT)
         .with_http_client(client)
         .with_headers(headers)
@@ -630,10 +642,31 @@ impl TelemetryExportLayer {
 #[derive(Clone)]
 struct ExportedSpan(OTelContext);
 
+fn exporter_callsite(metadata: &Metadata<'_>) -> bool {
+    metadata.level() <= &Level::DEBUG
+        && (admitted_span_fields(metadata).is_some() || candidate_event(metadata))
+}
+
 impl<S> Layer<S> for TelemetryExportLayer
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
+    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
+        if exporter_callsite(metadata) {
+            Interest::always()
+        } else {
+            Interest::never()
+        }
+    }
+
+    fn enabled(&self, metadata: &Metadata<'_>, _context: Context<'_, S>) -> bool {
+        exporter_callsite(metadata)
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::DEBUG)
+    }
+
     fn on_new_span(&self, attributes: &Attributes<'_>, id: &Id, context: Context<'_, S>) {
         let metadata = attributes.metadata();
         let Some(expected) = admitted_span_fields(metadata) else {
@@ -810,7 +843,7 @@ fn admitted_event_values(metadata: &Metadata<'_>, values: &RecordedValues) -> bo
             ]) && values.uuid("session_id")
                 && values.uuid("turn_id")
                 && values.uuid("model_call_id")
-                && values.closed("cause_code", MODEL_CAUSE_CODES)
+                && values.model_cause_code("cause_code")
         }
         _ => false,
     }
@@ -871,6 +904,12 @@ impl RecordedValues {
             .map(|value| admitted.contains(&value.trim_matches('"')))
             .unwrap_or(false)
     }
+    fn model_cause_code(&self, name: &str) -> bool {
+        self.get(name)
+            .map(|value| value.trim_matches('"'))
+            .and_then(ModelCallCauseToken::parse)
+            .is_some()
+    }
 
     fn record(&mut self, field: &Field, value: String) {
         self.values.insert(field.name().to_owned(), value);
@@ -912,50 +951,6 @@ const TURN_OUTCOMES: &[&str] = &[
     "target_unavailable",
     "capability_known_failure",
     "continuation_target_unavailable",
-];
-
-const MODEL_CAUSE_CODES: &[&str] = &[
-    "completed",
-    "provider_refused",
-    "provider_credential_rejected",
-    "provider_permission_denied",
-    "provider_invalid_request",
-    "provider_target_not_found",
-    "provider_request_too_large",
-    "provider_rate_limited",
-    "provider_quota_exhausted",
-    "provider_overloaded",
-    "provider_internal",
-    "provider_unrecognized_error",
-    "provider_cancellation_confirmed",
-    "cancelled_before_send",
-    "connect_failed",
-    "send_incomplete_proven_unacceptable",
-    "boundary_loss_cancellation_requested",
-    "boundary_loss_timed_out",
-    "boundary_loss_transport_failed",
-    "boundary_loss_response_body_lost",
-    "boundary_loss_response_unintelligible",
-    "boundary_loss_unexpected_http_status",
-    "boundary_loss_stream_incomplete",
-    "boundary_loss_stream_protocol_violation",
-    "unsupported_operation",
-    "credential_unmapped",
-    "credential_unavailable",
-    "credential_unreadable",
-    "credential_unusable",
-    "provider_target_substituted",
-    "unrepresentable_tool_material",
-    "finish_contradicts_content",
-    "unconfigured_target",
-    "preparation_defect",
-    "correlation_mismatch",
-    "authorization_mismatch",
-    "observation_correlation_mismatch",
-    "unsupported_completion_material",
-    "invalid_assistant_text",
-    "invalid_tool_schema",
-    "invalid_tool_proposal",
 ];
 
 /// Closed turn outcome accepted by the Prometheus registry.
@@ -1110,7 +1105,7 @@ pub struct PrometheusServer {
 }
 
 impl PrometheusServer {
-    /// Binds only the explicitly configured IP socket and starts one-at-a-time scrapes.
+    /// Binds only the explicitly configured IP socket with bounded concurrent scrapes.
     pub async fn bind(address: SocketAddr, metrics: TelemetryMetrics) -> io::Result<Self> {
         let listener = TcpListener::bind(address).await?;
         let task = tokio::spawn(serve_prometheus(listener, metrics));
@@ -1125,6 +1120,7 @@ impl Drop for PrometheusServer {
 }
 
 async fn serve_prometheus(listener: TcpListener, metrics: TelemetryMetrics) {
+    let permits = Arc::new(Semaphore::new(MAX_SCRAPE_CONNECTIONS));
     loop {
         let Ok((stream, _peer)) = listener.accept().await else {
             tracing::warn!(
@@ -1134,19 +1130,26 @@ async fn serve_prometheus(listener: TcpListener, metrics: TelemetryMetrics) {
             );
             return;
         };
-        if timeout(
-            SCRAPE_CONNECTION_TIMEOUT,
-            serve_prometheus_connection(stream, &metrics),
-        )
-        .await
-        .is_err()
-        {
-            tracing::warn!(
-                target: TELEMETRY_INTERNAL_TARGET,
-                cause_code = "prometheus_scrape_timed_out",
-                "Prometheus scrape connection exceeded its time bound"
-            );
-        }
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            continue;
+        };
+        let metrics = metrics.clone();
+        let _connection = tokio::spawn(async move {
+            let _permit = permit;
+            if timeout(
+                SCRAPE_CONNECTION_TIMEOUT,
+                serve_prometheus_connection(stream, &metrics),
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    target: TELEMETRY_INTERNAL_TARGET,
+                    cause_code = "prometheus_scrape_timed_out",
+                    "Prometheus scrape connection exceeded its time bound"
+                );
+            }
+        });
     }
 }
 
@@ -1199,7 +1202,7 @@ fn http_response(status: &str, content_type: &str, body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, net::SocketAddr};
+    use std::{ffi::OsString, fmt, net::SocketAddr};
 
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::{
@@ -1221,6 +1224,14 @@ mod tests {
     const SYNTHETIC_CREDENTIAL: &str = "sk-synthetic-not-a-real-credential";
     const SYNTHETIC_CONTENT: &str =
         "synthetic prompt completion and tool arguments: delete_everything=true";
+
+    struct PanicOnDisplay;
+
+    impl fmt::Display for PanicOnDisplay {
+        fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            panic!("dependency trace field was evaluated")
+        }
+    }
 
     fn capture_spans(emit: impl FnOnce()) -> Vec<SpanData> {
         let exporter = InMemorySpanExporter::default();
@@ -1337,6 +1348,21 @@ mod tests {
     }
 
     #[test]
+    fn export_layer_rejects_dependency_trace_before_field_evaluation() {
+        let provider = SdkTracerProvider::builder().build();
+        let layer = TelemetryExportLayer::new(provider.tracer("signalboxd-test"));
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(
+                target: "sqlx::query",
+                detail = %PanicOnDisplay,
+                "dependency query trace"
+            );
+        });
+    }
+
+    #[test]
     fn session_span_exports_only_its_daemon_minted_identifier() {
         let spans = capture_spans(|| {
             let span = tracing::info_span!(
@@ -1414,6 +1440,31 @@ mod tests {
     }
 
     #[test]
+    fn debug_model_completion_remains_exportable() {
+        let spans = capture_spans(|| {
+            let span = tracing::info_span!(
+                target: "signalboxd::context_guard",
+                "turn_work",
+                session_id = %SESSION_ID,
+                turn_id = %TURN_ID,
+            );
+            let _guard = span.enter();
+            tracing::debug!(
+                target: "signalbox_model_provider_runtime",
+                cause_code = "completed",
+                session_id = %SESSION_ID,
+                turn_id = %TURN_ID,
+                model_call_id = %MODEL_CALL_ID,
+                "model call completed"
+            );
+        });
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].events.len(), 1);
+        assert_eq!(spans[0].events[0].name, "model call completed");
+    }
+
+    #[test]
     fn absent_endpoint_ignores_otlp_secondary_settings_and_builds_nothing() {
         let mut environment = disabled_environment();
         environment.protocol = Some(OsString::from("synthetic-invalid-protocol"));
@@ -1431,6 +1482,18 @@ mod tests {
                 .build_otlp_runtime()
                 .expect("disabled OTLP constructs no exporter")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn http_protobuf_appends_the_trace_signal_path_to_the_base() {
+        assert_eq!(
+            super::http_trace_endpoint("http://collector.invalid:4318"),
+            Ok("http://collector.invalid:4318/v1/traces".to_owned())
+        );
+        assert_eq!(
+            super::http_trace_endpoint("http://collector.invalid:4318/otel/"),
+            Ok("http://collector.invalid:4318/otel/v1/traces".to_owned())
         );
     }
 
@@ -1549,7 +1612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prometheus_serves_metrics_only_on_the_separate_http_listener() {
+    async fn prometheus_serves_a_scrape_while_an_idle_peer_is_connected() {
         let metrics = TelemetryMetrics::new().expect("static metric descriptors are valid");
         metrics.observe_turn_started();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1557,6 +1620,10 @@ mod tests {
             .expect("loopback listener binds");
         let address: SocketAddr = listener.local_addr().expect("listener has an address");
         let server = tokio::spawn(serve_prometheus(listener, metrics));
+        let _stalled = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("idle peer connects");
+        tokio::task::yield_now().await;
         let mut stream = tokio::net::TcpStream::connect(address)
             .await
             .expect("test client connects");
@@ -1570,10 +1637,13 @@ mod tests {
             .await
             .expect("test request tail writes");
         let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .await
-            .expect("test response reads");
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            stream.read_to_string(&mut response),
+        )
+        .await
+        .expect("idle peer does not block the scrape")
+        .expect("test response reads");
         server.abort();
 
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));

@@ -180,9 +180,10 @@ resolved. The daemon binds a distinct plaintext HTTP listener, never the process
 protocol socket. `GET /metrics` returns the registry, other paths return 404,
 and there is no authentication or TLS. Therefore every peer that can reach the
 configured address can read the metrics, and deployment network policy owns that
-reachability. One connection is served at a time, a request is bounded to 8 KiB,
-and a connection is abandoned after two seconds. A bind or accept failure
-disables or stops only metrics; it does not fail request handling.
+reachability. At most 16 connections are served concurrently; an excess
+connection is dropped immediately. Each request is bounded to 8 KiB, and a
+connection is abandoned after two seconds. A bind or accept failure disables or
+stops only metrics; it does not fail request handling.
 
 ```text
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
@@ -223,6 +224,9 @@ The complete OTLP record inventory is:
   application values. Source location, thread fields, target, level, tracked
   busy/idle time, links, and arbitrary error conversion are disabled. The fixed
   instrumentation scope name is `signalboxd`; it has no version or schema URL.
+  The export layer registers interest only in candidate Signalbox schemas at
+  `DEBUG` or above, so dependency trace callsites remain disabled and do not
+  evaluate their fields.
 - The sole resource attribute is `service.name`, admitted by the checked
   `SIGNALBOX_OTLP_SERVICE_NAME` grammar above and never derived from a
   credential, request, provider response, model content, or tool material. The
@@ -261,10 +265,12 @@ The complete OTLP record inventory is:
   `authorization_mismatch`, `observation_correlation_mismatch`,
   `unsupported_completion_material`, `invalid_assistant_text`,
   `invalid_tool_schema`, or `invalid_tool_proposal`. These are closed enum
-  projections, never error messages. The event message is the fixed event name
-  and is not repeated as an attribute. Any other event name, module target,
-  field set, malformed UUID, token value, or any `error` field is rejected
-  before the OpenTelemetry layer.
+  projections, never error messages. Admission parses the runtime-owned
+  `ModelCallCauseToken` vocabulary, and the exhaustive `ModelCallCauseCode`
+  projection makes a new cause require a deliberate compiler-checked token. The
+  event message is the fixed event name and is not repeated as an attribute. Any
+  other event name, module target, field set, malformed UUID, token value, or
+  any `error` field is rejected before the OpenTelemetry layer.
 
 Consequently no admitted dynamic value can be a credential, prompt, completion,
 or tool argument: dynamic event and span values are UUIDs or exhaustive enum
