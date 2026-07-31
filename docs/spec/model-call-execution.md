@@ -29,7 +29,9 @@ operation was verified through PR #286 (`agent/session-system-prompt`).
 Provider-reported token evidence retention and exact commit-ambiguity comparison
 were verified through PR #301 (`agent/token-usage`); the empty-thinking
 completion rule was verified through PR #305 (`agent/sonnet-streamed-tool-use`).
-The crate-shared commit-ambiguity helper home was verified against this PR
+Configured token-limit enforcement and the routed Anthropic/Codex production
+composition are verified through PR #373 (`agent/adapter-wiring`). The
+crate-shared commit-ambiguity helper home was verified against this PR
 (`agent/domain-cleanup`). The context-summary projection and dedicated
 compaction-call evidence were verified through PR #312
 (`agent/context-compaction-core`); the explicit trigger, pre-activation context

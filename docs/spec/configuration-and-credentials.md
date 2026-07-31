@@ -24,11 +24,13 @@ copy-on-create session-template catalog was verified through PR #311
 templates, and orchestration template digests are verified through PR #349
 (`agent/review-orchestrator-wiring`). The static web-fetch egress allowlist is
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
-export contract is verified through PR #347 (`agent/telemetry-export`).
-Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
-tag. The runner configuration and credential paragraphs are the foundation
-proposal at the bottom of their implementing stack and become verified only with
-those child pull requests.
+export contract is verified through PR #347 (`agent/telemetry-export`). The
+static model-to-adapter mapping and append-only session credential history are
+verified through PR #373 (`agent/adapter-wiring`). Invariant law lives in
+[docs/invariants.md](../invariants.md), cited here by tag. The runner
+configuration and credential paragraphs are the foundation proposal at the
+bottom of their implementing stack and become verified only with those child
+pull requests.
 
 ## Process configuration
 
