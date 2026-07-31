@@ -70,6 +70,7 @@ const MAX_REPOSITORY_BYTES: usize = 256;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 4 * 1024;
 const MAX_URL_BYTES: usize = 8 * 1024;
+const MIN_INLINE_COMMENT_LINE: u32 = 1;
 const MAX_INLINE_COMMENTS: usize = 50;
 const ERROR_TRUNCATION_SUFFIX: &str = " … [truncated]";
 const INVALID_ARGUMENTS_DETAIL: &str = "GitHub pull-request tool arguments are invalid";
@@ -425,6 +426,7 @@ pub struct InlineReviewComment {
     /// Repository-relative path.
     path: FilePath,
     /// Positive diff line.
+    #[schemars(range(min = MIN_INLINE_COMMENT_LINE))]
     line: u32,
     /// Diff side.
     side: DiffSide,
@@ -470,6 +472,7 @@ pub struct PublishReviewArguments {
     body: Option<BoundedText>,
     /// Optional inline comments.
     #[serde(default)]
+    #[schemars(length(max = MAX_INLINE_COMMENTS))]
     comments: Vec<InlineReviewComment>,
 }
 
@@ -511,7 +514,10 @@ impl PublishReviewArguments {
                 PublishReviewEvent::Comment => self.body.is_some(),
                 PublishReviewEvent::RequestChanges => self.body.is_some(),
             }
-            && self.comments.iter().all(|comment| comment.line > 0)
+            && self
+                .comments
+                .iter()
+                .all(|comment| comment.line >= MIN_INLINE_COMMENT_LINE)
     }
 }
 
@@ -2140,6 +2146,23 @@ mod tests {
     }
 
     #[test]
+    fn publish_schema_states_inline_comment_runtime_bounds() {
+        let catalog = catalog();
+        let publish = definition(&catalog, PULL_REQUEST_PUBLISH_REVIEW_NAME);
+        let schema: serde_json::Value =
+            serde_json::from_str(publish.input_schema().as_str()).expect("schema is valid JSON");
+
+        assert_eq!(
+            schema["properties"]["comments"]["maxItems"],
+            serde_json::json!(MAX_INLINE_COMMENTS)
+        );
+        assert_eq!(
+            schema["$defs"]["InlineReviewComment"]["properties"]["line"]["minimum"],
+            serde_json::json!(MIN_INLINE_COMMENT_LINE)
+        );
+    }
+
+    #[test]
     fn egress_policy_admits_only_the_exact_github_api_origin() {
         let policy = GitHubEgressPolicy::github_api_only();
         let api = Url::parse("https://api.github.com/repos/KeenWill/signalbox")
@@ -2172,7 +2195,7 @@ mod tests {
             "repository": "KeenWill/signalbox", "number": 1,
             "commit_id": HEAD_REVISION, "event": "comment",
             "comments": [{
-                "path": FILE_PATH, "line": 1, "side": "RIGHT", "body": REVIEW_COMMENT_BODY
+                "path": FILE_PATH, "line": 1, "side": "right", "body": REVIEW_COMMENT_BODY
             }]
         }));
         let approval = normalized(serde_json::json!({
