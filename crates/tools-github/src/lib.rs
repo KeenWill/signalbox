@@ -838,12 +838,41 @@ pub enum GitHubTransportFailure {
     EgressRejected,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GitHubTransportFailureClass {
+    InvalidCredential,
+    Rejected,
+    GraphQlRejected,
+    InvalidResponse,
+    ResponseTooLarge,
+    RevisionChanged,
+    PreDispatchInfrastructure,
+    DispatchUnknown,
+    EgressRejected,
+}
+
 impl GitHubTransportFailure {
     /// Constructs a detail-free rejection for synthetic transports.
     pub const fn rejected(status: u16) -> Self {
         Self::Rejected {
             status,
             detail: None,
+        }
+    }
+
+    const fn class(&self) -> GitHubTransportFailureClass {
+        match self {
+            Self::InvalidCredential => GitHubTransportFailureClass::InvalidCredential,
+            Self::Rejected { .. } => GitHubTransportFailureClass::Rejected,
+            Self::GraphQlRejected => GitHubTransportFailureClass::GraphQlRejected,
+            Self::InvalidResponse { .. } => GitHubTransportFailureClass::InvalidResponse,
+            Self::ResponseTooLarge => GitHubTransportFailureClass::ResponseTooLarge,
+            Self::RevisionChanged => GitHubTransportFailureClass::RevisionChanged,
+            Self::PreDispatchInfrastructure => {
+                GitHubTransportFailureClass::PreDispatchInfrastructure
+            }
+            Self::DispatchUnknown => GitHubTransportFailureClass::DispatchUnknown,
+            Self::EgressRejected => GitHubTransportFailureClass::EgressRejected,
         }
     }
 }
@@ -1112,6 +1141,8 @@ where
             }
         };
         let Some(scrubber) = CredentialScrubber::try_new(&credential) else {
+            let correlation = invocation.correlation();
+            report_credential_value_failure(&correlation);
             return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.credential_detail.clone()),
             }));
@@ -1303,6 +1334,8 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
         kind: ToolKind,
         failure: GitHubTransportFailure,
     ) -> Result<CorrelatedToolExecutorEvidence, GitHubExecutorError> {
+        let correlation = invocation.correlation();
+        report_transport_failure(&failure, &correlation);
         let detail = self.failure_detail(kind, &failure)?;
         Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
             detail: Some(detail),
@@ -1352,6 +1385,34 @@ fn report_credential_access_failure(
         session_id = %correlation.session().as_uuid(),
         turn_id = %correlation.turn().as_uuid(),
         "GitHub credential resolution failed"
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CredentialValueFailure {
+    Unusable,
+}
+
+fn report_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation) {
+    tracing::warn!(
+        target: "signalbox_tools_github",
+        failure = ?CredentialValueFailure::Unusable,
+        session_id = %correlation.session().as_uuid(),
+        turn_id = %correlation.turn().as_uuid(),
+        "GitHub credential value was unusable"
+    );
+}
+
+fn report_transport_failure(
+    failure: &GitHubTransportFailure,
+    correlation: &ToolAttemptDispatchCorrelation,
+) {
+    tracing::warn!(
+        target: "signalbox_tools_github",
+        failure = ?failure.class(),
+        session_id = %correlation.session().as_uuid(),
+        turn_id = %correlation.turn().as_uuid(),
+        "GitHub transport failed"
     );
 }
 
@@ -1971,7 +2032,9 @@ const fn classify_destination_failure(
     failure: PublicDestinationClientError,
 ) -> GitHubTransportFailure {
     match failure {
-        PublicDestinationClientError::DestinationRejected => GitHubTransportFailure::EgressRejected,
+        PublicDestinationClientError::DestinationRejected => {
+            GitHubTransportFailure::PreDispatchInfrastructure
+        }
         PublicDestinationClientError::Infrastructure => {
             GitHubTransportFailure::PreDispatchInfrastructure
         }
@@ -2268,7 +2331,7 @@ fn normalize_thread(
         "resolved": required_bool(object, "isResolved")?,
         "outdated": required_bool(object, "isOutdated")?,
         "path": checked_path(required_string(object, "path")?)?,
-        "line": optional_u64(object, "line")?,
+        "line": required_nullable_u64(object, "line")?,
         "comments": comments,
         "comments_truncated": nested_bool(comments_connection, &["pageInfo", "hasNextPage"])?,
     }))
@@ -2288,7 +2351,7 @@ fn normalize_comment(
     value: &serde_json::Value,
 ) -> Result<serde_json::Value, GitHubTransportFailure> {
     let object = required_object(value)?;
-    let author = optional_object_string(object, "author", "login")?
+    let author = required_nullable_object_string(object, "author", "login")?
         .map(|author| checked_text(author, TextPresence::Required))
         .transpose()?;
     Ok(serde_json::json!({
@@ -2448,13 +2511,13 @@ fn required_u64(
         .ok_or_else(|| invalid_response(None))
 }
 
-fn optional_u64(
+fn required_nullable_u64(
     object: &serde_json::Map<String, serde_json::Value>,
     field: &str,
 ) -> Result<Option<u64>, GitHubTransportFailure> {
-    match object.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => value
+    match required(object, field)? {
+        serde_json::Value::Null => Ok(None),
+        value => value
             .as_u64()
             .map(Some)
             .ok_or_else(|| invalid_response(None)),
@@ -2478,19 +2541,6 @@ fn required_nullable_object_string(
     match required(object, field)? {
         serde_json::Value::Null => Ok(None),
         value => required_object(value)
-            .and_then(|nested| required_string(nested, nested_field))
-            .map(Some),
-    }
-}
-
-fn optional_object_string(
-    object: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-    nested_field: &str,
-) -> Result<Option<String>, GitHubTransportFailure> {
-    match object.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => required_object(value)
             .and_then(|nested| required_string(nested, nested_field))
             .map(Some),
     }
@@ -2571,6 +2621,8 @@ mod tests {
     const CONTROLLED_OPAQUE_ID: &str = "PRRC_fixture\n";
     const OTHER_THREAD_ID: &str = "PRRT_fixture_other";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
+    const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
+    const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=InvalidResponse";
     const SESSION_IDENTITY: u128 = 1;
     const TURN_IDENTITY: u128 = 2;
     const ISSUING_ATTEMPT_IDENTITY: u128 = 3;
@@ -2646,6 +2698,35 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             report_credential_access_failure(error, correlation);
+        });
+        output.text()
+    }
+
+    fn capture_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation) -> String {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            report_credential_value_failure(correlation);
+        });
+        output.text()
+    }
+
+    fn capture_transport_failure(
+        failure: &GitHubTransportFailure,
+        correlation: &ToolAttemptDispatchCorrelation,
+    ) -> String {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            report_transport_failure(failure, correlation);
         });
         output.text()
     }
@@ -2740,6 +2821,34 @@ mod tests {
         assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
 
         assert!(diagnostic.contains(CREDENTIAL_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(SYNTHETIC_TOKEN));
+    }
+
+    #[test]
+    fn unusable_credential_value_diagnostic_preserves_safe_classification() {
+        let correlation = dispatch_correlation();
+
+        let diagnostic = capture_credential_value_failure(&correlation);
+
+        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(CREDENTIAL_VALUE_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(SYNTHETIC_TOKEN));
+    }
+
+    #[test]
+    fn transport_failure_diagnostic_preserves_safe_classification() {
+        let correlation = dispatch_correlation();
+        let failure = GitHubTransportFailure::InvalidResponse {
+            detail: Some(SanitizedGitHubError(PROVIDER_ERROR_TEXT.to_owned())),
+        };
+
+        let diagnostic = capture_transport_failure(&failure, &correlation);
+
+        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TRANSPORT_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(PROVIDER_ERROR_TEXT));
         assert!(!diagnostic.contains(SYNTHETIC_TOKEN));
     }
 
@@ -3256,6 +3365,31 @@ mod tests {
     }
 
     #[test]
+    fn fixed_host_destination_rejection_is_pre_dispatch_infrastructure() {
+        let failure =
+            classify_destination_failure(PublicDestinationClientError::DestinationRejected);
+        let executor = GitHubTools::try_new(
+            SyntheticCredentials,
+            SyntheticTransport,
+            GitHubEgressPolicy::github_api_only(),
+        )
+        .expect("static declarations compile")
+        .into_parts()
+        .1;
+        let error = executor
+            .failure_detail(ToolKind::PublishReview, &failure)
+            .expect_err("fixed-host admission failure is surfaced to the operator");
+
+        assert_eq!(failure, GitHubTransportFailure::PreDispatchInfrastructure);
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+    }
+
+    #[test]
     fn provider_status_distinguishes_rejection_from_infrastructure() {
         let client_status =
             StatusCode::from_u16(CLIENT_ERROR_STATUS).expect("fixture status is valid");
@@ -3398,6 +3532,52 @@ mod tests {
         assert_eq!(
             parsed["threads"][0]["comments"][0]["body"],
             REVIEW_COMMENT_BODY
+        );
+    }
+
+    #[test]
+    fn graphql_requires_nullable_thread_line_to_be_present() {
+        let mut response = threads_response();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]
+            .as_object_mut()
+            .expect("thread fixture is an object")
+            .remove("line")
+            .expect("thread fixture contains line");
+
+        assert_eq!(normalize_threads(&response), Err(invalid_response(None)));
+    }
+
+    #[test]
+    fn graphql_requires_nullable_comment_author_to_be_present() {
+        let mut response = threads_response();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]
+            ["nodes"][0]
+            .as_object_mut()
+            .expect("comment fixture is an object")
+            .remove("author")
+            .expect("comment fixture contains author");
+
+        assert_eq!(normalize_threads(&response), Err(invalid_response(None)));
+    }
+
+    #[test]
+    fn graphql_accepts_present_null_thread_line_and_comment_author() {
+        let mut response = threads_response();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["line"] =
+            serde_json::Value::Null;
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"]
+            [0]["author"] = serde_json::Value::Null;
+
+        let parsed = normalize_threads(&response).expect("nullable members are admitted");
+
+        assert_eq!(
+            parsed["threads"][0]["line"],
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["line"]
+        );
+        assert_eq!(
+            parsed["threads"][0]["comments"][0]["author"],
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]
+                ["nodes"][0]["author"]
         );
     }
 
