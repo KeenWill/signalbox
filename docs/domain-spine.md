@@ -5400,6 +5400,7 @@ pub enum ReviewOrchestrationOutcome {
 pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
     Store(StoreError),
     InvalidImportEvidence(ReviewImportEvidenceFailure),
+    InvalidConcernEvidence(ReviewFanoutBarrierFailure),
     Runner(RunnerError),
     ConcernTaskTerminated,
     DurableConflict,

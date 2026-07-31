@@ -790,6 +790,124 @@ fn validate_concern_claim_keys(
     Ok(())
 }
 
+fn validate_concern_claim_for_seal(
+    attempt: &ReviewOrchestrationAttempt,
+    claim: &ReviewConcernClaim,
+    admitted: &[ReviewConcernClaim],
+) -> Result<(), ReviewFanoutBarrierFailure> {
+    let Some(expected_member) = attempt
+        .concerns
+        .iter()
+        .find(|member| member.key == claim.concern)
+    else {
+        return Err(ReviewFanoutBarrierFailure::ExtraConcern {
+            concern: claim.concern.clone(),
+        });
+    };
+    if claim.template_digest != expected_member.template_digest {
+        return Err(ReviewFanoutBarrierFailure::TemplateMismatch {
+            concern: expected_member.key.clone(),
+        });
+    }
+
+    let incomplete_pass = match &claim.outcome {
+        ReviewConcernOutcome::Failed { pass }
+        | ReviewConcernOutcome::Blocked { pass }
+        | ReviewConcernOutcome::Superseded { pass } => Some(*pass),
+        ReviewConcernOutcome::Cancelled { pass } => *pass,
+        ReviewConcernOutcome::Succeeded(success) => {
+            let producer = success.producer.reference();
+            if producer.target() != attempt.target {
+                return Err(ReviewFanoutBarrierFailure::ForeignProducerTarget {
+                    concern: expected_member.key.clone(),
+                });
+            }
+            if success.producer.policy() != attempt.policy || success.run.policy() != attempt.policy
+            {
+                return Err(ReviewFanoutBarrierFailure::ForeignProducerPolicy {
+                    concern: expected_member.key.clone(),
+                });
+            }
+            if success.template_digest != expected_member.template_digest {
+                return Err(ReviewFanoutBarrierFailure::ForeignProducerTemplate {
+                    concern: expected_member.key.clone(),
+                });
+            }
+            let sealed_inventory = match success.producer.state() {
+                ReviewPassState::Succeeded {
+                    result: Some(ReviewPassResult::ProducedFindings(inventory)),
+                    ..
+                } if success.producer.kind() == ReviewPassKind::ReadOnlyReview
+                    && success.run.reference() == producer.run()
+                    && success.run.workflow() == ReviewWorkflowKind::ReadOnlyReview
+                    && success.run.state()
+                        == (ReviewRunState::Succeeded {
+                            concluding_pass: producer,
+                        }) =>
+                {
+                    inventory.findings()
+                }
+                _ => {
+                    return Err(ReviewFanoutBarrierFailure::MemberIncomplete {
+                        concern: expected_member.key.clone(),
+                    });
+                }
+            };
+            let claimed_inventory: Vec<_> = success
+                .findings
+                .iter()
+                .map(|finding| finding.proposal().reference())
+                .collect();
+            if claimed_inventory != sealed_inventory {
+                let finding = claimed_inventory
+                    .first()
+                    .copied()
+                    .or_else(|| sealed_inventory.first().copied())
+                    .unwrap_or_else(|| {
+                        ReviewFindingRef::new(producer, ReviewFindingId::from_uuid(Uuid::nil()))
+                    });
+                return Err(ReviewFanoutBarrierFailure::InvalidSealedFinding {
+                    concern: expected_member.key.clone(),
+                    finding,
+                });
+            }
+            let mut previous = None;
+            for finding in &success.findings {
+                let reference = finding.proposal().reference();
+                if reference.pass() != producer
+                    || finding.proposal().producing_pass() != &success.producer
+                    || finding.status() != ReviewFindingStatus::Open
+                    || previous.is_some_and(|prior| prior >= reference)
+                {
+                    return Err(ReviewFanoutBarrierFailure::InvalidSealedFinding {
+                        concern: expected_member.key.clone(),
+                        finding: reference,
+                    });
+                }
+                if admitted.iter().any(|prior| {
+                    matches!(
+                        &prior.outcome,
+                        ReviewConcernOutcome::Succeeded(success)
+                            if success.findings.iter().any(|finding| {
+                                finding.proposal().reference() == reference
+                            })
+                    )
+                }) {
+                    return Err(ReviewFanoutBarrierFailure::RepeatedFinding { finding: reference });
+                }
+                previous = Some(reference);
+            }
+            None
+        }
+    };
+    if incomplete_pass.is_some_and(|pass| pass.target() != attempt.target) {
+        return Err(ReviewFanoutBarrierFailure::ForeignProducerTarget {
+            concern: expected_member.key.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn complete_fanout(
     attempt: &ReviewOrchestrationAttempt,
     claims: Vec<ReviewConcernClaim>,
@@ -802,96 +920,19 @@ fn complete_fanout(
 
     let mut members = Vec::with_capacity(attempt.concerns.len());
     let mut findings = Vec::new();
-    let mut finding_ids = BTreeSet::new();
     for expected_member in &attempt.concerns {
         let Some(claim) = current.remove(&expected_member.key) else {
             return Err(ReviewFanoutBarrierFailure::MissingConcern {
                 concern: expected_member.key.clone(),
             });
         };
-        if claim.template_digest != expected_member.template_digest {
-            return Err(ReviewFanoutBarrierFailure::TemplateMismatch {
-                concern: expected_member.key.clone(),
-            });
-        }
+        validate_concern_claim_for_seal(attempt, &claim, &members)?;
         let ReviewConcernOutcome::Succeeded(success) = &claim.outcome else {
             return Err(ReviewFanoutBarrierFailure::MemberIncomplete {
                 concern: expected_member.key.clone(),
             });
         };
-        let producer = success.producer.reference();
-        if producer.target() != attempt.target {
-            return Err(ReviewFanoutBarrierFailure::ForeignProducerTarget {
-                concern: expected_member.key.clone(),
-            });
-        }
-        if success.producer.policy() != attempt.policy || success.run.policy() != attempt.policy {
-            return Err(ReviewFanoutBarrierFailure::ForeignProducerPolicy {
-                concern: expected_member.key.clone(),
-            });
-        }
-        if success.template_digest != expected_member.template_digest {
-            return Err(ReviewFanoutBarrierFailure::ForeignProducerTemplate {
-                concern: expected_member.key.clone(),
-            });
-        }
-        let sealed_inventory = match success.producer.state() {
-            ReviewPassState::Succeeded {
-                result: Some(ReviewPassResult::ProducedFindings(inventory)),
-                ..
-            } if success.producer.kind() == ReviewPassKind::ReadOnlyReview
-                && success.run.reference() == producer.run()
-                && success.run.workflow() == ReviewWorkflowKind::ReadOnlyReview
-                && success.run.state()
-                    == (ReviewRunState::Succeeded {
-                        concluding_pass: producer,
-                    }) =>
-            {
-                inventory.findings()
-            }
-            _ => {
-                return Err(ReviewFanoutBarrierFailure::MemberIncomplete {
-                    concern: expected_member.key.clone(),
-                });
-            }
-        };
-        let claimed_inventory: Vec<_> = success
-            .findings
-            .iter()
-            .map(|finding| finding.proposal().reference())
-            .collect();
-        if claimed_inventory != sealed_inventory {
-            let finding = claimed_inventory
-                .first()
-                .copied()
-                .or_else(|| sealed_inventory.first().copied())
-                .unwrap_or_else(|| {
-                    ReviewFindingRef::new(producer, ReviewFindingId::from_uuid(Uuid::nil()))
-                });
-            return Err(ReviewFanoutBarrierFailure::InvalidSealedFinding {
-                concern: expected_member.key.clone(),
-                finding,
-            });
-        }
-        let mut previous = None;
-        for finding in &success.findings {
-            let reference = finding.proposal().reference();
-            if reference.pass() != producer
-                || finding.proposal().producing_pass() != &success.producer
-                || finding.status() != ReviewFindingStatus::Open
-                || previous.is_some_and(|prior| prior >= reference)
-            {
-                return Err(ReviewFanoutBarrierFailure::InvalidSealedFinding {
-                    concern: expected_member.key.clone(),
-                    finding: reference,
-                });
-            }
-            if !finding_ids.insert(reference) {
-                return Err(ReviewFanoutBarrierFailure::RepeatedFinding { finding: reference });
-            }
-            previous = Some(reference);
-            findings.push(finding.clone());
-        }
+        findings.extend(success.findings.iter().cloned());
         members.push(claim);
     }
     findings.sort_unstable_by_key(|finding| finding.proposal().reference());
@@ -2018,6 +2059,7 @@ pub enum ReviewOrchestrationOutcome {
 pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
     Store(StoreError),
     InvalidImportEvidence(ReviewImportEvidenceFailure),
+    InvalidConcernEvidence(ReviewFanoutBarrierFailure),
     Runner(RunnerError),
     ConcernTaskTerminated,
     DurableConflict,
@@ -2033,6 +2075,9 @@ impl<StoreError, RunnerError> Display for ReviewOrchestrationServiceError<StoreE
             Self::Store(_) => formatter.write_str("review orchestration store failed"),
             Self::InvalidImportEvidence(error) => {
                 write!(formatter, "review import evidence is invalid: {error}")
+            }
+            Self::InvalidConcernEvidence(error) => {
+                write!(formatter, "review concern evidence is invalid: {error}")
             }
             Self::Runner(_) => formatter.write_str("review orchestration pass runner failed"),
             Self::ConcernTaskTerminated => formatter.write_str("review concern task terminated"),
@@ -2065,6 +2110,7 @@ where
         match self {
             Self::Store(error) => Some(error),
             Self::InvalidImportEvidence(error) => Some(error),
+            Self::InvalidConcernEvidence(error) => Some(error),
             Self::Runner(error) => Some(error),
             Self::InvalidJudgmentPlan(error) => Some(error),
             Self::InvalidJudgmentEffectEvidence(error) => Some(error),
@@ -2153,6 +2199,7 @@ where
             Ok(members) => members,
             Err(failure) => return Ok(ReviewOrchestrationOutcome::FanoutIncomplete(failure)),
         };
+        let mut admitted_claims = existing;
         let mut tasks = JoinSet::new();
         for concern in members_to_run {
             let runner = Arc::clone(&self.runner);
@@ -2180,12 +2227,20 @@ where
                     ReviewOrchestrationServiceError::Runner(error),
                 ),
                 Ok((concern, template_digest, Ok(outcome))) => {
+                    let claim = ReviewConcernClaim::new(concern, template_digest, outcome);
+                    admitted_claims.retain(|current| current.concern != claim.concern);
+                    if let Err(error) =
+                        validate_concern_claim_for_seal(&attempt, &claim, &admitted_claims)
+                    {
+                        retain_concern_error(
+                            &mut first_concern_error,
+                            ReviewOrchestrationServiceError::InvalidConcernEvidence(error),
+                        );
+                        continue;
+                    }
                     let seal = self
                         .store
-                        .record_concern_claim(
-                            attempt.id,
-                            ReviewConcernClaim::new(concern, template_digest, outcome),
-                        )
+                        .record_concern_claim(attempt.id, claim.clone())
                         .await;
                     match seal {
                         Err(error) => retain_concern_error(
@@ -2199,7 +2254,7 @@ where
                         Ok(
                             ReviewDurableSealOutcome::Recorded
                             | ReviewDurableSealOutcome::EqualReplay,
-                        ) => {}
+                        ) => admitted_claims.push(claim),
                     }
                 }
             }
@@ -2460,6 +2515,7 @@ mod tests {
         Partial,
         Complete,
         ConcernRunnerError,
+        ForeignConcernTarget,
     }
 
     #[test]
@@ -2564,8 +2620,13 @@ mod tests {
                 } else {
                     30
                 };
+                let producer_target = if mode == RunnerMode::ForeignConcernTarget {
+                    ReviewTargetId::from_uuid(Uuid::from_u128(999))
+                } else {
+                    work.attempt.target
+                };
                 let (pass, run) = succeeded_evidence(
-                    work.attempt.target,
+                    producer_target,
                     work.attempt.policy,
                     seed,
                     ReviewPassKind::ReadOnlyReview,
@@ -3857,6 +3918,29 @@ mod tests {
             service.store.claims[0].concern(),
             &expected_recorded_concern
         );
+    }
+
+    #[tokio::test]
+    async fn incompatible_concern_evidence_is_rejected_before_durable_seal() {
+        let attempt_recorded = Arc::new(AtomicBool::new(false));
+        let runner = FakeRunner::new(
+            RunnerMode::ForeignConcernTarget,
+            Arc::clone(&attempt_recorded),
+        );
+        let mut service = ReviewOrchestrationService::new(FakeStore::new(attempt_recorded), runner);
+
+        let error = service
+            .execute(attempt())
+            .await
+            .expect_err("foreign concern evidence must fail before sealing");
+
+        assert!(matches!(
+            error,
+            ReviewOrchestrationServiceError::InvalidConcernEvidence(
+                ReviewFanoutBarrierFailure::ForeignProducerTarget { .. }
+            )
+        ));
+        assert!(service.store.claims.is_empty());
     }
 
     #[tokio::test]

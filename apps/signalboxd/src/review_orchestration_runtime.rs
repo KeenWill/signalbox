@@ -1536,6 +1536,7 @@ fn map_service_error(
             ReviewOrchestrationRuntimeError::Rejected
         }
         ReviewOrchestrationServiceError::InvalidImportEvidence(_)
+        | ReviewOrchestrationServiceError::InvalidConcernEvidence(_)
         | ReviewOrchestrationServiceError::InvalidJudgmentPlan(_)
         | ReviewOrchestrationServiceError::InvalidJudgmentEffectEvidence(_)
         | ReviewOrchestrationServiceError::InvalidTerminalBarrier(_) => {
