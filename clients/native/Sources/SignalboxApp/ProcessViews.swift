@@ -8,6 +8,9 @@ import SwiftUI
   import SignalboxModels
 #endif
 
+private let importedContinuationInProgressMessage =
+  "An imported conversation continuation is already in progress."
+
 @MainActor
 final class ProcessSessionListViewModel: ObservableObject {
   @Published private(set) var conversations: [SignalboxProcessConversation] = []
@@ -680,7 +683,12 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     relationship: SignalboxImportedSessionRelationship,
     aliasID: SignalboxCanonicalUUID
   ) async throws -> SignalboxCanonicalUUID {
-    guard let service = serviceProvider(), !isContinuing else {
+    guard !isContinuing else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        importedContinuationInProgressMessage
+      )
+    }
+    guard let service = serviceProvider() else {
       errorMessage = remoteTransportGateMessage
       throw SignalboxProcessServiceError.unexpectedMessage(remoteTransportGateMessage)
     }
