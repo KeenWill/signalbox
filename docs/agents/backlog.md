@@ -827,3 +827,73 @@ prototype from the owner — implemented and unit-tested, never production-smoke
 Owns: new SDK crate/package. Collides-with: nothing. Typed identities held at
 the SDK boundary — untyped-identity erosion characteristically starts exactly
 there.
+
+## Remote runner credential separation [blocked-on: remote runner transport] [size: M]
+
+Owns: remote runner authentication configuration and verification.
+Collides-with: runner transport and enrollment. Give runners a dedicated secret
+type and configuration channel, compare it in constant time, and reject fallback
+to client or provider credentials.
+
+Provenance: distilled from the owner's private `KeenWill/mono` repository,
+`projects/llm_hub/FOLLOWUPS.md`.
+
+## Remote runner admission policy [blocked-on: remote runner transport] [size: S-M]
+
+Owns: enrollment issuance and remote admission policy. Collides-with: runner
+authentication. Require explicit daemon-side authority for each admitted runner
+identity or capability class; possession of another valid platform credential
+must never permit runner self-enrollment.
+
+Provenance: distilled from the owner's private `KeenWill/mono` repository,
+`projects/llm_hub/FOLLOWUPS.md`.
+
+## Runner selection client flow [blocked-on: executable runner stack] [size: M]
+
+Owns: runner summaries, session-creation placement fields, and terminal-client
+selection. Collides-with: process-protocol and client session creation. Expose
+only live eligible identities and capability classes, then submit the selected
+typed placement with session creation.
+
+Provenance: distilled from the owner's private `KeenWill/mono` repository,
+`projects/llm_hub/FOLLOWUPS.md`.
+
+## Runner fleet projection [blocked-on: multi-runner enrollment; monitor stream] [size: M]
+
+Owns: runner health/read projections and monitor presentation. Collides-with:
+runner connection state and monitor protocol. Project connection recency,
+availability, advertised tools, and effective permission posture from durable
+daemon facts.
+
+Provenance: distilled from the owner's private `KeenWill/mono` repository,
+`projects/llm_hub/FOLLOWUPS.md`.
+
+## Runner capability-class visibility [blocked-on: runner fleet projection] [size: S]
+
+Owns: picker, fleet, and pinned-session presentation of capability classes.
+Collides-with: runner client projections. Preserve the typed
+`RunnerCapabilityClass` through every read model and render it wherever a user
+chooses or diagnoses placement.
+
+Provenance: distilled from the owner's private `KeenWill/mono` repository,
+`projects/llm_hub/FOLLOWUPS.md`.
+
+## Role-specific process identities [ready] [size: M]
+
+Owns: process-protocol identity wrappers and terminal-client state.
+Collides-with: process-protocol and client stacks. Replace role-erasing
+`CanonicalUuid` fields and client state with nominal session, turn, entry, and
+tool-request wire types while preserving their canonical UUID encoding.
+
+Provenance: distilled from the owner's private `KeenWill/mono` repository,
+`projects/llm_hub/FOLLOWUPS.md`.
+
+## External integration process locus [blocked-on: integration-host design pass] [size: L]
+
+Owns: an out-of-process integration host and its tool locus. Collides-with: tool
+placement and the deferred MCP pass. Define the isolation, lifecycle, and
+failure contract before browser automation or service integrations can be loaded
+into either `signalboxd` or a workspace runner.
+
+Provenance: distilled from the owner's private `KeenWill/mono` repository,
+`projects/llm_hub/FOLLOWUPS.md`.
