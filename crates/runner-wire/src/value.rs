@@ -440,12 +440,48 @@ pub enum TerminalResult {
     Ambiguous,
 }
 
+struct UniqueObject(serde_json::Map<String, serde_json::Value>);
+
+impl<'de> Deserialize<'de> for UniqueObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct UniqueObjectVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for UniqueObjectVisitor {
+            type Value = UniqueObject;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an object with unique member names")
+            }
+
+            fn visit_map<A>(self, mut entries: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut object = serde_json::Map::new();
+                while let Some((key, value)) = entries.next_entry()? {
+                    if object.insert(key, value).is_some() {
+                        return Err(serde::de::Error::custom(
+                            "terminal result contains a duplicate member",
+                        ));
+                    }
+                }
+                Ok(UniqueObject(object))
+            }
+        }
+
+        deserializer.deserialize_map(UniqueObjectVisitor)
+    }
+}
+
 impl<'de> Deserialize<'de> for TerminalResult {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let mut object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let mut object = UniqueObject::deserialize(deserializer)?.0;
         let kind = object
             .remove("kind")
             .and_then(|value| value.as_str().map(str::to_owned))

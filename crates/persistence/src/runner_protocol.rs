@@ -1770,6 +1770,7 @@ async fn insert_placement_record(
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
              workspace_working_directory, workspace_manifest_id,
+             workspace_placement_revision,
              workspace_clone_url_digest, workspace_credential_profile_name,
              workspace_sandbox_profile, workspace_relative_path,
              workspace_recovery_kind, workspace_branch_name, workspace_revision,
@@ -1779,7 +1780,7 @@ async fn insert_placement_record(
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
              $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
              $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-             $32, $33, $34
+             $32, $33, $34, $35
          )",
     )
     .bind(placement.session().into_uuid())
@@ -1811,6 +1812,7 @@ async fn insert_placement_record(
     .bind(state.workspace_repository)
     .bind(state.workspace_directory)
     .bind(state.workspace_manifest)
+    .bind(state.workspace_placement_revision)
     .bind(state.workspace_clone_url_digest)
     .bind(state.workspace_credential_profile)
     .bind(state.workspace_sandbox)
@@ -1872,6 +1874,7 @@ async fn insert_grant_if_new(
     let registration = authority.stored;
     let catalog = authority.catalog;
     let historical_registration;
+    let mut tombstone_policy_event = None;
     let tombstone = matches!(
         placement.state(),
         SessionRunnerPlacementState::Pinned(pinned)
@@ -1888,7 +1891,8 @@ async fn insert_grant_if_new(
             .filter(|revision| *revision > 0)
             .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
         let row = sqlx::query(
-            "SELECT registration_enrollment_id, registration_revision
+            "SELECT registration_enrollment_id, registration_revision,
+                    placement_event_ordinal
                FROM runner_credential_grant
               WHERE session_id = $1
                 AND lineage_origin_event_ordinal = $2
@@ -1902,6 +1906,7 @@ async fn insert_grant_if_new(
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+        tombstone_policy_event = Some(row.decode_column::<Decimal>("placement_event_ordinal")?);
         historical_registration = load_registration_in(
             transaction.as_mut(),
             runner_enrollment_id(row.decode_column("registration_enrollment_id")?),
@@ -1914,14 +1919,15 @@ async fn insert_grant_if_new(
         &historical_registration
     };
     let (grant_sandbox, grant_permission_overrides) = if tombstone {
-        let prior = prior_placement.ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let policy_event =
+            tombstone_policy_event.ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
         let prior_record = sqlx::query(
             "SELECT *
                FROM runner_session_placement_record
               WHERE session_id = $1 AND event_ordinal = $2",
         )
         .bind(placement.session().into_uuid())
-        .bind(prior.decode_column::<Decimal>("event_ordinal")?)
+        .bind(policy_event)
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
@@ -2246,7 +2252,7 @@ async fn decode_placement(
             .map(working_directory)
             .transpose()?
             .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-        let workspace = decode_provisioned_workspace(row, session, placement_revision, runner)?;
+        let workspace = decode_provisioned_workspace(row, session, runner)?;
         let pinned = PinnedRunnerPlacement {
             runner,
             working_directory: directory,
@@ -2284,12 +2290,13 @@ async fn decode_placement(
 fn decode_provisioned_workspace(
     row: &PgRow,
     session: SessionId,
-    placement_revision: RunnerGeneration,
     runner: RunnerId,
 ) -> Result<Option<ProvisionedWorkspace>, RunnerProtocolStoreError> {
     let repository = row.decode_column::<Option<String>>("workspace_repository_key")?;
     let directory = row.decode_column::<Option<String>>("workspace_working_directory")?;
     let manifest = row.decode_column::<Option<Uuid>>("workspace_manifest_id")?;
+    let placement_revision =
+        row.decode_column::<Option<Decimal>>("workspace_placement_revision")?;
     let clone_url_digest = row.decode_column::<Option<String>>("workspace_clone_url_digest")?;
     let credential_profile =
         row.decode_column::<Option<String>>("workspace_credential_profile_name")?;
@@ -2301,6 +2308,7 @@ fn decode_provisioned_workspace(
     let any_present = repository.is_some()
         || directory.is_some()
         || manifest.is_some()
+        || placement_revision.is_some()
         || clone_url_digest.is_some()
         || credential_profile.is_some()
         || sandbox.is_some()
@@ -2326,7 +2334,9 @@ fn decode_provisioned_workspace(
     };
     Ok(Some(ProvisionedWorkspace {
         session,
-        placement_revision,
+        placement_revision: decode_generation(
+            placement_revision.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+        )?,
         runner,
         repository: repository.map(repository_key).transpose()?,
         canonical_clone_url_digest: clone_url_digest
@@ -2937,6 +2947,7 @@ struct EncodedPlacementState<'a> {
     workspace_repository: Option<&'a str>,
     workspace_directory: Option<&'a str>,
     workspace_manifest: Option<Uuid>,
+    workspace_placement_revision: Option<Decimal>,
     workspace_clone_url_digest: Option<&'a str>,
     workspace_credential_profile: Option<&'a str>,
     workspace_sandbox: Option<&'static str>,
@@ -2960,6 +2971,7 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
                 workspace_repository: None,
                 workspace_directory: None,
                 workspace_manifest: None,
+                workspace_placement_revision: None,
                 workspace_clone_url_digest: None,
                 workspace_credential_profile: None,
                 workspace_sandbox: None,
@@ -2993,6 +3005,8 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
             .map(WorkspaceRepositoryKey::as_str),
         workspace_directory: workspace.map(|workspace| workspace.working_directory.as_str()),
         workspace_manifest: workspace.map(|workspace| workspace.manifest_id.into_uuid()),
+        workspace_placement_revision: workspace
+            .map(|workspace| Decimal::from(workspace.placement_revision.get())),
         workspace_clone_url_digest: workspace
             .and_then(|workspace| workspace.canonical_clone_url_digest.as_ref())
             .map(CanonicalCloneUrlDigest::as_str),

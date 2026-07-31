@@ -164,6 +164,7 @@ ALTER TABLE runner_session_placement_record
         DEFAULT 'ambient',
     ADD COLUMN permission_override_count numeric(20, 0) NOT NULL DEFAULT 0,
     ADD COLUMN workspace_manifest_id uuid,
+    ADD COLUMN workspace_placement_revision numeric(20, 0),
     ADD COLUMN workspace_clone_url_digest text,
     ADD COLUMN workspace_credential_profile_name runner_catalog_name,
     ADD COLUMN workspace_sandbox_profile text,
@@ -179,6 +180,10 @@ ALTER TABLE runner_session_placement_record
     ADD CONSTRAINT runner_session_placement_wire_u64
         CHECK (
             permission_override_count BETWEEN 0 AND 64
+            AND (
+                workspace_placement_revision IS NULL
+                OR workspace_placement_revision BETWEEN 1 AND 18446744073709551615
+            )
         ),
     ADD CONSTRAINT runner_session_placement_sandbox_closed
         CHECK (
@@ -244,6 +249,7 @@ ALTER TABLE runner_session_placement_record
                 AND workspace_repository_key IS NULL
                 AND workspace_working_directory IS NULL
                 AND workspace_manifest_id IS NULL
+                AND workspace_placement_revision IS NULL
                 AND workspace_clone_url_digest IS NULL
                 AND workspace_credential_profile_name IS NULL
                 AND workspace_sandbox_profile IS NULL
@@ -261,6 +267,7 @@ ALTER TABLE runner_session_placement_record
                         workspace_repository_key IS NULL
                         AND workspace_working_directory IS NULL
                         AND workspace_manifest_id IS NULL
+                        AND workspace_placement_revision IS NULL
                         AND workspace_clone_url_digest IS NULL
                         AND workspace_credential_profile_name IS NULL
                         AND workspace_sandbox_profile IS NULL
@@ -279,6 +286,7 @@ ALTER TABLE runner_session_placement_record
                         AND workspace_repository_key IS NULL
                         AND workspace_working_directory = pinned_working_directory
                         AND workspace_manifest_id IS NOT NULL
+                        AND workspace_placement_revision IS NOT NULL
                         AND workspace_clone_url_digest IS NULL
                         AND workspace_credential_profile_name IS NULL
                         AND workspace_sandbox_profile = requested_sandbox_profile
@@ -296,6 +304,7 @@ ALTER TABLE runner_session_placement_record
                 AND workspace_repository_key = requested_repository_key
                 AND workspace_working_directory = pinned_working_directory
                 AND workspace_manifest_id IS NOT NULL
+                AND workspace_placement_revision IS NOT NULL
                 AND workspace_clone_url_digest IS NOT NULL
                 AND workspace_credential_profile_name IS NOT DISTINCT FROM
                     requested_credential_profile_name
@@ -381,6 +390,7 @@ BEGIN
     IF NEW.event_kind IN ('runner_lost', 'profile_replaced')
        AND ROW(
             NEW.workspace_manifest_id,
+            NEW.workspace_placement_revision,
             NEW.workspace_clone_url_digest,
             NEW.workspace_credential_profile_name,
             NEW.workspace_sandbox_profile,
@@ -390,6 +400,7 @@ BEGIN
             NEW.workspace_revision
        ) IS DISTINCT FROM ROW(
             prior.workspace_manifest_id,
+            prior.workspace_placement_revision,
             prior.workspace_clone_url_digest,
             prior.workspace_credential_profile_name,
             prior.workspace_sandbox_profile,
@@ -421,7 +432,6 @@ AS $function$
 DECLARE
     placement runner_session_placement_record%ROWTYPE;
     actual_overrides bigint;
-    invalid_overrides bigint;
     changed_overrides bigint;
 BEGIN
     SELECT * INTO placement
@@ -431,22 +441,12 @@ BEGIN
     IF NOT FOUND THEN
         RETURN;
     END IF;
+    -- Catalog authority remains outside stored registration rows; adapter
+    -- store and load paths validate each name against RunnerCatalog.
     SELECT count(*) INTO actual_overrides
       FROM runner_session_placement_permission_override
      WHERE session_id = checked_session
        AND event_ordinal = checked_event;
-    SELECT count(*) INTO invalid_overrides
-      FROM runner_session_placement_permission_override AS override_record
-     WHERE override_record.session_id = checked_session
-       AND override_record.event_ordinal = checked_event
-       AND placement.state_kind <> 'unpinned'
-       AND NOT EXISTS (
-            SELECT 1
-              FROM runner_registration_tool AS available
-             WHERE available.enrollment_id = placement.registration_enrollment_id
-               AND available.registration_revision = placement.registration_revision
-               AND available.tool_name = override_record.tool_name
-       );
     changed_overrides := 0;
     IF placement.event_ordinal > 1
        AND placement.event_kind IN ('pinned', 'runner_lost', 'profile_replaced')
@@ -479,7 +479,6 @@ BEGIN
           ) AS changed;
     END IF;
     IF placement.permission_override_count <> actual_overrides
-       OR invalid_overrides <> 0
        OR changed_overrides <> 0
     THEN
         RAISE EXCEPTION 'runner placement permission inventory is incomplete'

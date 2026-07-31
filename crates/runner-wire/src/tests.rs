@@ -339,6 +339,28 @@ fn decoder_rejects_terminal_union_member_from_another_arm() {
 }
 
 #[test]
+fn decoder_rejects_duplicate_terminal_result_kind() {
+    let encoded = format!(
+        "{{\"version\":1,\"kind\":\"result\",\"payload\":{{\"correlation\":{},\"result\":{{\"kind\":\"success\",\"kind\":\"success\",\"text\":\"ok\"}}}}}}\n",
+        serde_json::to_string(&lease_correlation())
+            .unwrap_or_else(|error| panic!("lease correlation serializes: {error}"))
+    );
+
+    assert!(decode_line(encoded.as_bytes()).is_err());
+}
+
+#[test]
+fn decoder_rejects_duplicate_terminal_result_member() {
+    let encoded = format!(
+        "{{\"version\":1,\"kind\":\"result\",\"payload\":{{\"correlation\":{},\"result\":{{\"kind\":\"success\",\"text\":\"first\",\"text\":\"second\"}}}}}}\n",
+        serde_json::to_string(&lease_correlation())
+            .unwrap_or_else(|error| panic!("lease correlation serializes: {error}"))
+    );
+
+    assert!(decode_line(encoded.as_bytes()).is_err());
+}
+
+#[test]
 fn advertisement_rejects_unsorted_inventory() {
     let mut invalid = advertisement();
     invalid.tools = vec![tool("zeta"), tool("alpha")];

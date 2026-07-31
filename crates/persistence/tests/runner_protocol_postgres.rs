@@ -170,6 +170,14 @@ fn permission_overrides(permission: RunnerToolPermissionOverride) -> RunnerToolP
         .expect("the exact permission override fixture is valid")
 }
 
+fn daemon_fallback_permission_overrides() -> RunnerToolPermissionOverrides {
+    RunnerToolPermissionOverrides::try_new([(
+        tool("daemon_fallback"),
+        RunnerToolPermissionOverride::Confirm,
+    )])
+    .expect("the omitted combined-tool override fixture is valid")
+}
+
 fn repository_key() -> WorkspaceRepositoryKey {
     WorkspaceRepositoryKey::try_new("signalbox".to_owned())
         .expect("the fixture repository key is valid")
@@ -489,6 +497,15 @@ fn catalog() -> RunnerCatalog {
             selector: RunnerSelector::CapabilityClass(class()),
         },
     );
+    let daemon_fallback = RunnerToolDeclaration::new(
+        tool("daemon_fallback"),
+        model_definition(),
+        ToolPermissionDefault::Confirm,
+        RunnerToolEffectClass::Pure,
+        ToolAdmissibleLoci::DaemonOrRunner {
+            selector: RunnerSelector::CapabilityClass(class()),
+        },
+    );
     let policy = CredentialProfilePolicy::try_new(
         profile(),
         [
@@ -507,7 +524,7 @@ fn catalog() -> RunnerCatalog {
     .expect("the replacement profile references declared tools");
     RunnerCatalog::try_new(
         [class()],
-        [inspect, catalog_only],
+        [inspect, catalog_only, daemon_fallback],
         [policy, replacement_policy],
         [WorkspaceCapability::WorktreePerSession],
         sandbox_profiles(),
@@ -1087,6 +1104,7 @@ async fn append_runner_lost_without_advancing_head(
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
              workspace_working_directory, workspace_manifest_id,
+             workspace_placement_revision,
              workspace_clone_url_digest, workspace_credential_profile_name,
              workspace_sandbox_profile, workspace_relative_path,
              workspace_recovery_kind, workspace_branch_name, workspace_revision,
@@ -1105,6 +1123,7 @@ async fn append_runner_lost_without_advancing_head(
                 registration_enrollment_id, registration_revision,
                 pinned_tool_count, workspace_repository_key,
                 workspace_working_directory, workspace_manifest_id,
+                workspace_placement_revision,
                 workspace_clone_url_digest, workspace_credential_profile_name,
                 workspace_sandbox_profile, workspace_relative_path,
                 workspace_recovery_kind, workspace_branch_name, workspace_revision,
@@ -2613,6 +2632,82 @@ async fn s32_inv045_profile_replacement_survives_equivalent_reregistration()
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_combined_tool_override_survives_omitted_runner_availability()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: daemon_fallback_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("daemon policy admits the override while inspect dispatches");
+    store.store_pin(&pin, &registration).await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the omitted combined-tool override is durable");
+
+    assert_eq!(loaded.placement(), &pin.placement);
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_permission_override
+         DISABLE TRIGGER runner_session_placement_permission_override_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_permission_override
+            SET tool_name = $2
+          WHERE session_id = $1
+            AND tool_name = $3",
+    )
+    .bind(uuid(SESSION))
+    .bind(tool("future").as_str())
+    .bind(tool("daemon_fallback").as_str())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_permission_override
+         ENABLE TRIGGER runner_session_placement_permission_override_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupt = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await
+        .expect_err("an override outside daemon catalog authority fails on load");
+
+    assert_store_domain_error(corrupt, RunnerDomainError::ToolUndeclared(tool("future")));
+    drop(pool);
+    Ok(())
+}
+
 /// S31 / INV-035 / INV-045: a session-policy tool/profile pair admits a lease
 /// only with confirmed approval provenance; policy-auto provenance is
 /// rejected even for a direct lease-row insert.
@@ -3097,7 +3192,8 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
              pinned_credential_profile_name, registration_enrollment_id,
              registration_revision, pinned_tool_count,
              workspace_repository_key, workspace_working_directory,
-             workspace_manifest_id, workspace_clone_url_digest,
+             workspace_manifest_id, workspace_placement_revision,
+             workspace_clone_url_digest,
              workspace_credential_profile_name, workspace_sandbox_profile,
              workspace_relative_path, workspace_recovery_kind,
              workspace_branch_name, workspace_revision,
@@ -3121,7 +3217,8 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
                        AND tool_name = $6
                 ),
                 workspace_repository_key, workspace_working_directory,
-                workspace_manifest_id, workspace_clone_url_digest,
+                workspace_manifest_id, workspace_placement_revision,
+                workspace_clone_url_digest,
                 workspace_credential_profile_name, workspace_sandbox_profile,
                 workspace_relative_path, workspace_recovery_kind,
                 workspace_branch_name, workspace_revision,
@@ -3977,6 +4074,104 @@ async fn s32_inv045_grant_audit_rejects_truncate() -> Result<(), Box<dyn Error>>
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s32_inv044_profile_replacement_preserves_workspace_origin_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let working_directory = RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+        .expect("the fixture working directory is valid");
+    let workspace_placement_revision = RunnerGeneration::one();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            working_directory.clone(),
+            Some(ProvisionedWorkspace {
+                session: SessionId::from_uuid(uuid(SESSION)),
+                placement_revision: workspace_placement_revision,
+                runner: expected_enrollment.runner(),
+                repository: None,
+                canonical_clone_url_digest: None,
+                credential_profile: None,
+                sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+                working_directory,
+                relative_path: WorkspaceRelativePath::try_new("sessions/session/1/work".to_owned())
+                    .expect("the private-root path is relative"),
+                manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x81)),
+                recovery: None,
+            }),
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the restricted placement provisions its private root");
+    store.store_pin(&pin, &registration).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the profiled placement carries a grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("profile replacement retains the provisioned private root");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the retained workspace origin revision is loadable");
+    let revisions: (Decimal, Decimal) = sqlx::query_as(
+        "SELECT placement_revision, workspace_placement_revision
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+          ORDER BY event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(uuid(SESSION))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(loaded.placement(), &replacement.placement);
+    assert_eq!(
+        revisions,
+        (
+            Decimal::from(replacement.placement.revision().get()),
+            Decimal::from(workspace_placement_revision.get()),
+        ),
+    );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
@@ -4092,7 +4287,8 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
              pinned_credential_profile_name, registration_enrollment_id,
              registration_revision, pinned_tool_count,
              workspace_repository_key, workspace_working_directory,
-             workspace_manifest_id, workspace_clone_url_digest,
+             workspace_manifest_id, workspace_placement_revision,
+             workspace_clone_url_digest,
              workspace_credential_profile_name, workspace_sandbox_profile,
              workspace_relative_path, workspace_recovery_kind,
              workspace_branch_name, workspace_revision,
@@ -4111,7 +4307,8 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
                 $2, registration_enrollment_id,
                 registration_revision, pinned_tool_count,
                 workspace_repository_key, workspace_working_directory,
-                workspace_manifest_id, workspace_clone_url_digest,
+                workspace_manifest_id, workspace_placement_revision,
+                workspace_clone_url_digest,
                 workspace_credential_profile_name, workspace_sandbox_profile,
                 workspace_relative_path, workspace_recovery_kind,
                 workspace_branch_name, workspace_revision,
@@ -4330,6 +4527,24 @@ async fn s32_inv045_profile_free_tombstone_uses_predecessor_approval_policy()
 
     assert_eq!(actual_approval, expected_approval);
     assert_eq!(loaded.grant(), Some(&tombstone));
+    let profile_free_lost = profile_free
+        .placement
+        .mark_runner_lost()
+        .expect("the profile-free runner may be marked lost");
+    store
+        .store_placement(
+            &profile_free_lost,
+            Some(&second_registration),
+            Some(&tombstone),
+        )
+        .await?;
+    let reloaded_lost = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the carried tombstone keeps its originating approval policy");
+
+    assert_eq!(reloaded_lost.placement(), &profile_free_lost);
+    assert_eq!(reloaded_lost.grant(), Some(&tombstone));
     drop(pool);
     Ok(())
 }

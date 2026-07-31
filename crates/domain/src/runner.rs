@@ -978,6 +978,7 @@ impl RunnerEnrollment {
                 enrollment: self.enrollment,
                 runner: self.runner,
                 authentication: self.authentication,
+                catalog_tools: catalog.tools.keys().cloned().collect(),
                 classes: advertisement.classes,
                 tools,
                 profiles,
@@ -1131,6 +1132,7 @@ pub struct ValidatedRunnerRegistration {
     enrollment: RunnerEnrollmentId,
     runner: RunnerId,
     authentication: RunnerAuthenticationId,
+    catalog_tools: BTreeSet<ToolName>,
     classes: BTreeSet<RunnerCapabilityClass>,
     tools: BTreeMap<ToolName, RunnerToolDeclaration>,
     profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
@@ -1147,6 +1149,7 @@ impl PartialEq for ValidatedRunnerRegistration {
         self.enrollment == other.enrollment
             && self.runner == other.runner
             && self.authentication == other.authentication
+            && self.catalog_tools == other.catalog_tools
             && self.classes == other.classes
             && self.tools == other.tools
             && self.profiles == other.profiles
@@ -2265,6 +2268,7 @@ impl SessionRunnerPlacement {
             registration,
             directory,
             workspace,
+            WorkspaceRevisionMatch::Exact,
         )?;
         let grant = match pinned.credential_profile.clone() {
             Some(profile) => Some(build_grant(
@@ -2440,6 +2444,7 @@ impl SessionRunnerPlacement {
             registration,
             directory,
             workspace,
+            WorkspaceRevisionMatch::Exact,
         )?;
         let prior_request = self.request;
         let (grant, grant_change) =
@@ -2576,6 +2581,7 @@ impl SessionRunnerPlacement {
                     pinned_registration,
                     stored.working_directory.clone(),
                     stored.workspace.clone(),
+                    WorkspaceRevisionMatch::Retained,
                 )?;
                 checked.grant_lineage = stored.grant_lineage;
                 let lineage_is_valid = match (
@@ -2746,6 +2752,12 @@ fn registration_preserves_snapshot(
         }
 }
 
+#[derive(Clone, Copy)]
+enum WorkspaceRevisionMatch {
+    Exact,
+    Retained,
+}
+
 fn validate_placement(
     session: SessionId,
     revision: RunnerGeneration,
@@ -2753,6 +2765,7 @@ fn validate_placement(
     registration: &ValidatedRunnerRegistration,
     directory: RunnerWorkingDirectory,
     workspace: Option<ProvisionedWorkspace>,
+    workspace_revision_match: WorkspaceRevisionMatch,
 ) -> Result<PinnedRunnerPlacement, RunnerDomainError> {
     if !registration.satisfies(&request.selector) {
         return Err(RunnerDomainError::SelectorMismatch);
@@ -2763,7 +2776,7 @@ fn validate_placement(
     if let Some((tool, _)) = request
         .permission_overrides
         .iter()
-        .find(|(tool, _)| registration.tool(tool).is_none())
+        .find(|(tool, _)| !registration.catalog_tools.contains(tool))
     {
         return Err(RunnerDomainError::ToolUndeclared(tool.clone()));
     }
@@ -2789,7 +2802,10 @@ fn validate_placement(
     }
     let common_workspace_facts_match = |actual: &ProvisionedWorkspace| {
         actual.session == session
-            && actual.placement_revision == revision
+            && match workspace_revision_match {
+                WorkspaceRevisionMatch::Exact => actual.placement_revision == revision,
+                WorkspaceRevisionMatch::Retained => actual.placement_revision <= revision,
+            }
             && actual.runner == registration.runner
             && actual.sandbox == request.sandbox
             && actual.working_directory == directory
@@ -5661,6 +5677,87 @@ mod tests {
             ),
             Err(RunnerDomainError::ToolUnavailable)
         );
+    }
+
+    #[test]
+    fn s30_combined_tool_override_does_not_require_runner_advertisement() {
+        let enrollment = enrollment();
+        let registration = enrollment
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("deploy"), tool("sync")],
+                    [],
+                    [WorkspaceCapability::WorktreePerSession],
+                    sandbox_profiles(),
+                    [],
+                ),
+                &catalog(),
+            )
+            .expect("the runner may omit the combined-locus tool");
+        let mut request = profileless_placement_request();
+        request.permission_overrides = RunnerToolPermissionOverrides::try_new([(
+            tool("inspect"),
+            RunnerToolPermissionOverride::Confirm,
+        )])
+        .expect("the daemon-declared combined-tool override is valid");
+        let pin = SessionRunnerPlacement::new(session_id(SESSION), request)
+            .pin_and_offer_lease(
+                &enrollment,
+                &registration,
+                directory("/workspace/session"),
+                None,
+                authorized(
+                    "deploy",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::SideEffecting,
+                ),
+                lease_offer_request("deploy"),
+            )
+            .expect("the override remains session policy while another tool dispatches");
+        let unavailable = pin.placement.offer_lease(
+            &enrollment,
+            &registration,
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(RETRY_ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        );
+
+        assert_eq!(unavailable, Err(RunnerDomainError::ToolUnavailable));
+    }
+
+    #[test]
+    fn s30_permission_override_rejects_tool_absent_from_daemon_catalog() {
+        let enrollment = enrollment();
+        let registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the canonical registration is valid");
+        let mut request = profileless_placement_request();
+        request.permission_overrides = RunnerToolPermissionOverrides::try_new([(
+            tool("future"),
+            RunnerToolPermissionOverride::Confirm,
+        )])
+        .expect("the override map is structurally valid before catalog validation");
+        let rejected = SessionRunnerPlacement::new(session_id(SESSION), request)
+            .pin_and_offer_lease(
+                &enrollment,
+                &registration,
+                directory("/workspace/session"),
+                None,
+                authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect_err("a tool outside daemon policy must fail closed");
+
+        assert_eq!(rejected, RunnerDomainError::ToolUndeclared(tool("future")));
     }
 
     #[test]
