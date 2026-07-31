@@ -4252,7 +4252,7 @@ where
         .with_cache_creation_input_tokens(result.usage.cache_creation_input_tokens)
         .with_cache_read_input_tokens(result.usage.cache_read_input_tokens);
     let exceeds_limits = context_compaction_usage_exceeds_configured_limits(
-        &services.model_configuration.runtime_model_catalog(),
+        &services.model_configuration,
         prepared.target(),
         result.usage,
     )
