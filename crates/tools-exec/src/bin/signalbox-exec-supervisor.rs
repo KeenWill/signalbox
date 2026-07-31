@@ -6,8 +6,8 @@ mod linux {
         collections::{BTreeMap, BTreeSet},
         ffi::OsString,
         io::{Read, Write},
-        os::unix::process::{CommandExt, ExitStatusExt},
-        process::{Command, ExitCode, Stdio},
+        os::unix::process::ExitStatusExt,
+        process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
             Arc, Mutex, PoisonError,
             atomic::{AtomicBool, Ordering},
@@ -23,14 +23,41 @@ mod linux {
         ));
     }
 
-    use supervisor_protocol::{SupervisorSpawnFailure, SupervisorStatus};
+    use supervisor_protocol::{SupervisorFailureStage, SupervisorSpawnFailure, SupervisorStatus};
 
     const MINIMUM_POLL_INTERVAL: Duration = Duration::from_millis(2);
     const MAXIMUM_POLL_INTERVAL: Duration = Duration::from_millis(100);
     const REAP_DEADLINE: Duration = Duration::from_secs(1);
     const DISPATCH_MODE: &str = "--dispatch";
+    const LAUNCH_MODE: &str = "--launch";
+    const SELF_EXE: &str = "/proc/self/exe";
     const DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
+    const LAUNCH_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-launch-status:";
+    const LAUNCH_STATUS_TAIL_BYTES: usize = 1024;
     const STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+    enum LauncherStatus {
+        Exited { code: Option<i32> },
+        SpawnFailed { reason: SupervisorSpawnFailure },
+        SupervisionFailed,
+    }
+
+    enum TargetFailure {
+        Spawn(std::io::Error),
+        Supervision,
+    }
+
+    struct LauncherRead {
+        tail: Vec<u8>,
+        parsed: Option<(usize, LauncherStatus)>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum SupervisionCompletion {
+        LauncherExited { success: bool },
+        Status(SupervisorStatus),
+    }
 
     pub(super) fn entrypoint() -> ExitCode {
         let mut arguments = std::env::args_os().skip(1);
@@ -38,7 +65,10 @@ mod linux {
             return ExitCode::FAILURE;
         };
         if mode_or_timeout == DISPATCH_MODE {
-            return dispatch(arguments.collect());
+            return dispatch(arguments.collect(), true);
+        }
+        if mode_or_timeout == LAUNCH_MODE {
+            return launch(arguments.collect());
         }
         match run_supervisor(mode_or_timeout, arguments.collect()) {
             Ok(()) => ExitCode::SUCCESS,
@@ -73,9 +103,45 @@ mod linux {
             .ok_or(())
     }
 
-    fn dispatch(mut arguments: Vec<OsString>) -> ExitCode {
+    fn dispatch(arguments: Vec<OsString>, announce_dispatch: bool) -> ExitCode {
+        match run_target(arguments, announce_dispatch) {
+            Ok(status) => dispatch_exit_status(status),
+            Err(TargetFailure::Spawn(error)) => dispatch_spawn_failure(&error),
+            Err(TargetFailure::Supervision) => ExitCode::FAILURE,
+        }
+    }
+
+    fn launch(arguments: Vec<OsString>) -> ExitCode {
+        let status = match run_target(arguments, false) {
+            Ok(status) => LauncherStatus::Exited {
+                code: status.code(),
+            },
+            Err(TargetFailure::Spawn(error)) => LauncherStatus::SpawnFailed {
+                reason: spawn_failure(&error),
+            },
+            Err(TargetFailure::Supervision) => LauncherStatus::SupervisionFailed,
+        };
+        let mut stdout = std::io::stdout().lock();
+        let written = stdout
+            .write_all(LAUNCH_STATUS_TRAILER)
+            .and_then(|()| {
+                serde_json::to_writer(&mut stdout, &status).map_err(std::io::Error::other)
+            })
+            .and_then(|()| stdout.write_all(b"\n"))
+            .and_then(|()| stdout.flush());
+        if written.is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
+    }
+
+    fn run_target(
+        mut arguments: Vec<OsString>,
+        announce_dispatch: bool,
+    ) -> Result<ExitStatus, TargetFailure> {
         if arguments.is_empty() {
-            return ExitCode::FAILURE;
+            return Err(TargetFailure::Supervision);
         }
         let program = arguments.remove(0);
         let mut command = Command::new(program);
@@ -86,26 +152,27 @@ mod linux {
             .stderr(Stdio::piped());
         let mut child = match command.spawn() {
             Ok(child) => child,
-            Err(error) => return dispatch_spawn_failure(&error),
+            Err(error) => return Err(TargetFailure::Spawn(error)),
         };
         let Some(mut target_stdout) = child.stdout.take() else {
             terminate_child(&mut child);
-            return ExitCode::FAILURE;
+            return Err(TargetFailure::Supervision);
         };
         let Some(mut target_stderr) = child.stderr.take() else {
             terminate_child(&mut child);
-            return ExitCode::FAILURE;
+            return Err(TargetFailure::Supervision);
         };
-        let mut stderr = std::io::stderr().lock();
-        if stderr
-            .write_all(DISPATCH_MARKER)
-            .and_then(|()| stderr.flush())
-            .is_err()
-        {
-            terminate_child(&mut child);
-            return ExitCode::FAILURE;
+        if announce_dispatch {
+            let mut stderr = std::io::stderr().lock();
+            if stderr
+                .write_all(DISPATCH_MARKER)
+                .and_then(|()| stderr.flush())
+                .is_err()
+            {
+                terminate_child(&mut child);
+                return Err(TargetFailure::Supervision);
+            }
         }
-        drop(stderr);
         let leader_exited = Arc::new(AtomicBool::new(false));
         let stdout_leader_exited = Arc::clone(&leader_exited);
         let stdout_copy = std::thread::spawn(move || {
@@ -130,15 +197,19 @@ mod linux {
                 leader_exited.store(true, Ordering::Release);
                 let _ = stdout_copy.join();
                 let _ = stderr_copy.join();
-                return ExitCode::FAILURE;
+                return Err(TargetFailure::Supervision);
             }
         };
         leader_exited.store(true, Ordering::Release);
         let stdout_copy_failed = !matches!(stdout_copy.join(), Ok(Ok(())));
         let stderr_copy_failed = !matches!(stderr_copy.join(), Ok(Ok(())));
         if stdout_copy_failed || stderr_copy_failed {
-            return ExitCode::FAILURE;
+            return Err(TargetFailure::Supervision);
         }
+        Ok(status)
+    }
+
+    fn dispatch_exit_status(status: ExitStatus) -> ExitCode {
         if let Some(code) = status.code() {
             return ExitCode::from(code as u8);
         }
@@ -177,6 +248,7 @@ mod linux {
                 Ok(0) => return Ok(()),
                 Ok(read) => {
                     target.write_all(&buffer[..read])?;
+                    target.flush()?;
                     if let Some(remaining) = post_exit_remaining.as_mut() {
                         *remaining = remaining.saturating_sub(read as u64);
                         if *remaining == 0 {
@@ -210,75 +282,211 @@ mod linux {
         arguments: Vec<OsString>,
         timeout: Duration,
     ) -> SupervisorStatus {
-        if rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT)).is_err() {
-            return SupervisorStatus::SpawnFailed {
-                reason: SupervisorSpawnFailure::ProcessTreeUnsupported,
-            };
-        }
-        if process_children(std::process::id()).is_err() {
-            return SupervisorStatus::SpawnFailed {
-                reason: SupervisorSpawnFailure::ProcessTreeUnsupported,
-            };
-        }
-        let started = Instant::now();
-        let mut command = Command::new(program);
+        let pidfd_reservation = match preflight_process_tree() {
+            Ok(reservation) => reservation,
+            Err(()) => {
+                return SupervisorStatus::SpawnFailed {
+                    reason: SupervisorSpawnFailure::ProcessTreeUnsupported,
+                };
+            }
+        };
+        let mut command = Command::new(SELF_EXE);
         command
+            .arg(LAUNCH_MODE)
+            .arg(program)
             .args(arguments)
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .process_group(0);
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 return SupervisorStatus::SpawnFailed {
-                    reason: spawn_failure(error),
+                    reason: spawn_failure(&error),
                 };
             }
         };
+        drop(pidfd_reservation);
+        let Some(launcher_stdout) = child.stdout.take() else {
+            terminate_child(&mut child);
+            cleanup_untracked_children(std::process::id());
+            return SupervisorStatus::SupervisionFailed {
+                stage: SupervisorFailureStage::Cleanup,
+            };
+        };
+        let launcher_reader = std::thread::spawn(move || read_launcher_stdout(launcher_stdout));
         let mut tree = match ProcessTreeGuard::new(child.id(), std::process::id()) {
             Ok(tree) => tree,
             Err(()) => {
                 terminate_child(&mut child);
-                return SupervisorStatus::SpawnFailed {
-                    reason: SupervisorSpawnFailure::ProcessTreeUnsupported,
+                cleanup_untracked_children(std::process::id());
+                let _ = emit_launcher_stdout(launcher_reader, false);
+                return SupervisorStatus::SupervisionFailed {
+                    stage: SupervisorFailureStage::Cleanup,
                 };
             }
         };
+        let started = Instant::now();
         let cancelled = cancellation_signal();
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    break SupervisorStatus::Exited {
-                        code: status.code(),
+                    break match tree.live_descendant_beyond_root() {
+                        Ok(_) => SupervisionCompletion::LauncherExited {
+                            success: status.success(),
+                        },
+                        Err(()) => {
+                            SupervisionCompletion::Status(SupervisorStatus::SupervisionFailed {
+                                stage: SupervisorFailureStage::Cleanup,
+                            })
+                        }
                     };
                 }
                 Ok(None) => {}
-                Err(_) => break SupervisorStatus::SupervisionFailed,
+                Err(_) => {
+                    break SupervisionCompletion::Status(SupervisorStatus::SupervisionFailed {
+                        stage: SupervisorFailureStage::Wait,
+                    });
+                }
             }
             if cancelled.load(Ordering::Acquire) {
-                break SupervisorStatus::Cancelled;
+                break SupervisionCompletion::Status(SupervisorStatus::Cancelled);
             }
             if !tree.process_tree_supported() {
-                break SupervisorStatus::SpawnFailed {
-                    reason: SupervisorSpawnFailure::ProcessTreeUnsupported,
-                };
+                break SupervisionCompletion::Status(SupervisorStatus::SupervisionFailed {
+                    stage: SupervisorFailureStage::Cleanup,
+                });
             }
             if started.elapsed() >= timeout {
-                break SupervisorStatus::TimedOut;
+                break SupervisionCompletion::Status(SupervisorStatus::TimedOut);
             }
             std::thread::sleep(MINIMUM_POLL_INTERVAL);
         };
-        match tree.finish(&mut child) {
-            CleanupStatus::Complete => status,
-            CleanupStatus::ProcessTreeUnsupported => SupervisorStatus::SpawnFailed {
-                reason: SupervisorSpawnFailure::ProcessTreeUnsupported,
-            },
-            CleanupStatus::Failed => SupervisorStatus::SupervisionFailed,
+        let cleanup = tree.finish(&mut child);
+        match cleanup {
+            CleanupStatus::Complete { root_success } => {
+                let launcher_status = emit_launcher_stdout(launcher_reader, root_success);
+                match status {
+                    SupervisionCompletion::LauncherExited { success: true } => launcher_status
+                        .ok()
+                        .flatten()
+                        .map(launcher_supervisor_status)
+                        .unwrap_or(SupervisorStatus::SupervisionFailed {
+                            stage: SupervisorFailureStage::Wait,
+                        }),
+                    SupervisionCompletion::LauncherExited { success: false } => {
+                        SupervisorStatus::SupervisionFailed {
+                            stage: SupervisorFailureStage::Wait,
+                        }
+                    }
+                    SupervisionCompletion::Status(status) if launcher_status.is_ok() => status,
+                    SupervisionCompletion::Status(_) => SupervisorStatus::SupervisionFailed {
+                        stage: SupervisorFailureStage::Wait,
+                    },
+                }
+            }
+            CleanupStatus::ProcessTreeUnsupported { root_success }
+            | CleanupStatus::Failed { root_success } => {
+                let _ = emit_launcher_stdout(launcher_reader, root_success);
+                SupervisorStatus::SupervisionFailed {
+                    stage: SupervisorFailureStage::Cleanup,
+                }
+            }
         }
     }
 
-    fn spawn_failure(error: std::io::Error) -> SupervisorSpawnFailure {
+    fn read_launcher_stdout(
+        mut source: std::process::ChildStdout,
+    ) -> std::io::Result<LauncherRead> {
+        let mut target = std::io::stdout().lock();
+        let mut tail = Vec::with_capacity(LAUNCH_STATUS_TAIL_BYTES);
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buffer[..read]);
+            if tail.len() > LAUNCH_STATUS_TAIL_BYTES {
+                let flush_bytes = tail.len() - LAUNCH_STATUS_TAIL_BYTES;
+                target.write_all(&tail[..flush_bytes])?;
+                target.flush()?;
+                tail.drain(..flush_bytes);
+            }
+        }
+        let parsed = parse_launcher_status(&tail);
+        Ok(LauncherRead { tail, parsed })
+    }
+
+    fn parse_launcher_status(tail: &[u8]) -> Option<(usize, LauncherStatus)> {
+        if tail.last() != Some(&b'\n') {
+            return None;
+        }
+        let marker = tail
+            .windows(LAUNCH_STATUS_TRAILER.len())
+            .rposition(|window| window == LAUNCH_STATUS_TRAILER)?;
+        let encoded = &tail[marker + LAUNCH_STATUS_TRAILER.len()..tail.len() - 1];
+        serde_json::from_slice(encoded)
+            .ok()
+            .map(|status| (marker, status))
+    }
+
+    fn emit_launcher_stdout(
+        reader: JoinHandle<std::io::Result<LauncherRead>>,
+        trusted: bool,
+    ) -> Result<Option<LauncherStatus>, ()> {
+        let read = reader.join().map_err(|_| ())?.map_err(|_| ())?;
+        let (output_bytes, status) = if trusted {
+            let (marker, status) = read.parsed.ok_or(())?;
+            (&read.tail[..marker], Some(status))
+        } else {
+            (read.tail.as_slice(), None)
+        };
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(output_bytes).map_err(|_| ())?;
+        stdout.flush().map_err(|_| ())?;
+        Ok(status)
+    }
+
+    fn launcher_supervisor_status(status: LauncherStatus) -> SupervisorStatus {
+        match status {
+            LauncherStatus::Exited { code } => SupervisorStatus::Exited { code },
+            LauncherStatus::SpawnFailed { reason } => SupervisorStatus::SpawnFailed { reason },
+            LauncherStatus::SupervisionFailed => SupervisorStatus::SupervisionFailed {
+                stage: SupervisorFailureStage::Wait,
+            },
+        }
+    }
+
+    fn preflight_process_tree() -> Result<TrackedProcess, ()> {
+        rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT)).map_err(|_| ())?;
+        process_children(std::process::id()).map_err(|_| ())?;
+        pin_process(std::process::id())?.ok_or(())
+    }
+
+    fn cleanup_untracked_children(supervisor: u32) {
+        let deadline = Instant::now() + REAP_DEADLINE;
+        loop {
+            let children = process_children(supervisor).unwrap_or_default();
+            for raw_pid in children {
+                kill_process_group(raw_pid);
+                if let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+            reap_available_children();
+            if process_children(supervisor).is_ok_and(|children| children.is_empty()) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                reap_all_children();
+                return;
+            }
+            std::thread::sleep(MINIMUM_POLL_INTERVAL);
+        }
+    }
+
+    fn spawn_failure(error: &std::io::Error) -> SupervisorSpawnFailure {
         match error.kind() {
             std::io::ErrorKind::NotFound => SupervisorSpawnFailure::NotFound,
             std::io::ErrorKind::PermissionDenied => SupervisorSpawnFailure::PermissionDenied,
@@ -308,9 +516,9 @@ mod linux {
     }
 
     enum CleanupStatus {
-        Complete,
-        ProcessTreeUnsupported,
-        Failed,
+        Complete { root_success: bool },
+        ProcessTreeUnsupported { root_success: bool },
+        Failed { root_success: bool },
     }
 
     struct TrackedProcess {
@@ -360,14 +568,21 @@ mod linux {
         fn finish(&mut self, child: &mut std::process::Child) -> CleanupStatus {
             self.stop_watcher();
             let mut process_tree_supported = self.process_tree_supported();
+            let mut root_success = None;
             let deadline = Instant::now() + REAP_DEADLINE;
             loop {
                 if observe_descendants(self.root, self.supervisor, &self.descendants).is_err() {
                     process_tree_supported = false;
                 }
-                self.kill_tracked();
-                let _ = child.kill();
-                reap_available_children();
+                self.kill_tracked_descendants();
+                if root_success.is_none() {
+                    root_success = child
+                        .try_wait()
+                        .ok()
+                        .flatten()
+                        .map(|status| status.success());
+                }
+                reap_available_children_except(self.supervisor, self.root);
                 let children_empty = match process_children(self.supervisor) {
                     Ok(children) => children.is_empty(),
                     Err(_) => {
@@ -379,42 +594,49 @@ mod linux {
                     break;
                 }
                 if Instant::now() >= deadline {
-                    let _ = child.wait();
+                    self.kill_root();
+                    let _ = child.kill();
+                    let root_success = root_success
+                        .or_else(|| child.wait().ok().map(|status| status.success()))
+                        .unwrap_or(false);
                     reap_all_children();
                     self.armed = false;
                     return if process_tree_supported {
-                        CleanupStatus::Failed
+                        CleanupStatus::Failed { root_success }
                     } else {
-                        CleanupStatus::ProcessTreeUnsupported
+                        CleanupStatus::ProcessTreeUnsupported { root_success }
                     };
                 }
                 std::thread::sleep(MINIMUM_POLL_INTERVAL);
             }
-            let _ = child.wait();
+            let root_success = root_success
+                .or_else(|| child.wait().ok().map(|status| status.success()))
+                .unwrap_or(false);
             reap_all_children();
             self.armed = false;
             if process_tree_supported {
-                CleanupStatus::Complete
+                CleanupStatus::Complete { root_success }
             } else {
-                CleanupStatus::ProcessTreeUnsupported
+                CleanupStatus::ProcessTreeUnsupported { root_success }
             }
         }
 
         fn kill_all(&mut self) {
             self.stop_watcher();
             let _ = observe_descendants(self.root, self.supervisor, &self.descendants);
-            self.kill_tracked();
+            self.kill_tracked_descendants();
+            self.kill_root();
         }
 
-        fn kill_tracked(&self) {
+        fn kill_tracked_descendants(&self) {
             let descendants = self
                 .descendants
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if descendants.contains_key(&self.root) {
-                kill_process_group(self.root);
-            }
-            for process in descendants.values() {
+            for (raw_pid, process) in descendants.iter() {
+                if *raw_pid == self.root {
+                    continue;
+                }
                 let _ = rustix::process::pidfd_send_signal(
                     &process.pidfd,
                     rustix::process::Signal::KILL,
@@ -422,8 +644,28 @@ mod linux {
             }
         }
 
+        fn kill_root(&self) {
+            let descendants = self
+                .descendants
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(root) = descendants.get(&self.root) {
+                let _ =
+                    rustix::process::pidfd_send_signal(&root.pidfd, rustix::process::Signal::KILL);
+            }
+        }
+
         fn process_tree_supported(&self) -> bool {
             self.process_tree_supported.load(Ordering::Acquire)
+        }
+
+        fn live_descendant_beyond_root(&self) -> Result<bool, ()> {
+            observe_descendants(self.root, self.supervisor, &self.descendants)?;
+            let descendants = self
+                .descendants
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            Ok(descendants.keys().any(|raw_pid| *raw_pid != self.root))
         }
 
         fn stop_watcher(&mut self) {
@@ -631,6 +873,17 @@ mod linux {
         }
     }
 
+    fn reap_available_children_except(supervisor: u32, retained: u32) {
+        for raw_pid in process_children(supervisor).unwrap_or_default() {
+            if raw_pid == retained {
+                continue;
+            }
+            if let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) {
+                let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
+            }
+        }
+    }
+
     fn reap_all_children() {
         let deadline = Instant::now() + REAP_DEADLINE;
         while Instant::now() < deadline {
@@ -694,6 +947,21 @@ mod linux {
 
                 assert!(changed);
                 assert!(!tracked.contains_key(&raw_pid));
+                Ok(())
+            })
+        }
+
+        #[test]
+        fn process_tree_preflight_pins_the_supervisor_before_dispatch()
+        -> Result<(), Box<dyn std::error::Error>> {
+            with_procfs_children_support(|| {
+                let reservation = preflight_process_tree()
+                    .map_err(|()| std::io::Error::other("preflight process tree"))?;
+
+                let exited = pidfd_has_exited(&reservation.pidfd)
+                    .map_err(|()| std::io::Error::other("poll preflight pidfd"))?;
+
+                assert!(!exited);
                 Ok(())
             })
         }

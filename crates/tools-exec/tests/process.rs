@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, ffi::OsString, os::unix::fs::PermissionsExt, ti
 
 use signalbox_tools_exec::{
     CaptureCompleteness, ProcessEnvironment, ProcessOutcome, ProcessRequest, ProcessRunner,
-    TokioProcessRunner,
+    ProcessSupervisionFailure, TokioProcessRunner,
 };
 
 const OBSERVED_OUTPUT: &str = "12345";
@@ -18,6 +18,8 @@ const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
 const TARGET_TERMINATION_SIGNAL: &str = "PIPE";
 const REPLACEMENT_SUPERVISOR_EXIT_CODE: i32 = 99;
 const SUPERVISOR_PIN_DIRECTORY: &str = "signalbox-exec-supervisor-pin";
+const PARENT_KILL_PID_FILE: &str = "signalbox-exec-parent-kill";
+const GRANDPARENT_KILL_PID_FILE: &str = "signalbox-exec-grandparent-kill";
 
 #[tokio::test]
 async fn production_runner_pins_the_supervisor_executable_identity()
@@ -70,6 +72,37 @@ async fn production_runner_preserves_outer_spawn_path_failure()
             program: fixture_program("true")?.into_os_string(),
             arguments: Vec::new(),
             working_directory: std::env::current_dir()?.join("missing-exec-working-directory"),
+            timeout: Duration::from_secs(5),
+            capture_bytes: 1024,
+            environment: BTreeMap::new(),
+            environment_inheritance: ProcessEnvironment::Clear,
+        };
+
+        let result = production_runner()?.run(request).await;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: signalbox_tools_exec::ProcessSpawnFailure::NotFound,
+            }
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn production_runner_preserves_requested_program_spawn_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let missing = std::env::temp_dir().join(format!(
+            "signalbox-exec-missing-target-{}",
+            std::process::id()
+        ));
+        let request = ProcessRequest {
+            program: missing.into_os_string(),
+            arguments: Vec::new(),
+            working_directory: std::env::current_dir()?,
             timeout: Duration::from_secs(5),
             capture_bytes: 1024,
             environment: BTreeMap::new(),
@@ -291,6 +324,73 @@ async fn production_runner_kills_descendants_on_timeout() -> Result<(), Box<dyn 
 
         assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         assert!(!std::path::Path::new(&format!("/proc/{descendant}")).exists());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn production_runner_survives_target_killing_its_direct_parent()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let pid_file =
+            std::env::temp_dir().join(format!("{PARENT_KILL_PID_FILE}-{}", std::process::id()));
+        let script = format!(
+            "printf %s $$ > {}; kill -KILL $PPID; exec {} 30",
+            pid_file.display(),
+            fixture_program("sleep")?.display()
+        );
+        let request = shell_request(&script, Duration::from_secs(5), std::env::current_dir()?)?;
+        let started = std::time::Instant::now();
+
+        let result = production_runner()?.run(request).await;
+        let elapsed = started.elapsed();
+        let target = std::fs::read_to_string(&pid_file)?.parse::<u32>()?;
+        let _ = std::fs::remove_file(&pid_file);
+        await_process_absent(target).await?;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            }
+        );
+        assert!(elapsed < Duration::from_secs(2));
+        assert!(!std::path::Path::new(&format!("/proc/{target}")).exists());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn production_runner_survives_target_killing_the_authority_supervisor()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let pid_file =
+            std::env::temp_dir().join(format!("{GRANDPARENT_KILL_PID_FILE}-{}", std::process::id()));
+        let script = format!(
+            "supervisor=$({} '/^PPid:/ {{print $2}}' /proc/$PPID/status); printf %s $$ > {}; kill -KILL $supervisor; exec {} 30",
+            fixture_program("awk")?.display(),
+            pid_file.display(),
+            fixture_program("sleep")?.display()
+        );
+        let request = shell_request(&script, Duration::from_secs(5), std::env::current_dir()?)?;
+        let started = std::time::Instant::now();
+
+        let result = production_runner()?.run(request).await;
+        let elapsed = started.elapsed();
+        let target = std::fs::read_to_string(&pid_file)?.parse::<u32>()?;
+        let _ = std::fs::remove_file(&pid_file);
+        await_process_absent(target).await?;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            }
+        );
+        assert!(elapsed < Duration::from_secs(2));
+        assert!(!std::path::Path::new(&format!("/proc/{target}")).exists());
         Ok(())
     })
     .await
