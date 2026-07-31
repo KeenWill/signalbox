@@ -20,12 +20,13 @@ additive provider-failure cause column was verified through PR #330
 storage version four were verified through PR #311
 (`agent/session-templates-spec`); and the context-compaction transaction and
 lock inventory were verified against PR #314
-(`agent/context-compaction-protocol`). This page covers the Postgres
-representation in `crates/persistence` (source and migrations), migration
-discipline, durable command storage and replay equality, the fail-closed
-reconstitution boundary, the lock protocol, pending-steering durable state, the
-corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
-Session aggregate semantics live in
+(`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
+was verified against this PR (`agent/domain-cleanup`). This page covers the
+Postgres representation in `crates/persistence` (source and migrations),
+migration discipline, durable command storage and replay equality, the
+fail-closed reconstitution boundary, the lock protocol, pending-steering durable
+state, the corruption taxonomy, commit-ambiguity handling, and the transactional
+outbox. Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -809,9 +810,8 @@ isolate the affected session while remaining fail-closed.
 
 Transaction boundaries that retain the failing phase classify commit failures
 with `commit_failure_is_ambiguous`: the helper is crate-shared in `lib.rs` for
-durable-command adapters and repeated locally in `start_eligible_turn.rs`,
-`startup.rs`, `model_execution.rs`, and `tool_loop.rs`. This inventory excludes
-the phase-insensitive conversation-import repository, whose conservative wire
+every commit-classifying persistence adapter. This inventory excludes the
+phase-insensitive conversation-import repository, whose conservative wire
 mapping is owned by [process-protocol](process-protocol.md). A database-reported
 error is ambiguous only for SQLSTATE `08007` (transaction resolution unknown)
 and `40003` (statement completion unknown); any non-database failure awaiting
