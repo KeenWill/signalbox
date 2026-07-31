@@ -4,11 +4,13 @@ use clap::{
     ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, CommandId, ConversationCursor, ConversationImportFormat,
-    ConversationOrigin, ConversationOriginFilter, ImportedSessionRelationship,
-    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-    MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection, ReviewDiffSide, ReviewFindingInput,
-    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
+    CanonicalDigest, CanonicalU64, CanonicalUuid, CommandId, ConversationCursor,
+    ConversationImportFormat, ConversationOrigin, ConversationOriginFilter,
+    ImportedSessionRelationship, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+    MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection,
+    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
+    ReviewFindingInput, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewPassTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
 };
 use uuid::Uuid;
 
@@ -155,9 +157,105 @@ pub(crate) enum ReviewCommand {
         output_frontier_id: CanonicalUuid,
         finding: ReviewFindingInput,
     },
+    RecordFindings {
+        command_id: Option<CommandId>,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        findings_file: PathBuf,
+    },
+    CompletePass {
+        command_id: Option<CommandId>,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: Option<CanonicalUuid>,
+        output_frontier_id: Option<CanonicalUuid>,
+        outcome: ReviewPassTerminalOutcome,
+    },
+    RecordFindingEvent {
+        command_id: Option<CommandId>,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: Option<CanonicalUuid>,
+        finding_id: CanonicalUuid,
+        event_ordinal: CanonicalU64,
+        event: ReviewFindingEvent,
+    },
+    StartOrchestration {
+        command_id: Option<CommandId>,
+        attempt_id: CanonicalUuid,
+        target_id: CanonicalUuid,
+        concern_set_version: String,
+        import_template_name: String,
+        judgment_template_name: String,
+        repair_template_name: String,
+        publication_template_name: String,
+        concerns_file: PathBuf,
+    },
+    RecordImportOutcome {
+        command_id: Option<CommandId>,
+        attempt_id: CanonicalUuid,
+        pass_id: Option<CanonicalUuid>,
+        external_link_id: Option<CanonicalUuid>,
+        context_digest: Option<CanonicalDigest>,
+        outcome: ReviewImportTerminalOutcome,
+    },
+    RecordConcernOutcome {
+        command_id: Option<CommandId>,
+        attempt_id: CanonicalUuid,
+        concern: String,
+        pass_id: Option<CanonicalUuid>,
+        outcome: ReviewConcernTerminalOutcome,
+    },
+    RecordJudgmentPlan {
+        command_id: Option<CommandId>,
+        attempt_id: CanonicalUuid,
+        analysis_pass_id: CanonicalUuid,
+        members_file: PathBuf,
+    },
+    RecordJudgmentEffect {
+        command_id: Option<CommandId>,
+        attempt_id: CanonicalUuid,
+        finding_id: CanonicalUuid,
+        event_pass_id: Option<CanonicalUuid>,
+        outcome: ReviewJudgmentEffectTerminalOutcome,
+    },
+    RecordRepairOutcomes {
+        command_id: Option<CommandId>,
+        attempt_id: CanonicalUuid,
+        outcomes_file: PathBuf,
+    },
+    RecordPublicationOutcomes {
+        command_id: Option<CommandId>,
+        attempt_id: CanonicalUuid,
+        outcomes_file: PathBuf,
+    },
+    ReserveExternalLink {
+        command_id: Option<CommandId>,
+        external_link_id: CanonicalUuid,
+        finding_id: CanonicalUuid,
+        provider: String,
+        object_kind: ReviewExternalObjectKind,
+    },
+    AttachExternalLink {
+        command_id: Option<CommandId>,
+        external_link_id: CanonicalUuid,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        external_object: String,
+        event_ordinal: CanonicalU64,
+    },
+    ReadOrchestration {
+        attempt_id: CanonicalUuid,
+    },
     ListFindings {
         run_id: CanonicalUuid,
     },
+
     ReadTarget {
         target_id: CanonicalUuid,
     },
@@ -272,6 +370,32 @@ enum ReviewSubcommand {
     ActivatePass(ActivateReviewPassArguments),
     /// Conclude one read-only pass with exactly one finding.
     RecordFinding(RecordReviewFindingArguments),
+    /// Conclude one read-only pass with a complete JSON finding inventory.
+    RecordFindings(RecordReviewFindingsArguments),
+    /// Conclude one pass without another typed result payload.
+    CompletePass(CompleteReviewPassArguments),
+    /// Conclude one result-bearing pass with one finding-machine event.
+    RecordFindingEvent(RecordReviewFindingEventArguments),
+    /// Start one frozen concern-fan-out orchestration attempt.
+    StartOrchestration(StartReviewOrchestrationArguments),
+    /// Seal one imported-context outcome.
+    RecordImportOutcome(RecordReviewImportOutcomeArguments),
+    /// Seal one concern-member outcome.
+    RecordConcernOutcome(RecordReviewConcernOutcomeArguments),
+    /// Seal one complete judgment plan from a strict JSON file.
+    RecordJudgmentPlan(RecordReviewJudgmentPlanArguments),
+    /// Seal one judgment-plan effect outcome.
+    RecordJudgmentEffect(RecordReviewJudgmentEffectArguments),
+    /// Seal complete repair outcomes from a strict JSON file.
+    RecordRepairOutcomes(RecordReviewRepairOutcomesArguments),
+    /// Seal complete publication outcomes from a strict JSON file.
+    RecordPublicationOutcomes(RecordReviewPublicationOutcomesArguments),
+    /// Reserve provider publication identity before the external write.
+    ReserveExternalLink(ReserveReviewExternalLinkArguments),
+    /// Attach the provider object after the external write succeeds.
+    AttachExternalLink(AttachReviewExternalLinkArguments),
+    /// Read one review-orchestration attempt.
+    ReadOrchestration(ReviewAttemptArguments),
     /// List findings for one exact run.
     ListFindings(ReviewRunArguments),
     /// Read one target snapshot.
@@ -371,6 +495,202 @@ struct RecordReviewFindingArguments {
 }
 
 #[derive(Debug, ClapArgs)]
+struct RecordReviewFindingsArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
+    output_frontier_id: CanonicalUuid,
+    #[arg(long, value_name = "PATH")]
+    findings_file: PathBuf,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct CompleteReviewPassArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_enum)]
+    outcome: ReviewTerminalOutcomeArgument,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
+    output_frontier_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewFindingEventArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
+    output_frontier_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "FINDING", value_parser = canonical_uuid)]
+    finding_id: CanonicalUuid,
+    #[arg(long, value_name = "DECIMAL", value_parser = review_event_ordinal)]
+    event_ordinal: CanonicalU64,
+    #[arg(long, value_enum)]
+    event: ReviewFindingEventArgument,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long, value_name = "FINDING", value_parser = canonical_uuid)]
+    referenced_finding_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "LINK", value_parser = canonical_uuid)]
+    external_link_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct StartReviewOrchestrationArguments {
+    #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
+    attempt_id: CanonicalUuid,
+    #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
+    target_id: CanonicalUuid,
+    #[arg(long)]
+    concern_set_version: String,
+    #[arg(long, value_name = "NAME", value_parser = template_name)]
+    import_template_name: String,
+    #[arg(long, value_name = "NAME", value_parser = template_name)]
+    judgment_template_name: String,
+    #[arg(long, value_name = "NAME", value_parser = template_name)]
+    repair_template_name: String,
+    #[arg(long, value_name = "NAME", value_parser = template_name)]
+    publication_template_name: String,
+    #[arg(long, value_name = "PATH")]
+    concerns_file: PathBuf,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewImportOutcomeArguments {
+    #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
+    attempt_id: CanonicalUuid,
+    #[arg(long, value_enum)]
+    outcome: ReviewTerminalOutcomeArgument,
+    #[arg(long, value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "LINK", value_parser = canonical_uuid)]
+    external_link_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "DIGEST", value_parser = canonical_digest)]
+    context_digest: Option<CanonicalDigest>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewConcernOutcomeArguments {
+    #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
+    attempt_id: CanonicalUuid,
+    #[arg(value_name = "CONCERN")]
+    concern: String,
+    #[arg(long, value_enum)]
+    outcome: ReviewTerminalOutcomeArgument,
+    #[arg(long, value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewJudgmentPlanArguments {
+    #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
+    attempt_id: CanonicalUuid,
+    #[arg(value_name = "ANALYSIS_PASS", value_parser = canonical_uuid)]
+    analysis_pass_id: CanonicalUuid,
+    #[arg(long, value_name = "PATH")]
+    members_file: PathBuf,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewJudgmentEffectArguments {
+    #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
+    attempt_id: CanonicalUuid,
+    #[arg(value_name = "FINDING", value_parser = canonical_uuid)]
+    finding_id: CanonicalUuid,
+    #[arg(long, value_enum)]
+    outcome: ReviewJudgmentEffectOutcomeArgument,
+    #[arg(long, value_name = "PASS", value_parser = canonical_uuid)]
+    event_pass_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewRepairOutcomesArguments {
+    #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
+    attempt_id: CanonicalUuid,
+    #[arg(long, value_name = "PATH")]
+    outcomes_file: PathBuf,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewPublicationOutcomesArguments {
+    #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
+    attempt_id: CanonicalUuid,
+    #[arg(long, value_name = "PATH")]
+    outcomes_file: PathBuf,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReserveReviewExternalLinkArguments {
+    #[arg(value_name = "FINDING", value_parser = canonical_uuid)]
+    finding_id: CanonicalUuid,
+    #[arg(value_name = "LINK", value_parser = canonical_uuid)]
+    external_link_id: CanonicalUuid,
+    #[arg(long)]
+    provider: String,
+    #[arg(long, value_enum)]
+    object_kind: ReviewExternalObjectKindArgument,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct AttachReviewExternalLinkArguments {
+    #[arg(value_name = "LINK", value_parser = canonical_uuid)]
+    external_link_id: CanonicalUuid,
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
+    output_frontier_id: CanonicalUuid,
+    #[arg(long)]
+    external_object: String,
+    #[arg(long, value_name = "DECIMAL", value_parser = review_event_ordinal)]
+    event_ordinal: CanonicalU64,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewAttemptArguments {
+    #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
+    attempt_id: CanonicalUuid,
+}
+
+#[derive(Debug, ClapArgs)]
 struct ReviewTargetArguments {
     #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
     target_id: CanonicalUuid,
@@ -397,6 +717,41 @@ enum ReviewWorkflowArgument {
     PublishReview,
     FixFindings,
     PropagateStack,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ReviewTerminalOutcomeArgument {
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ReviewFindingEventArgument {
+    Accepted,
+    Rejected,
+    Duplicate,
+    Superseded,
+    Stale,
+    Fixed,
+    BlockedWithReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ReviewJudgmentEffectOutcomeArgument {
+    Applied,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewExternalObjectKindArgument {
+    Review,
+    ReviewThread,
+    ReviewComment,
+    ChangeRequestComment,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1122,6 +1477,288 @@ pub(crate) fn parse(
                     },
                 }
             }
+            ReviewSubcommand::RecordFindings(arguments) => ReviewCommand::RecordFindings {
+                command_id: arguments.command_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                turn_id: arguments.turn_id,
+                output_frontier_id: arguments.output_frontier_id,
+                findings_file: arguments.findings_file,
+            },
+            ReviewSubcommand::CompletePass(arguments) => {
+                let valid = matches!(
+                    (
+                        arguments.outcome,
+                        arguments.turn_id,
+                        arguments.output_frontier_id,
+                    ),
+                    (ReviewTerminalOutcomeArgument::Succeeded, Some(_), Some(_))
+                        | (
+                            ReviewTerminalOutcomeArgument::Failed
+                                | ReviewTerminalOutcomeArgument::Blocked,
+                            Some(_),
+                            None
+                        )
+                        | (ReviewTerminalOutcomeArgument::Cancelled, _, None)
+                );
+                if !valid {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "complete-pass evidence does not match its terminal outcome",
+                    )));
+                }
+                ReviewCommand::CompletePass {
+                    command_id: arguments.command_id,
+                    run_id: arguments.run_id,
+                    pass_id: arguments.pass_id,
+                    turn_id: arguments.turn_id,
+                    output_frontier_id: arguments.output_frontier_id,
+                    outcome: match arguments.outcome {
+                        ReviewTerminalOutcomeArgument::Succeeded => {
+                            ReviewPassTerminalOutcome::Succeeded
+                        }
+                        ReviewTerminalOutcomeArgument::Failed => ReviewPassTerminalOutcome::Failed,
+                        ReviewTerminalOutcomeArgument::Blocked => {
+                            ReviewPassTerminalOutcome::Blocked
+                        }
+                        ReviewTerminalOutcomeArgument::Cancelled => {
+                            ReviewPassTerminalOutcome::Cancelled
+                        }
+                    },
+                }
+            }
+            ReviewSubcommand::RecordFindingEvent(arguments) => {
+                let event = match (
+                    arguments.event,
+                    arguments.reason,
+                    arguments.referenced_finding_id,
+                    arguments.external_link_id,
+                ) {
+                    (ReviewFindingEventArgument::Accepted, None, None, None) => {
+                        ReviewFindingEvent::Accepted {}
+                    }
+                    (ReviewFindingEventArgument::Rejected, Some(reason), None, None) => {
+                        ReviewFindingEvent::Rejected { reason }
+                    }
+                    (ReviewFindingEventArgument::Duplicate, None, Some(finding), None) => {
+                        ReviewFindingEvent::Duplicate {
+                            canonical_finding_id: finding,
+                        }
+                    }
+                    (ReviewFindingEventArgument::Superseded, None, Some(finding), None) => {
+                        ReviewFindingEvent::Superseded {
+                            successor_finding_id: finding,
+                        }
+                    }
+                    (ReviewFindingEventArgument::Stale, None, None, None) => {
+                        ReviewFindingEvent::Stale {}
+                    }
+                    (ReviewFindingEventArgument::Fixed, None, None, None) => {
+                        ReviewFindingEvent::Fixed {}
+                    }
+                    (
+                        ReviewFindingEventArgument::BlockedWithReason,
+                        Some(reason),
+                        None,
+                        external_link_id,
+                    ) => ReviewFindingEvent::BlockedWithReason {
+                        reason,
+                        external_link_id,
+                    },
+                    _ => {
+                        return Err(UsageError(Cli::command().error(
+                            ErrorKind::ArgumentConflict,
+                            "record-finding-event options do not match the selected event",
+                        )));
+                    }
+                };
+                let blocked = matches!(event, ReviewFindingEvent::BlockedWithReason { .. });
+                if blocked == arguments.output_frontier_id.is_some() {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "record-finding-event frontier does not match the selected event",
+                    )));
+                }
+                ReviewCommand::RecordFindingEvent {
+                    command_id: arguments.command_id,
+
+                    run_id: arguments.run_id,
+                    pass_id: arguments.pass_id,
+                    turn_id: arguments.turn_id,
+                    output_frontier_id: arguments.output_frontier_id,
+                    finding_id: arguments.finding_id,
+                    event_ordinal: arguments.event_ordinal,
+                    event,
+                }
+            }
+            ReviewSubcommand::StartOrchestration(arguments) => ReviewCommand::StartOrchestration {
+                command_id: arguments.command_id,
+                attempt_id: arguments.attempt_id,
+                target_id: arguments.target_id,
+                concern_set_version: arguments.concern_set_version,
+                import_template_name: arguments.import_template_name,
+                judgment_template_name: arguments.judgment_template_name,
+                repair_template_name: arguments.repair_template_name,
+                publication_template_name: arguments.publication_template_name,
+                concerns_file: arguments.concerns_file,
+            },
+            ReviewSubcommand::RecordImportOutcome(arguments) => {
+                let valid = match arguments.outcome {
+                    ReviewTerminalOutcomeArgument::Succeeded => {
+                        arguments.pass_id.is_some() && arguments.context_digest.is_some()
+                    }
+                    ReviewTerminalOutcomeArgument::Failed
+                    | ReviewTerminalOutcomeArgument::Blocked => {
+                        arguments.pass_id.is_some()
+                            && arguments.external_link_id.is_none()
+                            && arguments.context_digest.is_none()
+                    }
+                    ReviewTerminalOutcomeArgument::Cancelled => {
+                        arguments.external_link_id.is_none() && arguments.context_digest.is_none()
+                    }
+                };
+                if !valid {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "record-import-outcome evidence does not match its terminal outcome",
+                    )));
+                }
+                ReviewCommand::RecordImportOutcome {
+                    command_id: arguments.command_id,
+                    attempt_id: arguments.attempt_id,
+                    pass_id: arguments.pass_id,
+                    external_link_id: arguments.external_link_id,
+                    context_digest: arguments.context_digest,
+                    outcome: match arguments.outcome {
+                        ReviewTerminalOutcomeArgument::Succeeded => {
+                            ReviewImportTerminalOutcome::Succeeded
+                        }
+                        ReviewTerminalOutcomeArgument::Failed => {
+                            ReviewImportTerminalOutcome::Failed
+                        }
+                        ReviewTerminalOutcomeArgument::Blocked => {
+                            ReviewImportTerminalOutcome::Blocked
+                        }
+                        ReviewTerminalOutcomeArgument::Cancelled => {
+                            ReviewImportTerminalOutcome::Cancelled
+                        }
+                    },
+                }
+            }
+            ReviewSubcommand::RecordConcernOutcome(arguments) => {
+                if arguments.outcome != ReviewTerminalOutcomeArgument::Cancelled
+                    && arguments.pass_id.is_none()
+                {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "record-concern-outcome requires --pass-id unless cancelled",
+                    )));
+                }
+                ReviewCommand::RecordConcernOutcome {
+                    command_id: arguments.command_id,
+                    attempt_id: arguments.attempt_id,
+                    concern: arguments.concern,
+                    pass_id: arguments.pass_id,
+                    outcome: match arguments.outcome {
+                        ReviewTerminalOutcomeArgument::Succeeded => {
+                            ReviewConcernTerminalOutcome::Succeeded
+                        }
+                        ReviewTerminalOutcomeArgument::Failed => {
+                            ReviewConcernTerminalOutcome::Failed
+                        }
+                        ReviewTerminalOutcomeArgument::Blocked => {
+                            ReviewConcernTerminalOutcome::Blocked
+                        }
+                        ReviewTerminalOutcomeArgument::Cancelled => {
+                            ReviewConcernTerminalOutcome::Cancelled
+                        }
+                    },
+                }
+            }
+            ReviewSubcommand::RecordJudgmentPlan(arguments) => ReviewCommand::RecordJudgmentPlan {
+                command_id: arguments.command_id,
+                attempt_id: arguments.attempt_id,
+                analysis_pass_id: arguments.analysis_pass_id,
+                members_file: arguments.members_file,
+            },
+            ReviewSubcommand::RecordJudgmentEffect(arguments) => {
+                let applied = arguments.outcome == ReviewJudgmentEffectOutcomeArgument::Applied;
+                if applied != arguments.event_pass_id.is_some() {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "record-judgment-effect pass evidence does not match its outcome",
+                    )));
+                }
+                ReviewCommand::RecordJudgmentEffect {
+                    command_id: arguments.command_id,
+                    attempt_id: arguments.attempt_id,
+                    finding_id: arguments.finding_id,
+                    event_pass_id: arguments.event_pass_id,
+                    outcome: match arguments.outcome {
+                        ReviewJudgmentEffectOutcomeArgument::Applied => {
+                            ReviewJudgmentEffectTerminalOutcome::Applied
+                        }
+                        ReviewJudgmentEffectOutcomeArgument::Failed => {
+                            ReviewJudgmentEffectTerminalOutcome::Failed
+                        }
+                        ReviewJudgmentEffectOutcomeArgument::Blocked => {
+                            ReviewJudgmentEffectTerminalOutcome::Blocked
+                        }
+                        ReviewJudgmentEffectOutcomeArgument::Cancelled => {
+                            ReviewJudgmentEffectTerminalOutcome::Cancelled
+                        }
+                    },
+                }
+            }
+            ReviewSubcommand::RecordRepairOutcomes(arguments) => {
+                ReviewCommand::RecordRepairOutcomes {
+                    command_id: arguments.command_id,
+                    attempt_id: arguments.attempt_id,
+                    outcomes_file: arguments.outcomes_file,
+                }
+            }
+            ReviewSubcommand::RecordPublicationOutcomes(arguments) => {
+                ReviewCommand::RecordPublicationOutcomes {
+                    command_id: arguments.command_id,
+                    attempt_id: arguments.attempt_id,
+                    outcomes_file: arguments.outcomes_file,
+                }
+            }
+            ReviewSubcommand::ReserveExternalLink(arguments) => {
+                ReviewCommand::ReserveExternalLink {
+                    command_id: arguments.command_id,
+                    external_link_id: arguments.external_link_id,
+                    finding_id: arguments.finding_id,
+                    provider: arguments.provider,
+                    object_kind: match arguments.object_kind {
+                        ReviewExternalObjectKindArgument::Review => {
+                            ReviewExternalObjectKind::Review
+                        }
+                        ReviewExternalObjectKindArgument::ReviewThread => {
+                            ReviewExternalObjectKind::ReviewThread
+                        }
+                        ReviewExternalObjectKindArgument::ReviewComment => {
+                            ReviewExternalObjectKind::ReviewComment
+                        }
+                        ReviewExternalObjectKindArgument::ChangeRequestComment => {
+                            ReviewExternalObjectKind::ChangeRequestComment
+                        }
+                    },
+                }
+            }
+            ReviewSubcommand::AttachExternalLink(arguments) => ReviewCommand::AttachExternalLink {
+                command_id: arguments.command_id,
+                external_link_id: arguments.external_link_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                turn_id: arguments.turn_id,
+                output_frontier_id: arguments.output_frontier_id,
+                external_object: arguments.external_object,
+                event_ordinal: arguments.event_ordinal,
+            },
+            ReviewSubcommand::ReadOrchestration(arguments) => ReviewCommand::ReadOrchestration {
+                attempt_id: arguments.attempt_id,
+            },
             ReviewSubcommand::ListFindings(arguments) => ReviewCommand::ListFindings {
                 run_id: arguments.run_id,
             },
@@ -1166,6 +1803,11 @@ fn canonical_uuid(value: &str) -> Result<CanonicalUuid, String> {
         return Err("UUID must be lowercase canonical hyphenated text".to_owned());
     }
     Ok(CanonicalUuid::from_uuid(parsed))
+}
+
+fn canonical_digest(value: &str) -> Result<CanonicalDigest, String> {
+    CanonicalDigest::try_new(value.to_owned())
+        .map_err(|_| "digest must be exactly 64 lowercase hexadecimal characters".to_owned())
 }
 
 fn command_id(value: &str) -> Result<CommandId, String> {
@@ -1260,6 +1902,14 @@ fn through_position(value: &str) -> Result<ThroughPositionArgument, String> {
     positive_canonical_u64(value)
         .map(ThroughPositionArgument::Exact)
         .map_err(|error| format!("{error}, or the exact text `{LATEST_IMPORTED_POSITION}`"))
+}
+
+fn review_event_ordinal(value: &str) -> Result<CanonicalU64, String> {
+    let parsed = positive_canonical_u64(value)?;
+    if parsed.value() > u64::from(u32::MAX) {
+        return Err("review event ordinal exceeds the unsigned 32-bit range".to_owned());
+    }
+    Ok(parsed)
 }
 
 fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
@@ -1417,6 +2067,346 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn review_complete_pass_checks_terminal_evidence_correlation() {
+        let run = "00000000-0000-0000-0000-000000000001";
+        let pass = "00000000-0000-0000-0000-000000000002";
+        let turn = "00000000-0000-0000-0000-000000000003";
+        let frontier = "00000000-0000-0000-0000-000000000004";
+        let valid = parse(
+            [
+                "review",
+                "complete-pass",
+                run,
+                pass,
+                "--outcome",
+                "succeeded",
+                "--turn-id",
+                turn,
+                "--output-frontier-id",
+                frontier,
+            ]
+            .map(Into::into),
+        );
+        let invalid = parse(
+            [
+                "review",
+                "complete-pass",
+                run,
+                pass,
+                "--outcome",
+                "failed",
+                "--turn-id",
+                turn,
+                "--output-frontier-id",
+                frontier,
+            ]
+            .map(Into::into),
+        );
+
+        assert!(valid.is_ok());
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn review_finding_event_checks_variant_specific_fields() {
+        let run = "00000000-0000-0000-0000-000000000001";
+        let pass = "00000000-0000-0000-0000-000000000002";
+        let turn = "00000000-0000-0000-0000-000000000003";
+        let frontier = "00000000-0000-0000-0000-000000000004";
+        let finding = "00000000-0000-0000-0000-000000000005";
+        let canonical = "00000000-0000-0000-0000-000000000006";
+        let valid = parse(
+            [
+                "review",
+                "record-finding-event",
+                run,
+                pass,
+                "--turn-id",
+                turn,
+                "--output-frontier-id",
+                frontier,
+                "--finding-id",
+                finding,
+                "--event-ordinal",
+                "1",
+                "--event",
+                "duplicate",
+                "--referenced-finding-id",
+                canonical,
+            ]
+            .map(Into::into),
+        );
+        let invalid = parse(
+            [
+                "review",
+                "record-finding-event",
+                run,
+                pass,
+                "--turn-id",
+                turn,
+                "--output-frontier-id",
+                frontier,
+                "--finding-id",
+                finding,
+                "--event-ordinal",
+                "1",
+                "--event",
+                "duplicate",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(valid.is_ok());
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn review_blocked_finding_event_requires_an_absent_frontier() {
+        let run = "00000000-0000-0000-0000-000000000001";
+        let pass = "00000000-0000-0000-0000-000000000002";
+        let turn = "00000000-0000-0000-0000-000000000003";
+        let frontier = "00000000-0000-0000-0000-000000000004";
+        let finding = "00000000-0000-0000-0000-000000000005";
+        let valid = parse(
+            [
+                "review",
+                "record-finding-event",
+                run,
+                pass,
+                "--turn-id",
+                turn,
+                "--finding-id",
+                finding,
+                "--event-ordinal",
+                "1",
+                "--event",
+                "blocked-with-reason",
+                "--reason",
+                "requires reconciliation",
+            ]
+            .map(Into::into),
+        );
+        let invalid = parse(
+            [
+                "review",
+                "record-finding-event",
+                run,
+                pass,
+                "--turn-id",
+                turn,
+                "--output-frontier-id",
+                frontier,
+                "--finding-id",
+                finding,
+                "--event-ordinal",
+                "1",
+                "--event",
+                "blocked-with-reason",
+                "--reason",
+                "requires reconciliation",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(valid.is_ok());
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn review_import_outcome_checks_canonical_digest_and_evidence() {
+        let attempt = "00000000-0000-0000-0000-000000000001";
+        let pass = "00000000-0000-0000-0000-000000000002";
+        let valid = parse(
+            [
+                "review",
+                "record-import-outcome",
+                attempt,
+                "--outcome",
+                "succeeded",
+                "--pass-id",
+                pass,
+                "--context-digest",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]
+            .map(Into::into),
+        );
+        let invalid_digest = parse(
+            [
+                "review",
+                "record-import-outcome",
+                attempt,
+                "--outcome",
+                "succeeded",
+                "--pass-id",
+                pass,
+                "--context-digest",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ]
+            .map(Into::into),
+        );
+        let missing_pass = parse(
+            [
+                "review",
+                "record-import-outcome",
+                attempt,
+                "--outcome",
+                "failed",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(valid.is_ok());
+        assert!(invalid_digest.is_err());
+        assert!(missing_pass.is_err());
+    }
+
+    #[test]
+    fn review_judgment_effect_checks_pass_evidence() {
+        let attempt = "00000000-0000-0000-0000-000000000001";
+        let finding = "00000000-0000-0000-0000-000000000002";
+        let pass = "00000000-0000-0000-0000-000000000003";
+        let valid = parse(
+            [
+                "review",
+                "record-judgment-effect",
+                attempt,
+                finding,
+                "--outcome",
+                "applied",
+                "--event-pass-id",
+                pass,
+            ]
+            .map(Into::into),
+        );
+        let invalid = parse(
+            [
+                "review",
+                "record-judgment-effect",
+                attempt,
+                finding,
+                "--outcome",
+                "blocked",
+                "--event-pass-id",
+                pass,
+            ]
+            .map(Into::into),
+        );
+
+        assert!(valid.is_ok());
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn review_inventory_commands_accept_explicit_json_paths() {
+        let attempt = "00000000-0000-0000-0000-000000000001";
+        let target = "00000000-0000-0000-0000-000000000002";
+        let pass = "00000000-0000-0000-0000-000000000003";
+        let start = parse(
+            [
+                "review",
+                "start-orchestration",
+                attempt,
+                target,
+                "--concern-set-version",
+                "initial-five",
+                "--import-template-name",
+                "review.import",
+                "--judgment-template-name",
+                "review.judgment",
+                "--repair-template-name",
+                "review.repair",
+                "--publication-template-name",
+                "review.publication",
+                "--concerns-file",
+                "concerns.json",
+            ]
+            .map(Into::into),
+        );
+        let judgment = parse(
+            [
+                "review",
+                "record-judgment-plan",
+                attempt,
+                pass,
+                "--members-file",
+                "members.json",
+            ]
+            .map(Into::into),
+        );
+        let repairs = parse(
+            [
+                "review",
+                "record-repair-outcomes",
+                attempt,
+                "--outcomes-file",
+                "repairs.json",
+            ]
+            .map(Into::into),
+        );
+        let publications = parse(
+            [
+                "review",
+                "record-publication-outcomes",
+                attempt,
+                "--outcomes-file",
+                "publications.json",
+            ]
+            .map(Into::into),
+        );
+        let read = parse(["review", "read-orchestration", attempt].map(Into::into));
+
+        assert!(start.is_ok());
+        assert!(judgment.is_ok());
+        assert!(repairs.is_ok());
+        assert!(publications.is_ok());
+        assert!(read.is_ok());
+    }
+
+    #[test]
+    fn review_publication_link_commands_accept_complete_evidence() {
+        let finding = "00000000-0000-0000-0000-000000000001";
+        let link = "00000000-0000-0000-0000-000000000002";
+        let run = "00000000-0000-0000-0000-000000000003";
+        let pass = "00000000-0000-0000-0000-000000000004";
+        let turn = "00000000-0000-0000-0000-000000000005";
+        let frontier = "00000000-0000-0000-0000-000000000006";
+        let reserve = parse(
+            [
+                "review",
+                "reserve-external-link",
+                finding,
+                link,
+                "--provider",
+                "example-host",
+                "--object-kind",
+                "review-comment",
+            ]
+            .map(Into::into),
+        );
+        let attach = parse(
+            [
+                "review",
+                "attach-external-link",
+                link,
+                run,
+                pass,
+                "--turn-id",
+                turn,
+                "--output-frontier-id",
+                frontier,
+                "--external-object",
+                "provider-object-7",
+                "--event-ordinal",
+                "1",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(reserve.is_ok());
+        assert!(attach.is_ok());
     }
 
     #[test]

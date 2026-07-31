@@ -21,12 +21,13 @@ use signalbox_application::{
     ListSessionMetadataService, LoadSessionMetadataService, OperatorFailureClass,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
-    ReplaceSessionMetadataService, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
-    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
-    ReviewWorkflowOperationKind, SessionMetadataListItem, SessionMetadataListQuery,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
-    UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
-    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
+    ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
+    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
+    ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
+    SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    SubmitInputTransaction, UuidV7CreateSessionFromImportedFrontierIdGenerator,
+    UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
+    UuidV7ToolLoopIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
@@ -46,13 +47,14 @@ use signalbox_domain::{
     ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
     ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
     ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
-    ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
-    ReviewFindingRef, ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass,
-    ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTurnEvidence,
-    ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings, ReviewRun, ReviewRunEvidence,
-    ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
-    ReviewText, ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
+    ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
+    ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
+    ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassResult,
+    ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
+    ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunId, ReviewRunRef,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SessionTemplateName,
     SessionTemplateProvenance, SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult,
@@ -110,9 +112,9 @@ use signalbox_process_protocol::{
     MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
     ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId,
     ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
-    ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
-    ReviewFindingSnapshot, ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
+    ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
+    ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
+    ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
@@ -136,6 +138,10 @@ use crate::telemetry::{ModelMetricDisposition, TelemetryMetrics, TurnMetricOutco
 use crate::{
     FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener, LocalSocketError,
     SessionTemplateConfiguration,
+    review_orchestration_runtime::{
+        ReviewOrchestrationInternalCause, ReviewOrchestrationRuntimeError,
+        execute_review_orchestration_request, read_review_orchestration_request,
+    },
 };
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -148,6 +154,7 @@ const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
+const REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS: u32 = 2;
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -683,6 +690,18 @@ async fn acquire_snapshot_reader_permit(
     }
 }
 
+async fn acquire_review_orchestration_snapshot_permit(
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => Ok(None),
+        permit = budget.acquire_many_owned(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS) => permit
+            .map(Some)
+            .map_err(|_| ProcessConnectionError::SnapshotReaderBudgetClosed),
+    }
+}
+
 async fn acquire_import_permit(
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
@@ -744,7 +763,7 @@ async fn acquire_review_command_permit_while_buffered(
 fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
-    if available == 0 {
+    if available < REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS {
         return None;
     }
     usize::try_from(available).ok()
@@ -756,10 +775,18 @@ const fn is_review_mutation(request: &ClientRequest) -> bool {
         ClientRequest::CreateReviewTarget { .. }
             | ClientRequest::StartReviewRun { .. }
             | ClientRequest::ActivateReviewPass { .. }
+            | ClientRequest::CompleteReviewPass { .. }
             | ClientRequest::RecordReviewFindings { .. }
-            | ClientRequest::RecordReviewFindingDisposition { .. }
+            | ClientRequest::RecordReviewFindingEvent { .. }
             | ClientRequest::ReserveReviewExternalLink { .. }
             | ClientRequest::AttachReviewExternalLink { .. }
+            | ClientRequest::StartReviewOrchestration { .. }
+            | ClientRequest::RecordReviewImportOutcome { .. }
+            | ClientRequest::RecordReviewConcernOutcome { .. }
+            | ClientRequest::RecordReviewJudgmentPlan { .. }
+            | ClientRequest::RecordReviewJudgmentEffect { .. }
+            | ClientRequest::RecordReviewRepairOutcomes { .. }
+            | ClientRequest::RecordReviewPublicationOutcomes { .. }
     )
 }
 
@@ -1267,6 +1294,31 @@ where
             )
             .await
         }
+        ClientRequest::CompleteReviewPass {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            outcome,
+        } => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
+            handle_complete_review_pass(
+                &mut response_writer,
+                version,
+                request_id,
+                required_review_digest(review_digest)?,
+                command_id,
+                run_id,
+                pass_id,
+                turn_id,
+                output_frontier_id,
+                outcome,
+                &services.pool,
+            )
+            .await
+        }
         ClientRequest::RecordReviewFindings {
             command_id,
             run_id,
@@ -1292,7 +1344,7 @@ where
             )
             .await
         }
-        ClientRequest::RecordReviewFindingDisposition {
+        ClientRequest::RecordReviewFindingEvent {
             command_id,
             run_id,
             pass_id,
@@ -1300,7 +1352,7 @@ where
             output_frontier_id,
             finding_id,
             event_ordinal,
-            disposition,
+            event,
         } => {
             let mut response_writer =
                 ReviewResponseWriter::new(writer, review_command_permit.take());
@@ -1316,7 +1368,7 @@ where
                 output_frontier_id,
                 finding_id,
                 event_ordinal,
-                disposition,
+                event,
                 &services.pool,
             )
             .await
@@ -1372,6 +1424,50 @@ where
                 &services.pool,
             )
             .await
+        }
+        request @ (ClientRequest::StartReviewOrchestration { .. }
+        | ClientRequest::RecordReviewImportOutcome { .. }
+        | ClientRequest::RecordReviewConcernOutcome { .. }
+        | ClientRequest::RecordReviewJudgmentPlan { .. }
+        | ClientRequest::RecordReviewJudgmentEffect { .. }
+        | ClientRequest::RecordReviewRepairOutcomes { .. }
+        | ClientRequest::RecordReviewPublicationOutcomes { .. }) => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
+            handle_review_orchestration_mutation(
+                &mut response_writer,
+                version,
+                request_id,
+                required_review_digest(review_digest)?,
+                request,
+                &services.pool,
+                services.template_configuration.as_ref(),
+            )
+            .await
+        }
+        request @ ClientRequest::ReadReviewOrchestration { .. } => {
+            let Some(snapshot_permit) = acquire_review_orchestration_snapshot_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            run_until_shutdown(
+                &mut shutdown,
+                handle_read_review_orchestration(
+                    writer,
+                    version,
+                    request_id,
+                    request,
+                    &services.pool,
+                    services.template_configuration.as_ref(),
+                    snapshot_permit,
+                ),
+            )
+            .await
+            .unwrap_or(Ok(()))
         }
         ClientRequest::ReadReviewTarget { target_id } => {
             handle_read_review_target(writer, version, request_id, target_id, &services.pool).await
@@ -1429,6 +1525,104 @@ where
             .await
         }
     }
+}
+
+async fn handle_review_orchestration_mutation<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    digest: [u8; 32],
+    request: ClientRequest,
+    pool: &PgPool,
+    templates: &SessionTemplateConfiguration,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    match execute_review_orchestration_request(request, digest, pool.clone(), templates).await {
+        Ok(message) => write_message(writer, version, request_id, message).await,
+        Err(error) => write_review_orchestration_error(writer, version, request_id, error).await,
+    }
+}
+
+async fn handle_read_review_orchestration<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: ClientRequest,
+    pool: &PgPool,
+    templates: &SessionTemplateConfiguration,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let result = read_review_orchestration_request(request, [0; 32], pool.clone(), templates).await;
+    drop(snapshot_permit);
+    match result {
+        Ok(message) => write_message(writer, version, request_id, message).await,
+        Err(error) => write_review_orchestration_error(writer, version, request_id, error).await,
+    }
+}
+
+async fn write_review_orchestration_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    error: ReviewOrchestrationRuntimeError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let protocol_error = match error {
+        ReviewOrchestrationRuntimeError::InvalidRequest
+        | ReviewOrchestrationRuntimeError::Rejected => {
+            ProtocolError::without_detail(ErrorCode::InvalidRequest)
+        }
+        ReviewOrchestrationRuntimeError::NotFound => {
+            ProtocolError::without_detail(ErrorCode::NotFound)
+        }
+        ReviewOrchestrationRuntimeError::ConflictingReuse => {
+            ProtocolError::without_detail(ErrorCode::ConflictingReuse)
+        }
+        ReviewOrchestrationRuntimeError::Unavailable { commit_ambiguous } => {
+            review_orchestration_unavailable_error(commit_ambiguous)
+        }
+        ReviewOrchestrationRuntimeError::Internal { session_id, cause } => {
+            let diagnostic = match cause {
+                ReviewOrchestrationInternalCause::StoreCorruption => {
+                    InternalDiagnostic::ReviewOrchestrationStoreCorruption
+                }
+                ReviewOrchestrationInternalCause::WorkflowCorruption => {
+                    InternalDiagnostic::ReviewOrchestrationWorkflowCorruption
+                }
+                ReviewOrchestrationInternalCause::SessionCorruption => {
+                    InternalDiagnostic::ReviewOrchestrationSessionCorruption
+                }
+                ReviewOrchestrationInternalCause::ServiceContract => {
+                    InternalDiagnostic::ReviewOrchestrationServiceContract
+                }
+            };
+            internal_protocol_error(session_id, diagnostic)
+        }
+    };
+    write_error(writer, version, request_id, protocol_error).await
+}
+
+fn review_orchestration_unavailable_error(commit_ambiguous: bool) -> ProtocolError {
+    let failure_class = OperatorFailureClass::Infrastructure { commit_ambiguous };
+    let cause_code = if commit_ambiguous {
+        "review_orchestration_commit_ambiguous"
+    } else {
+        "review_orchestration_database_unavailable"
+    };
+    tracing::error!(
+        ?failure_class,
+        cause_code,
+        session_id = tracing::field::Empty,
+        "review orchestration request failed"
+    );
+    ProtocolError::mutation_unavailable(commit_ambiguous)
 }
 
 fn required_review_digest(digest: Option<[u8; 32]>) -> Result<[u8; 32], ProcessConnectionError> {
@@ -1737,6 +1931,19 @@ where
                 pass_id: wire_uuid(pass.into_uuid()),
             }
         }
+        ReviewWorkflowCommandResult::PassCompleted { run, pass, status } => {
+            let state = match status {
+                ReviewPassCompletionStatus::Succeeded => ReviewPassLifecycle::Succeeded,
+                ReviewPassCompletionStatus::Failed => ReviewPassLifecycle::Failed,
+                ReviewPassCompletionStatus::Blocked => ReviewPassLifecycle::Blocked,
+                ReviewPassCompletionStatus::Cancelled => ReviewPassLifecycle::Cancelled,
+            };
+            ServerMessage::ReviewPassCompleted {
+                run_id: wire_uuid(run.into_uuid()),
+                pass_id: wire_uuid(pass.into_uuid()),
+                state,
+            }
+        }
         ReviewWorkflowCommandResult::FindingsRecorded {
             run,
             pass,
@@ -1751,7 +1958,7 @@ where
             }
         }
         ReviewWorkflowCommandResult::FindingEventRecorded { finding, status } => {
-            ServerMessage::ReviewFindingDispositionRecorded {
+            ServerMessage::ReviewFindingEventRecorded {
                 finding_id: wire_uuid(finding.into_uuid()),
                 status: wire_review_finding_status(status),
             }
@@ -1967,6 +2174,171 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn handle_complete_review_pass<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    digest: [u8; 32],
+    command_id: signalbox_process_protocol::CommandId,
+    run_id: CanonicalUuid,
+    pass_id: CanonicalUuid,
+    turn_id: Option<CanonicalUuid>,
+    output_frontier_id: Option<CanonicalUuid>,
+    outcome: ReviewPassTerminalOutcome,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    if replay_review_command(
+        writer,
+        version,
+        request_id,
+        pool,
+        command_id,
+        digest,
+        ReviewWorkflowOperationKind::CompletePass,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    let run_id = ReviewRunId::from_uuid(run_id.into_uuid());
+    let pass_id = ReviewPassId::from_uuid(pass_id.into_uuid());
+    let store = ReviewWorkflowStore::new(pool.clone());
+    let current_run = match store.load_run(run_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return write_review_invalid(writer, version, request_id).await,
+        Err(error) => return write_review_store_error(writer, version, request_id, error).await,
+    };
+    let current_pass = match store.load_pass(pass_id).await {
+        Ok(Some(pass)) => pass,
+        Ok(None) => return write_review_invalid(writer, version, request_id).await,
+        Err(error) => return write_review_store_error(writer, version, request_id, error).await,
+    };
+    if current_pass.reference().run().run() != run_id {
+        return write_review_invalid(writer, version, request_id).await;
+    }
+    if matches!(outcome, ReviewPassTerminalOutcome::Succeeded)
+        && current_pass.kind() == ReviewPassKind::ReadOnlyReview
+    {
+        return write_review_invalid(writer, version, request_id).await;
+    }
+    let completed = match (outcome, turn_id, output_frontier_id) {
+        (ReviewPassTerminalOutcome::Cancelled, None, None) => {
+            complete_queued_review_pass(current_run, current_pass)
+        }
+        (ReviewPassTerminalOutcome::Succeeded, Some(turn), Some(frontier)) => {
+            let Some(completed) = complete_review_pass(
+                writer,
+                version,
+                request_id,
+                pool,
+                current_run,
+                current_pass,
+                ReviewPassState::Succeeded {
+                    turn: TurnId::from_uuid(turn.into_uuid()),
+                    output_frontier: ContextFrontierId::from_uuid(frontier.into_uuid()),
+                    result: None,
+                },
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            Some(completed)
+        }
+        (ReviewPassTerminalOutcome::Failed, Some(turn), None) => {
+            let Some(completed) = complete_review_pass(
+                writer,
+                version,
+                request_id,
+                pool,
+                current_run,
+                current_pass,
+                ReviewPassState::Failed {
+                    turn: TurnId::from_uuid(turn.into_uuid()),
+                },
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            Some(completed)
+        }
+        (ReviewPassTerminalOutcome::Blocked, Some(turn), None) => {
+            let Some(completed) = complete_review_pass(
+                writer,
+                version,
+                request_id,
+                pool,
+                current_run,
+                current_pass,
+                ReviewPassState::Blocked {
+                    turn: TurnId::from_uuid(turn.into_uuid()),
+                    result: None,
+                },
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            Some(completed)
+        }
+        (ReviewPassTerminalOutcome::Cancelled, Some(turn), None) => {
+            let Some(completed) = complete_review_pass(
+                writer,
+                version,
+                request_id,
+                pool,
+                current_run,
+                current_pass,
+                ReviewPassState::Cancelled {
+                    turn: Some(TurnId::from_uuid(turn.into_uuid())),
+                },
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            Some(completed)
+        }
+        _ => return write_review_invalid(writer, version, request_id).await,
+    };
+    let Some((run, pass)) = completed.map(|(pass, run)| (run, pass)) else {
+        return write_review_invalid(writer, version, request_id).await;
+    };
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(command_id.into_uuid()),
+        digest,
+        ReviewWorkflowOperation::CompletePass { run, pass },
+    );
+    execute_review_command(writer, version, request_id, pool, command).await
+}
+
+fn complete_queued_review_pass(
+    current_run: ReviewRun,
+    current_pass: ReviewPass,
+) -> Option<(ReviewPass, ReviewRun)> {
+    let next_pass = ReviewPassState::Cancelled { turn: None };
+    let pass = if current_pass.state() == &next_pass {
+        current_pass
+    } else {
+        current_pass.transition(next_pass, None).ok()?
+    };
+    let pass_evidence = ReviewPassEvidence::from_pass(&pass, current_run.policy());
+    let next_run = ReviewRunState::Cancelled {
+        last_pass: Some(pass.reference()),
+    };
+    let run = if current_run.state() == next_run {
+        current_run
+    } else {
+        current_run.transition(next_run, Some(pass_evidence)).ok()?
+    };
+    Some((pass, run))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_record_review_findings<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -2031,7 +2403,7 @@ where
         output_frontier: ContextFrontierId::from_uuid(output_frontier_id.into_uuid()),
         result: Some(ReviewPassResult::ProducedFindings(inventory)),
     };
-    let Some((pass_evidence, run_evidence)) = complete_review_pass(
+    let Some((completed_pass, completed_run)) = complete_review_pass(
         writer,
         version,
         request_id,
@@ -2044,6 +2416,8 @@ where
     else {
         return Ok(());
     };
+    let pass_evidence = ReviewPassEvidence::from_pass(&completed_pass, completed_run.policy());
+    let run_evidence = completed_run.evidence();
     let target = match store.load_target(pass_evidence.reference().target()).await {
         Ok(Some(target)) => target,
         Ok(None) => return write_review_internal(writer, version, request_id).await,
@@ -2091,10 +2465,10 @@ async fn handle_record_review_disposition<Writer>(
     run_id: CanonicalUuid,
     pass_id: CanonicalUuid,
     turn_id: CanonicalUuid,
-    output_frontier_id: CanonicalUuid,
+    output_frontier_id: Option<CanonicalUuid>,
     finding_id: CanonicalUuid,
     event_ordinal: CanonicalU64,
-    disposition: WireReviewFindingDisposition,
+    event: WireReviewFindingEvent,
     pool: &PgPool,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -2133,7 +2507,6 @@ where
         Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     };
     if current_pass.reference().run().run() != run_id
-        || current_pass.kind() != ReviewPassKind::Judge
         || current_finding.proposal().reference().target() != current_pass.reference().target()
     {
         return write_review_invalid(writer, version, request_id).await;
@@ -2144,12 +2517,13 @@ where
     let Ok(ordinal) = ReviewEventOrdinal::try_new(ordinal_value) else {
         return write_review_invalid(writer, version, request_id).await;
     };
-    let (result_kind, event_kind) = match disposition {
-        WireReviewFindingDisposition::Accepted {} => (
+    let (result_kind, event_kind, blocked) = match event {
+        WireReviewFindingEvent::Accepted {} => (
             ReviewFindingEventResultKind::Accepted,
             ReviewFindingEventKind::Accepted,
+            false,
         ),
-        WireReviewFindingDisposition::Rejected { reason } => {
+        WireReviewFindingEvent::Rejected { reason } => {
             let Ok(reason) = ReviewText::try_new(reason) else {
                 return write_review_invalid(writer, version, request_id).await;
             };
@@ -2158,21 +2532,129 @@ where
                     reason: reason.clone(),
                 },
                 ReviewFindingEventKind::Rejected { reason },
+                false,
             )
         }
-        WireReviewFindingDisposition::Stale {} => (
+        WireReviewFindingEvent::Duplicate {
+            canonical_finding_id,
+        } => {
+            let referenced = match store
+                .load_finding(ReviewFindingId::from_uuid(canonical_finding_id.into_uuid()))
+                .await
+            {
+                Ok(Some(finding)) => finding,
+                Ok(None) => return write_review_invalid(writer, version, request_id).await,
+                Err(error) => {
+                    return write_review_store_error(writer, version, request_id, error).await;
+                }
+            };
+            let Some(canonical) = ReviewReferencedFindingEvidence::try_from_finding(&referenced)
+            else {
+                return write_review_invalid(writer, version, request_id).await;
+            };
+            (
+                ReviewFindingEventResultKind::Duplicate { canonical },
+                ReviewFindingEventKind::Duplicate { canonical },
+                false,
+            )
+        }
+        WireReviewFindingEvent::Superseded {
+            successor_finding_id,
+        } => {
+            let referenced = match store
+                .load_finding(ReviewFindingId::from_uuid(successor_finding_id.into_uuid()))
+                .await
+            {
+                Ok(Some(finding)) => finding,
+                Ok(None) => return write_review_invalid(writer, version, request_id).await,
+                Err(error) => {
+                    return write_review_store_error(writer, version, request_id, error).await;
+                }
+            };
+            let Some(successor) = ReviewReferencedFindingEvidence::try_from_finding(&referenced)
+            else {
+                return write_review_invalid(writer, version, request_id).await;
+            };
+            (
+                ReviewFindingEventResultKind::Superseded { successor },
+                ReviewFindingEventKind::Superseded { successor },
+                false,
+            )
+        }
+        WireReviewFindingEvent::Stale {} => (
             ReviewFindingEventResultKind::Stale,
             ReviewFindingEventKind::Stale,
+            false,
         ),
+        WireReviewFindingEvent::Fixed {} => (
+            ReviewFindingEventResultKind::Fixed,
+            ReviewFindingEventKind::Fixed,
+            false,
+        ),
+        WireReviewFindingEvent::BlockedWithReason {
+            reason,
+            external_link_id,
+        } => {
+            let Ok(reason) = ReviewText::try_new(reason) else {
+                return write_review_invalid(writer, version, request_id).await;
+            };
+            let link = match external_link_id {
+                Some(link_id) => {
+                    let link_id = ReviewExternalLinkId::from_uuid(link_id.into_uuid());
+                    let link = match store.load_external_link(link_id).await {
+                        Ok(Some(link)) => link,
+                        Ok(None) => {
+                            return write_review_invalid(writer, version, request_id).await;
+                        }
+                        Err(error) => {
+                            return write_review_store_error(writer, version, request_id, error)
+                                .await;
+                        }
+                    };
+                    let Ok(reference) = ReviewFindingPendingExternalLinkRef::try_new(
+                        current_finding.proposal().reference(),
+                        &link,
+                    ) else {
+                        return write_review_invalid(writer, version, request_id).await;
+                    };
+                    Some(reference)
+                }
+                None => None,
+            };
+            (
+                ReviewFindingEventResultKind::BlockedWithReason {
+                    reason: reason.clone(),
+                    link: link.as_ref().map(ReviewFindingPendingExternalLinkRef::link),
+                },
+                ReviewFindingEventKind::BlockedWithReason {
+                    reason,
+                    link: link.map(Box::new),
+                },
+                true,
+            )
+        }
     };
     let finding_reference = current_finding.proposal().reference();
     let result = ReviewFindingEventResult::new(finding_reference, ordinal, result_kind);
-    let next = ReviewPassState::Succeeded {
-        turn: TurnId::from_uuid(turn_id.into_uuid()),
-        output_frontier: ContextFrontierId::from_uuid(output_frontier_id.into_uuid()),
-        result: Some(ReviewPassResult::FindingEvent(result)),
+    let next = if blocked {
+        if output_frontier_id.is_some() {
+            return write_review_invalid(writer, version, request_id).await;
+        }
+        ReviewPassState::Blocked {
+            turn: TurnId::from_uuid(turn_id.into_uuid()),
+            result: Some(ReviewPassResult::FindingEvent(result)),
+        }
+    } else {
+        let Some(output_frontier_id) = output_frontier_id else {
+            return write_review_invalid(writer, version, request_id).await;
+        };
+        ReviewPassState::Succeeded {
+            turn: TurnId::from_uuid(turn_id.into_uuid()),
+            output_frontier: ContextFrontierId::from_uuid(output_frontier_id.into_uuid()),
+            result: Some(ReviewPassResult::FindingEvent(result)),
+        }
     };
-    let Some((pass_evidence, run_evidence)) = complete_review_pass(
+    let Some((completed_pass, completed_run)) = complete_review_pass(
         writer,
         version,
         request_id,
@@ -2185,6 +2667,8 @@ where
     else {
         return Ok(());
     };
+    let pass_evidence = ReviewPassEvidence::from_pass(&completed_pass, completed_run.policy());
+    let run_evidence = completed_run.evidence();
     let event = ReviewFindingEvent::new(
         finding_reference,
         ordinal,
@@ -2356,7 +2840,7 @@ where
         output_frontier: ContextFrontierId::from_uuid(output_frontier_id.into_uuid()),
         result: Some(ReviewPassResult::ExternalLinkAttachment(result)),
     };
-    let Some((pass_evidence, run_evidence)) = complete_review_pass(
+    let Some((completed_pass, completed_run)) = complete_review_pass(
         writer,
         version,
         request_id,
@@ -2369,6 +2853,8 @@ where
     else {
         return Ok(());
     };
+    let pass_evidence = ReviewPassEvidence::from_pass(&completed_pass, completed_run.policy());
+    let run_evidence = completed_run.evidence();
     let attachment = ReviewExternalLinkAttachment::new(
         link_id,
         pass_evidence.reference(),
@@ -2735,7 +3221,7 @@ async fn complete_review_pass<Writer>(
     current_run: signalbox_domain::ReviewRun,
     current_pass: ReviewPass,
     next: ReviewPassState,
-) -> Result<Option<(ReviewPassEvidence, ReviewRunEvidence)>, ProcessConnectionError>
+) -> Result<Option<(ReviewPass, ReviewRun)>, ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
@@ -2821,18 +3307,29 @@ where
     if canonical_session != current_pass.session().into_uuid()
         || canonical_input != current_pass.accepted_input().into_uuid()
         || state != "terminal"
-        || disposition.as_deref() != Some("completed")
         || frontier != expected_frontier
     {
         return write_review_invalid(writer, version, request_id)
             .await
             .map(|()| None);
     }
+    let turn_outcome = match disposition.as_deref() {
+        Some("completed") => ReviewPassTurnOutcome::Completed,
+        Some("failed") => ReviewPassTurnOutcome::Failed,
+        Some("refused") => ReviewPassTurnOutcome::Refused,
+        Some("cancelled") => ReviewPassTurnOutcome::Cancelled,
+        Some("reconciliation_required") => ReviewPassTurnOutcome::ReconciliationRequired,
+        _ => {
+            return write_review_internal(writer, version, request_id)
+                .await
+                .map(|()| None);
+        }
+    };
     let evidence = ReviewPassTurnEvidence::new(
         turn,
         current_pass.session(),
         current_pass.accepted_input(),
-        ReviewPassTurnOutcome::Completed,
+        turn_outcome,
         frontier.map(ContextFrontierId::from_uuid),
     );
     let policy = current_run.policy();
@@ -2860,8 +3357,7 @@ where
                 .await
                 .map(|()| None);
         }
-        let pass_evidence = ReviewPassEvidence::from_pass(&current_pass, policy);
-        return Ok(Some((pass_evidence, current_run.evidence())));
+        return Ok(Some((current_pass, current_run)));
     }
     let pass = match current_pass.transition(next, Some(evidence)) {
         Ok(pass) => pass,
@@ -2880,7 +3376,7 @@ where
                 .map(|()| None);
         }
     };
-    Ok(Some((pass_evidence, run.evidence())))
+    Ok(Some((pass, run)))
 }
 
 fn review_finding_content(
@@ -8145,6 +8641,10 @@ where
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InternalDiagnostic {
     ReviewWorkflowProjectionCorruption,
+    ReviewOrchestrationStoreCorruption,
+    ReviewOrchestrationWorkflowCorruption,
+    ReviewOrchestrationSessionCorruption,
+    ReviewOrchestrationServiceContract,
     ConversationImportContractDefect,
     ConversationImportWorkerTerminated,
     ImportedSessionDatabase,
@@ -8207,7 +8707,8 @@ impl InternalDiagnostic {
             | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
             },
-            Self::ConversationImportContractDefect
+            Self::ReviewOrchestrationServiceContract
+            | Self::ConversationImportContractDefect
             | Self::ConversationImportWorkerTerminated
             | Self::ImportedSessionCommandKindMismatch
             | Self::ImportedSessionPreparation
@@ -8227,6 +8728,9 @@ impl InternalDiagnostic {
             | Self::SubmitInputModelExecutionIdentityCollision
             | Self::ToolLoopIdentityCollision => OperatorFailureClass::IdentityCollision,
             Self::ReviewWorkflowProjectionCorruption
+            | Self::ReviewOrchestrationStoreCorruption
+            | Self::ReviewOrchestrationWorkflowCorruption
+            | Self::ReviewOrchestrationSessionCorruption
             | Self::ImportedSessionCorruption
             | Self::ImportedConversationCorruption
             | Self::SessionDefaultsVersionMissing
@@ -8249,6 +8753,12 @@ impl InternalDiagnostic {
     const fn cause_code(self) -> &'static str {
         match self {
             Self::ReviewWorkflowProjectionCorruption => "review_workflow_projection_corruption",
+            Self::ReviewOrchestrationStoreCorruption => "review_orchestration_store_corruption",
+            Self::ReviewOrchestrationWorkflowCorruption => {
+                "review_orchestration_workflow_corruption"
+            }
+            Self::ReviewOrchestrationSessionCorruption => "review_orchestration_session_corruption",
+            Self::ReviewOrchestrationServiceContract => "review_orchestration_service_contract",
             Self::ConversationImportContractDefect => "conversation_import_contract_defect",
             Self::ConversationImportWorkerTerminated => "conversation_import_worker_terminated",
             Self::ImportedSessionDatabase => "imported_session_database",
@@ -9180,11 +9690,12 @@ mod tests {
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
         MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
         OperationalImportError, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
-        ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId,
-        ReviewCommandAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
-        acquire_import_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
+        ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
+        REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS, RequestId, ReviewCommandAdmission,
+        SnapshotSpoolError, SubmitInputModelExecutionDiagnostic, acquire_import_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_review_orchestration_snapshot_permit, acquire_snapshot_reader_permit,
         admitted_user_content, canonical_review_request_digest, consume_snapshot_queued_update,
         context_compaction_failure_disposition, execute_import,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
@@ -9969,6 +10480,28 @@ context_window_tokens = 200000
             .ok_or_else(|| io::Error::other("ready input must acquire a frame slot"))?;
         assert_eq!(budget.available_permits(), 0);
         drop(permit);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_orchestration_snapshot_reserves_its_two_pool_connections()
+    -> Result<(), Box<dyn Error>> {
+        let reserved = usize::try_from(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS)?;
+        let capacity = reserved + 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+
+        let permit = acquire_review_orchestration_snapshot_permit(
+            Arc::clone(&budget),
+            &mut shutdown_receiver,
+        )
+        .await?
+        .ok_or_else(|| io::Error::other("the running fixture must acquire a permit"))?;
+
+        assert_eq!(budget.available_permits(), capacity - reserved);
+        drop(permit);
+        assert_eq!(budget.available_permits(), capacity);
+        assert!(snapshot_reader_capacity(3).is_none());
         Ok(())
     }
 

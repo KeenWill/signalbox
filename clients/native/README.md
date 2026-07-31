@@ -30,14 +30,15 @@ REST, WebSocket, or OpenAI-compatible surfaces.
   its required successor input.
 - Create a session by selecting a model alias read from the running daemon and
   optionally supplying a system prompt.
+- Inspect the bounded, read-only entry inventory for an imported conversation
+  and create a resume or fork session from a selected frontier and model alias.
 - Exercise the real encoder, decoder, request identity, and JSONL framing in
   deterministic mock UI flows.
 
 The process protocol exposes no runner, template, monitor, or artifact catalog;
 those views remain explicit capability gates rather than fabricated client
-behavior. Imported conversations appear in the unified list, while transcript
-inspection and continuation remain deferred to a separate native UI slice over
-the landed imported-conversation read.
+behavior. Imported conversations open as read-only transcript inventories and
+can continue into native sessions from an explicitly selected entry.
 
 ## Transport gate
 
@@ -63,10 +64,13 @@ iOS/iPad follow-on.
 ```bash
 scripts/build-xcode.sh
 scripts/test-xcode.sh
+scripts/test-real-server-xcode.sh
 ```
 
 The scheme runs app, client, model, integration, and UI tests. The local mock is
-selected with `--mock-server`.
+selected with `--mock-server`. The real-server script builds `signalboxd`,
+starts it with an isolated temporary PostgreSQL database and Unix socket, and
+runs the macOS client exchanges without making a model call.
 
 ## Screenshots
 
@@ -126,13 +130,13 @@ The following work remains:
 
 - Remote/mobile transport, authentication, authorization, and revocation await
   an owner-approved server design.
-- Imported transcript inspection and continuation await their native UI slice
-  over the imported-conversation read.
 - Runners, templates, monitor summaries, and artifacts await real
   process-protocol operations.
 - Compact-width navigation omits Templates until its information architecture is
   owner-approved; regular-width and macOS navigation retain the explicit
   capability gate.
-- The older REST/WebSocket implementation remains compiled temporarily for
-  import-era test and presentation compatibility, but production composition no
-  longer installs it.
+- The app, client, and model test directories are separate targets in the shared
+  scheme. The older REST/WebSocket implementation remains compiled because the
+  native and client bundles directly test it and legacy presentation view
+  models still use its client protocol; production composition does not install
+  it.

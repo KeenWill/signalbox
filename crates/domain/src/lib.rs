@@ -162,23 +162,25 @@ pub use review_workflow::{
     validate_complete_review_finding_reference_graph,
 };
 pub use runner::{
-    CredentialDispatchAuthorization, CredentialProfileChange, CredentialProfileGrant,
-    CredentialProfileGrantReconstitutionInput, CredentialProfileGrantReplacement,
-    CredentialProfileGrantState, CredentialProfileName, CredentialProfilePlacementReplacement,
-    CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement,
-    PreparedRunnerRegistration, ProvisionedWorkspace, RunnerAdvertisement, RunnerCapabilityClass,
-    RunnerCatalog, RunnerClaimedAttemptReplacement, RunnerCredentialGrantChange,
-    RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
+    CanonicalCloneUrlDigest, CredentialDispatchAuthorization, CredentialProfileChange,
+    CredentialProfileGrant, CredentialProfileGrantReconstitutionInput,
+    CredentialProfileGrantReplacement, CredentialProfileGrantState, CredentialProfileName,
+    CredentialProfilePlacementReplacement, CredentialProfilePolicy, CredentialToolApproval,
+    PinnedRunnerPlacement, PreparedRunnerRegistration, ProvisionedWorkspace, RunnerAdvertisement,
+    RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
+    RunnerCredentialGrantChange, RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerLease,
     RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseNoExecutionProof, RunnerLeaseOfferRequest,
     RunnerLeaseReconstitutionInput, RunnerLeaseRetryAuthority, RunnerLeaseRetryPreparation,
-    RunnerLeaseState, RunnerPlacementChange, RunnerPlacementReplacement, RunnerSelector,
-    RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory,
+    RunnerLeaseState, RunnerPlacementChange, RunnerPlacementReplacement, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory,
     SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
     ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
+    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceRecovery,
+    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
@@ -399,6 +401,11 @@ define_identity!(
 );
 
 define_identity!(
+    /// Identifies one stable runner-owned workspace manifest across lifecycle changes.
+    WorkspaceManifestId
+);
+
+define_identity!(
     /// Identifies one immutable review-target snapshot.
     ReviewTargetId
 );
@@ -478,7 +485,7 @@ mod tests {
         AcceptedInputId, ContextFrontierId, DurableCommandId, ImportedConversationId,
         ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RunnerAuthenticationId,
         RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
-        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceManifestId,
     };
     use uuid::Uuid;
 
@@ -516,5 +523,6 @@ mod tests {
         assert_uuid_contract!(RunnerId);
         assert_uuid_contract!(RunnerAuthenticationId);
         assert_uuid_contract!(RunnerLeaseId);
+        assert_uuid_contract!(WorkspaceManifestId);
     }
 }

@@ -1,8 +1,9 @@
 //! Durable owner-global command receipts for review-workflow mutations.
 
 use signalbox_application::{
-    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
-    ReviewWorkflowOperation, ReviewWorkflowOperationKind, ReviewWorkflowTransaction,
+    ReviewPassCompletionStatus, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
+    ReviewWorkflowCommandResult, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
+    ReviewWorkflowTransaction,
 };
 use signalbox_domain::{
     ReviewFinding, ReviewFindingStatus, ReviewKey, ReviewPass, ReviewPassState, ReviewRun,
@@ -226,6 +227,39 @@ async fn apply_or_recover(
                 pass: pass.reference().pass(),
             })
         }
+        ReviewWorkflowOperation::CompletePass { run, pass } => {
+            let status = ReviewPassCompletionStatus::from_state(pass.state())
+                .ok_or_else(|| command_conflict("pass completion is not result-free terminal"))?;
+            let current_run = store.load_run(run.reference().run()).await?;
+            let current_pass = store.load_pass(pass.reference().pass()).await?;
+            let completion_is_recoverable =
+                current_run.as_ref().zip(current_pass.as_ref()).is_some_and(
+                    |(current_run, current_pass)| current_run == run && current_pass == pass,
+                );
+            if !completion_is_recoverable {
+                let transitioned = store
+                    .transition_run_and_pass(
+                        run.reference().run(),
+                        pass.reference().pass(),
+                        run.state(),
+                        pass.state().clone(),
+                    )
+                    .await?;
+                let Some((committed_run, committed_pass)) = transitioned else {
+                    return Err(command_conflict("run or pass does not exist"));
+                };
+                if committed_run != *run || committed_pass != *pass {
+                    return Err(command_conflict(
+                        "run or pass completion differs from the requested transition",
+                    ));
+                }
+            }
+            Ok(ReviewWorkflowCommandResult::PassCompleted {
+                run: run.reference().run(),
+                pass: pass.reference().pass(),
+                status,
+            })
+        }
         ReviewWorkflowOperation::RecordFindings { pass, findings } => {
             let committed = store.load_pass(pass.reference().pass()).await?;
             if committed
@@ -422,6 +456,7 @@ fn operation_kind(operation: ReviewWorkflowOperationKind) -> &'static str {
         ReviewWorkflowOperationKind::RecordFindings => "record_findings",
         ReviewWorkflowOperationKind::RecordFindingEvent => "record_finding_event",
         ReviewWorkflowOperationKind::ActivatePass => "activate_pass",
+        ReviewWorkflowOperationKind::CompletePass => "complete_pass",
         ReviewWorkflowOperationKind::ReserveExternalLink => "reserve_external_link",
         ReviewWorkflowOperationKind::AttachExternalLink => "attach_external_link",
     }
@@ -514,6 +549,12 @@ fn encode_result(result: &ReviewWorkflowCommandResult) -> EncodedResult {
             encoded.run = Some(run.into_uuid());
             encoded.pass = Some(pass.into_uuid());
         }
+        ReviewWorkflowCommandResult::PassCompleted { run, pass, status } => {
+            encoded.kind = "pass_completed";
+            encoded.run = Some(run.into_uuid());
+            encoded.pass = Some(pass.into_uuid());
+            encoded.status = Some(encode_completion_status(*status));
+        }
         ReviewWorkflowCommandResult::ExternalLinkReserved { link } => {
             encoded.kind = "external_link_reserved";
             encoded.link = Some(link.into_uuid());
@@ -564,8 +605,36 @@ fn decode_result(
             run: super::review_workflow::run_id(row.try_get("result_run_id")?),
             pass: super::review_workflow::pass_id(row.try_get("result_pass_id")?),
         }),
+        "pass_completed" => Ok(ReviewWorkflowCommandResult::PassCompleted {
+            run: super::review_workflow::run_id(row.try_get("result_run_id")?),
+            pass: super::review_workflow::pass_id(row.try_get("result_pass_id")?),
+            status: decode_completion_status(row.try_get("result_finding_status")?)?,
+        }),
         _ => Err(command_conflict(
             "review command receipt has an unsupported result",
+        )),
+    }
+}
+
+const fn encode_completion_status(status: ReviewPassCompletionStatus) -> &'static str {
+    match status {
+        ReviewPassCompletionStatus::Succeeded => "succeeded",
+        ReviewPassCompletionStatus::Failed => "failed",
+        ReviewPassCompletionStatus::Blocked => "blocked",
+        ReviewPassCompletionStatus::Cancelled => "cancelled",
+    }
+}
+
+fn decode_completion_status(
+    status: String,
+) -> Result<ReviewPassCompletionStatus, ReviewWorkflowStoreError> {
+    match status.as_str() {
+        "succeeded" => Ok(ReviewPassCompletionStatus::Succeeded),
+        "failed" => Ok(ReviewPassCompletionStatus::Failed),
+        "blocked" => Ok(ReviewPassCompletionStatus::Blocked),
+        "cancelled" => Ok(ReviewPassCompletionStatus::Cancelled),
+        _ => Err(command_conflict(
+            "recorded pass completion status is invalid",
         )),
     }
 }

@@ -11,6 +11,10 @@ RESULT_BUNDLE_PATH="${SIGNALBOX_NATIVE_TEST_RESULT_BUNDLE_PATH:-$DERIVED_DATA_PA
 
 if [[ -n "${XCODE_DESTINATION:-}" ]]; then
 	DESTINATION="$XCODE_DESTINATION"
+	if simulator_destination_device_id "$XCODE_DESTINATION" >/dev/null ||
+		simulator_destination_device_name "$XCODE_DESTINATION" >/dev/null; then
+		DEVICE_ID="$(simulator_resolve_iphone_ids "$MIN_IOS_VERSION" | head -n 1 || true)"
+	fi
 else
 	DEVICE_ID="$(simulator_resolve_iphone_ids "$MIN_IOS_VERSION" | head -n 1)"
 
@@ -21,6 +25,12 @@ else
 
 	echo "Using newest available iPhone simulator for iOS $MIN_IOS_VERSION or newer: $DEVICE_ID"
 	DESTINATION="$(simulator_xcode_destination_for_id "$DEVICE_ID")"
+fi
+
+if [[ -n "${DEVICE_ID:-}" ]]; then
+	# A prior test or UI-test run can leave the shared host app active long
+	# enough for the next unit-test bundle launch to fail simulator preflight.
+	xcrun simctl terminate "$DEVICE_ID" co.rdwd.SignalboxNative >/dev/null 2>&1 || true
 fi
 
 CMD=(

@@ -23,6 +23,8 @@ pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str =
     durable_command_kind_to_str(CommandKind::DecideToolRequest);
 pub(crate) const REVIEW_WORKFLOW_KIND: &str =
     durable_command_kind_to_str(CommandKind::ReviewWorkflow);
+pub(crate) const REVIEW_ORCHESTRATION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReviewOrchestration);
 pub(crate) const COMPACT_SESSION_KIND: &str =
     durable_command_kind_to_str(CommandKind::CompactSession);
 
@@ -35,7 +37,7 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 8] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 9] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -86,6 +88,13 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 8] = [
         maximum_version: 1,
     },
     CommandKindDefinition {
+        kind: CommandKind::ReviewOrchestration,
+        spelling: REVIEW_ORCHESTRATION_KIND,
+        typed_table: "review_orchestration_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
         kind: CommandKind::CompactSession,
         spelling: COMPACT_SESSION_KIND,
         typed_table: "compact_session_command",
@@ -124,6 +133,21 @@ pub(crate) async fn inspect(
         .fetch_optional(&mut *connection)
         .await
         .map_err(RegistryInspectionError::Database)?;
+    if row.is_none() {
+        let recovered: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM review_orchestration_command_recovery
+                 WHERE command_id = $1
+            )",
+        )
+        .bind(durable_command_id_to_uuid(command_id))
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(RegistryInspectionError::Database)?;
+        if recovered {
+            return Ok(Some(CommandKind::ReviewOrchestration));
+        }
+    }
 
     row.map(|row| {
         let version: i16 = row
@@ -171,9 +195,16 @@ fn inspection_query() -> &'static str {
         // SQL text.
         let mut query = String::from("SELECT command.command_kind, command.storage_version");
         for definition in COMMAND_KIND_DEFINITIONS {
-            query.push_str(", EXISTS (SELECT 1 FROM ");
+            query.push_str(", (EXISTS (SELECT 1 FROM ");
             query.push_str(definition.typed_table);
-            query.push_str(" AS typed WHERE typed.command_id = command.command_id) AS ");
+            query.push_str(" AS typed WHERE typed.command_id = command.command_id)");
+            if definition.kind == CommandKind::ReviewOrchestration {
+                query.push_str(
+                    " OR EXISTS (SELECT 1 FROM review_orchestration_command_intent AS intent
+                       WHERE intent.command_id = command.command_id)",
+                );
+            }
+            query.push_str(") AS ");
             query.push_str(definition.spelling);
         }
         query.push_str(" FROM durable_command AS command WHERE command.command_id = $1");
