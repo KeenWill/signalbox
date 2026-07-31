@@ -6,7 +6,7 @@ use signalbox_tool_contract::ToolContract;
 use super::{
     CodeHostOperation,
     arguments::{
-        CodeHostChangeRequestNumber, CodeHostFilePath, CodeHostRepository,
+        CodeHostChangeRequestNumber, CodeHostChangedFilePath, CodeHostFilePath, CodeHostRepository,
         InvalidCodeHostArguments, decode as decode_arguments,
     },
 };
@@ -25,7 +25,7 @@ pub struct FilePatchArguments {
     /// Change-request number.
     number: CodeHostChangeRequestNumber,
     /// Exact repository-relative changed path.
-    path: CodeHostFilePath,
+    path: CodeHostChangedFilePath,
 }
 
 pub(super) struct Contract;
@@ -49,7 +49,7 @@ impl FilePatchArguments {
 
     /// Borrows the exact repository-relative path.
     pub fn path(&self) -> &CodeHostFilePath {
-        &self.path
+        self.path.as_file_path()
     }
 }
 

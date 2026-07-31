@@ -3828,6 +3828,25 @@ mod tests {
         assert_eq!(noncanonical_review_thread, None);
     }
 
+    /// File-shaped results cannot identify the repository root directory.
+    #[test]
+    fn returned_file_paths_reject_repository_root() {
+        let root_changed_file =
+            ChangedFile::try_new(String::from("."), String::from("modified"), 1, 0);
+        let root_review_thread = ReviewThread::try_new(ReviewThreadFields {
+            id: String::from("PRRT_root_fixture"),
+            resolved: false,
+            outdated: false,
+            path: String::from("."),
+            line: Some(1),
+            comments: Vec::new(),
+            comments_truncated: false,
+        });
+
+        assert_eq!(root_changed_file, None);
+        assert_eq!(root_review_thread, None);
+    }
+
     /// A GraphQL mutation error cannot be mistaken for a definitive
     /// no-mutation acknowledgement.
     #[test]

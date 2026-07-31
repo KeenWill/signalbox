@@ -102,7 +102,7 @@ impl JsonSchema for CodeHostUrl {
 }
 
 pub(super) fn valid_path(value: &str) -> bool {
-    CodeHostFilePath::try_new(value.to_owned()).is_ok()
+    value != "." && CodeHostFilePath::try_new(value.to_owned()).is_ok()
 }
 
 /// Typed result of `change_request_summary`.

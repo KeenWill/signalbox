@@ -339,6 +339,51 @@ impl JsonSchema for CodeHostFilePath {
     }
 }
 
+/// One checked repository-relative path that identifies a file, not the root.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub(super) struct CodeHostChangedFilePath(CodeHostFilePath);
+
+impl CodeHostChangedFilePath {
+    fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
+        let path = CodeHostFilePath::try_new(value)?;
+        (path.as_str() != ".")
+            .then_some(Self(path))
+            .ok_or(InvalidCodeHostArguments)
+    }
+
+    pub(super) const fn as_file_path(&self) -> &CodeHostFilePath {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for CodeHostChangedFilePath {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostChangedFilePath {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostChangedFilePath")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_FILE_PATH_BYTES,
+            "pattern": r"^(?:[^./\u0000][^/\u0000]*|\.[^./\u0000][^/\u0000]*|\.\.[^/\u0000]+)(?:/(?:[^./\u0000][^/\u0000]*|\.[^./\u0000][^/\u0000]*|\.\.[^/\u0000]+))*$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// One checked nonempty comment body.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(try_from = "String")]

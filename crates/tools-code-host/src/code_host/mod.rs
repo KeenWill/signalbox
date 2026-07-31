@@ -1158,7 +1158,7 @@ mod tests {
                       "description": "Exact repository-relative changed path.",
                       "maxLength": 4096,
                       "minLength": 1,
-                      "pattern": "^(?:\\.|(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+)(?:/(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+))*)$",
+                      "pattern": "^(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+)(?:/(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+))*$",
                       "type": "string"
                     },
                     "repository": {
@@ -1738,6 +1738,16 @@ mod tests {
             &catalog(),
             change_request_file_patch::NAME,
             r#"{"number":17,"path":"src/line\nbreak.rs","repository":"owner/repository"}"#,
+        );
+    }
+
+    /// The repository root cannot identify one changed file.
+    #[test]
+    fn change_request_file_patch_typed_decode_rejects_bare_dot_root() {
+        assert_invalid(
+            &catalog(),
+            change_request_file_patch::NAME,
+            r#"{"number":17,"path":".","repository":"owner/repository"}"#,
         );
     }
 
