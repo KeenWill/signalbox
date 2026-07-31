@@ -38,6 +38,7 @@ signalbox-domain = { path = "../../crates/domain" }
 signalbox-model-provider-runtime = { path = "../../crates/model-provider-runtime" }
 signalbox-model-runtime = { path = "../../crates/model-runtime" }
 signalbox-model-runtime-anthropic = { path = "../../crates/model-runtime-anthropic" }
+signalbox-model-runtime-codex-cli = { path = "../../crates/model-runtime-codex-cli" }
 signalbox-persistence = { path = "../../crates/persistence" }
 signalbox-process-protocol = { path = "../../crates/process-protocol" }
 signalbox-runner-wire = { path = "../../crates/runner-wire" }

@@ -35,9 +35,9 @@ use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
-    create_session::CreateSessionRepository, local_test_connection_options, migrate,
-    model_execution::PostgresModelCallRepository, start_eligible_turn::StartEligibleTurnRepository,
-    submit_input::SubmitInputRepository,
+    SessionCredentialPin, SessionModelCredential, create_session::CreateSessionRepository,
+    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
+    start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
 };
 use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSignal,
@@ -397,7 +397,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         provider,
     } = arguments;
     let content = UserContent::try_text(input).map_err(|_| DebugDriverError::InvalidText)?;
-    let (selection, targets, credential_reference, provider) = match provider {
+    let (selection, targets, credential_reference, credential_pin, provider) = match provider {
         DebugProvider::Scripted { reply } => {
             let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
             let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -409,6 +409,11 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 selection,
                 targets,
                 ModelCallCredentialReference::new("scripted-test"),
+                SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                    "scripted-debug",
+                    "scripted-test",
+                )])
+                .map_err(|_| DebugDriverError::Configuration)?,
                 DebugProviderRuntime::Scripted(
                     AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
                 ),
@@ -421,9 +426,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         } => {
             let configuration = HubModelConfiguration::read(&model_configuration_file)
                 .map_err(|_| DebugDriverError::Configuration)?;
-            if !configuration.contains_selection(selection) {
-                return Err(DebugDriverError::Configuration);
-            }
+            require_anthropic_selection(&configuration, selection)?;
             let credential_access = FileCredentialAccess::new(
                 api_key_file,
                 CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
@@ -439,6 +442,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 selection,
                 configuration.target_catalog(),
                 credential_reference,
+                configuration.session_credential_pin(),
                 DebugProviderRuntime::Anthropic(provider),
             )
         }
@@ -456,7 +460,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
 
     let mut create = CreateSessionService::new(
         UuidV7SessionIdGenerator,
-        CreateSessionRepository::new(pool.clone()),
+        CreateSessionRepository::new(pool.clone(), credential_pin),
     );
     let CreateSessionOutcome::Applied(created) = create
         .execute(
@@ -555,6 +559,16 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
     Ok(())
 }
 
+fn require_anthropic_selection(
+    configuration: &HubModelConfiguration,
+    selection: DirectModelSelection,
+) -> Result<(), DebugDriverError> {
+    match configuration.resolve_direct_model(selection) {
+        Some(route) if route.uses_anthropic_adapter() => Ok(()),
+        Some(_) | None => Err(DebugDriverError::Configuration),
+    }
+}
+
 enum DebugProviderRuntime {
     Scripted(AssistantText),
     Anthropic(RuntimeModelCallProvider<AnthropicRuntime<FileCredentialAccess>>),
@@ -586,10 +600,13 @@ mod tests {
     use std::future::ready;
 
     use signalbox_application::EligibilityPass;
-    use signalbox_domain::SessionId;
+    use signalbox_domain::{DirectModelSelection, SessionId};
     use uuid::Uuid;
 
-    use super::{ObservableDebugPass, format_transcript_text};
+    use super::{
+        DebugDriverError, HubModelConfiguration, ObservableDebugPass, format_transcript_text,
+        require_anthropic_selection,
+    };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct FakePassError;
@@ -613,6 +630,43 @@ mod tests {
         assert_eq!(
             format_transcript_text("user", "hello\nassistant: forged\r\u{1b}[2J"),
             "user: \"hello\\nassistant: forged\\r\\u{1b}[2J\""
+        );
+    }
+
+    #[test]
+    fn anthropic_debug_mode_rejects_a_configured_codex_route() {
+        let selection =
+            DirectModelSelection::from_uuid(Uuid::from_u128(0x10000000000040008000000000000001));
+        let configuration = HubModelConfiguration::parse(
+            r#"
+version = 1
+
+[[adapter_mappings]]
+model_family = "codex"
+adapter = "codex_cli"
+credential_profile = "codex-subscription-primary"
+
+[codex_cli]
+executable = "/bin/true"
+working_directory = "/tmp"
+
+[compaction]
+prompt = "Summarize."
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000001"
+target_id = "20000000-0000-4000-8000-000000000001"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 20
+context_window_tokens = 100
+"#,
+        )
+        .expect("Codex debug fixture configuration is valid");
+
+        assert_eq!(
+            require_anthropic_selection(&configuration, selection),
+            Err(DebugDriverError::Configuration)
         );
     }
 
