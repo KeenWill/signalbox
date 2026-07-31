@@ -3526,7 +3526,9 @@ const fn review_concern_state_is_coherent(
     match outcome {
         ReviewConcernTerminalOutcome::Succeeded => matches!(
             state,
-            ReviewOrchestrationState::AwaitingConcerns | ReviewOrchestrationState::AwaitingJudgment
+            ReviewOrchestrationState::AwaitingConcerns
+                | ReviewOrchestrationState::FanoutIncomplete
+                | ReviewOrchestrationState::AwaitingJudgment
         ),
         ReviewConcernTerminalOutcome::Failed
         | ReviewConcernTerminalOutcome::Blocked
@@ -3763,6 +3765,14 @@ mod tests {
         assert!(!review_concern_state_is_coherent(
             ReviewConcernTerminalOutcome::Failed,
             ReviewOrchestrationState::AwaitingJudgment,
+        ));
+    }
+
+    #[test]
+    fn successful_last_concern_can_close_an_incomplete_fanout() {
+        assert!(review_concern_state_is_coherent(
+            ReviewConcernTerminalOutcome::Succeeded,
+            ReviewOrchestrationState::FanoutIncomplete,
         ));
     }
 
