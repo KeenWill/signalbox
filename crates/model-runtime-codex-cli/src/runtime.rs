@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliProcessLabels,
+    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentVariable,
     CliProcessRequest, CliTerminalTextCapture, DeliveryMode, ModelOperation, ModelRuntime,
     ObservationSink, PreparationDefect, PreparationFailure, PreparationOutcome,
     ProvenUnsentEvidence, TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
@@ -19,40 +19,32 @@ use crate::wire::OUTPUT_SCHEMA;
 const CODEX_CREDENTIAL_HOME: &str = "CODEX_HOME";
 #[cfg(test)]
 const FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT: &str = "OPENAI_API_KEY";
-const CODEX_ENVIRONMENT_ALLOWLIST: &[&str] = &[
-    "ALL_PROXY",
-    CODEX_CREDENTIAL_HOME,
-    "COLORTERM",
-    "HOME",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "NO_PROXY",
-    "PATH",
-    "SSL_CERT_DIR",
-    "SSL_CERT_FILE",
-    "TEMP",
-    "TERM",
-    "TMP",
-    "TMPDIR",
-    "XDG_CACHE_HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "all_proxy",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
+const CODEX_ENVIRONMENT: &[CliEnvironmentVariable] = &[
+    CliEnvironmentVariable::inherited("ALL_PROXY"),
+    CliEnvironmentVariable::credential_home(CODEX_CREDENTIAL_HOME),
+    CliEnvironmentVariable::inherited("COLORTERM"),
+    CliEnvironmentVariable::credential_home("HOME"),
+    CliEnvironmentVariable::inherited("HTTP_PROXY"),
+    CliEnvironmentVariable::inherited("HTTPS_PROXY"),
+    CliEnvironmentVariable::inherited("LANG"),
+    CliEnvironmentVariable::inherited("LC_ALL"),
+    CliEnvironmentVariable::inherited("LC_CTYPE"),
+    CliEnvironmentVariable::inherited("NO_PROXY"),
+    CliEnvironmentVariable::inherited("PATH"),
+    CliEnvironmentVariable::inherited("SSL_CERT_DIR"),
+    CliEnvironmentVariable::inherited("SSL_CERT_FILE"),
+    CliEnvironmentVariable::inherited("TEMP"),
+    CliEnvironmentVariable::inherited("TERM"),
+    CliEnvironmentVariable::inherited("TMP"),
+    CliEnvironmentVariable::inherited("TMPDIR"),
+    CliEnvironmentVariable::inherited("XDG_CACHE_HOME"),
+    CliEnvironmentVariable::inherited("XDG_CONFIG_HOME"),
+    CliEnvironmentVariable::inherited("XDG_DATA_HOME"),
+    CliEnvironmentVariable::inherited("all_proxy"),
+    CliEnvironmentVariable::inherited("http_proxy"),
+    CliEnvironmentVariable::inherited("https_proxy"),
+    CliEnvironmentVariable::inherited("no_proxy"),
 ];
-
-const CODEX_CREDENTIAL_HOME_VARIABLES: &[&str] = &["HOME", CODEX_CREDENTIAL_HOME];
-const CODEX_PROCESS_LABELS: CliProcessLabels = CliProcessLabels {
-    provider: "Codex",
-    process: "Codex CLI",
-    decode_event: "Codex event",
-    bounded_event: "Codex JSONL event",
-};
 
 /// Every pinned-CLI feature that can add a model-visible tool, external
 /// interaction, instruction source, or delegated execution surface outside
@@ -464,16 +456,13 @@ async fn execute_process<C: Clone + Send + Sync>(
     let request = CliProcessRequest {
         command,
         prompt: prepared.prompt,
-        correlation: prepared.correlation,
         decoder,
         terminal_text_capture: CliTerminalTextCapture::Disabled,
         exchange_timeout: prepared.exchange_timeout,
         interrupt_grace: prepared.interrupt_grace,
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
-        labels: CODEX_PROCESS_LABELS,
-        environment_allowlist: CODEX_ENVIRONMENT_ALLOWLIST,
-        credential_home_variables: CODEX_CREDENTIAL_HOME_VARIABLES,
+        environment: CODEX_ENVIRONMENT,
     };
     let _output_schema = prepared.output_schema;
     execute_cli_process(request, sink, cancellation).await
@@ -482,7 +471,7 @@ async fn execute_process<C: Clone + Send + Sync>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CODEX_CREDENTIAL_HOME, CODEX_CREDENTIAL_HOME_VARIABLES, CODEX_ENVIRONMENT_ALLOWLIST,
+        CODEX_CREDENTIAL_HOME, CODEX_ENVIRONMENT, CliEnvironmentVariable,
         FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT,
     };
 
@@ -490,7 +479,20 @@ mod tests {
     /// direct credential-value variables are absent from the inherited set.
     #[test]
     fn inv_035_cli_environment_excludes_direct_credential_values() {
-        assert!(CODEX_CREDENTIAL_HOME_VARIABLES.contains(&CODEX_CREDENTIAL_HOME));
-        assert!(!CODEX_ENVIRONMENT_ALLOWLIST.contains(&FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT));
+        assert!(
+            CODEX_ENVIRONMENT
+                .iter()
+                .any(|variable| variable.name() == CODEX_CREDENTIAL_HOME)
+        );
+        assert!(
+            CODEX_ENVIRONMENT.contains(&CliEnvironmentVariable::credential_home(
+                CODEX_CREDENTIAL_HOME
+            ))
+        );
+        assert!(
+            !CODEX_ENVIRONMENT
+                .iter()
+                .any(|variable| variable.name() == FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT)
+        );
     }
 }

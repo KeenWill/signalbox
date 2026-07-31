@@ -39,6 +39,41 @@ pub struct CliProcessLabels {
     pub bounded_event: &'static str,
 }
 
+/// One inherited child-environment variable and its value policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CliEnvironmentVariable {
+    name: &'static str,
+    credential_home: bool,
+}
+
+impl CliEnvironmentVariable {
+    /// Admits a variable with ordinary shared credential-shape checks.
+    pub const fn inherited(name: &'static str) -> Self {
+        Self {
+            name,
+            credential_home: false,
+        }
+    }
+
+    /// Admits a credential-store selector only after path absolutization.
+    pub const fn credential_home(name: &'static str) -> Self {
+        Self {
+            name,
+            credential_home: true,
+        }
+    }
+
+    /// Returns the inherited variable name.
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    /// Reports whether the value selects a credential-store directory.
+    pub const fn is_credential_home(self) -> bool {
+        self.credential_home
+    }
+}
+
 /// How the shared redactor handles provider text for terminal reconstruction.
 #[derive(Clone, Copy)]
 pub enum CliTerminalTextCapture {
@@ -51,13 +86,11 @@ pub enum CliTerminalTextCapture {
 }
 
 /// One fully constructed provider command and its shared execution policy.
-pub struct CliProcessRequest<C, D> {
+pub struct CliProcessRequest<D> {
     /// Provider-specific command arguments and working directory.
     pub command: std::process::Command,
     /// Full request body written to stdin.
     pub prompt: Vec<u8>,
-    /// Correlation copied onto `SendCommenced`.
-    pub correlation: C,
     /// Provider-specific event decoder.
     pub decoder: D,
     /// Terminal text capture and forwarding policy.
@@ -73,12 +106,9 @@ pub struct CliProcessRequest<C, D> {
     /// Sanitization transiently retains one additional window of this size so
     /// JSON-aware redaction runs before evidence truncation.
     pub stderr_limit: usize,
-    /// Provider-specific diagnostic labels.
-    pub labels: CliProcessLabels,
-    /// Environment names permitted to reach the child.
-    pub environment_allowlist: &'static [&'static str],
-    /// Allowed variables that select the CLI credential store.
-    pub credential_home_variables: &'static [&'static str],
+    /// Environment variables permitted to reach the child, each bound to its
+    /// value-handling policy.
+    pub environment: &'static [CliEnvironmentVariable],
 }
 
 /// Provider-neutral classification of an event decoding failure.
@@ -129,6 +159,10 @@ impl std::error::Error for CliDecodeFailure {}
 
 /// Provider-specific interpretation at the edges of the shared process loop.
 pub trait CliSession<C>: Sized {
+    /// Provider-specific diagnostic labels bound to this decoder type.
+    const LABELS: CliProcessLabels;
+    /// The one correlation used for every observation in this exchange.
+    fn correlation(&self) -> &C;
     /// Whether the decoder has observed terminal provider evidence.
     fn terminal_observed(&self) -> bool;
     /// Decodes and emits one bounded JSONL event.
@@ -203,15 +237,16 @@ impl Drop for SupervisedChild {
 
 /// Runs one provider CLI command to a typed terminal outcome.
 pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
-    request: CliProcessRequest<C, D>,
+    request: CliProcessRequest<D>,
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
+    let labels = D::LABELS;
     if !CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED {
         return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
             cause: UnsentCause::ConnectFailed(TransportFacts::new(format!(
                 "{} process-group supervision is unsupported on this platform",
-                request.labels.process
+                labels.process
             ))),
         });
     }
@@ -225,16 +260,16 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         });
     }
     if request.event_limit == 0 {
-        return invalid_process_request(request.labels, "event limit must be nonzero");
+        return invalid_process_request(labels, "event limit must be nonzero");
     }
     if request.stderr_limit == 0 {
-        return invalid_process_request(request.labels, "stderr limit must be nonzero");
+        return invalid_process_request(labels, "stderr limit must be nonzero");
     }
     if request.interrupt_grace.is_zero() {
-        return invalid_process_request(request.labels, "interrupt grace must be nonzero");
+        return invalid_process_request(labels, "interrupt grace must be nonzero");
     }
     if request.exchange_timeout.is_zero() {
-        return invalid_process_request(request.labels, "exchange timeout must be nonzero");
+        return invalid_process_request(labels, "exchange timeout must be nonzero");
     }
     // Establish the usable deadline before command conversion, environment
     // access, SendCommenced, or spawn. `CliProcessRequest` is public and may
@@ -244,24 +279,22 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
             cause: UnsentCause::ConnectFailed(TransportFacts::new(format!(
                 "{} exchange timeout cannot be represented by the runtime clock",
-                request.labels.process
+                labels.process
             ))),
         });
     };
     let CliProcessRequest {
         command,
         prompt,
-        correlation,
         decoder,
         terminal_text_capture,
         exchange_timeout: _,
         interrupt_grace,
         event_limit,
         stderr_limit,
-        labels,
-        environment_allowlist,
-        credential_home_variables,
+        environment,
     } = request;
+    let correlation = decoder.correlation().clone();
     let mut command = Command::from(command);
     command
         .env_clear()
@@ -269,22 +302,18 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let environment = match allowlisted_environment(
-        environment_allowlist,
-        credential_home_variables,
-        labels,
-        |name| std::env::var_os(name),
-    ) {
-        Ok(environment) => environment,
-        Err(rejection) => {
-            // Nothing was sent: the rejection precedes `SendCommenced` and the
-            // spawn itself. The diagnostic names only the variable and the
-            // accurate reason, never the value.
-            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
-                cause: UnsentCause::ConnectFailed(TransportFacts::new(rejection.diagnostic())),
-            });
-        }
-    };
+    let environment =
+        match allowlisted_environment(environment, labels, |name| std::env::var_os(name)) {
+            Ok(environment) => environment,
+            Err(rejection) => {
+                // Nothing was sent: the rejection precedes `SendCommenced` and the
+                // spawn itself. The diagnostic names only the variable and the
+                // accurate reason, never the value.
+                return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::ConnectFailed(TransportFacts::new(rejection.diagnostic())),
+                });
+            }
+        };
     for (name, value) in environment {
         command.env(name, value);
     }
@@ -877,16 +906,16 @@ const PROXY_URL_VARIABLES: &[&str] = &[
 /// store somewhere under its working directory and select an unintended ambient
 /// login (see [`absolute_credential_home`]). Both must never reach the child.
 fn allowlisted_environment(
-    allowlist: &'static [&'static str],
-    credential_home_variables: &'static [&'static str],
+    policy: &'static [CliEnvironmentVariable],
     labels: CliProcessLabels,
     read: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Result<Vec<(&'static str, std::ffi::OsString)>, EnvironmentRejection> {
     let mut environment = Vec::new();
-    for name in allowlist {
+    for variable in policy {
+        let name = variable.name();
         if let Some(value) = read(name) {
-            match prepared_environment_value(name, value, credential_home_variables) {
-                Ok(prepared) => environment.push((*name, prepared)),
+            match prepared_environment_value(*variable, value) {
+                Ok(prepared) => environment.push((name, prepared)),
                 Err(reason) => {
                     return Err(EnvironmentRejection {
                         name,
@@ -958,15 +987,14 @@ impl EnvironmentRejection {
 /// resolution and forward the original relative path, which the child would
 /// then re-root beneath its own working directory.
 fn prepared_environment_value(
-    name: &str,
+    variable: CliEnvironmentVariable,
     value: std::ffi::OsString,
-    credential_home_variables: &[&str],
 ) -> Result<std::ffi::OsString, EnvironmentRejectionReason> {
-    if credential_home_variables.contains(&name) {
+    if variable.is_credential_home() {
         return absolute_credential_home(&value, absolutize_against_current_directory)
             .ok_or(EnvironmentRejectionReason::UnresolvableCredentialHome);
     }
-    match proxy_rejection(name, &value) {
+    match proxy_rejection(variable.name(), &value) {
         Some(reason) => Err(reason),
         None => Ok(value),
     }
@@ -1457,29 +1485,28 @@ fn pre_exchange_boundary_loss(cause: LossCause) -> TerminalEvidence {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundedOutput, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
-        CliProcessRequest, CliSession, CliTerminalTextCapture, EnvironmentRejection,
-        EnvironmentRejectionReason, TRUNCATION_SUFFIX, absolute_credential_home,
-        allowlisted_environment, execute_cli_process, read_bounded_line, read_bounded_output,
-        sanitized_stderr,
+        BoundedOutput, CliDecodeFailure, CliDecodeFailureClass, CliEnvironmentVariable,
+        CliProcessLabels, CliProcessRequest, CliSession, CliTerminalTextCapture,
+        EnvironmentRejection, EnvironmentRejectionReason, TRUNCATION_SUFFIX,
+        absolute_credential_home, allowlisted_environment, execute_cli_process, read_bounded_line,
+        read_bounded_output, sanitized_stderr,
     };
     use crate::{
         CancellationSignal, LossCause, REDACTED, RedactingSink, TerminalEvidence, UnsentCause,
     };
 
-    const TEST_ENVIRONMENT_ALLOWLIST: &[&str] = &[
-        "ALL_PROXY",
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "HOME",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "PATH",
-        "TERM",
-        "http_proxy",
+    const TEST_ENVIRONMENT: &[CliEnvironmentVariable] = &[
+        CliEnvironmentVariable::inherited("ALL_PROXY"),
+        CliEnvironmentVariable::credential_home("CLAUDE_CONFIG_DIR"),
+        CliEnvironmentVariable::credential_home("CODEX_HOME"),
+        CliEnvironmentVariable::credential_home("HOME"),
+        CliEnvironmentVariable::inherited("HTTP_PROXY"),
+        CliEnvironmentVariable::inherited("HTTPS_PROXY"),
+        CliEnvironmentVariable::inherited("NO_PROXY"),
+        CliEnvironmentVariable::inherited("PATH"),
+        CliEnvironmentVariable::inherited("TERM"),
+        CliEnvironmentVariable::inherited("http_proxy"),
     ];
-    const TEST_CREDENTIAL_HOME_VARIABLES: &[&str] = &["HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
     const TEST_LABELS: CliProcessLabels = CliProcessLabels {
         provider: "Codex",
         process: "Codex CLI",
@@ -1487,9 +1514,17 @@ mod tests {
         bounded_event: "Codex JSONL event",
     };
 
-    struct UnusedSession;
+    struct UnusedSession {
+        correlation: u8,
+    }
 
     impl CliSession<u8> for UnusedSession {
+        const LABELS: CliProcessLabels = TEST_LABELS;
+
+        fn correlation(&self) -> &u8 {
+            &self.correlation
+        }
+
         fn terminal_observed(&self) -> bool {
             false
         }
@@ -1542,22 +1577,17 @@ mod tests {
         })
     }
 
-    fn direct_request(
-        exchange_timeout: std::time::Duration,
-    ) -> CliProcessRequest<u8, UnusedSession> {
+    fn direct_request(exchange_timeout: std::time::Duration) -> CliProcessRequest<UnusedSession> {
         CliProcessRequest {
             command: std::process::Command::new("signalbox-test-command-must-not-spawn"),
             prompt: Vec::new(),
-            correlation: 7,
-            decoder: UnusedSession,
+            decoder: UnusedSession { correlation: 7 },
             terminal_text_capture: CliTerminalTextCapture::Disabled,
             exchange_timeout,
             interrupt_grace: std::time::Duration::from_millis(1),
             event_limit: 1_024,
             stderr_limit: 1_024,
-            labels: TEST_LABELS,
-            environment_allowlist: &[],
-            credential_home_variables: &[],
+            environment: &[],
         }
     }
 
@@ -1873,12 +1903,9 @@ mod tests {
     /// branching lives here in the helper, not in a test body.
     #[track_caller]
     fn rejection_for(name: &'static str, value: std::ffi::OsString) -> EnvironmentRejection {
-        allowlisted_environment(
-            TEST_ENVIRONMENT_ALLOWLIST,
-            TEST_CREDENTIAL_HOME_VARIABLES,
-            TEST_LABELS,
-            |queried| (queried == name).then(|| value.clone()),
-        )
+        allowlisted_environment(TEST_ENVIRONMENT, TEST_LABELS, |queried| {
+            (queried == name).then(|| value.clone())
+        })
         .expect_err("the value must be rejected")
     }
 
@@ -1886,12 +1913,9 @@ mod tests {
     /// assembled child value, so a passing case asserts equality straight-line.
     #[track_caller]
     fn accepted_value(name: &'static str, value: std::ffi::OsString) -> std::ffi::OsString {
-        let env = allowlisted_environment(
-            TEST_ENVIRONMENT_ALLOWLIST,
-            TEST_CREDENTIAL_HOME_VARIABLES,
-            TEST_LABELS,
-            |queried| (queried == name).then(|| value.clone()),
-        )
+        let env = allowlisted_environment(TEST_ENVIRONMENT, TEST_LABELS, |queried| {
+            (queried == name).then(|| value.clone())
+        })
         .expect("the value must pass through");
         env.into_iter()
             .find(|(assembled, _)| *assembled == name)
@@ -2038,12 +2062,9 @@ mod tests {
     /// directory between two would-be resolutions.
     #[test]
     fn assembled_credential_home_is_never_relative() {
-        let assembled = allowlisted_environment(
-            TEST_ENVIRONMENT_ALLOWLIST,
-            TEST_CREDENTIAL_HOME_VARIABLES,
-            TEST_LABELS,
-            |queried| (queried == "CODEX_HOME").then(|| std::ffi::OsString::from("relative-home")),
-        )
+        let assembled = allowlisted_environment(TEST_ENVIRONMENT, TEST_LABELS, |queried| {
+            (queried == "CODEX_HOME").then(|| std::ffi::OsString::from("relative-home"))
+        })
         .expect("a resolvable relative credential home is accepted");
 
         assert!(

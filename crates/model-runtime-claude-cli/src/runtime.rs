@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliProcessLabels,
+    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentVariable,
     CliProcessRequest, CliTerminalTextCapture, DeliveryMode, ModelOperation, ModelRuntime,
     ObservationSink, PreparationDefect, PreparationFailure, PreparationOutcome,
     ProvenUnsentEvidence, TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
@@ -16,41 +16,33 @@ use crate::config::ClaudeCliConfig;
 use crate::event::EventDecoder;
 use crate::translate::{TranslationError, qualified_tool_name, translate};
 
-const CLAUDE_ENVIRONMENT_ALLOWLIST: &[&str] = &[
-    "ALL_PROXY",
-    "CLAUDE_CONFIG_DIR",
-    "COLORTERM",
-    "HOME",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "NO_PROXY",
-    "PATH",
-    "SSL_CERT_DIR",
-    "SSL_CERT_FILE",
-    "TEMP",
-    "TERM",
-    "TMP",
-    "TMPDIR",
-    "XDG_CACHE_HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "all_proxy",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-];
-
 const CLAUDE_CONFIG_HOME_VARIABLE: &str = "CLAUDE_CONFIG_DIR";
-const CLAUDE_CREDENTIAL_HOME_VARIABLES: &[&str] = &["HOME", CLAUDE_CONFIG_HOME_VARIABLE];
-const CLAUDE_PROCESS_LABELS: CliProcessLabels = CliProcessLabels {
-    provider: "Claude",
-    process: "Claude CLI",
-    decode_event: "Claude event",
-    bounded_event: "Claude JSONL event",
-};
+const CLAUDE_ENVIRONMENT: &[CliEnvironmentVariable] = &[
+    CliEnvironmentVariable::inherited("ALL_PROXY"),
+    CliEnvironmentVariable::credential_home(CLAUDE_CONFIG_HOME_VARIABLE),
+    CliEnvironmentVariable::inherited("COLORTERM"),
+    CliEnvironmentVariable::credential_home("HOME"),
+    CliEnvironmentVariable::inherited("HTTP_PROXY"),
+    CliEnvironmentVariable::inherited("HTTPS_PROXY"),
+    CliEnvironmentVariable::inherited("LANG"),
+    CliEnvironmentVariable::inherited("LC_ALL"),
+    CliEnvironmentVariable::inherited("LC_CTYPE"),
+    CliEnvironmentVariable::inherited("NO_PROXY"),
+    CliEnvironmentVariable::inherited("PATH"),
+    CliEnvironmentVariable::inherited("SSL_CERT_DIR"),
+    CliEnvironmentVariable::inherited("SSL_CERT_FILE"),
+    CliEnvironmentVariable::inherited("TEMP"),
+    CliEnvironmentVariable::inherited("TERM"),
+    CliEnvironmentVariable::inherited("TMP"),
+    CliEnvironmentVariable::inherited("TMPDIR"),
+    CliEnvironmentVariable::inherited("XDG_CACHE_HOME"),
+    CliEnvironmentVariable::inherited("XDG_CONFIG_HOME"),
+    CliEnvironmentVariable::inherited("XDG_DATA_HOME"),
+    CliEnvironmentVariable::inherited("all_proxy"),
+    CliEnvironmentVariable::inherited("http_proxy"),
+    CliEnvironmentVariable::inherited("https_proxy"),
+    CliEnvironmentVariable::inherited("no_proxy"),
+];
 
 /// Every built-in tool reported by the pinned isolated Claude Code CLI.
 ///
@@ -462,7 +454,6 @@ async fn execute_process<C: Clone + Send + Sync>(
     let request = CliProcessRequest {
         command,
         prompt: prepared.prompt,
-        correlation: prepared.correlation,
         decoder,
         terminal_text_capture: match prepared.delivery {
             DeliveryMode::Buffered => CliTerminalTextCapture::TerminalOnly,
@@ -472,9 +463,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         interrupt_grace: prepared.interrupt_grace,
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
-        labels: CLAUDE_PROCESS_LABELS,
-        environment_allowlist: CLAUDE_ENVIRONMENT_ALLOWLIST,
-        credential_home_variables: CLAUDE_CREDENTIAL_HOME_VARIABLES,
+        environment: CLAUDE_ENVIRONMENT,
     };
     let _support_directory = prepared.support_directory;
     execute_cli_process(request, sink, cancellation).await
@@ -482,24 +471,28 @@ async fn execute_process<C: Clone + Send + Sync>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CLAUDE_CONFIG_HOME_VARIABLE, CLAUDE_CREDENTIAL_HOME_VARIABLES, CLAUDE_ENVIRONMENT_ALLOWLIST,
-    };
+    use super::{CLAUDE_CONFIG_HOME_VARIABLE, CLAUDE_ENVIRONMENT, CliEnvironmentVariable};
 
     const DIRECT_CREDENTIAL_VARIABLE: &str = "ANTHROPIC_API_KEY";
 
     #[test]
     fn cli_environment_routes_credential_store_without_direct_credential_values() {
         assert!(
-            CLAUDE_ENVIRONMENT_ALLOWLIST.contains(&CLAUDE_CONFIG_HOME_VARIABLE),
+            CLAUDE_ENVIRONMENT
+                .iter()
+                .any(|variable| variable.name() == CLAUDE_CONFIG_HOME_VARIABLE),
             "the provider credential-store selector reaches the child"
         );
         assert!(
-            CLAUDE_CREDENTIAL_HOME_VARIABLES.contains(&CLAUDE_CONFIG_HOME_VARIABLE),
+            CLAUDE_ENVIRONMENT.contains(&CliEnvironmentVariable::credential_home(
+                CLAUDE_CONFIG_HOME_VARIABLE
+            )),
             "the selector receives credential-home path handling"
         );
         assert!(
-            !CLAUDE_ENVIRONMENT_ALLOWLIST.contains(&DIRECT_CREDENTIAL_VARIABLE),
+            !CLAUDE_ENVIRONMENT
+                .iter()
+                .any(|variable| variable.name() == DIRECT_CREDENTIAL_VARIABLE),
             "direct credential values never reach the child"
         );
     }

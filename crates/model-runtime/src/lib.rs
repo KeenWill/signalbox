@@ -65,7 +65,8 @@ mod usage;
 #[cfg(feature = "cli-process")]
 pub use cli_process::{
     CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CliDecodeFailure, CliDecodeFailureClass,
-    CliProcessLabels, CliProcessRequest, CliSession, CliTerminalTextCapture, execute_cli_process,
+    CliEnvironmentVariable, CliProcessLabels, CliProcessRequest, CliSession,
+    CliTerminalTextCapture, execute_cli_process,
 };
 pub use cli_redaction::{
     REDACTED, RedactingSink, TerminalTextCapture, redact_json, redact_text,

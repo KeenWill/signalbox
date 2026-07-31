@@ -208,12 +208,17 @@ impl<'de> Visitor<'de> for DuplicateFreeVisitor<'_> {
 /// Reports whether a syntactically valid provider JSON value repeats an object
 /// member at any nesting depth.
 ///
-/// Malformed input remains the typed decoder's responsibility and carries no
-/// duplicate-detection guarantee: parsing stops at the first syntax error, so
-/// a repeat after that point is not observed. This scan exists only to detect
-/// the ambiguity that serde's last-value-wins object projection would otherwise
-/// erase from valid input.
-pub fn provider_json_has_duplicate_members(text: &str) -> bool {
+/// Values beyond [`PROVIDER_JSON_NESTING_LIMIT`] are rejected explicitly before
+/// serde can stop at its own recursion limit. Malformed input within the bound
+/// remains the typed decoder's responsibility and carries no duplicate-detection
+/// guarantee: parsing stops at the first syntax error, so a repeat after that
+/// point is not observed. This scan exists only to detect the ambiguity that
+/// serde's last-value-wins object projection would otherwise erase from valid
+/// input.
+pub fn provider_json_has_duplicate_members(
+    text: &str,
+) -> Result<bool, ProviderJsonNestingExceeded> {
+    validate_provider_json_nesting(text.as_bytes())?;
     let duplicate_found = Cell::new(false);
     let mut deserializer = serde_json::Deserializer::from_str(text);
     let _ = DuplicateFreeJson {
@@ -221,13 +226,13 @@ pub fn provider_json_has_duplicate_members(text: &str) -> bool {
     }
     .deserialize(&mut deserializer)
     .and_then(|()| deserializer.end());
-    duplicate_found.get()
+    Ok(duplicate_found.get())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingValidator,
+        PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingExceeded, ProviderJsonNestingValidator,
         provider_json_has_duplicate_members, validate_provider_json_nesting,
     };
 
@@ -279,31 +284,46 @@ mod tests {
 
     #[test]
     fn duplicate_member_scan_checks_every_object_depth() {
-        assert!(provider_json_has_duplicate_members(
-            r#"{"event":"first","event":"second"}"#
-        ));
-        assert!(provider_json_has_duplicate_members(
-            r#"{"outer":{"event":"first","event":"second"}}"#
-        ));
-        assert!(!provider_json_has_duplicate_members(
-            r#"{"event":"first","nested":{"event":"second"}}"#
-        ));
-        assert!(!provider_json_has_duplicate_members("{"));
+        assert_eq!(
+            provider_json_has_duplicate_members(r#"{"event":"first","event":"second"}"#),
+            Ok(true)
+        );
+        assert_eq!(
+            provider_json_has_duplicate_members(r#"{"outer":{"event":"first","event":"second"}}"#),
+            Ok(true)
+        );
+        assert_eq!(
+            provider_json_has_duplicate_members(r#"{"event":"first","nested":{"event":"second"}}"#),
+            Ok(false)
+        );
+        assert_eq!(provider_json_has_duplicate_members("{"), Ok(false));
     }
 
     #[test]
     fn duplicate_member_scan_continues_after_an_out_of_range_number() {
         const PROVIDER_JSON: &str = r#"{"number":1e1000000,"event":"first","event":"second"}"#;
 
-        assert!(provider_json_has_duplicate_members(PROVIDER_JSON));
+        assert_eq!(provider_json_has_duplicate_members(PROVIDER_JSON), Ok(true));
+    }
+
+    #[test]
+    fn duplicate_member_scan_reports_the_shared_nesting_limit() {
+        let depth = PROVIDER_JSON_NESTING_LIMIT + 1;
+        let json = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+
+        assert_eq!(
+            provider_json_has_duplicate_members(&json),
+            Err(ProviderJsonNestingExceeded)
+        );
     }
 
     #[test]
     fn malformed_input_before_a_repeat_is_left_to_the_typed_decoder() {
         const MALFORMED_PROVIDER_JSON: &str = r#"{"bad": tru, "dup": 1, "dup": 2}"#;
 
-        assert!(!provider_json_has_duplicate_members(
-            MALFORMED_PROVIDER_JSON
-        ));
+        assert_eq!(
+            provider_json_has_duplicate_members(MALFORMED_PROVIDER_JSON),
+            Ok(false)
+        );
     }
 }

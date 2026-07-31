@@ -5,11 +5,11 @@ use std::collections::HashSet;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use signalbox_model_runtime::{
-    AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliSession,
-    CompletionEvidence, CompletionFinish, DeliveryMode, ExchangeFacts, FinishReason, LossCause,
-    NativeErrorFacts, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
-    ProviderMessageId, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
-    TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
+    CliSession, CompletionEvidence, CompletionFinish, DeliveryMode, ExchangeFacts, FinishReason,
+    LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+    ProviderErrorEvidence, ProviderMessageId, ProviderRequestId, REDACTED, RedactingSink,
+    RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     provider_json_has_duplicate_members, redact_text, trailing_credential_context,
     validate_provider_json_nesting,
 };
@@ -22,7 +22,9 @@ use crate::wire::{
 };
 
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
-    if provider_json_has_duplicate_members(line) {
+    let duplicate = provider_json_has_duplicate_members(line)
+        .map_err(|error| DecodeFailure::stream_protocol(error.to_string()))?;
+    if duplicate {
         Err(DecodeFailure::stream_protocol(
             "JSON input has duplicate object members",
         ))
@@ -1076,6 +1078,17 @@ impl DecodeFailure {
 }
 
 impl<C: Clone> CliSession<C> for EventDecoder<C> {
+    const LABELS: CliProcessLabels = CliProcessLabels {
+        provider: "Codex",
+        process: "Codex CLI",
+        decode_event: "Codex event",
+        bounded_event: "Codex JSONL event",
+    };
+
+    fn correlation(&self) -> &C {
+        &self.correlation
+    }
+
     fn terminal_observed(&self) -> bool {
         EventDecoder::terminal_observed(self)
     }
