@@ -718,6 +718,27 @@ impl RunnerProtocolStore {
         enrollment: &RunnerEnrollment,
         advertisement: signalbox_domain::RunnerAdvertisement,
     ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
+        self.register_checked(enrollment, None, advertisement).await
+    }
+
+    /// Appends one complete advertisement only when the caller names the
+    /// enrollment-owned current registration revision.
+    pub async fn register_at_revision(
+        &self,
+        enrollment: &RunnerEnrollment,
+        expected: RunnerRegistrationRevision,
+        advertisement: signalbox_domain::RunnerAdvertisement,
+    ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
+        self.register_checked(enrollment, Some(expected), advertisement)
+            .await
+    }
+
+    async fn register_checked(
+        &self,
+        enrollment: &RunnerEnrollment,
+        expected: Option<RunnerRegistrationRevision>,
+        advertisement: signalbox_domain::RunnerAdvertisement,
+    ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
         if advertisement.repositories().count() > RunnerAdvertisement::MAX_REPOSITORIES {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::TooManyAdvertisedRepositories,
@@ -749,10 +770,21 @@ impl RunnerProtocolStore {
             .bind(enrollment_id.into_uuid())
             .fetch_optional(&mut *transaction)
             .await?;
+        let previous = previous.map(decode_registration_revision).transpose()?;
+        if let Some(expected) = expected
+            && previous != Some(expected)
+        {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::RegistrationChanged,
+            ));
+        }
         let revision = match previous {
-            Some(value) => decode_registration_revision(value)?.checked_next().ok_or(
-                RunnerProtocolStoreError::Corruption(RunnerProtocolCorruption::GenerationExhausted),
-            )?,
+            Some(value) => value
+                .checked_next()
+                .ok_or(RunnerProtocolStoreError::Corruption(
+                    RunnerProtocolCorruption::GenerationExhausted,
+                ))?,
             None => RunnerRegistrationRevision::first(),
         };
         if pending.registration().revision().get() != revision.get() {
