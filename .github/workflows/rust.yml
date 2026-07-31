@@ -84,6 +84,49 @@ jobs:
       - name: Build documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
+  # Report-only by owner decision: this job publishes deterministic counts
+  # for human comparison but can never fail the workflow or gate a merge.
+  domain-instruction-counts:
+    name: Domain instruction counts (report only)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes valgrind
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: domain-instruction-counts
+      - name: Install Gungraun runner
+        run: cargo install --locked --version '=0.19.4' gungraun-runner
+      - name: Report domain instruction counts and simulated cache behavior
+        run: |
+          benchmark_log="$RUNNER_TEMP/domain-instruction-counts.txt"
+          set +e
+          SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK=1 \
+            cargo bench --locked -p signalbox-domain --bench instruction_counts \
+            2>&1 | tee "$benchmark_log"
+          benchmark_status="${PIPESTATUS[0]}"
+          set -e
+          {
+            echo '## Domain instruction counts (report only)'
+            echo
+            echo 'This report is informational. It has no threshold and gates nothing.'
+            echo
+            echo '```text'
+            cat "$benchmark_log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$benchmark_status"
+
   # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
   # pinned PostgreSQL container through testcontainers, so the four runner CPUs
   # can execute isolated tests concurrently without sharing database state.
