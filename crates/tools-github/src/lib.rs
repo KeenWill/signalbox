@@ -61,8 +61,10 @@ const API_VERSION: &str = "2026-03-10";
 const USER_AGENT_VALUE: &str = "signalbox";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const PAGE_SIZE: &str = "100";
+const MAX_GRAPHQL_PAGE_ITEMS: usize = 100;
 const MAX_FILE_PAGES: u16 = 30;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
+const JSON_NULL_BYTES: usize = 4;
 const MAX_ERROR_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_ERROR_DETAIL_BYTES: usize = 2 * 1024;
 const MAX_RESULT_BYTES: usize = 512 * 1024;
@@ -1041,24 +1043,17 @@ fn truncate_diff_result(value: &mut serde_json::Value) -> Result<(), InvalidGitH
         .checked_sub(empty_size)
         .ok_or(InvalidGitHubArguments)?;
     let mut retained = Vec::new();
+    let mut patches = Vec::new();
     for mut file in files {
-        let separator = usize::from(!retained.is_empty());
-        let encoded_size = serde_json::to_vec(&file)
-            .map_err(|_| InvalidGitHubArguments)?
-            .len();
-        if separator + encoded_size <= remaining {
-            remaining -= separator + encoded_size;
-            retained.push(file);
-            continue;
-        }
         let patch = file
             .as_object_mut()
             .and_then(|object| object.get_mut("patch"))
             .ok_or(InvalidGitHubArguments)?;
-        if patch.is_null() {
-            break;
+        let patch = std::mem::replace(patch, serde_json::Value::Null);
+        if !patch.is_null() && !patch.is_string() {
+            return Err(InvalidGitHubArguments);
         }
-        *patch = serde_json::Value::Null;
+        let separator = usize::from(!retained.is_empty());
         let encoded_size = serde_json::to_vec(&file)
             .map_err(|_| InvalidGitHubArguments)?
             .len();
@@ -1067,6 +1062,27 @@ fn truncate_diff_result(value: &mut serde_json::Value) -> Result<(), InvalidGitH
         }
         remaining -= separator + encoded_size;
         retained.push(file);
+        patches.push(patch);
+    }
+    for (file, patch) in retained.iter_mut().zip(patches) {
+        if patch.is_null() {
+            continue;
+        }
+        let encoded_size = serde_json::to_vec(&patch)
+            .map_err(|_| InvalidGitHubArguments)?
+            .len();
+        let additional_size = encoded_size
+            .checked_sub(JSON_NULL_BYTES)
+            .ok_or(InvalidGitHubArguments)?;
+        if additional_size > remaining {
+            continue;
+        }
+        let retained_patch = file
+            .as_object_mut()
+            .and_then(|object| object.get_mut("patch"))
+            .ok_or(InvalidGitHubArguments)?;
+        *retained_patch = patch;
+        remaining -= additional_size;
     }
     object.insert("files".to_owned(), serde_json::Value::Array(retained));
     Ok(())
@@ -1903,8 +1919,7 @@ fn normalize_threads(
         value,
         &["data", "repository", "pullRequest", "reviewThreads"],
     )?;
-    let object = required_object(connection)?;
-    let threads = required_array(required(object, "nodes")?)?
+    let threads = bounded_connection_nodes(connection)?
         .iter()
         .map(normalize_thread)
         .collect::<Result<Vec<_>, _>>()?;
@@ -1919,8 +1934,7 @@ fn normalize_thread(
 ) -> Result<serde_json::Value, GitHubTransportFailure> {
     let object = required_object(value)?;
     let comments_connection = required(object, "comments")?;
-    let comments_object = required_object(comments_connection)?;
-    let comments = required_array(required(comments_object, "nodes")?)?
+    let comments = bounded_connection_nodes(comments_connection)?
         .iter()
         .map(normalize_comment)
         .collect::<Result<Vec<_>, _>>()?;
@@ -1933,6 +1947,16 @@ fn normalize_thread(
         "comments": comments,
         "comments_truncated": nested_bool(comments_connection, &["pageInfo", "hasNextPage"])?,
     }))
+}
+
+fn bounded_connection_nodes(
+    connection: &serde_json::Value,
+) -> Result<&Vec<serde_json::Value>, GitHubTransportFailure> {
+    let object = required_object(connection)?;
+    let nodes = required_array(required(object, "nodes")?)?;
+    (nodes.len() <= MAX_GRAPHQL_PAGE_ITEMS)
+        .then_some(nodes)
+        .ok_or_else(|| invalid_response(None))
 }
 
 fn normalize_comment(
@@ -2164,8 +2188,10 @@ mod tests {
     const SYNTHETIC_TOKEN: &str = "github_pat_synthetic_fixture_secret";
     const SYNTHETIC_UNICODE_TOKEN: &str = "github_pat_synthétic_fixture_secret";
     const SYNTHETIC_UNICODE_PREFIX: &str = "github_pat_synth";
-    const DIFF_FILES_FOR_RESULT_OVERFLOW: usize = 9;
+    const DIFF_FILES_FOR_RESULT_OVERFLOW: usize = 64;
     const LAST_OVERFLOW_FILE_INDEX: usize = DIFF_FILES_FOR_RESULT_OVERFLOW - 1;
+    const AGGREGATE_PATCH_BYTES: usize = MAX_TEXT_BYTES / 4;
+    const GRAPHQL_ITEMS_BEYOND_BOUND: usize = MAX_GRAPHQL_PAGE_ITEMS + 1;
     const PROVIDER_ERROR_TEXT: &str = "private provider detail";
     const PATCH_FILLER: &str = "x";
 
@@ -2411,7 +2437,8 @@ mod tests {
     #[test]
     fn aggregate_diff_evidence_is_truncated_to_result_bound() {
         let mut response = files_response();
-        response[0]["patch"] = serde_json::Value::String(PATCH_FILLER.repeat(MAX_TEXT_BYTES));
+        response[0]["patch"] =
+            serde_json::Value::String(PATCH_FILLER.repeat(AGGREGATE_PATCH_BYTES));
         let file = normalize_files(&response)
             .expect("bounded response is retained")
             .files
@@ -2549,6 +2576,30 @@ mod tests {
             parsed["threads"][0]["comments"][0]["body"],
             REVIEW_COMMENT_BODY
         );
+    }
+
+    #[test]
+    fn graphql_rejects_more_than_requested_review_threads() {
+        let mut response = threads_response();
+        let thread =
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0].clone();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
+            serde_json::Value::Array(vec![thread; GRAPHQL_ITEMS_BEYOND_BOUND]);
+
+        assert!(normalize_threads(&response).is_err());
+    }
+
+    #[test]
+    fn graphql_rejects_more_than_requested_review_comments() {
+        let mut response = threads_response();
+        let comment =
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]
+                ["nodes"][0]
+                .clone();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"] =
+            serde_json::Value::Array(vec![comment; GRAPHQL_ITEMS_BEYOND_BOUND]);
+
+        assert!(normalize_threads(&response).is_err());
     }
 
     #[test]
