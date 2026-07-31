@@ -536,7 +536,10 @@ private struct ProcessConversationDetailScreen: View {
           ProgressView("Loading session")
         }
       case .imported:
-        ProcessImportedConversationScreen(conversation: conversation) { sessionID in
+        ProcessImportedConversationScreen(
+          conversation: conversation,
+          continuationRetryStore: coordinator.importedContinuationRetryStore
+        ) { sessionID in
           coordinator.selectedProcessSessionID = sessionID
           NotificationCenter.default.post(name: .refreshRequested, object: nil)
           dismiss()
@@ -606,6 +609,45 @@ struct ProcessImportedContinuationRetryState {
   }
 }
 
+@MainActor
+final class ProcessImportedContinuationRetryStore {
+  private var state = ProcessImportedContinuationRetryState()
+
+  func reusableCreation(
+    importedConversationID: SignalboxCanonicalUUID,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    modelSelection: SignalboxModelSelection
+  ) -> SignalboxPreparedImportedSessionCreation? {
+    state.reusableCreation(
+      importedConversationID: importedConversationID,
+      throughPosition: throughPosition,
+      relationship: relationship,
+      modelSelection: modelSelection
+    )
+  }
+
+  func prepareForNewIntent() {
+    state.prepareForNewIntent()
+  }
+
+  func recordSuccess() {
+    state.recordSuccess()
+  }
+
+  func recordFailure(
+    _ error: Error,
+    prepared: SignalboxPreparedImportedSessionCreation?,
+    reusedUnresolvedCreation: Bool
+  ) {
+    state.recordFailure(
+      error,
+      prepared: prepared,
+      reusedUnresolvedCreation: reusedUnresolvedCreation
+    )
+  }
+}
+
 private extension SignalboxProcessServiceError {
   var retainsPreparedImportedSessionCreation: Bool {
     switch self {
@@ -638,10 +680,19 @@ final class ProcessImportedConversationViewModel: ObservableObject {
 
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var generation: UInt64 = 0
-  private var continuationRetryState = ProcessImportedContinuationRetryState()
+  private let continuationRetryStore: ProcessImportedContinuationRetryStore
 
   init(serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?) {
     self.serviceProvider = serviceProvider
+    continuationRetryStore = ProcessImportedContinuationRetryStore()
+  }
+
+  init(
+    serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?,
+    continuationRetryStore: ProcessImportedContinuationRetryStore
+  ) {
+    self.serviceProvider = serviceProvider
+    self.continuationRetryStore = continuationRetryStore
   }
 
   func replaceServiceProvider(
@@ -654,7 +705,6 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     isLoading = false
     isContinuing = false
     errorMessage = nil
-    continuationRetryState.prepareForNewIntent()
   }
 
   func load(conversation: SignalboxProcessConversation) async {
@@ -722,7 +772,7 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     var reusedUnresolvedCreation = false
     do {
       let prepared: SignalboxPreparedImportedSessionCreation
-      if let unresolved = continuationRetryState.reusableCreation(
+      if let unresolved = continuationRetryStore.reusableCreation(
         importedConversationID: conversation.conversationID,
         throughPosition: throughPosition,
         relationship: relationship,
@@ -731,7 +781,7 @@ final class ProcessImportedConversationViewModel: ObservableObject {
         prepared = unresolved
         reusedUnresolvedCreation = true
       } else {
-        continuationRetryState.prepareForNewIntent()
+        continuationRetryStore.prepareForNewIntent()
         prepared = try await service.prepareImportedSessionCreation(
           conversation: conversation,
           throughPosition: throughPosition,
@@ -741,11 +791,11 @@ final class ProcessImportedConversationViewModel: ObservableObject {
       }
       preparedForAttempt = prepared
       let sessionID = try await service.createSessionFromImportedFrontier(prepared)
-      continuationRetryState.recordSuccess()
+      continuationRetryStore.recordSuccess()
       errorMessage = nil
       return sessionID
     } catch {
-      continuationRetryState.recordFailure(
+      continuationRetryStore.recordFailure(
         error,
         prepared: preparedForAttempt,
         reusedUnresolvedCreation: reusedUnresolvedCreation
@@ -763,6 +813,21 @@ private struct ProcessImportedConversationScreen: View {
   @StateObject private var viewModel = ProcessImportedConversationViewModel { nil }
   @State private var selectedPosition: SignalboxCanonicalUInt64?
   @State private var showContinuationSheet = false
+
+  init(
+    conversation: SignalboxProcessConversation,
+    continuationRetryStore: ProcessImportedContinuationRetryStore,
+    didContinue: @escaping (SignalboxCanonicalUUID) -> Void
+  ) {
+    self.conversation = conversation
+    self.didContinue = didContinue
+    _viewModel = StateObject(
+      wrappedValue: ProcessImportedConversationViewModel(
+        serviceProvider: { nil },
+        continuationRetryStore: continuationRetryStore
+      )
+    )
+  }
 
   var body: some View {
     Group {

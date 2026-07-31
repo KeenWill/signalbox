@@ -20,6 +20,7 @@ final class AppCoordinator: ObservableObject {
 
     let isMockMode: Bool
     let screenshotScenario: ScreenshotScenario?
+    let importedContinuationRetryStore = ProcessImportedContinuationRetryStore()
 
     init(isMockMode: Bool, screenshotScenario: ScreenshotScenario? = nil, resetPersistedSettings: Bool = false) {
         self.screenshotScenario = screenshotScenario
@@ -85,6 +86,7 @@ final class AppCoordinator: ObservableObject {
     private func replaceProcessService(
         _ replacement: (any SignalboxProcessServiceProtocol)?
     ) {
+        importedContinuationRetryStore.prepareForNewIntent()
         processService = replacement
         NotificationCenter.default.post(name: .processServiceChanged, object: nil)
     }

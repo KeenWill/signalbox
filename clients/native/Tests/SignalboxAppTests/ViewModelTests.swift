@@ -71,16 +71,21 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(unavailableViewModel.errorMessage, remoteTransportGateMessage)
     }
 
-    func testImportedContinuationRetryReusesPreparedIdentityAfterUnknownSend() throws {
+    func testImportedContinuationRetrySurvivesViewModelReplacementAfterUnknownSend() throws {
         let prepared = try ImportedContinuationRetryFixture.preparedCreation()
-        var state = ProcessImportedContinuationRetryState()
+        let store = ProcessImportedContinuationRetryStore()
 
-        state.recordFailure(
+        store.recordFailure(
             ImportedContinuationRetryFixture.sendOutcomeUnknownError,
             prepared: prepared,
             reusedUnresolvedCreation: false
         )
-        let reusable = state.reusableCreation(
+        let replacementViewModel = ProcessImportedConversationViewModel(
+            serviceProvider: { nil },
+            continuationRetryStore: store
+        )
+        replacementViewModel.replaceServiceProvider { nil }
+        let reusable = store.reusableCreation(
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,

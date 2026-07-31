@@ -966,18 +966,9 @@ public struct SignalboxImportedConversationEntry: Decodable, Equatable, Sendable
       SignalboxImportedTextPreview.self,
       forKey: .textPreview
     )
-    let requiresTextPreview: Bool
     switch sourceSpeaker {
-    case .notAttested, .attestedAbsent:
-      requiresTextPreview = false
-    case .attested:
-      switch contentKind {
-      case .text:
-        requiresTextPreview = true
-      case .sourceEvent, .sourceMessageBlock, .toolCall, .toolResult, .thinking,
-        .redactedThinking, .document, .messageContentAbsent:
-        requiresTextPreview = false
-      }
+    case .notAttested, .attestedAbsent, .attested:
+      break
     case .unknown(let kind, _):
       throw DecodingError.dataCorrupted(
         .init(
@@ -987,12 +978,20 @@ public struct SignalboxImportedConversationEntry: Decodable, Equatable, Sendable
         )
       )
     }
-    guard (textPreview != nil) == requiresTextPreview else {
+    let admitsTextPreview: Bool
+    switch contentKind {
+    case .text:
+      admitsTextPreview = true
+    case .sourceEvent, .sourceMessageBlock, .toolCall, .toolResult, .thinking,
+      .redactedThinking, .document, .messageContentAbsent:
+      admitsTextPreview = false
+    }
+    guard textPreview == nil || admitsTextPreview else {
       throw DecodingError.dataCorrupted(
         .init(
           codingPath: decoder.codingPath + [CodingKeys.textPreview],
           debugDescription:
-            "Imported conversation entry text_preview contradicts its content and speaker."
+            "Imported conversation entry text_preview requires text content."
         )
       )
     }

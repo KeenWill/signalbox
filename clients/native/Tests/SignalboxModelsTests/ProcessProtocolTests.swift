@@ -113,13 +113,15 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(diagnostic, ProcessProtocolFixture.unknownImportedSourceSpeakerDiagnostic)
   }
 
-  func testImportedConversationEntryRejectsUnattestedTextPreview() throws {
+  func testImportedConversationEntryAcceptsAttestedSpeakerWithoutTextPreview() throws {
     let frame = try SignalboxProcessServerFrame.decode(
-      from: ProcessProtocolFixture.unattestedTextWithPreviewFrame()
+      from: ProcessProtocolFixture.attestedSpeakerWithoutTextPreviewFrame()
     )
-    let diagnostic = try ProcessProtocolFixture.unknownDiagnostic(in: frame.message)
+    let entry = try ProcessProtocolFixture.importedEntry(in: frame.message)
 
-    XCTAssertEqual(diagnostic, ProcessProtocolFixture.contradictoryImportedTextPreviewDiagnostic)
+    XCTAssertEqual(entry.sourceSpeakerLabel, "User")
+    XCTAssertEqual(entry.contentKind, .text)
+    XCTAssertNil(entry.textPreview)
   }
 
   func testModelAliasCatalogRequestAndSummaryUseClosedVersionOneShapes() throws {
@@ -663,9 +665,6 @@ private enum ProcessProtocolFixture {
   static let unknownImportedSourceSpeakerDiagnostic = SignalboxDecodingDiagnostic(
     message: "Invalid field value at message.source_speaker."
   )
-  static let contradictoryImportedTextPreviewDiagnostic = SignalboxDecodingDiagnostic(
-    message: "Invalid field value at message.text_preview."
-  )
 
   static func duplicateSnapshotBoundaryMessage(
     sessionID: String
@@ -921,7 +920,7 @@ private enum ProcessProtocolFixture {
     )
   }
 
-  static func unattestedTextWithPreviewFrame() -> Data {
+  static func attestedSpeakerWithoutTextPreviewFrame() -> Data {
     Data(
       """
       {
@@ -931,9 +930,9 @@ private enum ProcessProtocolFixture {
           "type":"imported_conversation_entry",
           "position":"1",
           "imported_entry_id":"33333333-3333-4333-8333-333333333333",
-          "source_speaker":{"type":"not_attested"},
+          "source_speaker":{"type":"attested","speaker":"user"},
           "content_kind":"text",
-          "text_preview":{"preview":"Unattested fixture text","truncated":false}
+          "text_preview":null
         }
       }
       """.utf8
