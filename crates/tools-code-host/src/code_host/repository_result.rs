@@ -190,6 +190,27 @@ impl RepositoryReadFileResult {
             },
             CodeHostResultCompleteness::Truncated => true,
         };
+        let range_coverage_consistent = match (
+            fields.completeness,
+            requested_start_line,
+            requested_end_line,
+            fields.end_line,
+        ) {
+            (
+                CodeHostResultCompleteness::Complete,
+                Some(1),
+                Some(requested_end),
+                Some(returned_end),
+            ) if returned_end < requested_end => fields.source_bytes == returned_bytes,
+            (
+                CodeHostResultCompleteness::Truncated,
+                Some(_),
+                Some(requested_end),
+                Some(returned_end),
+            ) => returned_end < requested_end || !content_ends_at_line_boundary,
+            (CodeHostResultCompleteness::Complete, _, _, _)
+            | (CodeHostResultCompleteness::Truncated, _, _, _) => true,
+        };
         let retention_bound_consistent = match fields.completeness {
             CodeHostResultCompleteness::Complete => true,
             CodeHostResultCompleteness::Truncated => {
@@ -207,6 +228,7 @@ impl RepositoryReadFileResult {
             && fields.content.len() <= MAX_REPOSITORY_FILE_CONTENT_BYTES
             && source_bytes_consistent
             && complete_first_line_consistent
+            && range_coverage_consistent
             && retention_bound_consistent
             && source_within_scan_limit
             && fields.last_line_complete == last_line_complete)
@@ -659,6 +681,67 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// A complete first-line range cannot omit a requested second line whose
+    /// existence is proven by exact source bytes.
+    #[test]
+    fn ranged_content_rejects_a_provably_present_omitted_line() {
+        const SOURCE: &str = "a\nb";
+        const RETURNED_CONTENT: &str = "a\n";
+        const REQUESTED_START: u32 = 1;
+        const REQUESTED_END: u32 = 2;
+        let source_bytes = u64::try_from(SOURCE.len()).expect("fixture source size fits u64");
+        let arguments = file_arguments(
+            "src/lib.rs",
+            REVISION,
+            Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
+        );
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: Some(REQUESTED_START),
+                end_line: Some(REQUESTED_START),
+                returned_lines: 1,
+                last_line_complete: true,
+                content: String::from(RETURNED_CONTENT),
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        );
+
+        assert!(result.is_none());
+    }
+
+    /// Truncation cannot be claimed after the complete requested range ended
+    /// at a line boundary.
+    #[test]
+    fn ranged_content_rejects_truncation_after_the_requested_range() {
+        const REQUESTED_LINE: u32 = 1;
+        let content = format!("{}\n", "a".repeat(MAX_REPOSITORY_FILE_CONTENT_BYTES - 1));
+        let returned_bytes = u64::try_from(content.len()).expect("fixture content size fits u64");
+        let source_bytes = returned_bytes
+            .checked_add(1)
+            .expect("fixture source size fits u64");
+        let arguments = file_arguments(
+            "src/lib.rs",
+            REVISION,
+            Some(json!({"end": REQUESTED_LINE, "start": REQUESTED_LINE})),
+        );
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: Some(REQUESTED_LINE),
+                end_line: Some(REQUESTED_LINE),
+                returned_lines: 1,
+                last_line_complete: true,
+                content,
+                completeness: CodeHostResultCompleteness::Truncated,
+            },
+        );
+
+        assert!(result.is_none());
+    }
+
     /// A later returned line requires at least one source byte per preceding newline.
     #[test]
     fn ranged_content_rejects_impossible_later_line_source_bytes() {
@@ -918,11 +1001,18 @@ mod tests {
     /// A typed directory result cannot exceed the encoded tool-result bound.
     #[test]
     fn directory_entries_reject_an_oversized_encoded_result() {
-        let escaped_path = "\u{0001}".repeat(crate::code_host::arguments::MAX_FILE_PATH_BYTES);
-        let entry =
-            RepositoryDirectoryEntry::try_new(escaped_path, RepositoryObjectKind::File, None)
-                .expect("fixture entry path is admitted");
-        let entries = vec![entry; MAX_RESULT_ITEMS];
+        let escaped_prefix =
+            "\u{0001}".repeat(crate::code_host::arguments::MAX_FILE_PATH_BYTES - 3);
+        let entries = (0..MAX_RESULT_ITEMS)
+            .map(|index| {
+                RepositoryDirectoryEntry::try_new(
+                    format!("{escaped_prefix}{index:03}"),
+                    RepositoryObjectKind::File,
+                    None,
+                )
+                .expect("fixture entry path is admitted")
+            })
+            .collect::<Vec<_>>();
         let observed_entries = entries.len();
         let arguments = directory_arguments(".");
         let result = RepositoryListDirectoryResult::try_entries(

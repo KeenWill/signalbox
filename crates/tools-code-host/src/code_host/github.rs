@@ -1693,7 +1693,11 @@ fn ensure_repository_response_path(
     object: &serde_json::Map<String, serde_json::Value>,
     requested_path: &str,
 ) -> Result<(), CodeHostTransportFailure> {
-    let returned_path = object.get("path").and_then(serde_json::Value::as_str);
+    let returned_path = match object.get("path") {
+        None => None,
+        Some(serde_json::Value::String(path)) => Some(path.as_str()),
+        Some(_) => return Err(CodeHostTransportFailure::InvalidResponse),
+    };
     let matches = if requested_path == "." {
         returned_path.is_none_or(|path| path.is_empty() || path == ".")
     } else {
@@ -1709,11 +1713,10 @@ fn ensure_repository_response_path(
 fn parse_repository_object_kind(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<RepositoryObjectKind, CodeHostTransportFailure> {
-    if object
-        .get("submodule_git_url")
-        .is_some_and(|value| !value.is_null())
-    {
-        return Ok(RepositoryObjectKind::Submodule);
+    match object.get("submodule_git_url") {
+        Some(serde_json::Value::String(_)) => return Ok(RepositoryObjectKind::Submodule),
+        None | Some(serde_json::Value::Null) => {}
+        Some(_) => return Err(CodeHostTransportFailure::InvalidResponse),
     }
     match required_string(object, "type")?.as_str() {
         "file" => Ok(RepositoryObjectKind::File),
@@ -3239,6 +3242,40 @@ mod tests {
             .expect("a host-boundary directory response remains typed");
 
         assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
+    }
+
+    /// A present repository-root response path must retain its documented string type.
+    #[test]
+    fn repository_root_rejects_a_non_string_response_path() {
+        let value = serde_json::json!({
+            "entries": [],
+            "path": 17,
+            "type": "dir",
+        });
+
+        assert_eq!(
+            parse_repository_path_lookup(&value, ".", CodeHostResultCompleteness::Complete),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// GitHub's legacy submodule marker must be either absent, null, or a string.
+    #[test]
+    fn repository_entry_rejects_a_non_string_submodule_marker() {
+        let value = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": 17,
+            "type": "file",
+        });
+
+        assert_eq!(
+            parse_repository_path_lookup(
+                &value,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
     }
 
     /// A directory larger than the result item bound reports both the observed

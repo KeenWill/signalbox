@@ -314,25 +314,42 @@ impl CodeHostToolKind {
     }
 
     fn accepts_result(self, result: &CodeHostResult) -> bool {
-        matches!(
-            (self, result),
-            (Self::Summary, CodeHostResult::Summary(_))
-                | (Self::ChangedFiles, CodeHostResult::ChangedFiles(_))
-                | (Self::FilePatch, CodeHostResult::FilePatch(_))
-                | (Self::ListDirectory, CodeHostResult::ListDirectory(_))
-                | (Self::ReadFile, CodeHostResult::ReadFile(_))
-                | (Self::ChecksStatus, CodeHostResult::ChecksStatus(_))
-                | (Self::Comment, CodeHostResult::Comment(_))
-                | (Self::ConvergenceState, CodeHostResult::ConvergenceState(_))
-                | (Self::ReviewThreads, CodeHostResult::ReviewThreads(_))
-                | (Self::StackState, CodeHostResult::StackState(_))
-                | (Self::ThreadInventory, CodeHostResult::ThreadInventory(_))
-                | (Self::ThreadReply, CodeHostResult::ThreadReply(_))
-                | (Self::ThreadResolve, CodeHostResult::ThreadResolve(_))
-                | (Self::CiJobLog, CodeHostResult::CiJobLog(_))
-                | (Self::RerunFailedJobs, CodeHostResult::RerunFailedJobs(_))
-                | (Self::ReviewGateCheck, CodeHostResult::ReviewGateCheck(_))
-        )
+        let result_kind = match result {
+            CodeHostResult::Summary(_) => Self::Summary,
+            CodeHostResult::ChangedFiles(_) => Self::ChangedFiles,
+            CodeHostResult::FilePatch(_) => Self::FilePatch,
+            CodeHostResult::ListDirectory(_) => Self::ListDirectory,
+            CodeHostResult::ReadFile(_) => Self::ReadFile,
+            CodeHostResult::ChecksStatus(_) => Self::ChecksStatus,
+            CodeHostResult::Comment(_) => Self::Comment,
+            CodeHostResult::ConvergenceState(_) => Self::ConvergenceState,
+            CodeHostResult::ReviewThreads(_) => Self::ReviewThreads,
+            CodeHostResult::StackState(_) => Self::StackState,
+            CodeHostResult::ThreadInventory(_) => Self::ThreadInventory,
+            CodeHostResult::ThreadReply(_) => Self::ThreadReply,
+            CodeHostResult::ThreadResolve(_) => Self::ThreadResolve,
+            CodeHostResult::CiJobLog(_) => Self::CiJobLog,
+            CodeHostResult::RerunFailedJobs(_) => Self::RerunFailedJobs,
+            CodeHostResult::ReviewGateCheck(_) => Self::ReviewGateCheck,
+        };
+        match self {
+            Self::Summary
+            | Self::ChangedFiles
+            | Self::FilePatch
+            | Self::ListDirectory
+            | Self::ReadFile
+            | Self::ChecksStatus
+            | Self::Comment
+            | Self::ConvergenceState
+            | Self::ReviewThreads
+            | Self::StackState
+            | Self::ThreadInventory
+            | Self::ThreadReply
+            | Self::ThreadResolve
+            | Self::CiJobLog
+            | Self::RerunFailedJobs
+            | Self::ReviewGateCheck => self == result_kind,
+        }
     }
 }
 
