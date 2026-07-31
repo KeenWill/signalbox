@@ -252,11 +252,11 @@ The file named by `SIGNALBOX_TEMPLATE_CONFIG_FILE` is a separate versioned TOML
 document (`config/session-templates.example.toml` is the checked-in example). It
 is read once at startup, after the model catalog, and never reread within a
 process. Its root requires exactly `version = 1`, an optional array of
-`[[templates]]` tables, and one optional `[review_library]` table; a version-only
-document is a valid empty catalog. Unknown root and nested fields, a mistyped
-templates or review-library value, duplicate names, and every invalid field fail
-as precise sanitized `SessionTemplateConfigurationError` variants without
-including file paths, prompt content, or document text.
+`[[templates]]` tables, and one optional `[review_library]` table; a
+version-only document is a valid empty catalog. Unknown root and nested fields,
+a mistyped templates or review-library value, duplicate names, and every invalid
+field fail as precise sanitized `SessionTemplateConfigurationError` variants
+without including file paths, prompt content, or document text.
 
 The version-one `[review_library]` table is closed and carries exactly:
 
@@ -274,11 +274,12 @@ The version-one `[review_library]` table is closed and carries exactly:
   nonempty keys `correctness`, `interface-and-type-design`, `test-quality`,
   `security`, and `documentation-code-drift`.
 
-An absent concern table, an empty or partial five-key inventory, an extra concern
-key, a missing or empty body, both or neither model choices, a noncanonical or
-unknown model identity, a missing approval Boolean, or any unknown field rejects
-the complete catalog. The initial concern inventory is closed: a different set
-requires a later accepted catalog contract rather than an extra version-one key.
+An absent concern table, an empty or partial five-key inventory, an extra
+concern key, a missing or empty body, both or neither model choices, a
+noncanonical or unknown model identity, a missing approval Boolean, or any
+unknown field rejects the complete catalog. The initial concern inventory is
+closed: a different set requires a later accepted catalog contract rather than
+an extra version-one key.
 
 Loading a library generates exactly nine ordinary resolved session templates:
 `review-import`, `review-judgment`, `review-repair`, `review-publication`,
@@ -335,16 +336,15 @@ prompt text or parse this file.
 
 Review orchestration retains a second digest for each generated template. It is
 domain-separated SHA-256 over the same unsigned-64-bit length framing. Its
-frames, in order, are ASCII
-`signalbox/review-template/orchestration-digest/v1`; the exact stage or concern
-key; the source version as eight unsigned big-endian bytes; ASCII `direct` or
-`alias`; the selected UUID's 16 network-order bytes; ASCII `disabled` or
-`approve_all`; SHA-256 of the exact shared-header bytes; and SHA-256 of the exact
-body bytes. The key frame makes equal prompt bytes used for different stages or
-concerns distinct orchestration inputs. This orchestration digest does not
-replace the ordinary content digest: template provenance uses the complete
-assembled prompt digest above, while the immutable orchestration attempt uses
-the header/body/key-aware digest.
+frames, in order, are ASCII `signalbox/review-template/orchestration-digest/v1`;
+the exact stage or concern key; the source version as eight unsigned big-endian
+bytes; ASCII `direct` or `alias`; the selected UUID's 16 network-order bytes;
+ASCII `disabled` or `approve_all`; SHA-256 of the exact shared-header bytes; and
+SHA-256 of the exact body bytes. The key frame makes equal prompt bytes used for
+different stages or concerns distinct orchestration inputs. This orchestration
+digest does not replace the ordinary content digest: template provenance uses
+the complete assembled prompt digest above, while the immutable orchestration
+attempt uses the header/body/key-aware digest.
 
 Creation by template name first consults the owner-global durable-command
 registry by command identity. An existing create-session claim is reconstituted
@@ -358,9 +358,9 @@ retains no live catalog reference. Generated review templates follow this same
 copy-on-create path: the complete assembled prompt, model selection, approval
 blanket, reserved name, and content digest become immutable session evidence. An
 edit therefore requires a daemon restart and affects only creation commands
-first handled under the new catalog. Equal replay
-of an already handled command and template name returns the original copied
-session rather than comparing against the current bundle (INV-047).
+first handled under the new catalog. Equal replay of an already handled command
+and template name returns the original copied session rather than comparing
+against the current bundle (INV-047).
 
 Why: a separate file lets operators change the reusable creation surface without
 mixing it into immutable model-identity definitions, while one load boundary

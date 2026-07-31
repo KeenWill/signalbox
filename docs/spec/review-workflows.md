@@ -408,8 +408,8 @@ ordinary content digest must equal the currently resolved reserved template
 provenance for that stage or concern; missing or mismatched provenance rejects
 the submission. The application then authenticates the separately frozen
 orchestration digest carried by the attempt. Session execution evidence and
-attempt configuration therefore agree through two independently checked
-bindings rather than a caller-supplied claim.
+attempt configuration therefore agree through two independently checked bindings
+rather than a caller-supplied claim.
 
 The application exposes ports for immutable-target context import,
 session-backed passes, repair, and reserved publication. Adapter success returns
@@ -724,10 +724,10 @@ surface.
 
 The process protocol exposes closed requests to create a target, start a run and
 its session-backed pass, activate that pass, record its complete finding
-inventory or one finding event, reserve and attach external links, and
-read targets, runs with their pass, individual findings, or an identity-ordered
-run finding list. It additionally exposes the closed orchestration start,
-import, concern, judgment-plan, judgment-effect, repair, publication, and read
+inventory or one finding event, reserve and attach external links, and read
+targets, runs with their pass, individual findings, or an identity-ordered run
+finding list. It additionally exposes the closed orchestration start, import,
+concern, judgment-plan, judgment-effect, repair, publication, and read
 operations consumed by the client-fed adapter. Exact wire shapes, bounds, and
 compatibility are owned by
 [the process protocol](process-protocol.md#client-requests).
@@ -746,9 +746,9 @@ Read-only success is admission-atomic. The public command that records findings
 transitions the run and pass to succeeded, binds `ProducedFindings`, and inserts
 the complete canonical inventory in one transaction. It cannot commit succeeded
 read-only state with an absent result. The empty inventory follows that same
-path. Finding events and external-link attachments likewise bind their
-exact pass result in the transaction that appends or attaches the effect. Thus
-every committed intermediate point remains a domain-reconstitutable aggregate; a
+path. Finding events and external-link attachments likewise bind their exact
+pass result in the transaction that appends or attaches the effect. Thus every
+committed intermediate point remains a domain-reconstitutable aggregate; a
 process crash cannot expose a state that the store's own loaders classify as
 corruption.
 
