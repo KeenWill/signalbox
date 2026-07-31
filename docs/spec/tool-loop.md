@@ -16,7 +16,7 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 `web_fetch` egress policy and complete bounded file-patch lookup through PR #330
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
-`b062e6c9a826fd664292df440b82e420c7317cfe`. The runner executable stack rooted
+`9b030b0e3557f09de32c2b2d61676fe67afa65d8`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. This page
 owns logical tool requests, approval policy and decisions, physical tool
 attempts, result admission, intra-turn continuation, crash classification, the
@@ -890,16 +890,19 @@ The declarations and compact result objects are:
   fails execution before repository content is read. An exact resolution pins
   the Contents request to that commit, and a Contents 404 then means
   `path_not_found`. A commit conflict proves an empty repository and returns
-  `revision_not_found` without a Contents request. A commit 404 permits one
-  Contents visibility probe pinned to the requested revision: only a bounded 404
-  body that exactly names that revision as an absent ref returns
-  `revision_not_found`; a generic 404 remains failed execution because metadata
-  visibility alone cannot prove absence. A successful text or binary file read
-  therefore uses three requests (commit resolution, Contents metadata, immutable
-  blob), a directory result or path absence uses two (commit resolution and
-  Contents), and revision absence uses one or two. Every request shares one
-  30-second transaction budget, and every request after resolution names the
-  resolved commit or immutable blob rather than a moving reference.
+  `revision_not_found` without a Contents request. A commit 422 whose bounded
+  JSON `message` is exactly `No commit found for SHA: {revision}` also proves
+  absence without a Contents request; any other 422 remains failed execution. A
+  commit 404 permits one Contents visibility probe pinned to the requested
+  revision: only a bounded 404 body that exactly names that revision as an
+  absent ref returns `revision_not_found`; a generic 404 remains failed
+  execution because metadata visibility alone cannot prove absence. A successful
+  text or binary file read therefore uses three requests (commit resolution,
+  Contents metadata, immutable blob), a directory result or path absence uses
+  two (commit resolution and Contents), and revision absence uses one or two.
+  Every request shares one 30-second transaction budget, and every request after
+  resolution names the resolved commit or immutable blob rather than a moving
+  reference.
 - `repository_list_directory` accepts `repository`, one repository-relative
   directory `path`, and the same required exact commit `revision`. An entries
   outcome retains at most 100 immediate children with path, repository-object
@@ -1021,22 +1024,16 @@ ordinary JSON response. The exact-revision contents lookup admits at most
 ceiling plus one framing allowance, budgeting each entry for ten worst-case
 JSON-expanded fields: nine maximum repository paths, one separately admitted 4
 KiB symlink target, and 8 KiB of fixed material, before projecting the shared
-result bound. Both repository tools pin the contents request with the required
-exact commit `ref`; a file read pins its second request to the immutable blob
-identity returned by that lookup rather than re-reading a moving reference. A
-contents 404 whose bounded response exactly says that the requested revision is
-not a commit becomes `revision_not_found` after that single request. Any other
-contents 404 triggers one probe of the exact Git commit identity: success
-becomes `path_not_found`, and an empty-repository conflict becomes
-`revision_not_found`. A commit 404, any other host rejection, or a physical
-request failure remains failed execution rather than absence; a separate
-repository-metadata request cannot supply content-access evidence. Both requests
-in a file read or path-absence classification share one aggregate 30-second
-transaction deadline. The authenticated job-log endpoint is the sole
-redirect-shaped exchange: after exactly one 302 response, the adapter validates
-its bounded HTTPS location, resolves and pins a wholly public destination set,
-and performs one credential-free download with redirect following still
-disabled. Credential delivery and redaction are owned by
+result bound. Both repository tools implement the commit preflight, absence
+classification, request counts, and aggregate transaction deadline stated in
+their declarations above. After exact resolution, each Contents request is
+pinned to the resolved commit; a file read pins its subsequent request to the
+immutable blob identity returned by that lookup rather than re-reading a moving
+reference. The authenticated job-log endpoint is the sole redirect-shaped
+exchange: after exactly one 302 response, the adapter validates its bounded
+HTTPS location, resolves and pins a wholly public destination set, and performs
+one credential-free download with redirect following still disabled. Credential
+delivery and redaction are owned by
 [configuration-and-credentials](configuration-and-credentials.md).
 
 A missing or unusable credential and a definitive client rejection produce only
