@@ -1,0 +1,127 @@
+name: devenv lock
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "41 7 * * 2"
+
+permissions: {}
+
+env:
+  ARTIFACT: devenv-lock
+
+jobs:
+  # Unpinned upstream Nix runs only here, without a repository write token.
+  relock:
+    name: Re-lock and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.changed.outputs.value }}
+      build: ${{ steps.build.outcome }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+
+      - name: Update the lock
+        run: devenv update
+
+      - name: Check for a change
+        id: changed
+        run: |
+          if git diff --quiet -- devenv.lock; then
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the updated environment
+        id: build
+        if: steps.changed.outputs.value == 'true'
+        continue-on-error: true
+        timeout-minutes: 40
+        run: devenv shell -- true
+
+      - name: Upload the updated lock
+        if: steps.changed.outputs.value == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: devenv.lock
+          if-no-files-found: error
+          retention-days: 1
+
+  # This job holds the write token but never installs or executes Nix/devenv.
+  propose:
+    name: Open a draft proposal
+    needs: relock
+    if: needs.relock.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Download the updated lock
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ runner.temp }}/devenv-lock
+
+      - name: Describe the update
+        env:
+          BUILD_OUTCOME: ${{ needs.relock.outputs.build }}
+        run: |
+          changes="$(jq -r --slurpfile old devenv.lock '
+            . as $new
+            | (($old[0].nodes | keys) + (.nodes | keys) | unique[]) as $name
+            | ($old[0].nodes[$name].locked.rev // "not present") as $before
+            | ($new.nodes[$name].locked.rev // "not present") as $after
+            | select($before != $after)
+            | "- `\($name)`: `\($before)` → `\($after)`"
+          ' "$RUNNER_TEMP/devenv-lock/devenv.lock")"
+          if [[ -z "$changes" ]]; then
+            changes="- No input revision changed."
+          fi
+          if [[ "$BUILD_OUTCOME" == "success" ]]; then
+            build="The updated environment built successfully."
+          else
+            build="**The updated environment did not build successfully.** Check the workflow run."
+          fi
+          printf '%s\n\n%s\n%s\n\n%s\n' \
+            "Scheduled \`devenv update\`." \
+            "Inputs moved:" "$changes" "$build" \
+            > "$RUNNER_TEMP/body.md"
+
+      # A unique branch avoids clobbering an earlier proposal; superseded drafts
+      # stay open until a human spends the small cost to close them.
+      - name: Push a per-run branch and open the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="automation/devenv-lock-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cp "$RUNNER_TEMP/devenv-lock/devenv.lock" devenv.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add devenv.lock
+          git commit -m "devenv: refresh locked inputs"
+          git push origin "HEAD:refs/heads/$branch"
+          gh pr create --draft --base main --head "$branch" \
+            --title "devenv: refresh locked inputs" \
+            --body-file "$RUNNER_TEMP/body.md"
