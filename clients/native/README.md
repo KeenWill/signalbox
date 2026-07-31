@@ -63,10 +63,13 @@ iOS/iPad follow-on.
 ```bash
 scripts/build-xcode.sh
 scripts/test-xcode.sh
+scripts/test-real-server-xcode.sh
 ```
 
 The scheme runs app, client, model, integration, and UI tests. The local mock is
-selected with `--mock-server`.
+selected with `--mock-server`. The real-server script builds `signalboxd`,
+starts it with an isolated temporary PostgreSQL database and Unix socket, and
+runs the macOS client exchanges without making a model call.
 
 ## Screenshots
 

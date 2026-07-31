@@ -23,6 +23,31 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testSessionMetadataEncodesAbsentTitleAsExplicitNull() throws {
+    let metadata = SignalboxProcessSessionMetadata(
+      title: nil,
+      tags: [],
+      attributes: [:],
+      archived: false
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(metadata)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"archived":false,"attributes":{},"tags":[],"title":null}"#
+    )
+  }
+
+  func testSessionMetadataRequiresItsNullableTitleMember() throws {
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(
+        SignalboxProcessSessionMetadata.self,
+        from: Data(#"{"archived":false,"attributes":{},"tags":[]}"#.utf8)
+      )
+    )
+  }
+
   func testModelAliasCatalogRequestAndSummaryUseClosedVersionOneShapes() throws {
     let requestFrame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 8),

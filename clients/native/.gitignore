@@ -5,4 +5,5 @@ xcuserdata/
 *.xcuserstate
 .derivedData/
 .derivedData-macos/
+.derivedData-real-server/
 .tart-results/

@@ -190,6 +190,42 @@ public struct SignalboxProcessSessionMetadata: Codable, Equatable, Sendable {
     self.attributes = attributes
     self.archived = archived
   }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    guard container.contains(.title) else {
+      throw DecodingError.keyNotFound(
+        CodingKeys.title,
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Session metadata requires the nullable title member."
+        )
+      )
+    }
+    title = try container.decodeIfPresent(String.self, forKey: .title)
+    tags = try container.decode([String].self, forKey: .tags)
+    attributes = try container.decode([String: String].self, forKey: .attributes)
+    archived = try container.decode(Bool.self, forKey: .archived)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    if let title {
+      try container.encode(title, forKey: .title)
+    } else {
+      try container.encodeNil(forKey: .title)
+    }
+    try container.encode(tags, forKey: .tags)
+    try container.encode(attributes, forKey: .attributes)
+    try container.encode(archived, forKey: .archived)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case title
+    case tags
+    case attributes
+    case archived
+  }
 }
 
 public struct SignalboxMetadataLastWriter: Codable, Equatable, Sendable {

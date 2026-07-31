@@ -64,3 +64,31 @@ jobs:
       # recapturing goldens is a manual flow.
       - name: Check screenshot goldens
         run: clients/native/scripts/check-screenshot-goldens.sh
+
+  # Builds Rust separately from the simulator suite so Swift-only feedback does
+  # not wait behind the daemon build. The name is unique across workflows for
+  # the same branch-protection reason documented on swift-validate above.
+  swift-real-daemon:
+    name: Swift real-daemon integration
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Xcode 26.6
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcodebuild -version
+      - name: Install PostgreSQL 18
+        run: |
+          brew install postgresql@18
+          echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: swift-real-daemon
+      - name: Run native client against signalboxd
+        run: clients/native/scripts/test-real-server-xcode.sh
