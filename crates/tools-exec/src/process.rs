@@ -7,9 +7,10 @@ use std::{
     fmt,
     future::Future,
     path::{Component, Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
+#[cfg(target_os = "linux")]
+use std::{process::Stdio, sync::Arc};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -22,8 +23,10 @@ use signalbox_domain::{
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
+#[cfg(target_os = "linux")]
 use tokio::{io::AsyncReadExt, process::Command};
 
+#[cfg(target_os = "linux")]
 use crate::supervisor_protocol::{SupervisorSpawnFailure, SupervisorStatus};
 
 pub const SANDBOXED_EXEC_NAME: &str = "sandboxed_exec";
@@ -42,13 +45,13 @@ pub(crate) const EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
 const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
+const SANDBOX_DISPATCH_PROGRAM: &str = "/signalbox-exec-dispatch";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_STATUS_TAIL_BYTES: usize = 1024;
-const SANDBOX_DISPATCH_SHELL: &str = "program=$1; shift; case $program in */*) target=$program ;; *) target=; old_ifs=$IFS; IFS=:; for directory in $PATH; do candidate=$directory/$program; if [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then target=$candidate; break; fi; done; IFS=$old_ifs ;; esac; if [ -z \"$target\" ] || [ ! -f \"$target\" ] || [ ! -x \"$target\" ]; then exit 127; fi; printf 'signalbox-exec:dispatched\\n' >&2; exec \"$target\" \"$@\"";
 
 fn default_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
@@ -118,6 +121,13 @@ pub enum ExecToolConstructionError {
         /// Underlying filesystem failure, when one occurred.
         source: Option<std::io::Error>,
     },
+    /// The injected supervisor program was not an absolute canonical file.
+    SupervisorProgram {
+        /// Supplied program associated with the failure.
+        path: PathBuf,
+        /// Underlying filesystem failure, when one occurred.
+        source: Option<std::io::Error>,
+    },
 }
 
 impl fmt::Display for ExecToolConstructionError {
@@ -134,6 +144,13 @@ impl fmt::Display for ExecToolConstructionError {
                     path.display()
                 )
             }
+            Self::SupervisorProgram { path, .. } => {
+                write!(
+                    formatter,
+                    "exec supervisor program `{}` is invalid",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -144,12 +161,17 @@ impl Error for ExecToolConstructionError {
             Self::WorkspaceRoot {
                 source: Some(source),
                 ..
+            }
+            | Self::SupervisorProgram {
+                source: Some(source),
+                ..
             } => Some(source),
             Self::Name
             | Self::Schema
             | Self::ErrorDetail
             | Self::Duplicate
-            | Self::WorkspaceRoot { source: None, .. } => None,
+            | Self::WorkspaceRoot { source: None, .. }
+            | Self::SupervisorProgram { source: None, .. } => None,
         }
     }
 }
@@ -188,8 +210,12 @@ impl SandboxedExecTool<TokioProcessRunner> {
     /// Builds the production sandboxed tool.
     pub fn try_new_production(
         workspace_root: impl AsRef<Path>,
+        supervisor_program: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
-        Self::try_new(TokioProcessRunner, workspace_root)
+        Self::try_new(
+            TokioProcessRunner::try_new(supervisor_program)?,
+            workspace_root,
+        )
     }
 }
 
@@ -229,8 +255,12 @@ impl UnsandboxedExecTool<TokioProcessRunner> {
     /// Builds the production unsandboxed tool with fixed confirmation posture.
     pub fn try_new_production(
         workspace_root: impl AsRef<Path>,
+        supervisor_program: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
-        Self::try_new(TokioProcessRunner, workspace_root)
+        Self::try_new(
+            TokioProcessRunner::try_new(supervisor_program)?,
+            workspace_root,
+        )
     }
 }
 
@@ -431,6 +461,9 @@ pub enum BwrapAvailability {
 
 /// Injectable one-shot process spawning and bubblewrap probing.
 pub trait ProcessRunner: Clone + Send {
+    /// Exact helper executable used to prove sandboxed target startup.
+    fn sandbox_launcher_program(&self) -> &Path;
+
     /// Probes the exact bubblewrap profile used for later execution.
     fn bwrap_availability(
         &mut self,
@@ -442,12 +475,42 @@ pub trait ProcessRunner: Clone + Send {
 }
 
 /// Production Tokio process runner using an isolated Linux supervisor process.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TokioProcessRunner;
+#[derive(Clone, Debug)]
+pub struct TokioProcessRunner {
+    supervisor_program: PathBuf,
+}
+
+impl TokioProcessRunner {
+    /// Pins the separately packaged Linux supervisor executable.
+    pub fn try_new(
+        supervisor_program: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        let supplied = supervisor_program.as_ref();
+        let canonical = supplied.canonicalize().map_err(|source| {
+            ExecToolConstructionError::SupervisorProgram {
+                path: supplied.to_owned(),
+                source: Some(source),
+            }
+        })?;
+        if !canonical.is_absolute() || !canonical.is_file() {
+            return Err(ExecToolConstructionError::SupervisorProgram {
+                path: supplied.to_owned(),
+                source: None,
+            });
+        }
+        Ok(Self {
+            supervisor_program: canonical,
+        })
+    }
+}
 
 impl ProcessRunner for TokioProcessRunner {
+    fn sandbox_launcher_program(&self) -> &Path {
+        &self.supervisor_program
+    }
+
     async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
-        let result = run_process(probe).await;
+        let result = run_process(&self.supervisor_program, probe).await;
         match result.outcome {
             ProcessOutcome::Exited { code: Some(0) } => BwrapAvailability::Available,
             ProcessOutcome::SpawnFailed {
@@ -461,7 +524,7 @@ impl ProcessRunner for TokioProcessRunner {
     }
 
     async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
-        run_process(request).await
+        run_process(&self.supervisor_program, request).await
     }
 }
 
@@ -470,6 +533,7 @@ impl ProcessRunner for TokioProcessRunner {
 pub struct SandboxedCommandRunner<Runner> {
     runner: Runner,
     workspace_root: PathBuf,
+    sandbox_launcher: PathBuf,
     #[cfg(target_os = "linux")]
     workspace_identity: WorkspaceIdentity,
 }
@@ -481,8 +545,10 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
+        let sandbox_launcher = runner.sandbox_launcher_program().to_owned();
         Ok(Self {
             runner,
+            sandbox_launcher,
             #[cfg(target_os = "linux")]
             workspace_identity: WorkspaceIdentity::capture(&workspace_root)?,
             workspace_root,
@@ -503,6 +569,8 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         arguments: ExecArguments,
         capture_bytes: usize,
     ) -> ExecResult {
+        let requested_timeout = Duration::from_secs(arguments.timeout_seconds);
+        let deadline = tokio::time::Instant::now() + requested_timeout;
         #[cfg(target_os = "linux")]
         if !self.workspace_identity.matches(&self.workspace_root) {
             return ExecResult {
@@ -518,11 +586,18 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             .to_string_lossy()
             .into_owned();
         let probe = bwrap_request(
-            &self.workspace_root,
+            SandboxLaunchContext {
+                workspace_root: &self.workspace_root,
+                #[cfg(target_os = "linux")]
+                bind_source: &self.workspace_identity.bind_source,
+                #[cfg(not(target_os = "linux"))]
+                bind_source: &self.workspace_root,
+                launcher: &self.sandbox_launcher,
+            },
             &probe_program,
             &[String::from("-c"), String::from("exit 0")],
             ".",
-            Duration::from_secs(5),
+            requested_timeout.min(Duration::from_secs(5)),
             8 * 1024,
         );
         let availability = self.runner.bwrap_availability(probe).await;
@@ -539,12 +614,28 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         stderr: OutputCapture::empty(),
                     };
                 }
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return ExecResult {
+                        confinement: ExecutionConfinement::SandboxSetupFailed,
+                        outcome: ProcessOutcome::TimedOut,
+                        stdout: OutputCapture::empty(),
+                        stderr: OutputCapture::empty(),
+                    };
+                }
                 let request = bwrap_request(
-                    &self.workspace_root,
+                    SandboxLaunchContext {
+                        workspace_root: &self.workspace_root,
+                        #[cfg(target_os = "linux")]
+                        bind_source: &self.workspace_identity.bind_source,
+                        #[cfg(not(target_os = "linux"))]
+                        bind_source: &self.workspace_root,
+                        launcher: &self.sandbox_launcher,
+                    },
                     &arguments.program,
                     &arguments.arguments,
                     &arguments.working_directory,
-                    Duration::from_secs(arguments.timeout_seconds),
+                    remaining,
                     capture_bytes,
                 );
                 sandbox_process_result(self.runner.run(request).await)
@@ -562,28 +653,45 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct WorkspaceIdentity {
     device: u64,
     inode: u64,
+    bind_source: PathBuf,
+    _directory: Arc<rustix::fd::OwnedFd>,
 }
 
 #[cfg(target_os = "linux")]
 impl WorkspaceIdentity {
     fn capture(path: &Path) -> Result<Self, ExecToolConstructionError> {
-        let metadata =
-            path.metadata()
-                .map_err(|source| ExecToolConstructionError::WorkspaceRoot {
-                    path: path.to_owned(),
-                    source: Some(source),
-                })?;
+        let directory = rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|source| ExecToolConstructionError::WorkspaceRoot {
+            path: path.to_owned(),
+            source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+        })?;
+        let pinned_metadata = rustix::fs::fstat(&directory).map_err(|source| {
+            ExecToolConstructionError::WorkspaceRoot {
+                path: path.to_owned(),
+                source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+            }
+        })?;
+        let bind_source = PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            rustix::fd::AsRawFd::as_raw_fd(&directory)
+        ));
         Ok(Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device: pinned_metadata.st_dev,
+            inode: pinned_metadata.st_ino,
+            bind_source,
+            _directory: Arc::new(directory),
         })
     }
 
-    fn matches(self, path: &Path) -> bool {
+    fn matches(&self, path: &Path) -> bool {
         path.symlink_metadata().is_ok_and(|metadata| {
             metadata.file_type().is_dir()
                 && metadata.dev() == self.device
@@ -656,15 +764,22 @@ fn direct_request(root: &Path, arguments: &ExecArguments, capture_bytes: usize) 
     }
 }
 
+#[derive(Clone, Copy)]
+struct SandboxLaunchContext<'a> {
+    workspace_root: &'a Path,
+    bind_source: &'a Path,
+    launcher: &'a Path,
+}
+
 fn bwrap_request(
-    root: &Path,
+    context: SandboxLaunchContext<'_>,
     program: &str,
     arguments: &[String],
     working_directory: &str,
     timeout: Duration,
     capture_bytes: usize,
 ) -> ProcessRequest {
-    let sandbox_path = sandbox_path(root);
+    let sandbox_path = sandbox_path(context.workspace_root);
     let sandbox_directory = if working_directory == "." {
         String::from(SANDBOX_WORKSPACE)
     } else {
@@ -720,26 +835,27 @@ fn bwrap_request(
     .into_iter()
     .map(OsString::from)
     .collect::<Vec<_>>();
-    bwrap_arguments.push(root.as_os_str().to_owned());
+    bwrap_arguments.push(context.bind_source.as_os_str().to_owned());
     bwrap_arguments.push(OsString::from(SANDBOX_WORKSPACE));
     bwrap_arguments.extend([
+        OsString::from("--ro-bind"),
+        context.launcher.as_os_str().to_owned(),
+        OsString::from(SANDBOX_DISPATCH_PROGRAM),
         OsString::from("--chdir"),
         OsString::from(sandbox_directory),
         OsString::from("--setenv"),
         OsString::from("HOME"),
         OsString::from(SANDBOX_WORKSPACE),
         OsString::from("--"),
-        sandbox_shell(root).into_os_string(),
-        OsString::from("-c"),
-        OsString::from(SANDBOX_DISPATCH_SHELL),
-        OsString::from("signalbox-exec"),
+        OsString::from(SANDBOX_DISPATCH_PROGRAM),
+        OsString::from("--dispatch"),
         OsString::from(program),
     ]);
     bwrap_arguments.extend(arguments.iter().map(OsString::from));
     ProcessRequest {
         program: OsString::from(BWRAP_PROGRAM),
         arguments: bwrap_arguments,
-        working_directory: root.to_owned(),
+        working_directory: context.bind_source.to_owned(),
         timeout,
         capture_bytes: capture_bytes.saturating_add(SANDBOX_DISPATCH_MARKER.len()),
         environment: BTreeMap::from([
@@ -949,13 +1065,7 @@ fn process_result(confinement: ExecutionConfinement, result: ProcessRunResult) -
 }
 
 fn sandbox_process_result(mut result: ProcessRunResult) -> ExecResult {
-    let dispatched = result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER)
-        && !matches!(
-            result.outcome,
-            ProcessOutcome::Exited {
-                code: Some(126 | 127)
-            }
-        );
+    let dispatched = result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER);
     if result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER) {
         result.stderr.bytes.drain(..SANDBOX_DISPATCH_MARKER.len());
     }
@@ -985,12 +1095,14 @@ fn output_capture(output: ProcessOutput) -> OutputCapture {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct BoundedBytes {
     bytes: Vec<u8>,
     completeness: CaptureCompleteness,
 }
 
+#[cfg(target_os = "linux")]
 async fn read_bounded(
     mut reader: impl tokio::io::AsyncRead + Unpin,
     limit: usize,
@@ -1066,29 +1178,24 @@ async fn read_supervised_stdout(
     ))
 }
 
-async fn run_process(request: ProcessRequest) -> ProcessRunResult {
+async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = request;
+        let _ = (supervisor_program, request);
         empty_process_result(ProcessOutcome::SpawnFailed {
             reason: ProcessSpawnFailure::ProcessTreeUnsupported,
         })
     }
     #[cfg(target_os = "linux")]
     {
-        run_process_linux(request).await
+        run_process_linux(supervisor_program, request).await
     }
 }
 
 #[cfg(target_os = "linux")]
-async fn run_process_linux(request: ProcessRequest) -> ProcessRunResult {
-    let Some(supervisor) = supervisor_program() else {
-        return empty_process_result(ProcessOutcome::SpawnFailed {
-            reason: ProcessSpawnFailure::ProcessTreeUnsupported,
-        });
-    };
+async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
     let timeout_milliseconds = request.timeout.as_millis().min(u128::from(u64::MAX));
-    let mut command = Command::new(supervisor);
+    let mut command = Command::new(supervisor_program);
     command
         .arg(timeout_milliseconds.to_string())
         .arg(&request.program)
@@ -1174,23 +1281,6 @@ async fn run_process_linux(request: ProcessRequest) -> ProcessRunResult {
 }
 
 #[cfg(target_os = "linux")]
-fn supervisor_program() -> Option<PathBuf> {
-    let current = std::env::current_exe().ok()?;
-    let directory = current.parent()?;
-    let beside_current = directory.join("signalbox-exec-supervisor");
-    let beside_target = directory
-        .file_name()
-        .is_some_and(|name| name == "deps")
-        .then(|| directory.parent())
-        .flatten()
-        .map(|parent| parent.join("signalbox-exec-supervisor"));
-    [Some(beside_current), beside_target]
-        .into_iter()
-        .flatten()
-        .find(|candidate| candidate.is_file())
-}
-
-#[cfg(target_os = "linux")]
 fn supervisor_outcome(status: SupervisorStatus) -> ProcessOutcome {
     match status {
         SupervisorStatus::Exited { code } => ProcessOutcome::Exited { code },
@@ -1237,6 +1327,10 @@ mod tests {
 
     const SANDBOXED_STDOUT: &str = "checked";
     const SANDBOXED_WORKING_DIRECTORY: &str = "crate";
+    const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
+    const REQUEST_TIMEOUT_SECONDS: u64 = 1;
+    const SLOW_PROBE_DELAY: Duration = Duration::from_millis(1_100);
+    const TEST_SANDBOX_LAUNCHER: &str = "/fixture/signalbox-exec-supervisor";
 
     struct ReplacementWorkspace {
         path: PathBuf,
@@ -1274,6 +1368,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct FakeRunner {
         availability: BwrapAvailability,
+        probe_delay: Duration,
         results: Arc<Mutex<Vec<ProcessRunResult>>>,
         probes: Arc<Mutex<Vec<ProcessRequest>>>,
         requests: Arc<Mutex<Vec<ProcessRequest>>>,
@@ -1283,6 +1378,7 @@ mod tests {
         fn returning(availability: BwrapAvailability, result: ProcessRunResult) -> Self {
             Self {
                 availability,
+                probe_delay: Duration::ZERO,
                 results: Arc::new(Mutex::new(vec![result])),
                 probes: Arc::new(Mutex::new(Vec::new())),
                 requests: Arc::new(Mutex::new(Vec::new())),
@@ -1302,14 +1398,24 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
         }
+
+        fn with_probe_delay(mut self, probe_delay: Duration) -> Self {
+            self.probe_delay = probe_delay;
+            self
+        }
     }
 
     impl ProcessRunner for FakeRunner {
+        fn sandbox_launcher_program(&self) -> &Path {
+            Path::new(TEST_SANDBOX_LAUNCHER)
+        }
+
         async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
             self.probes
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(probe);
+            tokio::time::sleep(self.probe_delay).await;
             self.availability
         }
 
@@ -1454,6 +1560,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn sandboxed_request_uses_bwrap_profile_and_workspace_mount() -> Result<(), Box<dyn Error>>
     {
@@ -1464,6 +1571,7 @@ mod tests {
         );
         let observation = runner.clone();
         let mut command_runner = SandboxedCommandRunner::try_new(runner, &root)?;
+        let bind_source = command_runner.workspace_identity.bind_source.clone();
         let arguments = ExecArguments {
             program: String::from("cargo"),
             arguments: vec![String::from("check")],
@@ -1482,12 +1590,24 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
         let bind_arguments = [
             OsString::from("--bind"),
-            root.as_os_str().to_owned(),
+            bind_source.into_os_string(),
             OsString::from(SANDBOX_WORKSPACE),
         ];
         let chdir_arguments = [
             OsString::from("--chdir"),
             OsString::from(format!("{SANDBOX_WORKSPACE}/{SANDBOXED_WORKING_DIRECTORY}")),
+        ];
+        let launcher_arguments = [
+            OsString::from("--ro-bind"),
+            OsString::from(TEST_SANDBOX_LAUNCHER),
+            OsString::from(SANDBOX_DISPATCH_PROGRAM),
+        ];
+        let dispatch_arguments = [
+            OsString::from("--"),
+            OsString::from(SANDBOX_DISPATCH_PROGRAM),
+            OsString::from("--dispatch"),
+            OsString::from("cargo"),
+            OsString::from("check"),
         ];
 
         assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
@@ -1518,7 +1638,44 @@ mod tests {
                 .windows(chdir_arguments.len())
                 .any(|arguments| arguments == chdir_arguments)
         );
+        assert!(
+            request
+                .arguments
+                .windows(launcher_arguments.len())
+                .any(|arguments| arguments == launcher_arguments)
+        );
+        assert!(request.arguments.ends_with(&dispatch_arguments));
         assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandbox_probe_consumes_the_same_request_deadline() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        )
+        .with_probe_delay(SLOW_PROBE_DELAY);
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, root)?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("."),
+            timeout_seconds: REQUEST_TIMEOUT_SECONDS,
+        };
+
+        let result = command_runner.execute(arguments).await;
+        let probes = observation.recorded_probes();
+        let probe = probes
+            .first()
+            .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
+
+        assert_eq!(probe.timeout, Duration::from_secs(REQUEST_TIMEOUT_SECONDS));
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
+        assert!(observation.recorded_requests().is_empty());
         Ok(())
     }
 
@@ -1568,7 +1725,7 @@ mod tests {
                     completeness: CaptureCompleteness::Complete,
                 },
                 stderr: ProcessOutput {
-                    bytes: [SANDBOX_DISPATCH_MARKER, b"target missing"].concat(),
+                    bytes: b"target missing".to_vec(),
                     completeness: CaptureCompleteness::Complete,
                 },
             },
@@ -1588,6 +1745,34 @@ mod tests {
             result.outcome,
             ProcessOutcome::SpawnFailed {
                 reason: ProcessSpawnFailure::SandboxSetup,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandboxed_target_may_legitimately_exit_127() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let mut process = successful_sandbox_process(b"");
+        process.outcome = ProcessOutcome::Exited {
+            code: Some(LEGITIMATE_TARGET_EXIT_CODE),
+        };
+        let runner = FakeRunner::returning(BwrapAvailability::Available, process);
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, root)?;
+        let arguments = ExecArguments {
+            program: String::from("target"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::FilesystemConfined);
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::Exited {
+                code: Some(LEGITIMATE_TARGET_EXIT_CODE),
             }
         );
         Ok(())

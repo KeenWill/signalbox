@@ -26,6 +26,7 @@
 //! --test bwrap`.
 
 mod process;
+#[cfg(target_os = "linux")]
 mod supervisor_protocol;
 
 pub use process::{

@@ -9,8 +9,11 @@ use signalbox_tools_exec::{
 
 const OBSERVED_OUTPUT: &str = "12345";
 const CAPTURE_BYTES: usize = 4;
+const DISPATCH_MODE: &str = "--dispatch";
+const EXPECTED_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
 const EXPLICIT_ENVIRONMENT_NAME: &str = "SIGNALBOX_EXEC_FIXTURE";
 const EXPLICIT_ENVIRONMENT_VALUE: &str = "visible";
+const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
 
 #[tokio::test]
 async fn production_runner_reports_observed_bytes_beyond_limit()
@@ -25,7 +28,7 @@ async fn production_runner_reports_observed_bytes_beyond_limit()
         environment_inheritance: ProcessEnvironment::Clear,
     };
 
-    let result = TokioProcessRunner.run(request).await;
+    let result = production_runner()?.run(request).await;
 
     assert_eq!(
         result.stdout.bytes,
@@ -51,13 +54,44 @@ async fn production_runner_clears_ambient_environment_when_requested()
         environment_inheritance: ProcessEnvironment::Clear,
     };
 
-    let result = TokioProcessRunner.run(request).await;
+    let result = production_runner()?.run(request).await;
 
     assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
     assert_eq!(
         result.stdout.bytes,
         explicit_environment_output().as_bytes()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn production_dispatcher_marks_started_target_that_exits_127()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+    let request = ProcessRequest {
+        program: supervisor.into_os_string(),
+        arguments: vec![
+            OsString::from(DISPATCH_MODE),
+            fixture_program("sh")?.into_os_string(),
+            OsString::from("-c"),
+            OsString::from(format!("exit {LEGITIMATE_TARGET_EXIT_CODE}")),
+        ],
+        working_directory: std::env::current_dir()?,
+        timeout: Duration::from_secs(5),
+        capture_bytes: 1024,
+        environment: BTreeMap::new(),
+        environment_inheritance: ProcessEnvironment::Clear,
+    };
+
+    let result = production_runner()?.run(request).await;
+
+    assert_eq!(
+        result.outcome,
+        ProcessOutcome::Exited {
+            code: Some(LEGITIMATE_TARGET_EXIT_CODE),
+        }
+    );
+    assert_eq!(result.stderr.bytes, EXPECTED_DISPATCH_MARKER);
     Ok(())
 }
 
@@ -75,7 +109,7 @@ async fn production_runner_kills_descendants_after_leader_completion()
         environment_inheritance: ProcessEnvironment::Clear,
     };
 
-    let result = TokioProcessRunner.run(request).await;
+    let result = production_runner()?.run(request).await;
     let descendant = std::str::from_utf8(&result.stdout.bytes)?.parse::<u32>()?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -101,7 +135,7 @@ async fn production_runner_kills_descendants_on_timeout() -> Result<(), Box<dyn 
         environment_inheritance: ProcessEnvironment::Clear,
     };
 
-    let result = TokioProcessRunner.run(request).await;
+    let result = production_runner()?.run(request).await;
     let descendant = std::str::from_utf8(&result.stdout.bytes)?.parse::<u32>()?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -119,7 +153,7 @@ async fn production_runner_reaps_new_session_descendant_after_leader_completion(
         std::env::current_dir()?,
     )?;
 
-    let result = TokioProcessRunner.run(request).await;
+    let result = production_runner()?.run(request).await;
     let descendant = std::str::from_utf8(&result.stdout.bytes)?.parse::<u32>()?;
 
     assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
@@ -138,7 +172,7 @@ async fn production_runner_reaps_new_session_descendant_on_timeout()
     )?;
     let started = std::time::Instant::now();
 
-    let result = TokioProcessRunner.run(request).await;
+    let result = production_runner()?.run(request).await;
     let elapsed = started.elapsed();
     let descendant = std::str::from_utf8(&result.stdout.bytes)?.parse::<u32>()?;
 
@@ -163,7 +197,8 @@ async fn production_runner_reaps_new_session_descendant_on_cancellation()
         pid_file.display()
     );
     let request = shell_request(&script, Duration::from_secs(30), std::env::current_dir()?)?;
-    let task = tokio::spawn(async move { TokioProcessRunner.run(request).await });
+    let mut runner = production_runner()?;
+    let task = tokio::spawn(async move { runner.run(request).await });
     let descendant = await_pid_file(&pid_file).await?;
 
     task.abort();
@@ -181,7 +216,8 @@ async fn production_runner_does_not_kill_unrelated_concurrent_child()
 -> Result<(), Box<dyn std::error::Error>> {
     let script = format!("{} 0.25", fixture_program("sleep")?.display());
     let request = shell_request(&script, Duration::from_secs(5), std::env::current_dir()?)?;
-    let execution = tokio::spawn(async move { TokioProcessRunner.run(request).await });
+    let mut runner = production_runner()?;
+    let execution = tokio::spawn(async move { runner.run(request).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut unrelated = std::process::Command::new(fixture_program("sleep")?)
         .arg("30")
@@ -212,11 +248,12 @@ async fn concurrent_execution_timeout_starts_without_global_queueing()
         Duration::from_millis(100),
         std::env::current_dir()?,
     )?;
-    let long_execution = tokio::spawn(async move { TokioProcessRunner.run(long_request).await });
+    let mut long_runner = production_runner()?;
+    let long_execution = tokio::spawn(async move { long_runner.run(long_request).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let started = std::time::Instant::now();
 
-    let short_result = TokioProcessRunner.run(short_request).await;
+    let short_result = production_runner()?.run(short_request).await;
     let short_elapsed = started.elapsed();
     let long_result = long_execution.await?;
 
@@ -299,4 +336,10 @@ fn fixture_program(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error:
         .ok_or_else(|| {
             std::io::Error::other(format!("fixture program `{name}` is unavailable")).into()
         })
+}
+
+fn production_runner() -> Result<TokioProcessRunner, Box<dyn std::error::Error>> {
+    Ok(TokioProcessRunner::try_new(env!(
+        "CARGO_BIN_EXE_signalbox-exec-supervisor"
+    ))?)
 }

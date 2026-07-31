@@ -18,7 +18,9 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
         return Ok(());
     }
     let root = std::env::current_dir()?;
-    let mut runner = SandboxedCommandRunner::try_new(TokioProcessRunner, root)?;
+    let process_runner =
+        TokioProcessRunner::try_new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))?;
+    let mut runner = SandboxedCommandRunner::try_new(process_runner, root)?;
     let arguments = ExecArguments {
         program: String::from("test"),
         arguments: vec![String::from("!"), String::from("-e"), String::from("/home")],
