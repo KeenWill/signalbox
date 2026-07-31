@@ -5,6 +5,7 @@ use std::{
     error::Error,
     ffi::{OsStr, OsString},
     fmt, fs, io,
+    os::unix::fs::PermissionsExt as _,
     path::{Component, Path, PathBuf},
 };
 
@@ -155,11 +156,12 @@ impl RunnerConfiguration {
     /// Reads and validates one strict version-one TOML document.
     pub fn read(path: &Path) -> Result<Self, RunnerConfigurationError> {
         let content = fs::read_to_string(path).map_err(RunnerConfigurationError::Read)?;
-        Self::parse(&content)
+        let mut configuration = Self::parse(&content)?;
+        configuration.validate_filesystem()?;
+        Ok(configuration)
     }
 
-    /// Parses one complete strict version-one TOML document.
-    pub fn parse(content: &str) -> Result<Self, RunnerConfigurationError> {
+    fn parse(content: &str) -> Result<Self, RunnerConfigurationError> {
         let raw: RawConfiguration =
             toml::from_str(content).map_err(|_| RunnerConfigurationError::InvalidDocument)?;
         if raw.version != CONFIGURATION_VERSION {
@@ -217,6 +219,43 @@ impl RunnerConfiguration {
         })
     }
 
+    fn validate_filesystem(&mut self) -> Result<(), RunnerConfigurationError> {
+        self.daemon_socket_path = canonicalize_without_final(&self.daemon_socket_path)
+            .map_err(|_| RunnerConfigurationError::InvalidDaemonSocketPath)?;
+        self.runner_root = canonicalize_without_final(&self.runner_root)
+            .map_err(|_| RunnerConfigurationError::InvalidRunnerRoot)?;
+        self.bubblewrap_path = fs::canonicalize(&self.bubblewrap_path)
+            .map_err(|_| RunnerConfigurationError::InvalidBubblewrapPath)?;
+        let bubblewrap = fs::metadata(&self.bubblewrap_path)
+            .map_err(|_| RunnerConfigurationError::InvalidBubblewrapPath)?;
+        if !bubblewrap.is_file() || bubblewrap.permissions().mode() & 0o111 == 0 {
+            return Err(RunnerConfigurationError::InvalidBubblewrapPath);
+        }
+        self.read_only_paths = self
+            .read_only_paths
+            .iter()
+            .map(fs::canonicalize)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| RunnerConfigurationError::InvalidReadOnlyPaths)?;
+        validate_read_only_paths(&self.read_only_paths, &self.runner_root)?;
+        let mut credential_files = BTreeSet::new();
+        for credential in self.credentials.values_mut() {
+            credential.file = canonicalize_without_final(&credential.file)
+                .map_err(|_| RunnerConfigurationError::InvalidCredentials)?;
+            if !credential_files.insert(credential.file.clone())
+                || credential.file.starts_with(&self.runner_root)
+                || self.runner_root.starts_with(&credential.file)
+                || self.read_only_paths.iter().any(|read_only| {
+                    credential.file.starts_with(read_only)
+                        || read_only.starts_with(&credential.file)
+                })
+            {
+                return Err(RunnerConfigurationError::InvalidCredentials);
+            }
+        }
+        Ok(())
+    }
+
     /// Borrows the configured dedicated hub socket path.
     pub fn daemon_socket_path(&self) -> &Path {
         &self.daemon_socket_path
@@ -266,6 +305,19 @@ impl RunnerConfiguration {
     pub const fn advertisement(&self) -> &Advertisement {
         &self.advertisement
     }
+}
+
+fn canonicalize_without_final(path: &Path) -> Result<PathBuf, io::Error> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "absolute path has no parent")
+    })?;
+    let final_component = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "absolute path has no final component",
+        )
+    })?;
+    Ok(fs::canonicalize(parent)?.join(final_component))
 }
 
 fn valid_absolute_path(path: &Path) -> bool {
@@ -554,6 +606,10 @@ impl Error for RunnerConfigurationError {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
+    use tempfile::TempDir;
+
     use super::*;
 
     const EMPTY_CONFIGURATION: &str = r#"
@@ -752,6 +808,44 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
             error.to_string(),
             "runner read-only path inventory is invalid"
         );
+    }
+
+    #[test]
+    fn configuration_read_returns_the_canonical_read_only_path() {
+        let parent = TempDir::new().expect("a temporary configuration root exists");
+        let canonical_read_only = parent.path().join("toolchain");
+        fs::create_dir(&canonical_read_only).expect("the read-only fixture path exists");
+        let read_only_alias = parent.path().join("toolchain-alias");
+        symlink(&canonical_read_only, &read_only_alias)
+            .expect("the read-only fixture alias exists");
+        let bubblewrap = parent.path().join("bwrap");
+        fs::write(&bubblewrap, b"fixture").expect("the bubblewrap fixture exists");
+        fs::set_permissions(&bubblewrap, fs::Permissions::from_mode(0o700))
+            .expect("the bubblewrap fixture is executable");
+        let configuration_path = parent.path().join("runner.toml");
+        let document = format!(
+            r#"version = 1
+daemon_socket_path = "{}"
+runner_root = "{}"
+bubblewrap_path = "{}"
+read_only_paths = ["{}"]
+allowed_network_hosts = []
+git_author_name = "Signalbox Runner"
+git_author_email = "runner@example.invalid"
+repositories = {{}}
+credentials = {{}}
+"#,
+            parent.path().join("runner.sock").display(),
+            parent.path().join("runner-state").display(),
+            bubblewrap.display(),
+            read_only_alias.display(),
+        );
+        fs::write(&configuration_path, document).expect("the runner configuration exists");
+
+        let configuration = RunnerConfiguration::read(&configuration_path)
+            .expect("the filesystem-backed runner configuration is valid");
+
+        assert_eq!(configuration.read_only_paths(), [canonical_read_only]);
     }
 
     #[test]
