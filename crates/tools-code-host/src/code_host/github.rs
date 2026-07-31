@@ -2616,8 +2616,13 @@ mod tests {
     const FILE_PATCH_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
     const REPOSITORY_REVISION: &str = "4444444444444444444444444444444444444444";
     const REPOSITORY_BLOB: &str = "5555555555555555555555555555555555555555";
-    const MISSING_REVISION_BODY: &[u8] =
-        br#"{"message":"No commit found for the ref 4444444444444444444444444444444444444444"}"#;
+    fn missing_revision_body() -> Vec<u8> {
+        serde_json::json!({
+            "message": format!("No commit found for the ref {REPOSITORY_REVISION}"),
+        })
+        .to_string()
+        .into_bytes()
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct FilePatchRevisionTransitionInput {
@@ -2755,12 +2760,13 @@ mod tests {
     #[tokio::test]
     async fn repository_missing_revision_is_typed_separately() {
         let (transport, listener) = repository_test_transport().await;
+        let response_body = missing_revision_body();
         let server = tokio::spawn(async move {
             serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
                     status: "404 Not Found",
-                    body: MISSING_REVISION_BODY,
+                    body: &response_body,
                 },
             )
             .await
