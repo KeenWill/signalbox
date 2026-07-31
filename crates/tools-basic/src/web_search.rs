@@ -379,8 +379,9 @@ impl WebSearchResult {
     pub fn try_new(fields: WebSearchResultFields) -> Option<Self> {
         let parsed = Url::parse(&fields.url).ok()?;
         (fields.title.len() <= MAX_RESULT_TITLE_BYTES
-            && !fields.title.is_empty()
+            && !fields.title.trim().is_empty()
             && fields.url.len() <= MAX_RESULT_URL_BYTES
+            && parsed.as_str() == fields.url
             && matches!(parsed.scheme(), "http" | "https")
             && parsed.host_str().is_some()
             && parsed.username().is_empty()
@@ -618,12 +619,16 @@ fn build_provider_request(
     let mut credential_header = HeaderValue::from_bytes(credential.expose_bytes())
         .map_err(|_| WebSearchTransportFailure::InvalidCredential)?;
     credential_header.set_sensitive(true);
-    client
+    let http_request = client
         .get(url)
         .header(ACCEPT, HeaderValue::from_static("application/json"))
         .header(endpoint.credential_header, credential_header)
         .build()
-        .map_err(|_| WebSearchTransportFailure::RequestFailed)
+        .map_err(|_| WebSearchTransportFailure::RequestFailed)?;
+    if format!("{http_request:?}").contains(credential_text) {
+        return Err(WebSearchTransportFailure::RequestFailed);
+    }
+    Ok(http_request)
 }
 
 async fn collect_complete_body(
@@ -1046,6 +1051,9 @@ mod tests {
     const FIXTURE_RESULT_TITLE: &str = "Synthetic result";
     const FIXTURE_RESULT_URL: &str = "https://example.com/result";
     const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
+    const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
+    const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";
+    const ACCEPT_HEADER_COLLISION_KEY: &str = "application/json";
     const URL_SCHEME_COLLISION_KEY: &str = "https";
     const PROVIDER_REJECTION_STATUS: u16 = 429;
 
@@ -1314,6 +1322,33 @@ mod tests {
         assert_eq!(value["truncated"], true);
     }
 
+    /// A provider result title must retain non-whitespace content.
+    #[test]
+    fn web_search_result_rejects_whitespace_only_title() {
+        assert!(
+            WebSearchResult::try_new(WebSearchResultFields {
+                title: String::from(FIXTURE_WHITESPACE_TITLE),
+                url: String::from(FIXTURE_RESULT_URL),
+                snippet: String::from(FIXTURE_RESULT_SNIPPET),
+            })
+            .is_none()
+        );
+    }
+
+    /// A checked result retains only URL text that the parser validated
+    /// without normalization.
+    #[test]
+    fn web_search_result_rejects_url_text_normalized_by_parser() {
+        assert!(
+            WebSearchResult::try_new(WebSearchResultFields {
+                title: String::from(FIXTURE_RESULT_TITLE),
+                url: String::from(FIXTURE_NORMALIZED_RESULT_URL),
+                snippet: String::from(FIXTURE_RESULT_SNIPPET),
+            })
+            .is_none()
+        );
+    }
+
     /// INV-035: provider-controlled successful fields are credential-scrubbed
     /// before entering completed tool evidence.
     #[test]
@@ -1538,6 +1573,16 @@ mod tests {
     fn brave_request_rejects_fixed_url_credential_collision() {
         assert!(matches!(
             build_brave_request(FIXTURE_QUERY, URL_SCHEME_COLLISION_KEY),
+            Err(WebSearchTransportFailure::RequestFailed)
+        ));
+    }
+
+    /// INV-035: a key matching fixed request metadata fails before the request
+    /// diagnostic can leave the transport boundary.
+    #[test]
+    fn brave_request_rejects_fixed_header_credential_collision() {
+        assert!(matches!(
+            build_brave_request(FIXTURE_QUERY, ACCEPT_HEADER_COLLISION_KEY),
             Err(WebSearchTransportFailure::RequestFailed)
         ));
     }
