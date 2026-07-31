@@ -1,7 +1,15 @@
 //! Bounded tools for an injected local workspace.
 
+mod patch;
 mod path;
 mod read;
+
+pub use patch::{
+    ExpectedPatchSyntax, MAX_PATCH_BYTES, MAX_PATCH_HUNKS, MAX_PATCH_OPERATIONS,
+    MalformedPatchReason, PatchApplyError, PatchApplyErrorKind, PatchHunk, PatchLocation,
+    PatchOperation, PatchParseError, PatchParseErrorKind, PatchPathRejection, PatchPlan,
+    PlannedPatchOperation, WorkspacePatch, apply_patch_to_contents, parse_patch, plan_patch,
+};
 
 pub use path::{
     LocalWorkspaceFileSystem, WorkspaceDirectoryEntry, WorkspaceDirectoryRead, WorkspaceEntryKind,
