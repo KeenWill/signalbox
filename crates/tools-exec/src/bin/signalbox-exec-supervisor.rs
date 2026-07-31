@@ -106,19 +106,34 @@ mod linux {
             return ExitCode::FAILURE;
         }
         drop(stderr);
+        let leader_exited = Arc::new(AtomicBool::new(false));
+        let stdout_leader_exited = Arc::clone(&leader_exited);
         let stdout_copy = std::thread::spawn(move || {
-            std::io::copy(&mut target_stdout, &mut std::io::stdout()).map(|_| ())
+            copy_until_leader_exit(
+                &mut target_stdout,
+                &mut std::io::stdout(),
+                &stdout_leader_exited,
+            )
         });
+        let stderr_leader_exited = Arc::clone(&leader_exited);
         let stderr_copy = std::thread::spawn(move || {
-            std::io::copy(&mut target_stderr, &mut std::io::stderr()).map(|_| ())
+            copy_until_leader_exit(
+                &mut target_stderr,
+                &mut std::io::stderr(),
+                &stderr_leader_exited,
+            )
         });
         let status = match child.wait() {
             Ok(status) => status,
             Err(_) => {
                 terminate_child(&mut child);
+                leader_exited.store(true, Ordering::Release);
+                let _ = stdout_copy.join();
+                let _ = stderr_copy.join();
                 return ExitCode::FAILURE;
             }
         };
+        leader_exited.store(true, Ordering::Release);
         let stdout_copy_failed = !matches!(stdout_copy.join(), Ok(Ok(())));
         let stderr_copy_failed = !matches!(stderr_copy.join(), Ok(Ok(())));
         if stdout_copy_failed || stderr_copy_failed {
@@ -135,6 +150,50 @@ mod linux {
             let _ = rustix::process::kill_process(pid, signal);
         }
         ExitCode::FAILURE
+    }
+
+    fn copy_until_leader_exit<Source, Target>(
+        source: &mut Source,
+        target: &mut Target,
+        leader_exited: &AtomicBool,
+    ) -> std::io::Result<()>
+    where
+        Source: Read + rustix::fd::AsFd,
+        Target: Write,
+    {
+        let flags = rustix::fs::fcntl_getfl(&*source)?;
+        rustix::fs::fcntl_setfl(&*source, flags | rustix::fs::OFlags::NONBLOCK)?;
+        let mut buffer = [0_u8; 8 * 1024];
+        let mut post_exit_remaining = None;
+        loop {
+            if post_exit_remaining.is_none() && leader_exited.load(Ordering::Acquire) {
+                let remaining = rustix::io::ioctl_fionread(&*source)?;
+                if remaining == 0 {
+                    return Ok(());
+                }
+                post_exit_remaining = Some(remaining);
+            }
+            let read_limit = post_exit_remaining
+                .map(|remaining| usize::try_from(remaining).unwrap_or(usize::MAX))
+                .unwrap_or(buffer.len())
+                .min(buffer.len());
+            match source.read(&mut buffer[..read_limit]) {
+                Ok(0) => return Ok(()),
+                Ok(read) => {
+                    target.write_all(&buffer[..read])?;
+                    if let Some(remaining) = post_exit_remaining.as_mut() {
+                        *remaining = remaining.saturating_sub(read as u64);
+                        if *remaining == 0 {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(MINIMUM_POLL_INTERVAL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn terminate_child(child: &mut std::process::Child) {
@@ -181,7 +240,15 @@ mod linux {
                 };
             }
         };
-        let mut tree = ProcessTreeGuard::new(child.id(), std::process::id());
+        let mut tree = match ProcessTreeGuard::new(child.id(), std::process::id()) {
+            Ok(tree) => tree,
+            Err(()) => {
+                terminate_child(&mut child);
+                return SupervisorStatus::SpawnFailed {
+                    reason: SupervisorSpawnFailure::ProcessTreeUnsupported,
+                };
+            }
+        };
         let cancelled = cancellation_signal();
         let status = loop {
             match child.try_wait() {
@@ -256,8 +323,9 @@ mod linux {
     }
 
     impl ProcessTreeGuard {
-        fn new(root: u32, supervisor: u32) -> Self {
-            let descendants = Arc::new(Mutex::new(BTreeMap::new()));
+        fn new(root: u32, supervisor: u32) -> Result<Self, ()> {
+            let root_process = pin_process(root)?.ok_or(())?;
+            let descendants = Arc::new(Mutex::new(BTreeMap::from([(root, root_process)])));
             let stop = Arc::new(AtomicBool::new(false));
             let watcher_descendants = Arc::clone(&descendants);
             let watcher_stop = Arc::clone(&stop);
@@ -282,7 +350,7 @@ mod linux {
                     std::thread::sleep(interval);
                 }
             });
-            Self {
+            Ok(Self {
                 root,
                 supervisor,
                 descendants,
@@ -290,7 +358,7 @@ mod linux {
                 watcher: Some(watcher),
                 process_tree_supported,
                 armed: true,
-            }
+            })
         }
 
         fn finish(&mut self, child: &mut std::process::Child) -> CleanupStatus {
@@ -343,11 +411,13 @@ mod linux {
         }
 
         fn kill_tracked(&self) {
-            kill_process_group(self.root);
             let descendants = self
                 .descendants
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            if descendants.contains_key(&self.root) {
+                kill_process_group(self.root);
+            }
             for process in descendants.values() {
                 let _ = rustix::process::pidfd_send_signal(
                     &process.pidfd,
@@ -393,7 +463,6 @@ mod linux {
         let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
         let mut changed = retire_exited_or_reused(&mut tracked)?;
         let mut known = tracked.keys().copied().collect::<BTreeSet<_>>();
-        known.insert(root);
         loop {
             let before = known.len();
             let parents = known
@@ -604,6 +673,30 @@ mod linux {
 
             assert!(changed);
             assert!(tracked.is_empty());
+            Ok(())
+        }
+
+        #[test]
+        fn reaped_root_is_not_reintroduced_as_an_ancestry_root()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let mut child = Command::new(std::env::current_exe()?)
+                .args(["--ignored", "--exact", CHILD_FIXTURE_NAME])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            let raw_pid = child.id();
+            let process = pin_process(raw_pid)
+                .map_err(|()| std::io::Error::other("pin process"))?
+                .ok_or_else(|| std::io::Error::other("child process disappeared"))?;
+            let tracked = Arc::new(Mutex::new(BTreeMap::from([(raw_pid, process)])));
+            child.wait()?;
+
+            let changed = observe_descendants(raw_pid, std::process::id(), &tracked)
+                .map_err(|()| std::io::Error::other("observe descendants"))?;
+            let tracked = tracked.lock().unwrap_or_else(PoisonError::into_inner);
+
+            assert!(changed);
+            assert!(!tracked.contains_key(&raw_pid));
             Ok(())
         }
 

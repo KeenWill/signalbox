@@ -965,10 +965,27 @@ fn sandbox_path(workspace_root: &Path) -> OsString {
 }
 
 fn sandbox_shell(workspace_root: &Path) -> PathBuf {
-    std::env::split_paths(&sandbox_path(workspace_root))
-        .map(|directory| directory.join("sh"))
-        .find(|candidate| candidate.is_file())
+    executable_sandbox_shell(&sandbox_path(workspace_root))
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+fn executable_sandbox_shell(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|directory| directory.join("sh"))
+        .find(|candidate| sandbox_program_is_executable(candidate))
+}
+
+fn sandbox_program_is_executable(candidate: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        candidate
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        candidate.is_file()
+    }
 }
 
 fn trusted_sandbox_path(path: &Path, workspace_root: &Path) -> Option<PathBuf> {
@@ -1399,6 +1416,8 @@ fn empty_process_result(outcome: ProcessOutcome) -> ProcessRunResult {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex, PoisonError};
 
     use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
@@ -1415,6 +1434,57 @@ mod tests {
     struct ReplacementWorkspace {
         path: PathBuf,
         retired: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ProbeShellFixture {
+        root: PathBuf,
+        search_path: OsString,
+        expected_shell: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl ProbeShellFixture {
+        fn new() -> Result<Self, Box<dyn Error>> {
+            let identity = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "signalbox-exec-probe-shell-{}-{identity}",
+                std::process::id()
+            ));
+            let blocked_directory = root.join("blocked");
+            let executable_directory = root.join("executable");
+            std::fs::create_dir_all(&blocked_directory)?;
+            std::fs::create_dir_all(&executable_directory)?;
+            let blocked_shell = blocked_directory.join("sh");
+            let expected_shell = executable_directory.join("sh");
+            std::fs::write(&blocked_shell, b"blocked")?;
+            std::fs::write(&expected_shell, b"executable")?;
+            std::fs::set_permissions(&blocked_shell, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(&expected_shell, std::fs::Permissions::from_mode(0o700))?;
+            let search_path = std::env::join_paths([blocked_directory, executable_directory])?;
+            Ok(Self {
+                root,
+                search_path,
+                expected_shell,
+            })
+        }
+
+        fn search_path(&self) -> &std::ffi::OsStr {
+            &self.search_path
+        }
+
+        fn expected_shell(&self) -> &Path {
+            &self.expected_shell
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ProbeShellFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 
     impl ReplacementWorkspace {
@@ -1565,6 +1635,18 @@ mod tests {
             unsandboxed_definition.permission_default(),
             ToolPermissionDefault::Confirm
         );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_shell_skips_a_non_executable_regular_file() -> Result<(), Box<dyn Error>> {
+        let fixture = ProbeShellFixture::new()?;
+
+        let selected = executable_sandbox_shell(fixture.search_path())
+            .ok_or_else(|| std::io::Error::other("one executable probe shell"))?;
+
+        assert_eq!(selected, fixture.expected_shell());
         Ok(())
     }
 

@@ -178,6 +178,40 @@ async fn production_dispatcher_marks_started_target_that_exits_127()
 }
 
 #[tokio::test]
+async fn production_dispatcher_does_not_wait_for_descendant_held_pipes()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let supervisor = std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+        let script = format!("{} 30 & printf %s $!", fixture_program("sleep")?.display());
+        let request = ProcessRequest {
+            program: supervisor.into_os_string(),
+            arguments: vec![
+                OsString::from(DISPATCH_MODE),
+                fixture_program("sh")?.into_os_string(),
+                OsString::from("-c"),
+                OsString::from(script),
+            ],
+            working_directory: std::env::current_dir()?,
+            timeout: Duration::from_secs(5),
+            capture_bytes: 64,
+            environment: BTreeMap::new(),
+            environment_inheritance: ProcessEnvironment::Clear,
+        };
+        let started = std::time::Instant::now();
+
+        let result = production_runner()?.run(request).await;
+        let elapsed = started.elapsed();
+        let descendant = std::str::from_utf8(&result.stdout.bytes)?.parse::<u32>()?;
+
+        assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
+        assert!(elapsed < Duration::from_secs(2));
+        assert!(!std::path::Path::new(&format!("/proc/{descendant}")).exists());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn production_runner_kills_descendants_after_leader_completion()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
