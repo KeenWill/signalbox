@@ -650,15 +650,13 @@ fn classify_send_failure(error: reqwest::Error) -> WebSearchTransportFailure {
 struct BraveResponse {
     #[serde(rename = "type")]
     response_type: String,
-    #[serde(default)]
-    query: Option<BraveQueryFacts>,
+    query: BraveQueryFacts,
     #[serde(default)]
     web: Option<BraveWebResults>,
 }
 
 #[derive(serde::Deserialize)]
 struct BraveQueryFacts {
-    #[serde(default)]
     more_results_available: bool,
 }
 
@@ -691,10 +689,7 @@ fn decode_brave_response(body: &[u8]) -> Result<WebSearchResponse, WebSearchTran
     if response.response_type != "search" {
         return Err(WebSearchTransportFailure::InvalidResponse);
     }
-    let completeness = if response
-        .query
-        .is_some_and(|query| query.more_results_available)
-    {
+    let completeness = if response.query.more_results_available {
         WebSearchPageCompleteness::MoreAvailable
     } else {
         WebSearchPageCompleteness::Complete
@@ -974,8 +969,8 @@ impl CredentialScrubber {
     }
 
     fn redact_text(&self, text: &str) -> String {
-        let exact_redacted = text.replace(&self.exact, "[redacted]");
-        let escaped_redacted = exact_redacted.replace(&self.json_escaped, "[redacted]");
+        let exact_redacted = text.replace(&self.exact, "");
+        let escaped_redacted = exact_redacted.replace(&self.json_escaped, "");
         redact_text(&escaped_redacted)
     }
 
@@ -1293,7 +1288,31 @@ mod tests {
         };
 
         assert!(!content.contains(SYNTHETIC_KEY));
-        assert!(content.contains("[redacted]"));
+    }
+
+    /// INV-035: credential removal cannot reproduce a key that overlaps the
+    /// ordinary redaction sentinel.
+    #[test]
+    fn web_search_redaction_sentinel_cannot_reproduce_credential() {
+        const SENTINEL_OVERLAPPING_KEY: &str = "red";
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: format!("x{SENTINEL_OVERLAPPING_KEY}x"),
+            url: format!("{FIXTURE_RESULT_URL}?q={SENTINEL_OVERLAPPING_KEY}"),
+            snippet: format!("y{SENTINEL_OVERLAPPING_KEY}y"),
+        })
+        .expect("reflected fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            SENTINEL_OVERLAPPING_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+        let evidence = success_evidence(response, &scrubber).expect("response encodes");
+        let ToolExecutorEvidence::CompletedText(content) = evidence else {
+            panic!("a successful provider response completes with text")
+        };
+
+        assert!(!content.contains(SENTINEL_OVERLAPPING_KEY));
     }
 
     /// INV-035: JSON-aware error sanitization decodes an escaped credential
@@ -1306,7 +1325,6 @@ mod tests {
         let detail = provider_error_detail(error, &scrubber()).expect("detail is admitted");
 
         assert!(!detail.as_str().contains(SYNTHETIC_KEY));
-        assert!(detail.as_str().contains("[redacted]"));
     }
 
     /// INV-035: error redaction precedes evidence truncation, so a credential
@@ -1324,7 +1342,6 @@ mod tests {
         let detail = provider_error_detail(error, &scrubber()).expect("detail is admitted");
 
         assert!(!detail.as_str().contains(SYNTHETIC_KEY));
-        assert!(detail.as_str().contains("[redacted]"));
         assert!(detail.as_str().ends_with(TRUNCATION_SUFFIX));
     }
 
@@ -1432,5 +1449,24 @@ mod tests {
         assert_eq!(decoded.url(), FIXTURE_RESULT_URL);
         assert_eq!(decoded.snippet(), FIXTURE_RESULT_SNIPPET);
         assert!(!response.more_results_available());
+    }
+
+    /// A success envelope without provider pagination facts cannot claim that
+    /// its bounded result page is complete.
+    #[test]
+    fn brave_response_without_pagination_facts_is_invalid() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "type": "search",
+            "web": {
+                "type": "search",
+                "results": [],
+            },
+        }))
+        .expect("recorded response fixture encodes");
+
+        assert!(matches!(
+            decode_provider_response(WebSearchProvider::Brave, &body),
+            Err(WebSearchTransportFailure::InvalidResponse)
+        ));
     }
 }
