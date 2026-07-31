@@ -758,14 +758,6 @@ impl RunnerProtocolStore {
         let canonical = load_enrollment_in(transaction.as_mut(), enrollment_id)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
-        if canonical != *enrollment {
-            return Err(RunnerProtocolStoreError::Domain(
-                RunnerDomainError::CorrelationMismatch,
-            ));
-        }
-        let pending = enrollment
-            .prepare_registration(advertisement, &self.catalog)
-            .map_err(RunnerProtocolStoreError::Domain)?;
         let previous: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
             .bind(enrollment_id.into_uuid())
             .fetch_optional(&mut *transaction)
@@ -779,6 +771,14 @@ impl RunnerProtocolStore {
                 RunnerDomainError::RegistrationChanged,
             ));
         }
+        if canonical != *enrollment {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let pending = enrollment
+            .prepare_registration(advertisement, &self.catalog)
+            .map_err(RunnerProtocolStoreError::Domain)?;
         let revision = match previous {
             Some(value) => value
                 .checked_next()
