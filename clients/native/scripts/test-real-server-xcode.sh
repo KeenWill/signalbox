@@ -6,11 +6,14 @@ REPOSITORY_ROOT="$(cd "$NATIVE_ROOT/../.." && pwd)"
 
 if ! command -v initdb >/dev/null 2>&1; then
 	if command -v devenv >/dev/null 2>&1; then
-		POSTGRES_BIN="$(
-			devenv shell -- bash -lc 'dirname "$(command -v initdb)"'
+		POSTGRES_INITDB="$(
+			devenv shell -- bash -lc 'command -v initdb' || true
 		)"
-		PATH="$POSTGRES_BIN:$PATH"
-		export PATH
+		if [[ -x "$POSTGRES_INITDB" ]]; then
+			POSTGRES_BIN="$(dirname "$POSTGRES_INITDB")"
+			PATH="$POSTGRES_BIN:$PATH"
+			export PATH
+		fi
 	fi
 fi
 if ! command -v initdb >/dev/null 2>&1; then
