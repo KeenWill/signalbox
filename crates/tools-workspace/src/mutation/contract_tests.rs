@@ -29,7 +29,7 @@ fn write_file_schema_carries_path_and_content_bounds() {
     assert_eq!(schema["properties"]["path"]["minLength"], json!(1));
     assert_eq!(
         schema["properties"]["path"]["maxLength"],
-        json!(crate::path::MAX_WORKSPACE_PATH_BYTES)
+        json!(crate::path::MAX_WORKSPACE_PATH_CHARACTERS)
     );
     assert_eq!(
         schema["properties"]["content"]["maxLength"],
@@ -41,6 +41,10 @@ fn write_file_schema_carries_path_and_content_bounds() {
 fn edit_file_schema_carries_match_bounds_and_replace_all_default() {
     let schema = rendered_contract_schema::<EditFileContract>();
 
+    assert_eq!(
+        schema["properties"]["path"]["maxLength"],
+        json!(crate::path::MAX_WORKSPACE_PATH_CHARACTERS)
+    );
     assert_eq!(schema["properties"]["old_string"]["minLength"], json!(1));
     assert_eq!(
         schema["properties"]["old_string"]["maxLength"],
@@ -114,4 +118,29 @@ fn catalog_preserves_truncated_patch_location_and_reason() {
         detail.as_str(),
         "patch parse failed at line 4: Truncated { expected: EndPatch }"
     );
+}
+
+#[test]
+fn unicode_mutation_path_bound_matches_schema_and_runtime_validation() {
+    const CHARACTER: &str = "é";
+    const CHARACTER_COUNT: usize = 3_000;
+
+    let path = CHARACTER.repeat(CHARACTER_COUNT);
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    let catalog = fixture_catalog(&workspace);
+
+    assert!(path.len() > crate::path::MAX_WORKSPACE_PATH_CHARACTERS);
+
+    catalog
+        .validate_arguments(
+            &tool_name(WRITE_FILE_NAME),
+            &arguments(
+                &json!({
+                    "content": "",
+                    "path": path,
+                })
+                .to_string(),
+            ),
+        )
+        .expect("schema-admitted Unicode path validates at runtime");
 }

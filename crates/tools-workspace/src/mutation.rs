@@ -55,7 +55,7 @@ const COMMIT_FAILED_DETAIL: &str = "atomic workspace mutation commit failed";
 #[serde(deny_unknown_fields)]
 pub struct WriteFileArguments {
     /// Relative destination path inside the injected root.
-    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_BYTES))]
+    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_CHARACTERS))]
     pub path: String,
     /// Complete UTF-8 replacement content, bounded to one MiB as encoded.
     #[schemars(length(max = MAX_WORKSPACE_MUTATION_FILE_BYTES))]
@@ -76,7 +76,7 @@ impl ToolContract for WriteFileContract {
 #[serde(deny_unknown_fields)]
 pub struct EditFileArguments {
     /// Relative existing file path inside the injected root.
-    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_BYTES))]
+    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_CHARACTERS))]
     pub path: String,
     /// Exact non-empty source text to replace.
     #[schemars(length(min = 1, max = MAX_WORKSPACE_MUTATION_FILE_BYTES))]

@@ -154,7 +154,7 @@ pub enum PatchPathRejection {
     Absolute,
     /// The supplied path contained a parent-directory component.
     ParentTraversal,
-    /// The supplied path was empty, contained NUL, or exceeded its byte bound.
+    /// The supplied path was empty, contained NUL, or exceeded its bounded shape.
     Invalid,
 }
 
@@ -572,6 +572,7 @@ fn is_directive(line: &str) -> bool {
 
 fn normalize_path(supplied: &str) -> Result<String, PatchPathRejection> {
     if supplied.is_empty()
+        || supplied.chars().count() > crate::path::MAX_WORKSPACE_PATH_CHARACTERS
         || supplied.len() > crate::path::MAX_WORKSPACE_PATH_BYTES
         || supplied.contains('\0')
     {
@@ -1095,6 +1096,38 @@ mod tests {
             PatchParseErrorKind::PathRejected {
                 path: String::from("src/../../outside.txt"),
                 reason: PatchPathRejection::ParentTraversal,
+            }
+        );
+    }
+
+    #[test]
+    fn multibyte_operation_path_within_character_bound_parses() {
+        const CHARACTER: &str = "é";
+        const CHARACTER_COUNT: usize = 3_000;
+
+        let path = CHARACTER.repeat(CHARACTER_COUNT);
+        let patch = format!("*** Begin Patch\n*** Delete File: {path}\n*** End Patch");
+
+        assert!(path.len() > crate::path::MAX_WORKSPACE_PATH_CHARACTERS);
+
+        let parsed = parse_patch(&patch).expect("character-bounded multibyte path parses");
+
+        assert_eq!(parsed.operations()[0].path(), path);
+    }
+
+    #[test]
+    fn operation_path_over_character_bound_has_typed_rejection() {
+        const CHARACTER: &str = "x";
+
+        let path = CHARACTER.repeat(crate::path::MAX_WORKSPACE_PATH_CHARACTERS + 1);
+        let patch = format!("*** Begin Patch\n*** Delete File: {path}\n*** End Patch");
+        let error = parse_patch(&patch).expect_err("over-bound path rejects");
+
+        assert_eq!(
+            error.kind,
+            PatchParseErrorKind::PathRejected {
+                path,
+                reason: PatchPathRejection::Invalid,
             }
         );
     }
