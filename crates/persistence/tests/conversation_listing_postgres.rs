@@ -50,6 +50,16 @@ const DATABASE_NAME: &str = "signalbox_conversation_listing";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
+
 /// One synthetic Claude Code export whose summary record supplies the derived
 /// display title and whose one user message supplies the fallback candidate.
 const CLAUDE_SUMMARY_SOURCE: &str = concat!(
@@ -123,7 +133,7 @@ fn creation(command_value: u128, session_value: u128) -> PreparedCreateSession {
 }
 
 async fn create_fixture_session(pool: &PgPool, seed: u128) -> Result<SessionId, Box<dyn Error>> {
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(seed + 0x8000, seed))
         .await?;
     Ok(session(seed))

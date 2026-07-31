@@ -48,8 +48,9 @@ use signalboxd::{
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
     SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
-    usage_limits::UsageLimitedModelCallProvider,
+    TelemetryExportFilter, TelemetryMetrics,
+    model_adapter::ConfiguredModelRuntime,
+    usage_limits::{UsageLimitedContextCompactionModel, UsageLimitedModelCallProvider},
 };
 use tracing_subscriber::prelude::*;
 
@@ -149,7 +150,7 @@ struct HubConfiguration {
     database_url: String,
     model_configuration_file: PathBuf,
     template_configuration_file: PathBuf,
-    anthropic_api_key_file: PathBuf,
+    anthropic_api_key_file: Option<PathBuf>,
     github_token_file: PathBuf,
     process_socket_path: PathBuf,
 }
@@ -203,7 +204,7 @@ impl HubConfiguration {
             template_configuration_file,
         )?;
         let anthropic_api_key_file =
-            required_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT, anthropic_api_key_file)?;
+            optional_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT, anthropic_api_key_file)?;
         let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
         let process_socket_path =
             required_path(PROCESS_SOCKET_PATH_ENVIRONMENT, process_socket_path)?;
@@ -230,8 +231,17 @@ impl HubConfiguration {
         &self.template_configuration_file
     }
 
-    fn anthropic_api_key_file(&self) -> PathBuf {
-        self.anthropic_api_key_file.clone()
+    fn anthropic_api_key_file(
+        &self,
+        required: bool,
+    ) -> Result<Option<PathBuf>, HubConfigurationError> {
+        if required && self.anthropic_api_key_file.is_none() {
+            return Err(HubConfigurationError::new(
+                ANTHROPIC_API_KEY_FILE_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ));
+        }
+        Ok(self.anthropic_api_key_file.clone())
     }
 
     fn github_token_file(&self) -> PathBuf {
@@ -257,6 +267,15 @@ fn required_path(
     } else {
         Ok(PathBuf::from(value))
     }
+}
+
+fn optional_path(
+    setting: &'static str,
+    value: Option<OsString>,
+) -> Result<Option<PathBuf>, HubConfigurationError> {
+    value
+        .map(|value| required_path(setting, Some(value)))
+        .transpose()
 }
 
 /// Closed startup causes admitted to operator telemetry.
@@ -767,27 +786,39 @@ async fn run_hub(
             SanitizedStartupCause::TemplateConfiguration(&error),
         )
     })?;
-    let credential_access = FileCredentialAccess::new(
-        configuration.anthropic_api_key_file(),
-        CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
-    );
-    let credential_reference =
-        ModelCallCredentialReference::new(credential_access.credential_reference().as_str());
+    let anthropic_api_key_file = configuration
+        .anthropic_api_key_file(model_configuration.uses_anthropic_adapter())
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Configuration(&error),
+            )
+        })?;
+    let credential_access = anthropic_api_key_file.map(|path| {
+        FileCredentialAccess::new(
+            path,
+            CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+        )
+    });
+    let credential_reference = ModelCallCredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE);
     let code_host_credentials = FileCredentialAccess::new(
         configuration.github_token_file(),
         CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
     );
-    let compaction_anthropic =
-        AnthropicRuntime::new(AnthropicConfig::new(), credential_access.clone()).map_err(
-            |error| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
-                )
-            },
-        )?;
-    let anthropic =
-        AnthropicRuntime::new(AnthropicConfig::new(), credential_access).map_err(|error| {
+    let compaction_anthropic = credential_access
+        .clone()
+        .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
+        .transpose()
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
+            )
+        })?;
+    let anthropic = credential_access
+        .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
+        .transpose()
+        .map_err(|error| {
             erase_startup_cause(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
@@ -813,9 +844,11 @@ async fn run_hub(
             SanitizedStartupCause::Static("codex_cli_construction_failed"),
         )
     })?;
-    let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
-        RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
-    );
+    let context_compaction_model: Arc<dyn ContextCompactionModel> =
+        Arc::new(UsageLimitedContextCompactionModel::new(
+            RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
+            runtime_models.clone(),
+        ));
     let provider = RuntimeModelCallProvider::new(runtime, runtime_models.clone());
     let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
@@ -1357,8 +1390,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AnthropicConstructionError, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
-        HubConfiguration, HubConfigurationError, HubRuntimeError,
+        ANTHROPIC_API_KEY_FILE_ENVIRONMENT, AnthropicConstructionError, DATABASE_URL_ENVIRONMENT,
+        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError, HubRuntimeError,
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
         PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
@@ -1575,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn deployment_paths_and_database_url_are_required() {
+    fn deployment_paths_and_database_url_are_validated() {
         assert_eq!(
             HubConfiguration::from_values(
                 None,
@@ -1671,8 +1704,8 @@ mod tests {
             std::path::Path::new("templates.toml")
         );
         assert_eq!(
-            configuration.anthropic_api_key_file(),
-            std::path::PathBuf::from("key")
+            configuration.anthropic_api_key_file(true),
+            Ok(Some(std::path::PathBuf::from("key")))
         );
         assert_eq!(
             configuration.github_token_file(),
@@ -1681,6 +1714,24 @@ mod tests {
         assert_eq!(
             configuration.process_socket_path(),
             std::path::Path::new("/tmp/signalbox.sock")
+        );
+
+        let codex_only = HubConfiguration::from_values(
+            Some(OsString::from("postgres://secret")),
+            Some(OsString::from("models.toml")),
+            Some(OsString::from("templates.toml")),
+            None,
+            Some(OsString::from("github-token")),
+            Some(OsString::from("/tmp/signalbox.sock")),
+        )
+        .expect("Anthropic credentials are optional before routes are loaded");
+        assert_eq!(codex_only.anthropic_api_key_file(false), Ok(None));
+        assert_eq!(
+            codex_only.anthropic_api_key_file(true),
+            Err(HubConfigurationError::new(
+                ANTHROPIC_API_KEY_FILE_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ))
         );
     }
 

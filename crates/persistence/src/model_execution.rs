@@ -1324,9 +1324,21 @@ async fn resolve_session_credential(
     .await
     {
         Ok(reference) => Ok(reference),
-        Err(sqlx::Error::RowNotFound) => {
-            Err(ModelCallCorruption::Missing("current session model credential").into())
-        }
+        Err(sqlx::Error::RowNotFound) => match families.migration_fallback_family(target) {
+            Some(fallback_family) => crate::session_credentials::load_migrated_session_credential(
+                connection,
+                session_id_to_uuid(session),
+                fallback_family,
+            )
+            .await
+            .map_err(|error| match error {
+                sqlx::Error::RowNotFound => {
+                    ModelCallCorruption::Missing("current session model credential").into()
+                }
+                error => error.into(),
+            }),
+            None => Err(ModelCallCorruption::Missing("current session model credential").into()),
+        },
         Err(error) => Err(error.into()),
     }
 }

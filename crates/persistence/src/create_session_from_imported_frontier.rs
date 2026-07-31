@@ -249,22 +249,16 @@ impl ImportedSessionRepositoryError {
 #[derive(Clone, Debug)]
 pub struct ImportedSessionRepository {
     pool: PgPool,
-    credential_pin: Option<crate::SessionCredentialPin>,
+    credential_pin: crate::SessionCredentialPin,
 }
 
 impl ImportedSessionRepository {
     /// Uses the supplied pool for claim-first creation and checked replay.
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, credential_pin: crate::SessionCredentialPin) -> Self {
         Self {
             pool,
-            credential_pin: None,
+            credential_pin,
         }
-    }
-
-    /// Pins the complete configured credential snapshot into first handling.
-    pub fn with_credential_pin(mut self, credential_pin: crate::SessionCredentialPin) -> Self {
-        self.credential_pin = Some(credential_pin);
-        self
     }
 
     /// Handles one canonical imported-frontier creation atomically.
@@ -348,8 +342,7 @@ impl ImportedSessionRepository {
             }
         };
         let result = prepared.applied_result();
-        if let Err(error) =
-            insert_prepared(&mut transaction, prepared, self.credential_pin.as_ref()).await
+        if let Err(error) = insert_prepared(&mut transaction, prepared, &self.credential_pin).await
         {
             transaction.rollback().await?;
             return Err(error);
@@ -432,7 +425,7 @@ async fn existing_outcome(
 async fn insert_prepared(
     connection: &mut PgConnection,
     prepared: PreparedCreateSessionFromImportedFrontier,
-    credential_pin: Option<&crate::SessionCredentialPin>,
+    credential_pin: &crate::SessionCredentialPin,
 ) -> Result<(), ImportedSessionRepositoryError> {
     let command = prepared.command();
     let session = prepared.session();
@@ -460,16 +453,14 @@ async fn insert_prepared(
     .await
     .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
 
-    if let Some(pin) = credential_pin {
-        crate::session_credentials::insert_initial_session_credential_event(
-            connection,
-            session_id_to_uuid(session.id()),
-            durable_command_id_to_uuid(command.command_id()),
-            "imported_session",
-            pin,
-        )
-        .await?;
-    }
+    crate::session_credentials::insert_initial_session_credential_event(
+        connection,
+        session_id_to_uuid(session.id()),
+        durable_command_id_to_uuid(command.command_id()),
+        "imported_session",
+        credential_pin,
+    )
+    .await?;
 
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
         .bind(session_id_to_uuid(session.id()))

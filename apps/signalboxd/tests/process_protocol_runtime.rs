@@ -106,6 +106,16 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_process_runtime";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = MAX_SUBMITTED_INPUT_BYTES + 1;
 const STREAMING_DELTA_COUNT: usize = 192;
@@ -444,7 +454,7 @@ async fn create_imported_session(pool: &PgPool) -> Result<CanonicalUuid, Box<dyn
             .into(),
             frontiers: [ContextFrontierId::from_uuid(Uuid::from_u128(0x500))].into(),
         },
-        ImportedSessionRepository::new(pool.clone()),
+        ImportedSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     let outcome = create_service
         .execute(CreateSessionFromImportedFrontierRequest::try_new(

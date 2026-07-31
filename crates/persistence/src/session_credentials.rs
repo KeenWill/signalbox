@@ -87,18 +87,28 @@ pub enum SessionCredentialPinError {
 /// Static model-target-to-family mapping used only to select a pinned entry.
 #[derive(Clone, Debug)]
 pub struct ModelCredentialFamilyCatalog {
-    families: Arc<HashMap<ResolvedProviderTarget, Arc<str>>>,
+    families: Arc<HashMap<ResolvedProviderTarget, ModelCredentialFamilyRoute>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ModelCredentialFamilyRoute {
+    family: Arc<str>,
+    migration_fallback_family: Option<Arc<str>>,
 }
 
 impl ModelCredentialFamilyCatalog {
     /// Builds an exact target mapping and rejects conflicting definitions.
     pub fn try_new(
-        entries: impl IntoIterator<Item = (ResolvedProviderTarget, Arc<str>)>,
+        entries: impl IntoIterator<Item = (ResolvedProviderTarget, Arc<str>, Option<Arc<str>>)>,
     ) -> Result<Self, ModelCredentialFamilyCatalogError> {
         let mut families = HashMap::new();
-        for (target, family) in entries {
-            if let Some(previous) = families.insert(target, Arc::clone(&family))
-                && previous != family
+        for (target, family, migration_fallback_family) in entries {
+            let route = ModelCredentialFamilyRoute {
+                family,
+                migration_fallback_family,
+            };
+            if let Some(previous) = families.insert(target, route.clone())
+                && previous != route
             {
                 return Err(ModelCredentialFamilyCatalogError::ConflictingTarget);
             }
@@ -110,7 +120,15 @@ impl ModelCredentialFamilyCatalog {
 
     /// Resolves the configuration family for one exact provider target.
     pub fn family(&self, target: ResolvedProviderTarget) -> Option<&str> {
-        self.families.get(&target).map(AsRef::as_ref)
+        self.families
+            .get(&target)
+            .map(|route| route.family.as_ref())
+    }
+
+    pub(crate) fn migration_fallback_family(&self, target: ResolvedProviderTarget) -> Option<&str> {
+        self.families
+            .get(&target)
+            .and_then(|route| route.migration_fallback_family.as_deref())
     }
 }
 
@@ -184,6 +202,32 @@ pub(crate) async fn load_current_session_credential(
     Ok(ModelCallCredentialReference::new(reference))
 }
 
+pub(crate) async fn load_migrated_session_credential(
+    connection: &mut PgConnection,
+    session_id: Uuid,
+    family: &str,
+) -> Result<ModelCallCredentialReference, sqlx::Error> {
+    let reference: String = sqlx::query(
+        "SELECT entry.credential_reference
+           FROM session_current_model_credentials AS current
+           JOIN session_model_credential_record AS record
+             ON record.session_id = current.session_id
+            AND record.event_ordinal = current.current_event_ordinal
+           JOIN session_model_credential_entry AS entry
+             ON entry.session_id = current.session_id
+            AND entry.event_ordinal = current.current_event_ordinal
+          WHERE current.session_id = $1
+            AND record.provenance_kind = 'migration_backfill'
+            AND entry.model_family = $2",
+    )
+    .bind(session_id)
+    .bind(family)
+    .fetch_one(&mut *connection)
+    .await?
+    .try_get("credential_reference")?;
+    Ok(ModelCallCredentialReference::new(reference))
+}
+
 /// Loads the current credential reference for one session and model family.
 pub async fn current_session_credential(
     pool: &PgPool,
@@ -196,7 +240,15 @@ pub async fn current_session_credential(
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionCredentialPin, SessionCredentialPinError, SessionModelCredential};
+    use std::sync::Arc;
+
+    use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget};
+    use sqlx::types::Uuid;
+
+    use super::{
+        ModelCredentialFamilyCatalog, SessionCredentialPin, SessionCredentialPinError,
+        SessionModelCredential,
+    };
 
     #[test]
     fn credential_pin_rejects_duplicate_model_families() {
@@ -205,5 +257,25 @@ mod tests {
             SessionModelCredential::new("codex", "second"),
         ]);
         assert_eq!(result, Err(SessionCredentialPinError::DuplicateModelFamily));
+    }
+
+    #[test]
+    fn target_family_catalog_retains_explicit_migration_fallback_metadata() {
+        let configured_family = Arc::<str>::from("custom-anthropic");
+        let migration_family = Arc::<str>::from("anthropic");
+        let target =
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(1)));
+        let catalog = ModelCredentialFamilyCatalog::try_new([(
+            target,
+            Arc::clone(&configured_family),
+            Some(Arc::clone(&migration_family)),
+        )])
+        .expect("one exact family route is valid");
+
+        assert_eq!(catalog.family(target), Some(configured_family.as_ref()));
+        assert_eq!(
+            catalog.migration_fallback_family(target),
+            Some(migration_family.as_ref())
+        );
     }
 }

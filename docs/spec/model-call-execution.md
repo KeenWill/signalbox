@@ -34,13 +34,14 @@ composition are verified through PR #373 (`agent/adapter-wiring`). The
 crate-shared commit-ambiguity helper home was verified against this PR
 (`agent/domain-cleanup`). The context-summary projection and dedicated
 compaction-call evidence were verified through PR #312
-(`agent/context-compaction-core`); the explicit trigger, pre-activation context
-guard, configured prompt, and provider-native input counting were verified
-through PR #314 (`agent/context-compaction-protocol`). The runner-placement
-rendering and executable session-tool snapshot paragraphs are the foundation
-proposal at the bottom of their implementing stack and become verified only with
-those child pull requests. Invariant tags cite
-[docs/invariants.md](../invariants.md).
+(`agent/context-compaction-core`); the explicit trigger, dormant automatic
+preparation machinery, configured prompt, and provider-native input-counting
+implementation were verified through PR #314
+(`agent/context-compaction-protocol`). The daemon does not schedule that
+automatic machinery. The runner-placement rendering and executable session-tool
+snapshot paragraphs are the foundation proposal at the bottom of their
+implementing stack and become verified only with those child pull requests.
+Invariant tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -302,13 +303,14 @@ by guarded session mutation. Each transition first rereads its exact call and
 command lifecycle: an equal `InFlight`, failed terminal disposition, or complete
 summary/result is a successful replay, while a different terminal fact fails
 closed. The daemon retries database and ambiguous-commit outcomes at this seam;
-it does not start provider interaction until authorization is resolved. Before
-authorization, an automatic compaction also retries transient database failures
-while loading its selected transcript range, retaining the live `Prepared` call
-as provably unsent rather than consuming that queued turn's sole automatic
-attempt. An integrity failure still terminalizes the unsent call. After a
-successful provider result, the daemon retains the summary and its usage in
-memory until the exact completion is durably applied or replayed.
+it does not start provider interaction until authorization is resolved. The
+dormant automatic preparation path retries transient database failures while
+loading its selected transcript range, retaining the live `Prepared` call as
+provably unsent rather than consuming that queued turn's sole automatic attempt.
+The daemon does not invoke that path. An integrity failure still terminalizes
+the unsent call if a future scheduler admits it. After a successful provider
+result, the daemon retains the summary and its usage in memory until the exact
+completion is durably applied or replayed.
 
 The explicit `compact_session` request names a session and an optional semantic
 transcript position. Absence selects the latest safe terminal or pre-call
@@ -692,14 +694,14 @@ regains authority. Why: startup recovery is the one audited path that classifies
 an issued call from durable evidence, so a live process that cannot construct a
 trustworthy result must stop rather than improvise. An eligibility pass raises
 the same signal whenever a durable stage it owns reports
-`Infrastructure { commit_ambiguous: true }` — the guarded counted activation
-commit and automatic compaction preparation alike — since only that next scan
-can decide what committed. The connection runtime raises it through the same
-handle for an explicit compaction command reporting that class, and still
-answers the client `commit_ambiguous`: a connection handler holds no prepared
-record to terminalize, replay of the command finds it pending, and a fresh
-command finds the nonterminal call, so the restart is the only remedy and
-nothing else would ask for it.
+`Infrastructure { commit_ambiguous: true }` from the guarded counted activation
+commit, since only that next scan can decide what committed. The scheduled pass
+no longer prepares automatic compaction. The connection runtime raises the same
+signal through its recovery handle for an explicit compaction command reporting
+that class, and still answers the client `commit_ambiguous`: a connection
+handler holds no prepared record to terminalize, replay of the command finds it
+pending, and a fresh command finds the nonterminal call, so the restart is the
+only remedy and nothing else would ask for it.
 
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):

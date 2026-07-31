@@ -1,6 +1,6 @@
 //! Model-configuration token-limit enforcement around provider execution.
 
-use std::future::Future;
+use std::{fmt, future::Future, pin::Pin};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
@@ -10,7 +10,11 @@ use signalbox_domain::{
     AuthorizedModelCall, CorrelatedModelCallTerminalObservation, ModelCallTerminalObservation,
     ProviderReportedTokenUsage,
 };
-use signalbox_model_provider_runtime::RuntimeModelCatalog;
+use signalbox_model_provider_runtime::{
+    ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
+    ContextCompactionModelResult, RuntimeModelCatalog,
+};
+use signalbox_model_runtime::TokenUsage;
 
 /// One provider capability paired with configuration-owned limits.
 pub struct UsageLimitedCapability<C> {
@@ -70,6 +74,69 @@ fn exceeds_configured_limits(
         .unwrap_or(0)
         .saturating_add(usage.output_tokens().unwrap_or(0))
         > context_window_tokens
+}
+
+fn runtime_usage_exceeds_configured_limits(
+    usage: TokenUsage,
+    max_output_tokens: u64,
+    context_window_tokens: u64,
+) -> bool {
+    usage
+        .output_tokens
+        .is_some_and(|output| output > max_output_tokens)
+        || usage
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(usage.output_tokens.unwrap_or(0))
+            > context_window_tokens
+}
+
+/// Dedicated-compaction wrapper enforcing the same immutable model limits.
+#[derive(Clone, Debug)]
+pub struct UsageLimitedContextCompactionModel<M> {
+    inner: M,
+    models: RuntimeModelCatalog,
+}
+
+impl<M> UsageLimitedContextCompactionModel<M> {
+    /// Binds dedicated compaction to the same immutable runtime catalog.
+    pub fn new(inner: M, models: RuntimeModelCatalog) -> Self {
+        Self { inner, models }
+    }
+}
+
+impl<M> ContextCompactionModel for UsageLimitedContextCompactionModel<M>
+where
+    M: ContextCompactionModel + fmt::Debug + Send + Sync,
+{
+    fn execute<'a>(
+        &'a self,
+        request: ContextCompactionModelRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ContextCompactionModelResult, ContextCompactionModelError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let definition = self
+                .models
+                .resolve(request.target)
+                .ok_or(ContextCompactionModelError::UnconfiguredTarget)?;
+            let max_output_tokens = u64::from(definition.max_output_tokens());
+            let context_window_tokens = u64::from(definition.context_window_tokens());
+            let result = self.inner.execute(request).await?;
+            if runtime_usage_exceeds_configured_limits(
+                result.usage,
+                max_output_tokens,
+                context_window_tokens,
+            ) {
+                return Err(ContextCompactionModelError::ProviderError);
+            }
+            Ok(result)
+        })
+    }
 }
 
 impl<P> ModelCallProvider for UsageLimitedModelCallProvider<P>
@@ -161,9 +228,43 @@ where
 
 #[cfg(test)]
 mod tests {
-    use signalbox_domain::ProviderReportedTokenUsage;
+    use std::{future::Future, pin::Pin};
 
-    use super::exceeds_configured_limits;
+    use signalbox_domain::{
+        DirectModelSelection, ModelCallId, ProviderModelIdentity, ProviderReportedTokenUsage,
+        ResolvedProviderTarget, SessionId,
+    };
+    use signalbox_model_provider_runtime::{
+        ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
+        ContextCompactionModelResult,
+    };
+    use signalbox_model_runtime::TokenUsage;
+    use uuid::Uuid;
+
+    use crate::configuration::HubModelConfiguration;
+
+    use super::{UsageLimitedContextCompactionModel, exceeds_configured_limits};
+
+    #[derive(Clone, Debug)]
+    struct FixedCompactionModel {
+        result: ContextCompactionModelResult,
+    }
+
+    impl ContextCompactionModel for FixedCompactionModel {
+        fn execute<'a>(
+            &'a self,
+            _request: ContextCompactionModelRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<ContextCompactionModelResult, ContextCompactionModelError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move { Ok(self.result.clone()) })
+        }
+    }
 
     #[test]
     fn reported_output_usage_is_checked_against_the_model_output_limit() {
@@ -194,5 +295,62 @@ mod tests {
             20,
             100
         ));
+    }
+
+    #[tokio::test]
+    async fn dedicated_compaction_rejects_adapter_usage_over_configured_limits() {
+        let configuration = HubModelConfiguration::parse(
+            r#"
+version = 1
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
+[compaction]
+prompt = "Summarize."
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000001"
+target_id = "20000000-0000-4000-8000-000000000001"
+model_family = "anthropic"
+provider_model = "claude-example"
+max_output_tokens = 20
+context_window_tokens = 100
+"#,
+        )
+        .expect("fixture model configuration is valid");
+        let model = UsageLimitedContextCompactionModel::new(
+            FixedCompactionModel {
+                result: ContextCompactionModelResult {
+                    summary: String::from("summary"),
+                    usage: TokenUsage {
+                        input_tokens: Some(80),
+                        output_tokens: Some(21),
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    },
+                },
+            },
+            configuration.runtime_model_catalog(),
+        );
+        let result = model
+            .execute(ContextCompactionModelRequest {
+                call: ModelCallId::from_uuid(Uuid::from_u128(1)),
+                session: SessionId::from_uuid(Uuid::from_u128(2)),
+                selection: DirectModelSelection::from_uuid(Uuid::from_u128(
+                    0x10000000000040008000000000000001,
+                )),
+                target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                    Uuid::from_u128(0x20000000000040008000000000000001),
+                )),
+                credential_reference: String::from("anthropic-primary"),
+                system_prompt: String::from("Summarize."),
+                rendered_range: String::from("history"),
+            })
+            .await;
+
+        assert_eq!(result, Err(ContextCompactionModelError::ProviderError));
     }
 }

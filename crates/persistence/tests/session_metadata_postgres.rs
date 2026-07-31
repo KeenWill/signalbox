@@ -38,6 +38,16 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_metadata";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
 const UNSUPPORTED_COMMAND_ACTOR: &str = "recovery";
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -234,7 +244,8 @@ fn assert_check_violation(error: &sqlx::Error) {
 async fn s01_inv002_initial_metadata_read_returns_unwritten_snapshot() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation(0x801, 0x701)).await?;
     let repository = SessionMetadataRepository::new(pool.clone());
 
@@ -278,7 +289,7 @@ async fn s01_inv012_missing_session_rejection_replays_exactly() -> Result<(), Bo
 async fn inv012_applied_metadata_receipt_rejects_unsupported_command_actor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -380,7 +391,7 @@ async fn inv012_metadata_receipt_rejects_supported_actor_reattribution()
     const CORRUPT_TOOL_REQUEST: u128 = 0xA01;
 
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, TARGET_SESSION))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -430,7 +441,7 @@ async fn inv012_metadata_receipt_rejects_supported_actor_reattribution()
 async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -504,7 +515,7 @@ async fn inv012_tool_metadata_actor_round_trips_exactly() -> Result<(), Box<dyn 
     const TOOL_REQUEST: u128 = 0xA01;
 
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(CREATION_COMMAND, TARGET_SESSION))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -560,7 +571,7 @@ async fn inv012_tool_metadata_actor_round_trips_exactly() -> Result<(), Box<dyn 
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_maximum_metadata_satellites_install_as_one_receipt() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -609,7 +620,7 @@ async fn inv012_maximum_metadata_satellites_install_as_one_receipt() -> Result<(
 async fn inv012_metadata_writer_stamp_is_sampled_after_lock_and_shared()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
 
@@ -693,7 +704,8 @@ async fn inv012_metadata_writer_stamp_is_sampled_after_lock_and_shared()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn metadata_list_applies_exact_tag_and_title_filters() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation(0x801, 0x701)).await?;
     create_repository.handle(creation(0x802, 0x702)).await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -739,7 +751,8 @@ async fn metadata_list_applies_exact_tag_and_title_filters() -> Result<(), Box<d
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv013_metadata_list_hides_archived_sessions_by_default() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation(0x801, 0x701)).await?;
     create_repository.handle(creation(0x802, 0x702)).await?;
     create_repository.handle(creation(0x803, 0x703)).await?;
@@ -781,7 +794,8 @@ async fn inv013_metadata_list_hides_archived_sessions_by_default() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation(0x801, 0x701)).await?;
     create_repository.handle(creation(0x802, 0x702)).await?;
     create_repository.handle(creation(0x803, 0x703)).await?;
@@ -822,7 +836,7 @@ async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>>
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_concurrent_replacements_serialize_and_replay() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -880,7 +894,7 @@ async fn inv012_concurrent_replacements_serialize_and_replay() -> Result<(), Box
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_prior_metadata_receipt_cannot_be_reinstalled() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -936,7 +950,7 @@ async fn inv012_prior_metadata_receipt_cannot_be_reinstalled() -> Result<(), Box
 async fn inv012_metadata_installation_authenticates_snapshot_before_supersession()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let mut transaction = pool.begin().await?;
@@ -989,7 +1003,7 @@ async fn inv012_metadata_installation_authenticates_snapshot_before_supersession
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_metadata_installation_evidence_rejects_delete() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     SessionMetadataRepository::new(pool.clone())
@@ -1022,7 +1036,7 @@ async fn inv012_metadata_installation_evidence_rejects_delete() -> Result<(), Bo
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv005_metadata_receipt_parent_rejects_update() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     SessionMetadataRepository::new(pool.clone())
@@ -1053,7 +1067,7 @@ async fn inv005_metadata_receipt_parent_rejects_update() -> Result<(), Box<dyn E
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv002_written_metadata_root_rejects_delete() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -1089,7 +1103,8 @@ async fn inv002_written_metadata_root_rejects_delete() -> Result<(), Box<dyn Err
 async fn inv002_metadata_root_rejects_identity_change_without_satellites()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation(0x801, 0x701)).await?;
     create_repository.handle(creation(0x802, 0x702)).await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -1142,7 +1157,7 @@ async fn inv002_metadata_root_rejects_identity_change_without_satellites()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv002_current_metadata_tag_rejects_partial_delete() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -1187,7 +1202,7 @@ async fn inv002_current_metadata_tag_rejects_partial_delete() -> Result<(), Box<
 async fn inv002_current_metadata_attribute_rejects_out_of_band_update() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -1226,7 +1241,7 @@ async fn inv002_current_metadata_attribute_rejects_out_of_band_update() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv005_metadata_receipt_satellites_reject_late_inserts() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     SessionMetadataRepository::new(pool.clone())
@@ -1296,7 +1311,7 @@ async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), B
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv002_current_metadata_timestamp_must_be_finite() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     SessionMetadataRepository::new(pool.clone())
@@ -1358,7 +1373,7 @@ async fn inv002_metadata_receipt_timestamp_must_be_finite() -> Result<(), Box<dy
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let mut transaction = pool.begin().await?;
@@ -1400,7 +1415,7 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_cross_kind_reuse_is_conflict() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -1427,7 +1442,7 @@ async fn inv012_cross_kind_reuse_is_conflict() -> Result<(), Box<dyn Error>> {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv002_metadata_list_validates_omitted_attributes() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -1546,7 +1561,8 @@ async fn inv005_metadata_tables_reject_truncate() -> Result<(), Box<dyn Error>> 
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn metadata_schema_bounds_every_indexed_string() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation(0xa01, 0x801)).await?;
     let repository = SessionMetadataRepository::new(pool.clone());
     repository

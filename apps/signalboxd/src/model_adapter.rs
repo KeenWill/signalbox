@@ -13,9 +13,9 @@ use signalbox_model_runtime_codex_cli::{
 use crate::configuration::{HubModelConfiguration, ModelAdapter};
 
 /// One prepared capability tagged by the adapter that created it.
-pub enum ConfiguredPreparedRequest<C, A> {
+pub enum ConfiguredPreparedRequest<C, A, P> {
     /// Anthropic HTTP request capability.
-    Anthropic(A),
+    Anthropic { runtime: Arc<A>, prepared: P },
     /// Codex CLI process request capability.
     CodexCli {
         runtime: Arc<CodexCliRuntime>,
@@ -25,7 +25,7 @@ pub enum ConfiguredPreparedRequest<C, A> {
 
 /// Runtime router whose exact routes come only from startup configuration.
 pub struct ConfiguredModelRuntime<A> {
-    anthropic: A,
+    anthropic: Option<Arc<A>>,
     codex_cli: Option<Arc<CodexCliRuntime>>,
     routes: HashMap<String, ModelAdapter>,
 }
@@ -33,11 +33,11 @@ pub struct ConfiguredModelRuntime<A> {
 impl<A> ConfiguredModelRuntime<A> {
     /// Constructs every configured adapter without provider interaction.
     pub fn new(
-        anthropic: A,
+        anthropic: Option<A>,
         configuration: &HubModelConfiguration,
     ) -> Result<Self, CodexCliConstructionError> {
         Ok(Self {
-            anthropic,
+            anthropic: anthropic.map(Arc::new),
             codex_cli: configuration.codex_cli_runtime()?.map(Arc::new),
             routes: configuration.adapter_routes(),
         })
@@ -58,10 +58,10 @@ impl<A> std::fmt::Debug for ConfiguredModelRuntime<A> {
     }
 }
 
-fn map_preparation<C, P, A>(
+fn map_preparation<C, P, R>(
     outcome: PreparationOutcome<C, P>,
-    prepared: impl FnOnce(P) -> ConfiguredPreparedRequest<C, A>,
-) -> PreparationOutcome<C, ConfiguredPreparedRequest<C, A>> {
+    prepared: impl FnOnce(P) -> R,
+) -> PreparationOutcome<C, R> {
     match outcome {
         PreparationOutcome::Prepared(value) => PreparationOutcome::Prepared(prepared(value)),
         PreparationOutcome::Cancelled { correlation } => {
@@ -90,7 +90,7 @@ where
     A: ModelRuntime<C> + Send + Sync,
     A::Prepared: Send,
 {
-    type Prepared = ConfiguredPreparedRequest<C, A::Prepared>;
+    type Prepared = ConfiguredPreparedRequest<C, A, A::Prepared>;
 
     async fn prepare(
         &self,
@@ -98,10 +98,24 @@ where
         cancellation: CancellationSignal,
     ) -> PreparationOutcome<C, Self::Prepared> {
         match self.routes.get(operation.resolved_target.as_str()) {
-            Some(ModelAdapter::Anthropic) => map_preparation(
-                self.anthropic.prepare(operation, cancellation).await,
-                ConfiguredPreparedRequest::Anthropic,
-            ),
+            Some(ModelAdapter::Anthropic) => {
+                let runtime = match self.anthropic.as_ref() {
+                    Some(runtime) => Arc::clone(runtime),
+                    None => {
+                        return PreparationOutcome::Defect {
+                            correlation: operation.correlation,
+                            defect: PreparationDefect::RequestConstructionFailed {
+                                detail: String::from("configured Anthropic adapter is unavailable"),
+                            },
+                        };
+                    }
+                };
+                let prepared = runtime.prepare(operation, cancellation).await;
+                map_preparation(prepared, |prepared| ConfiguredPreparedRequest::Anthropic {
+                    runtime,
+                    prepared,
+                })
+            }
             Some(ModelAdapter::CodexCli) => match self.codex_cli.as_ref() {
                 Some(runtime) => {
                     let prepared = runtime.prepare(operation, cancellation).await;
@@ -134,8 +148,8 @@ where
         cancellation: CancellationSignal,
     ) -> TerminalReport<C> {
         match prepared {
-            ConfiguredPreparedRequest::Anthropic(prepared) => {
-                self.anthropic.execute(prepared, sink, cancellation).await
+            ConfiguredPreparedRequest::Anthropic { runtime, prepared } => {
+                runtime.execute(prepared, sink, cancellation).await
             }
             ConfiguredPreparedRequest::CodexCli { runtime, prepared } => {
                 runtime.execute(*prepared, sink, cancellation).await
@@ -157,7 +171,7 @@ mod tests {
 
     use crate::configuration::HubModelConfiguration;
 
-    use super::{ConfiguredModelRuntime, ConfiguredPreparedRequest};
+    use super::ConfiguredModelRuntime;
 
     #[derive(Default)]
     struct Observations(Vec<Observation<String>>);
@@ -168,13 +182,7 @@ mod tests {
         }
     }
 
-    fn prepared(
-        outcome: PreparationOutcome<
-            String,
-            ConfiguredPreparedRequest<String, signalbox_model_runtime::ScriptedPrepared<String>>,
-        >,
-    ) -> Option<ConfiguredPreparedRequest<String, signalbox_model_runtime::ScriptedPrepared<String>>>
-    {
+    fn prepared<P>(outcome: PreparationOutcome<String, P>) -> Option<P> {
         match outcome {
             PreparationOutcome::Prepared(prepared) => Some(prepared),
             PreparationOutcome::Cancelled { .. }
@@ -241,7 +249,7 @@ context_window_tokens = 200000
             "claude-example",
         )));
         let received = anthropic.clone();
-        let runtime = ConfiguredModelRuntime::new(anthropic, &configuration)
+        let runtime = ConfiguredModelRuntime::new(Some(anthropic), &configuration)
             .expect("Anthropic-only runtime constructs");
         let operation = ModelOperation::new(
             String::from("anthropic-route"),
@@ -332,9 +340,8 @@ context_window_tokens = 200000
             temporary.path().display(),
         ))
         .expect("Codex mapping and process paths are valid");
-        let runtime =
-            ConfiguredModelRuntime::new(ScriptedModel::<String>::following([]), &configuration)
-                .expect("configured adapters construct");
+        let runtime = ConfiguredModelRuntime::new(None::<ScriptedModel<String>>, &configuration)
+            .expect("configured adapters construct");
         let operation = ModelOperation::new(
             String::from("codex-route"),
             CredentialReference::new("codex-subscription-primary"),

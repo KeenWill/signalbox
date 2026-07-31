@@ -3695,8 +3695,8 @@ where
     let model_selection = domain_model_selection(wire_request.initial_model_selection);
     let defaults = SessionConfigurationDefaults::new(model_selection);
     let through_position = wire_request.through_position;
-    let repository = ImportedSessionRepository::new(pool.clone())
-        .with_credential_pin(model_configuration.session_credential_pin());
+    let repository =
+        ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
 
     match repository.load(command_id).await {
         Ok(Some(recorded)) => {
@@ -5347,8 +5347,10 @@ where
         .await;
     };
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = CreateSessionRepository::new(services.pool.clone())
-        .with_credential_pin(services.model_configuration.session_credential_pin());
+    let repository = CreateSessionRepository::new(
+        services.pool.clone(),
+        services.model_configuration.session_credential_pin(),
+    );
     match repository.load(command_id).await {
         Ok(Some(recorded)) => {
             let recorded_name = recorded
@@ -5502,8 +5504,8 @@ async fn execute_create_session_request<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let repository = CreateSessionRepository::new(pool.clone())
-        .with_credential_pin(model_configuration.session_credential_pin());
+    let repository =
+        CreateSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
     match repository.load(request.command_id()).await {
         Ok(Some(recorded)) => {
             let command = recorded.command();

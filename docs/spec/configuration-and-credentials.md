@@ -664,8 +664,12 @@ deployment-side rules that code cannot enforce are stated in
   entry for the resolved target's family. Equal command replay returns the
   recorded session without consulting the current table, so a configuration edit
   never silently re-resolves an existing session's credentials. The migration
-  seeds each preexisting session with the sole previously composed `anthropic` /
-  `anthropic-primary` pair.
+  seeds each preexisting session with a `migration_backfill` creation event
+  containing the sole previously composed `anthropic` / `anthropic-primary`
+  pair. While that event remains current, an Anthropic route may use the durable
+  legacy entry for a differently named configured family; Codex routes never
+  may. A later explicit credential event ends this migration-only aliasing
+  because resolution then uses only that complete latest snapshot.
 - **Resolution timing.** The Anthropic adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
@@ -879,9 +883,6 @@ are outside this cluster-delivery policy:
   reconstitution's `CallTargetMismatch` cross-check fails closed only for a
   session with a live stored call; for everything else, not retargeting a
   `selection_id` is deployment discipline.
-- Multi-provider support and the reference-to-provider-component mapping are
-  undecided; today `provider = "anthropic"` and `anthropic-primary` are
-  hard-coded.
 - The [credential operations policy](#credential-operations-policy) is
   operational discipline with no code or CI enforcement; violating it cannot be
   caught by any test.

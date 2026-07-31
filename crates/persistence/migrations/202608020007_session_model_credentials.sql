@@ -8,13 +8,18 @@ CREATE TABLE session_model_credential_record (
         CHECK (event_ordinal BETWEEN 1 AND 18446744073709551615),
     event_kind text NOT NULL CHECK (event_kind IN ('created', 'updated')),
     provenance_kind text NOT NULL
-        CHECK (provenance_kind IN ('create_session', 'imported_session', 'credential_update')),
+        CHECK (provenance_kind IN (
+            'create_session', 'imported_session', 'migration_backfill',
+            'credential_update'
+        )),
     provenance_command_id uuid NOT NULL REFERENCES durable_command(command_id) ON DELETE RESTRICT,
     recorded_at timestamptz NOT NULL,
     PRIMARY KEY (session_id, event_ordinal),
     CHECK (
         (event_ordinal = 1 AND event_kind = 'created'
-            AND provenance_kind IN ('create_session', 'imported_session'))
+            AND provenance_kind IN (
+                'create_session', 'imported_session', 'migration_backfill'
+            ))
         OR
         (event_ordinal > 1 AND event_kind = 'updated'
             AND provenance_kind = 'credential_update')
@@ -123,6 +128,27 @@ CREATE TRIGGER session_model_credential_entry_immutable
 BEFORE UPDATE OR DELETE ON session_model_credential_entry
 FOR EACH ROW EXECUTE FUNCTION reject_session_model_credential_rewrite();
 
+CREATE FUNCTION reject_session_model_credential_entry_after_publication()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM session_current_model_credentials
+         WHERE session_id = NEW.session_id
+           AND current_event_ordinal >= NEW.event_ordinal
+    ) THEN
+        RAISE EXCEPTION 'published session model credential snapshots are immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER session_model_credential_entry_sealed_after_publication
+BEFORE INSERT ON session_model_credential_entry
+FOR EACH ROW EXECUTE FUNCTION reject_session_model_credential_entry_after_publication();
+
 CREATE TRIGGER session_model_credential_record_rejects_truncate
 BEFORE TRUNCATE ON session_model_credential_record
 FOR EACH STATEMENT EXECUTE FUNCTION reject_session_model_credential_rewrite();
@@ -137,19 +163,17 @@ FOR EACH STATEMENT EXECUTE FUNCTION reject_session_model_credential_rewrite();
 
 WITH creation AS (
     SELECT created_session_id AS session_id,
-           command_id,
-           'create_session'::text AS provenance_kind
+           command_id
       FROM create_session_command
     UNION ALL
     SELECT created_session_id,
-           command_id,
-           'imported_session'::text
+           command_id
       FROM create_session_from_imported_frontier_command
 )
 INSERT INTO session_model_credential_record
     (session_id, event_ordinal, event_kind, provenance_kind,
      provenance_command_id, recorded_at)
-SELECT session_id, 1, 'created', provenance_kind, command_id, transaction_timestamp()
+SELECT session_id, 1, 'created', 'migration_backfill', command_id, transaction_timestamp()
   FROM creation;
 
 INSERT INTO session_model_credential_entry

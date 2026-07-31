@@ -51,6 +51,16 @@ const DATABASE_NAME: &str = "signalbox_imported_session_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
+
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
@@ -133,7 +143,7 @@ async fn s28_inv038_inv039_first_imported_frontier_creation_commits_exact_seed_a
     .await?;
 
     let command = imported_command(0x300, &conversation, ImportedSessionRelationship::Resume);
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let mut next_semantic = 0x600_u128;
     let outcome = repository
         .handle(
@@ -195,7 +205,7 @@ async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generat
     .await?;
 
     let command = imported_command(0x301, &conversation, ImportedSessionRelationship::Resume);
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let mut next_semantic = 0x610_u128;
     let first = repository
         .handle(
@@ -267,7 +277,7 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
             DangerousToolAutoApproval::ApproveAll,
         ),
     );
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let mut next_semantic = 0x620_u128;
     let created = repository
         .handle(
@@ -332,7 +342,7 @@ async fn s28_inv002_inv039_current_session_load_reconstitutes_imported_ancestry(
     .await?;
 
     let command = imported_command(0x303, &conversation, ImportedSessionRelationship::Resume);
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let mut next_semantic = 0x630_u128;
     let created = repository
         .handle(
@@ -387,7 +397,7 @@ async fn s28_inv012_inv039_conflicting_reuse_is_typed_and_generation_free()
     .await?;
 
     let command = imported_command(0x304, &conversation, ImportedSessionRelationship::Resume);
-    let repository = ImportedSessionRepository::new(pool);
+    let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());
     let mut next_semantic = 0x640_u128;
     let created = repository
         .handle(
@@ -430,7 +440,7 @@ async fn s28_inv012_inv039_conflicting_reuse_is_typed_and_generation_free()
 async fn s28_inv012_inv039_missing_conversation_remains_unclaimed_and_generation_free()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
 
     let absent = imported(0x111, 0x211, "{\"type\":\"summary\",\"value\":null}");
     let absent_command = imported_command(0x310, &absent, ImportedSessionRelationship::Resume);
@@ -468,7 +478,7 @@ async fn s28_inv012_inv039_missing_frontier_remains_unclaimed_and_generation_fre
         stored.clone(),
     )
     .await?;
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
 
     let alternate = imported(0x110, 0x212, "{\"type\":\"summary\",\"value\":\"other\"}");
     let missing_frontier_command =
@@ -515,7 +525,8 @@ async fn s28_inv001_inv012_inv039_concurrent_equal_creation_has_one_identity_con
     )
     .await?;
     let command = imported_command(0x315, &conversation, ImportedSessionRelationship::Fork);
-    let first_repository = ImportedSessionRepository::new(pool.clone());
+    let first_repository =
+        ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let second_repository = first_repository.clone();
     let generated = Arc::new(AtomicU64::new(0));
     let first_generated = Arc::clone(&generated);
@@ -599,7 +610,7 @@ async fn s28_inv001_inv039_generated_session_identity_collision_is_typed()
         conversation.clone(),
     )
     .await?;
-    let repository = ImportedSessionRepository::new(pool);
+    let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());
     let occupied_session = SessionId::from_uuid(Uuid::from_u128(0x416));
     repository
         .handle(
@@ -649,7 +660,7 @@ async fn s28_inv001_inv039_generated_semantic_entry_identity_collision_is_typed(
         conversation.clone(),
     )
     .await?;
-    let repository = ImportedSessionRepository::new(pool);
+    let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());
     let occupied_semantic = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x618));
     repository
         .handle(
@@ -699,7 +710,7 @@ async fn s28_inv001_inv039_generated_seed_frontier_identity_collision_is_typed()
         conversation.clone(),
     )
     .await?;
-    let repository = ImportedSessionRepository::new(pool);
+    let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());
     let occupied_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x71a));
     repository
         .handle(
@@ -749,7 +760,7 @@ async fn s28_inv002_command_load_rejects_stored_sentinel_command_identity()
         conversation.clone(),
     )
     .await?;
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let command = imported_command(0x31c, &conversation, ImportedSessionRelationship::Resume);
     repository
         .handle(
@@ -802,7 +813,7 @@ async fn s28_inv002_inv039_current_load_rejects_imported_template_provenance()
         conversation.clone(),
     )
     .await?;
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let created = repository
         .handle(
             imported_command(0x31f, &conversation, ImportedSessionRelationship::Resume),
@@ -852,7 +863,7 @@ async fn s28_inv039_current_load_rejects_missing_imported_seed() -> Result<(), B
         conversation.clone(),
     )
     .await?;
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let created = repository
         .handle(
             imported_command(0x320, &conversation, ImportedSessionRelationship::Resume),
@@ -901,7 +912,7 @@ async fn s28_inv002_inv039_current_load_rejects_cross_wired_seed_header_count()
         conversation.clone(),
     )
     .await?;
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let created = repository
         .handle(
             imported_command(0x321, &conversation, ImportedSessionRelationship::Fork),

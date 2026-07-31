@@ -51,6 +51,16 @@ const DATABASE_NAME: &str = "signalboxd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
+
 #[derive(Clone, Copy, Debug)]
 struct UnexpectedToolExecutor;
 
@@ -146,7 +156,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(
         UuidV7SessionIdGenerator,
-        CreateSessionRepository::new(pool.clone()),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     let CreateSessionOutcome::Applied(created) = create
         .execute(CreateSessionRequest::try_new(

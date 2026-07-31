@@ -35,6 +35,8 @@ pub const ANTHROPIC_CREDENTIAL_REFERENCE: &str = "anthropic-primary";
 /// Non-secret reference naming the deployment-selected ambient Codex login.
 pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 
+const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
+
 /// Adapter implementations this daemon build can construct.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ModelAdapter {
@@ -100,6 +102,11 @@ impl ResolvedModelRoute {
     /// Build-provided adapter selected by the mapping table.
     pub const fn adapter(&self) -> ModelAdapter {
         self.adapter
+    }
+
+    /// Reports whether this route names the Anthropic HTTP adapter.
+    pub const fn uses_anthropic_adapter(&self) -> bool {
+        matches!(self.adapter, ModelAdapter::Anthropic)
     }
 
     /// Non-secret credential profile pinned for new sessions.
@@ -376,12 +383,17 @@ impl HubModelConfiguration {
             .map_err(|_| HubModelConfigurationError::DuplicateSelection)?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
-        let credential_families = ModelCredentialFamilyCatalog::try_new(
-            routes
-                .values()
-                .map(|route| (route.target, Arc::<str>::from(route.model_family.as_ref()))),
-        )
-        .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
+        let credential_families =
+            ModelCredentialFamilyCatalog::try_new(routes.values().map(|route| {
+                (
+                    route.target,
+                    Arc::<str>::from(route.model_family.as_ref()),
+                    route
+                        .uses_anthropic_adapter()
+                        .then(|| Arc::<str>::from(MIGRATED_ANTHROPIC_MODEL_FAMILY)),
+                )
+            }))
+            .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         Ok(Self {
             targets,
             runtime_models,
@@ -470,6 +482,17 @@ impl HubModelConfiguration {
 
     pub(crate) fn adapter_routes(&self) -> HashMap<String, ModelAdapter> {
         self.provider_model_adapters.clone()
+    }
+
+    fn uses_adapter(&self, adapter: ModelAdapter) -> bool {
+        self.provider_model_adapters
+            .values()
+            .any(|configured| *configured == adapter)
+    }
+
+    /// Reports whether at least one configured route requires Anthropic.
+    pub fn uses_anthropic_adapter(&self) -> bool {
+        self.uses_adapter(ModelAdapter::Anthropic)
     }
 
     /// Returns the exact configured compaction system prompt.

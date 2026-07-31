@@ -95,6 +95,16 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalboxd_tool_loop_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
 const FIXTURE_ID_SEED: u128 = 0x3100;
 const DECISION_COMMAND_ID: u128 = 0x3110;
 const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
@@ -174,7 +184,7 @@ impl ToolLoopFixture {
         );
         let mut create = CreateSessionService::new(
             UuidV7SessionIdGenerator,
-            CreateSessionRepository::new(pool.clone()),
+            CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
         );
         let CreateSessionOutcome::Applied(created) = create
             .execute(CreateSessionRequest::try_new(
