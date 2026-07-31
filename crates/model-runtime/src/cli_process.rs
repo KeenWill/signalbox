@@ -68,7 +68,10 @@ pub struct CliProcessRequest<C, D> {
     pub interrupt_grace: Duration,
     /// Maximum JSONL event size.
     pub event_limit: usize,
-    /// Maximum retained stderr size.
+    /// Maximum emitted stderr evidence size.
+    ///
+    /// Sanitization transiently retains one additional window of this size so
+    /// JSON-aware redaction runs before evidence truncation.
     pub stderr_limit: usize,
     /// Provider-specific diagnostic labels.
     pub labels: CliProcessLabels,
@@ -784,7 +787,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                     format!(
                         "{} exited with status {status}: {}",
                         labels.process,
-                        stderr.classification.trim()
+                        stderr.classification().trim()
                     ),
                 )
             } else if let Some(error) = input_error {
@@ -1153,18 +1156,28 @@ fn oversize_event(limit: usize, labels: CliProcessLabels) -> std::io::Error {
 }
 
 struct BoundedOutput {
-    text: String,
-    classification: String,
+    raw: Vec<u8>,
+    classification_end: usize,
     evidence_truncated: bool,
 }
 
 impl BoundedOutput {
     fn diagnostic(text: String) -> Self {
+        let raw = text.into_bytes();
         Self {
-            classification: text.clone(),
-            text,
+            classification_end: raw.len(),
+            raw,
             evidence_truncated: false,
         }
+    }
+
+    fn classification(&self) -> String {
+        let mut classification =
+            String::from_utf8_lossy(&self.raw[..self.classification_end]).into_owned();
+        if self.evidence_truncated {
+            classification.push_str(TRUNCATION_SUFFIX);
+        }
+        classification
     }
 }
 
@@ -1186,13 +1199,9 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
         evidence_truncated |= retained.len() > evidence_limit || admitted < read;
     }
     let classification_end = retained.len().min(evidence_limit);
-    let mut classification = String::from_utf8_lossy(&retained[..classification_end]).into_owned();
-    if evidence_truncated {
-        classification.push_str(TRUNCATION_SUFFIX);
-    }
     Ok(BoundedOutput {
-        text: String::from_utf8_lossy(&retained).into_owned(),
-        classification,
+        raw: retained,
+        classification_end,
         evidence_truncated,
     })
 }
@@ -1210,7 +1219,8 @@ fn sanitized_stderr<C: Clone>(
     // JSON-aware sanitization can see escapes and closing syntax beyond the
     // emitted prefix. Cutting at the evidence limit first could split an
     // escape and hide the reversible credential it encodes.
-    let sanitized = sink.redact_terminal_failure_text(&stderr.text);
+    let text = String::from_utf8_lossy(&stderr.raw);
+    let sanitized = sink.redact_terminal_failure_text(&text);
     truncate_text(&sanitized, evidence_limit, stderr.evidence_truncated)
 }
 
@@ -1740,8 +1750,8 @@ mod tests {
             .expect("the fixture carries one JSON escape")
             + 2;
         let stderr = BoundedOutput {
-            classification: body.clone(),
-            text: body,
+            classification_end: body.len(),
+            raw: body.into_bytes(),
             evidence_truncated: false,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
@@ -1759,8 +1769,8 @@ mod tests {
     fn an_incomplete_stderr_window_is_sanitized_and_marked_truncated() {
         const SYNTHETIC_CREDENTIAL: &str = "SYNTHETIC-SECRET-STDERR-Z";
         let stderr = BoundedOutput {
-            text: format!("api_key={SYNTHETIC_CREDENTIAL}"),
-            classification: String::new(),
+            raw: format!("api_key={SYNTHETIC_CREDENTIAL}").into_bytes(),
+            classification_end: 0,
             evidence_truncated: true,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
@@ -1776,8 +1786,8 @@ mod tests {
     fn post_sanitization_truncation_keeps_the_redaction_marker_atomic() {
         const EVIDENCE_LIMIT: usize = 12;
         let stderr = BoundedOutput {
-            text: "api_key=x".to_string(),
-            classification: String::new(),
+            raw: b"api_key=x".to_vec(),
+            classification_end: 0,
             evidence_truncated: false,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
@@ -1797,7 +1807,7 @@ mod tests {
             .await
             .expect("the in-memory reader succeeds");
 
-        assert_eq!(output.text.as_bytes(), &INPUT[..2 * EVIDENCE_LIMIT]);
+        assert_eq!(output.raw, &INPUT[..2 * EVIDENCE_LIMIT]);
     }
 
     #[tokio::test]
@@ -1810,7 +1820,7 @@ mod tests {
             .expect("the in-memory reader succeeds");
 
         let expected = [&INPUT[..EVIDENCE_LIMIT], TRUNCATION_SUFFIX.as_bytes()].concat();
-        assert_eq!(output.classification.as_bytes(), expected);
+        assert_eq!(output.classification().as_bytes(), expected);
     }
 
     #[tokio::test]
@@ -1822,7 +1832,7 @@ mod tests {
             .await
             .expect("the in-memory reader succeeds");
 
-        assert_eq!(output.text.as_bytes(), input);
+        assert_eq!(output.raw, input);
         assert!(!output.evidence_truncated);
     }
 
