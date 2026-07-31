@@ -561,7 +561,7 @@ private struct ProcessConversationDetailScreen: View {
 }
 
 struct ProcessImportedContinuationRetryState {
-  private var unresolvedCreation: SignalboxPreparedImportedSessionCreation?
+  private var unresolvedCreations: [SignalboxPreparedImportedSessionCreation] = []
 
   func reusableCreation(
     importedConversationID: SignalboxCanonicalUUID,
@@ -569,23 +569,22 @@ struct ProcessImportedContinuationRetryState {
     relationship: SignalboxImportedSessionRelationship,
     modelSelection: SignalboxModelSelection
   ) -> SignalboxPreparedImportedSessionCreation? {
-    guard let unresolvedCreation,
-      unresolvedCreation.importedConversationID == importedConversationID,
-      unresolvedCreation.throughPosition == throughPosition,
-      unresolvedCreation.relationship == relationship,
-      unresolvedCreation.modelSelection == modelSelection
-    else {
-      return nil
+    unresolvedCreations.first {
+      $0.importedConversationID == importedConversationID
+        && $0.throughPosition == throughPosition
+        && $0.relationship == relationship
+        && $0.modelSelection == modelSelection
     }
-    return unresolvedCreation
   }
 
-  mutating func prepareForNewIntent() {
-    unresolvedCreation = nil
+  mutating func removeAll() {
+    unresolvedCreations.removeAll()
   }
 
-  mutating func recordSuccess() {
-    unresolvedCreation = nil
+  mutating func recordSuccess(_ prepared: SignalboxPreparedImportedSessionCreation) {
+    unresolvedCreations.removeAll {
+      $0.commandID == prepared.commandID
+    }
   }
 
   mutating func recordFailure(
@@ -605,13 +604,48 @@ struct ProcessImportedContinuationRetryState {
     } else {
       retainsPreparedCreation = false
     }
-    unresolvedCreation = retainsPreparedCreation ? prepared : nil
+    guard let prepared else {
+      return
+    }
+    unresolvedCreations.removeAll {
+      $0.importedConversationID == prepared.importedConversationID
+        && $0.throughPosition == prepared.throughPosition
+        && $0.relationship == prepared.relationship
+        && $0.modelSelection == prepared.modelSelection
+    }
+    if retainsPreparedCreation {
+      unresolvedCreations.append(prepared)
+    }
   }
 }
 
 @MainActor
 final class ProcessImportedContinuationRetryStore {
   private var state = ProcessImportedContinuationRetryState()
+  private var endpoint: String?
+  private var endpointGeneration: UInt64 = 0
+  private var isAttemptInProgress = false
+
+  func activateEndpoint(_ endpoint: String?) {
+    guard self.endpoint != endpoint else {
+      return
+    }
+    self.endpoint = endpoint
+    endpointGeneration &+= 1
+    state.removeAll()
+  }
+
+  func beginAttempt() -> UInt64? {
+    guard !isAttemptInProgress else {
+      return nil
+    }
+    isAttemptInProgress = true
+    return endpointGeneration
+  }
+
+  func endAttempt() {
+    isAttemptInProgress = false
+  }
 
   func reusableCreation(
     importedConversationID: SignalboxCanonicalUUID,
@@ -627,19 +661,25 @@ final class ProcessImportedContinuationRetryStore {
     )
   }
 
-  func prepareForNewIntent() {
-    state.prepareForNewIntent()
-  }
-
-  func recordSuccess() {
-    state.recordSuccess()
+  func recordSuccess(
+    _ prepared: SignalboxPreparedImportedSessionCreation,
+    endpointGeneration: UInt64
+  ) {
+    guard endpointGeneration == self.endpointGeneration else {
+      return
+    }
+    state.recordSuccess(prepared)
   }
 
   func recordFailure(
     _ error: Error,
     prepared: SignalboxPreparedImportedSessionCreation?,
-    reusedUnresolvedCreation: Bool
+    reusedUnresolvedCreation: Bool,
+    endpointGeneration: UInt64
   ) {
+    guard endpointGeneration == self.endpointGeneration else {
+      return
+    }
     state.recordFailure(
       error,
       prepared: prepared,
@@ -759,6 +799,14 @@ final class ProcessImportedConversationViewModel: ObservableObject {
         importedContinuationInProgressMessage
       )
     }
+    guard let retryEndpointGeneration = continuationRetryStore.beginAttempt() else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        importedContinuationInProgressMessage
+      )
+    }
+    defer {
+      continuationRetryStore.endAttempt()
+    }
     guard let service = serviceProvider() else {
       errorMessage = remoteTransportGateMessage
       throw SignalboxProcessServiceError.unexpectedMessage(remoteTransportGateMessage)
@@ -781,7 +829,6 @@ final class ProcessImportedConversationViewModel: ObservableObject {
         prepared = unresolved
         reusedUnresolvedCreation = true
       } else {
-        continuationRetryStore.prepareForNewIntent()
         prepared = try await service.prepareImportedSessionCreation(
           conversation: conversation,
           throughPosition: throughPosition,
@@ -791,14 +838,18 @@ final class ProcessImportedConversationViewModel: ObservableObject {
       }
       preparedForAttempt = prepared
       let sessionID = try await service.createSessionFromImportedFrontier(prepared)
-      continuationRetryStore.recordSuccess()
+      continuationRetryStore.recordSuccess(
+        prepared,
+        endpointGeneration: retryEndpointGeneration
+      )
       errorMessage = nil
       return sessionID
     } catch {
       continuationRetryStore.recordFailure(
         error,
         prepared: preparedForAttempt,
-        reusedUnresolvedCreation: reusedUnresolvedCreation
+        reusedUnresolvedCreation: reusedUnresolvedCreation,
+        endpointGeneration: retryEndpointGeneration
       )
       errorMessage = error.localizedDescription
       throw error

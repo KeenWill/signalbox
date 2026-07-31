@@ -291,7 +291,16 @@ private func requireImportedConversationID(
   case .conversationImportInserted(let importedConversationID),
     .conversationImportAlreadyImported(let importedConversationID):
     return importedConversationID
-  default:
+  case .sessionCreated, .inputSubmitted, .toolRequestDecided, .sessionDefaults,
+    .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
+    .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
+    .sessionMetadataReplaced, .conversationPageStart, .conversationSummary,
+    .conversationPageEnd, .importedConversationStart, .importedConversationEntry,
+    .importedConversationEnd, .modelAliasesStart, .modelAliasSummary,
+    .modelAliasesEnd, .transcriptSnapshotStart, .transcriptTurn,
+    .transcriptModelCallUsage, .transcriptModelCallsEnd, .transcriptEntry,
+    .transcriptTextEntry, .transcriptContent, .transcriptSnapshotEnd,
+    .sessionEvent, .providerTextDelta, .protocolError, .unknown:
     throw RealServerFixtureError.unexpectedMessage
   }
 }

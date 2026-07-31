@@ -69,6 +69,7 @@ final class AppCoordinator: ObservableObject {
             #if os(macOS)
             if let socketPath = processSettings.validatedSocketPath {
                 self.processService = Self.makeProcessService(socketPath: socketPath)
+                importedContinuationRetryStore.activateEndpoint(socketPath)
             }
             #endif
         }
@@ -84,9 +85,10 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func replaceProcessService(
-        _ replacement: (any SignalboxProcessServiceProtocol)?
+        _ replacement: (any SignalboxProcessServiceProtocol)?,
+        socketPath: String?
     ) {
-        importedContinuationRetryStore.prepareForNewIntent()
+        importedContinuationRetryStore.activateEndpoint(socketPath)
         processService = replacement
         NotificationCenter.default.post(name: .processServiceChanged, object: nil)
     }
@@ -98,20 +100,20 @@ final class AppCoordinator: ObservableObject {
         }
         #if os(macOS)
         guard let socketPath = processSettings.validatedSocketPath else {
-            replaceProcessService(nil)
+            replaceProcessService(nil, socketPath: nil)
             processSettings.save()
             return
         }
         let candidate = Self.makeProcessService(socketPath: socketPath)
-        replaceProcessService(nil)
+        replaceProcessService(nil, socketPath: socketPath)
         await processSettings.test(using: candidate, expectedSocketPath: socketPath)
         if processSettings.connectionStatus == .connected,
            processSettings.validatedSocketPath == socketPath {
-            replaceProcessService(candidate)
+            replaceProcessService(candidate, socketPath: socketPath)
             NotificationCenter.default.post(name: .refreshRequested, object: nil)
         }
         #else
-        replaceProcessService(nil)
+        replaceProcessService(nil, socketPath: nil)
         await processSettings.test(using: nil)
         #endif
     }
@@ -120,7 +122,7 @@ final class AppCoordinator: ObservableObject {
         guard !isMockMode else {
             return
         }
-        replaceProcessService(nil)
+        replaceProcessService(nil, socketPath: processSettings.validatedSocketPath)
         processSettings.save()
         NotificationCenter.default.post(name: .refreshRequested, object: nil)
     }
