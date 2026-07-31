@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use std::{collections::BTreeMap, ffi::OsString, time::Duration};
+use std::{collections::BTreeMap, ffi::OsString, os::unix::fs::PermissionsExt, time::Duration};
 
 use signalbox_tools_exec::{
     CaptureCompleteness, ProcessEnvironment, ProcessOutcome, ProcessRequest, ProcessRunner,
@@ -13,7 +13,74 @@ const DISPATCH_MODE: &str = "--dispatch";
 const EXPECTED_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
 const EXPLICIT_ENVIRONMENT_NAME: &str = "SIGNALBOX_EXEC_FIXTURE";
 const EXPLICIT_ENVIRONMENT_VALUE: &str = "visible";
+const SUCCESSFUL_EXIT_CODE: i32 = 0;
 const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
+const REPLACEMENT_SUPERVISOR_EXIT_CODE: i32 = 99;
+const SUPERVISOR_PIN_DIRECTORY: &str = "signalbox-exec-supervisor-pin";
+
+#[tokio::test]
+async fn production_runner_pins_the_supervisor_executable_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory =
+        std::env::temp_dir().join(format!("{SUPERVISOR_PIN_DIRECTORY}-{}", std::process::id()));
+    std::fs::create_dir(&directory)?;
+    let supplied = directory.join("supervisor");
+    let moved = directory.join("original-supervisor");
+    std::fs::copy(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"), &supplied)?;
+    std::fs::set_permissions(&supplied, std::fs::Permissions::from_mode(0o700))?;
+    let mut runner = TokioProcessRunner::try_new(&supplied)?;
+    std::fs::rename(&supplied, &moved)?;
+    std::fs::write(
+        &supplied,
+        format!("#!/bin/sh\nexit {REPLACEMENT_SUPERVISOR_EXIT_CODE}\n"),
+    )?;
+    std::fs::set_permissions(&supplied, std::fs::Permissions::from_mode(0o700))?;
+    let request = ProcessRequest {
+        program: fixture_program("true")?.into_os_string(),
+        arguments: Vec::new(),
+        working_directory: std::env::current_dir()?,
+        timeout: Duration::from_secs(5),
+        capture_bytes: 1024,
+        environment: BTreeMap::new(),
+        environment_inheritance: ProcessEnvironment::Clear,
+    };
+
+    let result = runner.run(request).await;
+    drop(runner);
+    std::fs::remove_dir_all(directory)?;
+
+    assert_eq!(
+        result.outcome,
+        ProcessOutcome::Exited {
+            code: Some(SUCCESSFUL_EXIT_CODE),
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn production_runner_preserves_outer_spawn_path_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let request = ProcessRequest {
+        program: fixture_program("true")?.into_os_string(),
+        arguments: Vec::new(),
+        working_directory: std::env::current_dir()?.join("missing-exec-working-directory"),
+        timeout: Duration::from_secs(5),
+        capture_bytes: 1024,
+        environment: BTreeMap::new(),
+        environment_inheritance: ProcessEnvironment::Clear,
+    };
+
+    let result = production_runner()?.run(request).await;
+
+    assert_eq!(
+        result.outcome,
+        ProcessOutcome::SpawnFailed {
+            reason: signalbox_tools_exec::ProcessSpawnFailure::NotFound,
+        }
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn production_runner_reports_observed_bytes_beyond_limit()

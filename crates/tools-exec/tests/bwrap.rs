@@ -38,4 +38,5 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 #[test]
 fn bwrap_gate_distinguishes_missing_from_unusable_evidence() {
     assert_ne!(BwrapAvailability::Missing, BwrapAvailability::Unusable);
+    assert_ne!(BwrapAvailability::TimedOut, BwrapAvailability::Unusable);
 }

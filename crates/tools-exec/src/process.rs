@@ -457,6 +457,8 @@ pub enum BwrapAvailability {
     Missing,
     /// The platform or host policy prevented the profile from starting.
     Unusable,
+    /// The exact profile probe exhausted the request deadline.
+    TimedOut,
 }
 
 /// Injectable one-shot process spawning and bubblewrap probing.
@@ -478,6 +480,8 @@ pub trait ProcessRunner: Clone + Send {
 #[derive(Clone, Debug)]
 pub struct TokioProcessRunner {
     supervisor_program: PathBuf,
+    #[cfg(target_os = "linux")]
+    _supervisor: Arc<rustix::fd::OwnedFd>,
 }
 
 impl TokioProcessRunner {
@@ -498,8 +502,43 @@ impl TokioProcessRunner {
                 source: None,
             });
         }
+        #[cfg(target_os = "linux")]
+        let (supervisor_program, _supervisor) = {
+            let supervisor = rustix::fs::open(
+                &canonical,
+                rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|source| ExecToolConstructionError::SupervisorProgram {
+                path: supplied.to_owned(),
+                source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+            })?;
+            let metadata = rustix::fs::fstat(&supervisor).map_err(|source| {
+                ExecToolConstructionError::SupervisorProgram {
+                    path: supplied.to_owned(),
+                    source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                }
+            })?;
+            if rustix::fs::FileType::from_raw_mode(metadata.st_mode)
+                != rustix::fs::FileType::RegularFile
+            {
+                return Err(ExecToolConstructionError::SupervisorProgram {
+                    path: supplied.to_owned(),
+                    source: None,
+                });
+            }
+            let pinned_program = PathBuf::from(format!(
+                "/proc/self/fd/{}",
+                rustix::fd::AsRawFd::as_raw_fd(&supervisor)
+            ));
+            (pinned_program, Arc::new(supervisor))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let supervisor_program = canonical;
         Ok(Self {
-            supervisor_program: canonical,
+            supervisor_program,
+            #[cfg(target_os = "linux")]
+            _supervisor,
         })
     }
 }
@@ -516,8 +555,8 @@ impl ProcessRunner for TokioProcessRunner {
             ProcessOutcome::SpawnFailed {
                 reason: ProcessSpawnFailure::NotFound,
             } => BwrapAvailability::Missing,
+            ProcessOutcome::TimedOut => BwrapAvailability::TimedOut,
             ProcessOutcome::Exited { .. }
-            | ProcessOutcome::TimedOut
             | ProcessOutcome::SpawnFailed { .. }
             | ProcessOutcome::SupervisionFailed { .. } => BwrapAvailability::Unusable,
         }
@@ -645,6 +684,12 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 outcome: ProcessOutcome::SpawnFailed {
                     reason: ProcessSpawnFailure::SandboxUnavailable,
                 },
+                stdout: OutputCapture::empty(),
+                stderr: OutputCapture::empty(),
+            },
+            BwrapAvailability::TimedOut => ExecResult {
+                confinement: ExecutionConfinement::SandboxSetupFailed,
+                outcome: ProcessOutcome::TimedOut,
                 stdout: OutputCapture::empty(),
                 stderr: OutputCapture::empty(),
             },
@@ -937,7 +982,7 @@ pub enum ExecutionConfinement {
         /// Typed host evidence from the exact profile probe.
         availability: BwrapAvailability,
     },
-    /// Bubblewrap was available but did not confirm target dispatch.
+    /// Bubblewrap setup did not complete or confirm target dispatch.
     SandboxSetupFailed,
 }
 
@@ -968,7 +1013,7 @@ pub enum ProcessOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessSpawnFailure {
-    /// Executable lookup failed.
+    /// An executable or request path lookup failed.
     NotFound,
     /// The host denied process creation.
     PermissionDenied,
@@ -1212,9 +1257,13 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(_) => {
+        Err(error) => {
             return empty_process_result(ProcessOutcome::SpawnFailed {
-                reason: ProcessSpawnFailure::ProcessTreeUnsupported,
+                reason: match error.kind() {
+                    std::io::ErrorKind::NotFound => ProcessSpawnFailure::NotFound,
+                    std::io::ErrorKind::PermissionDenied => ProcessSpawnFailure::PermissionDenied,
+                    _ => ProcessSpawnFailure::Other,
+                },
             });
         }
     };
@@ -1556,6 +1605,30 @@ mod tests {
                 reason: ProcessSpawnFailure::SandboxUnavailable,
             }
         );
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandbox_probe_timeout_remains_timeout_evidence() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::TimedOut,
+            successful_process(b"must remain unused"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, root)?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         assert_eq!(observation.recorded_requests(), Vec::new());
         Ok(())
     }
