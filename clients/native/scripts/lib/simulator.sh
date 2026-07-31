@@ -198,8 +198,12 @@ simulator_resolve_iphone_ids() {
 
 		if device_name="$(simulator_destination_device_name "$XCODE_DESTINATION")"; then
 			device_os="$(simulator_destination_runtime_os "$XCODE_DESTINATION" || true)"
-			device_list="$(simulator_list_available)"
-			simulator_find_iphone_ids_by_name "$device_name" "$device_os" "$device_list"
+			if [[ -n "$device_os" ]]; then
+				device_list="$(simulator_list_available)"
+				simulator_find_iphone_ids_by_name "$device_name" "$device_os" "$device_list"
+			else
+				simulator_resolve_device_id_by_name "$device_name" "" "$min_os"
+			fi
 			return 0
 		fi
 	fi
