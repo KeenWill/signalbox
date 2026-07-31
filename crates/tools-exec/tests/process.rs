@@ -26,6 +26,7 @@ const REPLACEMENT_SUPERVISOR_EXIT_CODE: i32 = 99;
 const SUPERVISOR_PIN_DIRECTORY: &str = "signalbox-exec-supervisor-pin";
 const PARENT_KILL_PID_FILE: &str = "signalbox-exec-parent-kill";
 const GRANDPARENT_KILL_PID_FILE: &str = "signalbox-exec-grandparent-kill";
+const ESCAPED_SUPERVISOR_KILL_PID_FILE: &str = "signalbox-exec-escaped-supervisor-kill";
 const CANCELLATION_PID_FILE: &str = "signalbox-tools-exec-cancel";
 
 struct TemporaryPath {
@@ -396,6 +397,40 @@ async fn production_runner_survives_target_killing_the_authority_supervisor()
         let script = format!(
             "supervisor=$({} '/^PPid:/ {{print $2}}' /proc/$PPID/status); printf %s $$ > {}; kill -KILL $supervisor; exec {} 30",
             fixture_program("awk")?.display(),
+            pid_file.as_path().display(),
+            fixture_program("sleep")?.display()
+        );
+        let request = shell_request(&script, Duration::from_secs(5), std::env::current_dir()?)?;
+        let started = std::time::Instant::now();
+
+        let result = production_runner()?.run(request).await;
+        let elapsed = started.elapsed();
+        let target = std::fs::read_to_string(pid_file.as_path())?.parse::<u32>()?;
+        await_process_absent(target).await?;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            }
+        );
+        assert!(elapsed < Duration::from_secs(2));
+        assert!(!std::path::Path::new(&format!("/proc/{target}")).exists());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn production_runner_reaps_new_session_target_after_supervisor_kill()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let pid_file = TemporaryPath::new(ESCAPED_SUPERVISOR_KILL_PID_FILE)?;
+        let script = format!(
+            "supervisor=$({} \"/^PPid:/ {{print \\$2}}\" /proc/$PPID/status); {} {} -c \"printf %s \\$\\$ > {}; kill -KILL $supervisor; exec {} 30\"",
+            fixture_program("awk")?.display(),
+            fixture_program("setsid")?.display(),
+            fixture_program("sh")?.display(),
             pid_file.as_path().display(),
             fixture_program("sleep")?.display()
         );

@@ -10,7 +10,15 @@ use std::{
     time::Duration,
 };
 #[cfg(target_os = "linux")]
-use std::{process::Stdio, sync::Arc};
+use std::{
+    process::Stdio,
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
+    time::Instant,
+};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -24,7 +32,10 @@ use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
 #[cfg(target_os = "linux")]
-use tokio::{io::AsyncReadExt, process::Command};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
 
 #[cfg(target_os = "linux")]
 use crate::supervisor_protocol::{
@@ -54,6 +65,10 @@ const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
 const SUPERVISOR_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_STATUS_TAIL_BYTES: usize = 1024;
+#[cfg(target_os = "linux")]
+const OUTER_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
+#[cfg(target_os = "linux")]
+const OUTER_PROCESS_CLEANUP_DEADLINE: Duration = Duration::from_secs(1);
 
 fn default_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
@@ -1175,11 +1190,16 @@ fn sandbox_process_result(mut result: ProcessRunResult, capture_bytes: usize) ->
     if dispatched {
         return process_result(ExecutionConfinement::FilesystemConfined, result);
     }
+    let outcome = if result.outcome == ProcessOutcome::TimedOut {
+        ProcessOutcome::TimedOut
+    } else {
+        ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::SandboxSetup,
+        }
+    };
     ExecResult {
         confinement: ExecutionConfinement::SandboxSetupFailed,
-        outcome: ProcessOutcome::SpawnFailed {
-            reason: ProcessSpawnFailure::SandboxSetup,
-        },
+        outcome,
         stdout: output_capture(result.stdout),
         stderr: output_capture(result.stderr),
     }
@@ -1288,6 +1308,343 @@ async fn read_supervised_stdout(
     ))
 }
 
+#[cfg(target_os = "linux")]
+struct OuterTrackedProcess {
+    pidfd: rustix::fd::OwnedFd,
+    start_time: u64,
+}
+
+#[cfg(target_os = "linux")]
+struct OuterProcessTreeGuard {
+    root: u32,
+    descendants: Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
+    stop: Arc<AtomicBool>,
+    watcher: Option<JoinHandle<()>>,
+    process_tree_supported: Arc<AtomicBool>,
+    armed: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OuterCleanupStatus {
+    Complete,
+    ProcessTreeUnsupported,
+    Failed,
+}
+
+#[cfg(target_os = "linux")]
+impl OuterProcessTreeGuard {
+    fn new(root: u32) -> Result<Self, ()> {
+        let root_process = outer_pin_process(root)?.ok_or(())?;
+        let descendants = Arc::new(Mutex::new(BTreeMap::from([(root, root_process)])));
+        let stop = Arc::new(AtomicBool::new(false));
+        let watcher_descendants = Arc::clone(&descendants);
+        let watcher_stop = Arc::clone(&stop);
+        let process_tree_supported = Arc::new(AtomicBool::new(true));
+        let watcher_process_tree_supported = Arc::clone(&process_tree_supported);
+        let watcher = std::thread::spawn(move || {
+            while !watcher_stop.load(Ordering::Acquire) {
+                if outer_observe_descendants(root, &watcher_descendants).is_err() {
+                    watcher_process_tree_supported.store(false, Ordering::Release);
+                    return;
+                }
+                std::thread::sleep(OUTER_PROCESS_POLL_INTERVAL);
+            }
+        });
+        Ok(Self {
+            root,
+            descendants,
+            stop,
+            watcher: Some(watcher),
+            process_tree_supported,
+            armed: true,
+        })
+    }
+
+    fn root_exited(&self) -> Result<bool, ()> {
+        let descendants = self
+            .descendants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let root = descendants.get(&self.root).ok_or(())?;
+        outer_pidfd_has_exited(&root.pidfd)
+    }
+
+    fn live_descendant_beyond_root(&self) -> Result<bool, ()> {
+        outer_observe_descendants(self.root, &self.descendants)?;
+        let descendants = self
+            .descendants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Ok(descendants.keys().any(|pid| *pid != self.root))
+    }
+
+    fn kill_all(&mut self) {
+        self.stop_watcher();
+        if outer_observe_descendants(self.root, &self.descendants).is_err() {
+            self.process_tree_supported.store(false, Ordering::Release);
+        }
+        self.kill_tracked();
+    }
+
+    fn finish(&mut self) -> OuterCleanupStatus {
+        self.kill_all();
+        let deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
+        loop {
+            outer_reap_tracked(&self.descendants);
+            if self.all_tracked_absent() {
+                self.armed = false;
+                return if self.process_tree_supported.load(Ordering::Acquire) {
+                    OuterCleanupStatus::Complete
+                } else {
+                    OuterCleanupStatus::ProcessTreeUnsupported
+                };
+            }
+            if Instant::now() >= deadline {
+                return OuterCleanupStatus::Failed;
+            }
+            std::thread::sleep(OUTER_PROCESS_POLL_INTERVAL);
+        }
+    }
+
+    fn kill_tracked(&self) {
+        let descendants = self
+            .descendants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for process in descendants.values() {
+            let _ =
+                rustix::process::pidfd_send_signal(&process.pidfd, rustix::process::Signal::KILL);
+        }
+    }
+
+    fn all_tracked_absent(&self) -> bool {
+        let descendants = self
+            .descendants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        descendants.iter().all(|(raw_pid, process)| {
+            outer_process_start_time(*raw_pid)
+                .is_ok_and(|start_time| start_time != Some(process.start_time))
+        })
+    }
+
+    fn stop_watcher(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(watcher) = self.watcher.take()
+            && watcher.join().is_err()
+        {
+            self.process_tree_supported.store(false, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OuterProcessTreeGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.finish();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn preflight_outer_process_tree() -> Result<OuterTrackedProcess, ()> {
+    rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT)).map_err(|_| ())?;
+    outer_process_children(std::process::id()).map_err(|_| ())?;
+    outer_pin_process(std::process::id())?.ok_or(())
+}
+
+#[cfg(target_os = "linux")]
+fn outer_observe_descendants(
+    root: u32,
+    descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
+) -> Result<(), ()> {
+    let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut known = tracked.keys().copied().collect::<BTreeSet<_>>();
+    loop {
+        let before = known.len();
+        let parents = known.iter().copied().collect::<Vec<_>>();
+        for parent in parents {
+            let Some(expected_start_time) = tracked.get(&parent).map(|process| process.start_time)
+            else {
+                continue;
+            };
+            if outer_process_start_time(parent)? != Some(expected_start_time) {
+                if parent != root {
+                    tracked.remove(&parent);
+                    known.remove(&parent);
+                }
+                continue;
+            }
+            let children = match outer_process_children(parent) {
+                Ok(children) => children,
+                Err(OuterProcessChildrenError::Gone) if parent == root => continue,
+                Err(OuterProcessChildrenError::Gone) => {
+                    tracked.remove(&parent);
+                    known.remove(&parent);
+                    continue;
+                }
+                Err(OuterProcessChildrenError::Unsupported) => return Err(()),
+            };
+            if outer_process_start_time(parent)? != Some(expected_start_time) {
+                if parent != root {
+                    tracked.remove(&parent);
+                    known.remove(&parent);
+                }
+                continue;
+            }
+            for raw_pid in children {
+                if known.contains(&raw_pid) {
+                    continue;
+                }
+                if let Some(process) = outer_pin_process(raw_pid)? {
+                    tracked.insert(raw_pid, process);
+                    known.insert(raw_pid);
+                }
+            }
+        }
+        if known.len() == before {
+            break;
+        }
+    }
+    outer_retire_reused(root, &mut tracked)
+}
+
+#[cfg(target_os = "linux")]
+fn outer_retire_reused(
+    root: u32,
+    tracked: &mut BTreeMap<u32, OuterTrackedProcess>,
+) -> Result<(), ()> {
+    let mut retired = Vec::new();
+    for (raw_pid, process) in tracked.iter() {
+        if *raw_pid == root {
+            continue;
+        }
+        let identity_changed = outer_process_start_time(*raw_pid)? != Some(process.start_time);
+        if identity_changed {
+            retired.push(*raw_pid);
+        }
+    }
+    for raw_pid in retired {
+        tracked.remove(&raw_pid);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn outer_pin_process(raw_pid: u32) -> Result<Option<OuterTrackedProcess>, ()> {
+    let Some(start_time) = outer_process_start_time(raw_pid)? else {
+        return Ok(None);
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) else {
+        return Ok(None);
+    };
+    let pidfd = match rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
+        Ok(pidfd) => pidfd,
+        Err(rustix::io::Errno::SRCH) => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    if outer_process_start_time(raw_pid)? != Some(start_time) {
+        return Ok(None);
+    }
+    Ok(Some(OuterTrackedProcess { pidfd, start_time }))
+}
+
+#[cfg(target_os = "linux")]
+fn outer_pidfd_has_exited(pidfd: &rustix::fd::OwnedFd) -> Result<bool, ()> {
+    let mut descriptors = [rustix::event::PollFd::new(
+        pidfd,
+        rustix::event::PollFlags::IN,
+    )];
+    rustix::event::poll(
+        &mut descriptors,
+        Some(&rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }),
+    )
+    .map_err(|_| ())?;
+    Ok(!descriptors[0].revents().is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn outer_process_start_time(pid: u32) -> Result<Option<u64>, ()> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if outer_process_gone(&error) => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let command_end = stat.rfind(')').ok_or(())?;
+    let start_time = stat[command_end + 1..]
+        .split_whitespace()
+        .nth(19)
+        .ok_or(())?
+        .parse::<u64>()
+        .map_err(|_| ())?;
+    Ok(Some(start_time))
+}
+
+#[cfg(target_os = "linux")]
+fn outer_process_gone(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error())
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum OuterProcessChildrenError {
+    Gone,
+    Unsupported,
+}
+
+#[cfg(target_os = "linux")]
+fn outer_process_children(pid: u32) -> Result<Vec<u32>, OuterProcessChildrenError> {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).map_err(|error| {
+        if outer_process_gone(&error) {
+            OuterProcessChildrenError::Gone
+        } else {
+            OuterProcessChildrenError::Unsupported
+        }
+    })?;
+    let mut children = Vec::new();
+    let mut observed_task = false;
+    for entry in tasks {
+        let entry = entry.map_err(|_| OuterProcessChildrenError::Unsupported)?;
+        let task = entry
+            .file_name()
+            .to_string_lossy()
+            .parse::<u32>()
+            .map_err(|_| OuterProcessChildrenError::Unsupported)?;
+        match std::fs::read_to_string(format!("/proc/{pid}/task/{task}/children")) {
+            Ok(values) => {
+                observed_task = true;
+                let parsed = values
+                    .split_whitespace()
+                    .map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| OuterProcessChildrenError::Unsupported)?;
+                children.extend(parsed);
+            }
+            Err(error) if outer_process_gone(&error) => {}
+            Err(_) => return Err(OuterProcessChildrenError::Unsupported),
+        }
+    }
+    observed_task
+        .then_some(children)
+        .ok_or(OuterProcessChildrenError::Gone)
+}
+
+#[cfg(target_os = "linux")]
+fn outer_reap_tracked(descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>) {
+    let descendants = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+    for raw_pid in descendants.keys() {
+        if let Some(pid) = rustix::process::Pid::from_raw(*raw_pid as i32) {
+            let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
+        }
+    }
+}
+
 async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
     #[cfg(not(target_os = "linux"))]
     {
@@ -1304,6 +1661,14 @@ async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> Proc
 
 #[cfg(target_os = "linux")]
 async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
+    let outer_reservation = match preflight_outer_process_tree() {
+        Ok(reservation) => reservation,
+        Err(()) => {
+            return empty_process_result(ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::ProcessTreeUnsupported,
+            });
+        }
+    };
     let timeout_milliseconds = request.timeout.as_millis().min(u128::from(u64::MAX));
     let mut command = Command::new(supervisor_program);
     command
@@ -1333,12 +1698,34 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             });
         }
     };
-    let supervisor_pid = child.id();
-    let control = child.stdin.take();
+    let supervisor_pid = match child.id() {
+        Some(supervisor_pid) => supervisor_pid,
+        None => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return empty_process_result(ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Cleanup,
+            });
+        }
+    };
+    let mut outer_tree = match OuterProcessTreeGuard::new(supervisor_pid) {
+        Ok(tree) => tree,
+        Err(()) => {
+            kill_supervisor_process_group(supervisor_pid);
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return empty_process_result(ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Cleanup,
+            });
+        }
+    };
+    drop(outer_reservation);
+    let mut control = child.stdin.take();
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
             drop(control);
+            outer_tree.kill_all();
             let _ = child.wait().await;
             return empty_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stdout,
@@ -1349,6 +1736,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         Some(stderr) => stderr,
         None => {
             drop(control);
+            outer_tree.kill_all();
             let _ = child.wait().await;
             return empty_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stderr,
@@ -1359,30 +1747,66 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let mut stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
     let outer_deadline = request.timeout.saturating_add(Duration::from_secs(2));
     let outer_deadline = tokio::time::Instant::now() + outer_deadline;
+    let startup = tokio::time::timeout(OUTER_PROCESS_CLEANUP_DEADLINE, async {
+        let control = control.as_mut().ok_or(())?;
+        control.write_all(&[1]).await.map_err(|_| ())?;
+        loop {
+            match outer_tree.live_descendant_beyond_root() {
+                Ok(true) => break,
+                Ok(false) => tokio::time::sleep(OUTER_PROCESS_POLL_INTERVAL).await,
+                Err(()) => return Err(()),
+            }
+        }
+        control.write_all(&[1]).await.map_err(|_| ())
+    })
+    .await;
+    if !matches!(startup, Ok(Ok(()))) {
+        drop(control);
+        kill_supervisor_process_group(supervisor_pid);
+        outer_tree.kill_all();
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        stdout_task.abort();
+        stderr_task.abort();
+        return empty_process_result(ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Cleanup,
+        });
+    }
+    let root_exit = tokio::time::timeout_at(outer_deadline, async {
+        loop {
+            match outer_tree.root_exited() {
+                Ok(true) => return Ok(()),
+                Ok(false) => tokio::time::sleep(OUTER_PROCESS_POLL_INTERVAL).await,
+                Err(()) => return Err(()),
+            }
+        }
+    })
+    .await;
+    kill_supervisor_process_group(supervisor_pid);
+    if root_exit.is_err() || matches!(root_exit, Ok(Err(()))) {
+        outer_tree.kill_all();
+        let _ = child.kill().await;
+    }
     let waited = tokio::time::timeout_at(outer_deadline, child.wait()).await;
     drop(control);
-    let wait_failure = match waited {
+    let mut wait_failure = match waited {
         Ok(Ok(status)) if status.success() => None,
-        Ok(Ok(_)) => {
-            kill_supervisor_process_group(supervisor_pid);
-            Some(ProcessOutcome::SupervisionFailed {
-                reason: ProcessSupervisionFailure::Wait,
-            })
-        }
-        Ok(Err(_)) => {
-            kill_supervisor_process_group(supervisor_pid);
-            Some(ProcessOutcome::SupervisionFailed {
-                reason: ProcessSupervisionFailure::Wait,
-            })
-        }
+        Ok(Ok(_)) | Ok(Err(_)) => Some(ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Wait,
+        }),
         Err(_) => {
-            kill_supervisor_process_group(supervisor_pid);
+            outer_tree.kill_all();
             let _ = child.kill().await;
             Some(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Wait,
             })
         }
     };
+    if outer_tree.finish() != OuterCleanupStatus::Complete {
+        wait_failure = Some(ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Cleanup,
+        });
+    }
     let captures = tokio::time::timeout_at(outer_deadline, async {
         let stdout = (&mut stdout_task).await;
         let stderr = (&mut stderr_task).await;
@@ -1392,7 +1816,6 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let (stdout, stderr) = match captures {
         Ok(captures) => captures,
         Err(_) => {
-            kill_supervisor_process_group(supervisor_pid);
             stdout_task.abort();
             stderr_task.abort();
             return empty_process_result(ProcessOutcome::SupervisionFailed {
@@ -1426,8 +1849,8 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
 }
 
 #[cfg(target_os = "linux")]
-fn kill_supervisor_process_group(raw_pid: Option<u32>) {
-    if let Some(pid) = raw_pid.and_then(|raw_pid| rustix::process::Pid::from_raw(raw_pid as i32)) {
+fn kill_supervisor_process_group(raw_pid: u32) {
+    if let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
     }
 }
@@ -1736,6 +2159,35 @@ mod tests {
             }),
             BwrapAvailability::Unusable
         );
+    }
+
+    #[test]
+    fn target_profile_setup_timeout_preserves_timeout_evidence() {
+        let result = sandbox_process_result(
+            ProcessRunResult {
+                outcome: ProcessOutcome::TimedOut,
+                stdout: ProcessOutput {
+                    bytes: Vec::new(),
+                    completeness: CaptureCompleteness::Complete,
+                },
+                stderr: ProcessOutput {
+                    bytes: Vec::new(),
+                    completeness: CaptureCompleteness::Complete,
+                },
+            },
+            EXEC_CAPTURE_BYTES,
+        );
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn outer_esrch_is_process_absence_evidence() {
+        let error = std::io::Error::from_raw_os_error(rustix::io::Errno::SRCH.raw_os_error());
+
+        assert!(outer_process_gone(&error));
     }
 
     #[cfg(target_os = "linux")]
