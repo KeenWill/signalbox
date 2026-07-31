@@ -380,7 +380,7 @@ trait CommandExecution: Clone + Send {
 pub struct ProcessRequest {
     /// Executable name or path.
     pub program: OsString,
-    /// Exact argv elements after argv[0].
+    /// Exact argument-vector elements after the program name.
     pub arguments: Vec<OsString>,
     /// Ambient working directory used to spawn the executable.
     pub working_directory: PathBuf,
