@@ -10,7 +10,7 @@ is verified through PR #343 (`agent/review-orchestrator`). The current
 implementation also provides the closed concern library, relational
 orchestration attempt and command-receipt store, client-fed daemon adapter, and
 process and terminal surfaces described below, verified against commit
-`89fc2993`. This page owns review targets, workflow runs, session-backed passes,
+`4ace4b4d`. This page owns review targets, workflow runs, session-backed passes,
 findings, external links, their relational store, and application orchestration.
 Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
@@ -746,12 +746,13 @@ before entering the aggregate transaction.
 Read-only success is admission-atomic. The public command that records findings
 transitions the run and pass to succeeded, binds `ProducedFindings`, and inserts
 the complete canonical inventory in one transaction. It cannot commit succeeded
-read-only state with an absent result. The empty inventory follows that same
-path. Finding events and external-link attachments likewise bind their exact
-pass result in the transaction that appends or attaches the effect. Thus every
-committed intermediate point remains a domain-reconstitutable aggregate; a
-process crash cannot expose a state that the store's own loaders classify as
-corruption.
+read-only state with an absent result. Generic pass completion therefore refuses
+read-only success; the complete-findings command is the sole success path. The
+empty inventory follows that same path. Finding events and external-link
+attachments likewise bind their exact pass result in the transaction that
+appends or attaches the effect. Thus every committed intermediate point remains
+a domain-reconstitutable aggregate; a process crash cannot expose a state that
+the store's own loaders classify as corruption.
 
 Every review mutation carries an owner-global command identity. The daemon binds
 that identity to the digest and closed kind of the validated semantic request
@@ -760,8 +761,10 @@ the receipt; an equal retry recognizes the exact complete effect, records a
 missing receipt, and returns the stable result. Once recorded, the receipt is
 inspected before mutable aggregate-state validation and carries every fact
 needed to return the original response, so a later aggregate state cannot turn
-an equal retry into a rejection. Distinct reuse fails closed. This
-representation is the durable review-command contract.
+an equal retry into a rejection. A fresh start command for an attempt that
+already exists is rejected instead of relabeling its durable stage as newly
+started. Distinct reuse fails closed. This representation is the durable
+review-command contract.
 
 The terminal client exposes target creation, run admission and activation,
 single-finding read-only completion, finding listing, target, run, and finding

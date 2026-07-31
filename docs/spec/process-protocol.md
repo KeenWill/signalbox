@@ -3,7 +3,7 @@
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface at commit `89fc2993`. This page is the normative boundary between a
+surface at commit `4ace4b4d`. This page is the normative boundary between a
 local client process and `signalboxd`; domain values, PostgreSQL records, and
 wire messages remain distinct representations.
 
@@ -413,16 +413,19 @@ excluded. Before hashing, the daemon canonicalizes a complete
 does not distinguish the same semantic inventory. The typed append-only receipt
 stores the complete stable success response. A recorded receipt is inspected
 before mutable aggregate-state preconditions, so an equal retry returns that
-response even after the operation changed the aggregate state. Each aggregate
-effect uses its owning store transaction. Fresh run admission creates its run
-and sole pass in one transaction; recovery also recognizes and completes a
-matching run-only intermediate committed by the earlier multi-transaction
-implementation. This atomicity is the run-admission contract. If an effect
-commits before the receipt and the process exits, an equal retry recognizes the
-exact complete effect, records the missing receipt, and returns the stable
-result. Reusing the command identity for a different digest, operation kind,
-aggregate payload, complete inventory, event, or attachment fails closed. This
-representation is the durable review-command contract.
+response even after the operation changed the aggregate state. A fresh start
+command identity for an attempt that already exists is `invalid_request`; only
+the original command identity can replay its recorded
+`review_orchestration_started` receipt. Each aggregate effect uses its owning
+store transaction. Fresh run admission creates its run and sole pass in one
+transaction; recovery also recognizes and completes a matching run-only
+intermediate committed by the earlier multi-transaction implementation. This
+atomicity is the run-admission contract. If an effect commits before the receipt
+and the process exits, an equal retry recognizes the exact complete effect,
+records the missing receipt, and returns the stable result. Reusing the command
+identity for a different digest, operation kind, aggregate payload, complete
+inventory, event, or attachment fails closed. This representation is the durable
+review-command contract.
 
 The daemon admits one review mutation at a time and retains that admission
 through claim inspection, aggregate effect recovery, and receipt recording. A
@@ -666,7 +669,9 @@ Review mutations return exactly one stable acknowledgement:
 - `review_orchestration_advanced { attempt_id, state }`.
 
 The complete-pass receipt accepts only the terminal pass states `succeeded`,
-`failed`, `blocked`, and `cancelled`. Finding-event status is the exact state
+`failed`, `blocked`, and `cancelled`. Generic `succeeded` completion refuses a
+read-only-review pass; `record_review_findings` is its only success admission,
+including for an empty inventory. Finding-event status is the exact state
 derived from the submitted event. Every orchestration stage seal returns the
 same attempt identity and the resulting closed orchestration state; a client
 refuses a state outside the stages that operation can reach.
