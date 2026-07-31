@@ -378,10 +378,11 @@ impl WebSearchResult {
     /// Constructs one provider result within the fixed field bounds.
     pub fn try_new(fields: WebSearchResultFields) -> Option<Self> {
         let parsed = Url::parse(&fields.url).ok()?;
+        let normalized_url = parsed.to_string();
         (fields.title.len() <= MAX_RESULT_TITLE_BYTES
             && !fields.title.trim().is_empty()
             && fields.url.len() <= MAX_RESULT_URL_BYTES
-            && parsed.as_str() == fields.url
+            && normalized_url.len() <= MAX_RESULT_URL_BYTES
             && matches!(parsed.scheme(), "http" | "https")
             && parsed.host_str().is_some()
             && parsed.username().is_empty()
@@ -389,7 +390,7 @@ impl WebSearchResult {
             && fields.snippet.len() <= MAX_RESULT_SNIPPET_BYTES)
             .then_some(Self {
                 title: fields.title,
-                url: fields.url,
+                url: normalized_url,
                 snippet: fields.snippet,
             })
     }
@@ -467,13 +468,17 @@ pub struct WebSearchProviderError {
 
 impl fmt::Debug for WebSearchProviderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WebSearchProviderError")
-            .field("status", &self.status)
-            .field("body", &"[provider-controlled]")
-            .finish()
+        formatter.write_str("WebSearchProviderError")
     }
 }
+
+impl fmt::Display for WebSearchProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("web search provider rejection evidence")
+    }
+}
+
+impl Error for WebSearchProviderError {}
 
 impl WebSearchProviderError {
     /// Retains one complete provider error body within the exchange cap.
@@ -503,13 +508,42 @@ impl fmt::Debug for WebSearchTransportFailure {
         match self {
             Self::InvalidCredential => formatter.write_str("InvalidCredential"),
             Self::RequestFailed => formatter.write_str("RequestFailed"),
-            Self::ProviderRejected(error) => formatter
-                .debug_tuple("ProviderRejected")
-                .field(error)
-                .finish(),
+            Self::ProviderRejected(_) => formatter.write_str("ProviderRejected"),
             Self::InvalidResponse => formatter.write_str("InvalidResponse"),
             Self::ResponseTooLarge => formatter.write_str("ResponseTooLarge"),
             Self::DispatchUnknown => formatter.write_str("DispatchUnknown"),
+        }
+    }
+}
+
+impl fmt::Display for WebSearchTransportFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCredential => formatter.write_str("invalid web search credential"),
+            Self::RequestFailed => formatter.write_str("web search request failed before dispatch"),
+            Self::ProviderRejected(_) => {
+                formatter.write_str("web search provider rejected the request")
+            }
+            Self::InvalidResponse => {
+                formatter.write_str("web search provider returned an invalid response")
+            }
+            Self::ResponseTooLarge => {
+                formatter.write_str("web search provider response exceeded the byte cap")
+            }
+            Self::DispatchUnknown => formatter.write_str("web search request outcome is unknown"),
+        }
+    }
+}
+
+impl Error for WebSearchTransportFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ProviderRejected(error) => Some(error),
+            Self::InvalidCredential
+            | Self::RequestFailed
+            | Self::InvalidResponse
+            | Self::ResponseTooLarge
+            | Self::DispatchUnknown => None,
         }
     }
 }
@@ -1053,6 +1087,8 @@ mod tests {
     const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
     const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
     const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";
+    const FIXTURE_ORIGIN_ONLY_RESULT_URL: &str = "https://example.com";
+    const FIXTURE_CANONICAL_ORIGIN_RESULT_URL: &str = "https://example.com/";
     const ACCEPT_HEADER_COLLISION_KEY: &str = "application/json";
     const URL_SCHEME_COLLISION_KEY: &str = "https";
     const PROVIDER_REJECTION_STATUS: u16 = 429;
@@ -1335,18 +1371,32 @@ mod tests {
         );
     }
 
-    /// A checked result retains only URL text that the parser validated
-    /// without normalization.
+    /// A checked result stores the parser-validated URL serialization rather
+    /// than provider text discarded during parsing.
     #[test]
-    fn web_search_result_rejects_url_text_normalized_by_parser() {
-        assert!(
-            WebSearchResult::try_new(WebSearchResultFields {
-                title: String::from(FIXTURE_RESULT_TITLE),
-                url: String::from(FIXTURE_NORMALIZED_RESULT_URL),
-                snippet: String::from(FIXTURE_RESULT_SNIPPET),
-            })
-            .is_none()
-        );
+    fn web_search_result_stores_url_text_normalized_by_parser() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_NORMALIZED_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("normalized fixture URL is admitted");
+
+        assert_eq!(result.url(), FIXTURE_RESULT_URL);
+    }
+
+    /// Routine URL canonicalization, including an origin-only trailing slash,
+    /// is retained as the validated result URL.
+    #[test]
+    fn web_search_result_preserves_canonicalizable_origin_url() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_ORIGIN_ONLY_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("origin-only fixture URL is admitted");
+
+        assert_eq!(result.url(), FIXTURE_CANONICAL_ORIGIN_RESULT_URL);
     }
 
     /// INV-035: provider-controlled successful fields are credential-scrubbed
@@ -1585,6 +1635,27 @@ mod tests {
             build_brave_request(FIXTURE_QUERY, ACCEPT_HEADER_COLLISION_KEY),
             Err(WebSearchTransportFailure::RequestFailed)
         ));
+    }
+
+    /// INV-035: a provider status equal to the API key is retained for
+    /// request-scoped sanitization but omitted from raw public diagnostics.
+    #[test]
+    fn web_search_transport_diagnostics_omit_credential_colliding_status() {
+        let status_collision_key = PROVIDER_REJECTION_STATUS.to_string();
+        let provider_error = WebSearchProviderError::new(
+            PROVIDER_REJECTION_STATUS,
+            br#"{"message":"synthetic rejection"}"#.to_vec(),
+        )
+        .expect("fixture provider error is admitted");
+
+        assert!(!format!("{provider_error:?}").contains(&status_collision_key));
+        assert!(!provider_error.to_string().contains(&status_collision_key));
+
+        let failure = WebSearchTransportFailure::ProviderRejected(provider_error);
+
+        assert!(!format!("{failure:?}").contains(&status_collision_key));
+        assert!(!failure.to_string().contains(&status_collision_key));
+        assert!(failure.source().is_some());
     }
 
     /// INV-035: provider response and error diagnostics never render
