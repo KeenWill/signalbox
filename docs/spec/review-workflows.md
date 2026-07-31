@@ -10,7 +10,7 @@ is verified through PR #343 (`agent/review-orchestrator`). The current
 implementation also provides the closed concern library, relational
 orchestration attempt and command-receipt store, client-fed daemon adapter, and
 process and terminal surfaces described below, verified against commit
-`18f2c185`. This page owns review targets, workflow runs, session-backed passes,
+`89fc2993`. This page owns review targets, workflow runs, session-backed passes,
 findings, external links, their relational store, and application orchestration.
 Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by

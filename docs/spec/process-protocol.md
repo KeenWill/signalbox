@@ -3,7 +3,7 @@
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface at commit `18f2c185`. This page is the normative boundary between a
+surface at commit `89fc2993`. This page is the normative boundary between a
 local client process and `signalboxd`; domain values, PostgreSQL records, and
 wire messages remain distinct representations.
 
@@ -312,7 +312,12 @@ admits either. The required counts are `finding_count`, `judgment_member_count`,
 exceed findings, and applied, fixed, or published counts cannot exceed judgment
 members. The snapshot repeats the same nonempty unique one-through-32 concern
 inventory and checked concern-set key; impossible server projections are
-malformed.
+malformed. Snapshot construction consumes two units from the shared
+pool-capacity budget, leaving two connections reserved for non-snapshot work; a
+pool with fewer than four configured connections cannot start the process
+listener. The database-global snapshot admission loser rolls back its
+transaction before an exponential retry wait that begins at 10 ms and is capped
+at 100 ms.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the
