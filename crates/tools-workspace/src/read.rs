@@ -1000,10 +1000,13 @@ mod tests {
     }
 
     #[test]
-    fn list_directory_is_sorted_and_bounded() {
+    fn list_directory_cap_selects_lexically_first_entry() {
+        const FIRST_PATH: &str = "a.txt";
+        const LATER_PATH: &str = "b.txt";
+
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
-        fs::write(workspace.path().join("b.txt"), "b").expect("fixture file writes");
-        fs::write(workspace.path().join("a.txt"), "a").expect("fixture file writes");
+        fs::write(workspace.path().join(LATER_PATH), "b").expect("fixture file writes");
+        fs::write(workspace.path().join(FIRST_PATH), "a").expect("fixture file writes");
         let (_catalog, executor) = fixture_tools(&workspace);
         let operation = decode_operation(
             ReadToolKind::ListDirectory,
@@ -1019,15 +1022,18 @@ mod tests {
             panic!("list_directory returns a listing")
         };
 
-        assert_eq!(result.entries[0].path, "a.txt");
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].path, FIRST_PATH);
         assert!(result.truncated);
     }
 
     #[test]
-    fn glob_files_matches_relative_pattern_without_following_symlinks() {
+    fn glob_files_matches_relative_pattern() {
+        const MATCH_PATH: &str = "src/lib.rs";
+
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
         fs::create_dir(workspace.path().join("src")).expect("fixture directory creates");
-        fs::write(workspace.path().join("src/lib.rs"), "pub fn fixture() {}")
+        fs::write(workspace.path().join(MATCH_PATH), "pub fn fixture() {}")
             .expect("fixture file writes");
         fs::write(workspace.path().join("README.md"), "fixture").expect("fixture file writes");
         let (_catalog, executor) = fixture_tools(&workspace);
@@ -1046,7 +1052,7 @@ mod tests {
         };
 
         assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].path, "src/lib.rs");
+        assert_eq!(result.matches[0].path, MATCH_PATH);
         assert!(!result.truncated);
     }
 
