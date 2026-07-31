@@ -177,6 +177,11 @@ GITHUB_CREDENTIAL="$TEMPORARY_ROOT/github-token"
 cat >"$MODEL_CONFIGURATION" <<'EOF'
 version = 1
 
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
 [compaction]
 prompt = "Synthetic real-server harness compaction prompt."
 
@@ -186,7 +191,7 @@ allowed_origins = []
 [[models]]
 selection_id = "10000000-0000-4000-8000-000000000001"
 target_id = "20000000-0000-4000-8000-000000000001"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "synthetic-real-server-model"
 max_output_tokens = 1024
 context_window_tokens = 8192
