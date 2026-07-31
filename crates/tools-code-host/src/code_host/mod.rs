@@ -857,12 +857,13 @@ fn scrub_result_value(
     scrubber: &CredentialScrubber,
     value: &mut serde_json::Value,
 ) -> Option<()> {
+    let is_file_content = kind == CodeHostToolKind::ReadFile
+        && value.get("outcome").and_then(serde_json::Value::as_str) == Some("content");
     scrubber.redact_value(value);
-    if kind != CodeHostToolKind::ReadFile
-        || value.get("outcome").and_then(serde_json::Value::as_str) != Some("content")
-    {
+    if !is_file_content {
         return Some(());
     }
+
     let returned_bytes = value.get("content")?.as_str()?.len();
     if returned_bytes > repository_result::MAX_REPOSITORY_FILE_CONTENT_BYTES {
         return None;
@@ -1972,13 +1973,13 @@ mod tests {
     /// advertised retained-content bound.
     #[test]
     fn repository_file_scrubbing_rejects_content_expansion_past_the_bound() {
-        const CREDENTIAL: &str = "x";
-        const SOURCE_CONTENT_BYTES: usize = 10 * 1024;
+        const CREDENTIAL: &str = "content";
+        const SOURCE_CONTENT_REPETITIONS: usize = 8 * 1024;
         const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
         let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
         let scrubber =
             CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
-        let source_content = CREDENTIAL.repeat(SOURCE_CONTENT_BYTES);
+        let source_content = CREDENTIAL.repeat(SOURCE_CONTENT_REPETITIONS);
         let source_bytes =
             u64::try_from(source_content.len()).expect("fixture source size fits u64");
         let arguments: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
@@ -2023,7 +2024,10 @@ mod tests {
             "revision": "89abcdef0123456789abcdef0123456789abcdef",
         }))
         .expect("fixture returned arguments are admitted");
-        let result = CodeHostResult::ReadFile(RepositoryReadFileResult::path_not_found(&returned));
+        let result = CodeHostResult::ReadFile(
+            RepositoryReadFileResult::try_path_not_found(&returned)
+                .expect("fixture non-root path admits absence"),
+        );
         let operation = CodeHostOperation::ReadFile(requested);
 
         assert!(!operation.accepts_repository_result(&result));

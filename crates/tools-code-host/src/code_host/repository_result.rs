@@ -240,12 +240,12 @@ impl RepositoryReadFileResult {
     }
 
     /// Records that the requested path was absent at the exact revision.
-    pub fn path_not_found(arguments: &RepositoryReadFileArguments) -> Self {
-        Self {
+    pub fn try_path_not_found(arguments: &RepositoryReadFileArguments) -> Option<Self> {
+        (arguments.path().as_str() != ".").then_some(Self {
             identity: RepositoryObjectIdentity::from_file_arguments(arguments),
             requested_line_range: arguments.line_range(),
             outcome: RepositoryFileOutcome::PathNotFound,
-        }
+        })
     }
 
     /// Records that GitHub did not recognize the requested exact revision.
@@ -522,11 +522,11 @@ impl RepositoryListDirectoryResult {
     }
 
     /// Records that the requested path was absent at the exact revision.
-    pub fn path_not_found(arguments: &RepositoryListDirectoryArguments) -> Self {
-        Self {
+    pub fn try_path_not_found(arguments: &RepositoryListDirectoryArguments) -> Option<Self> {
+        (arguments.path().as_str() != ".").then_some(Self {
             identity: RepositoryObjectIdentity::from_directory_arguments(arguments),
             outcome: RepositoryDirectoryOutcome::PathNotFound,
-        }
+        })
     }
 
     /// Records that GitHub did not recognize the requested exact revision.
@@ -1002,6 +1002,18 @@ mod tests {
         assert!(submodule.is_none());
     }
 
+    /// No recognized exact commit can omit its repository root tree.
+    #[test]
+    fn root_path_not_found_outcomes_are_unconstructible() {
+        let file_arguments = file_arguments(".", REVISION, None);
+        let directory_arguments = directory_arguments(".");
+        let file = RepositoryReadFileResult::try_path_not_found(&file_arguments);
+        let directory = RepositoryListDirectoryResult::try_path_not_found(&directory_arguments);
+
+        assert!(file.is_none());
+        assert!(directory.is_none());
+    }
+
     /// A complete whole-file result contains every byte reported by its source
     /// metadata before evidence scrubbing changes the emitted byte count.
     #[test]
@@ -1146,7 +1158,8 @@ mod tests {
     fn file_result_rejects_another_request_identity() {
         let requested = file_arguments("src/a.rs", REVISION, None);
         let returned = file_arguments("src/b.rs", OTHER_REVISION, None);
-        let result = RepositoryReadFileResult::path_not_found(&returned);
+        let result = RepositoryReadFileResult::try_path_not_found(&returned)
+            .expect("fixture non-root path admits absence");
 
         assert!(!result.matches(&requested));
     }

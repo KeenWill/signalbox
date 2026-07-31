@@ -374,7 +374,7 @@ impl GitHubCodeHostTransport {
                 RepositoryReadFileResult::try_not_a_file(&arguments, kind)
             }
             RepositoryPathLookup::PathNotFound => {
-                Some(RepositoryReadFileResult::path_not_found(&arguments))
+                RepositoryReadFileResult::try_path_not_found(&arguments)
             }
             RepositoryPathLookup::RevisionNotFound => {
                 Some(RepositoryReadFileResult::revision_not_found(&arguments))
@@ -424,7 +424,7 @@ impl GitHubCodeHostTransport {
                 RepositoryListDirectoryResult::try_not_a_directory(&arguments, kind)
             }
             RepositoryPathLookup::PathNotFound => {
-                Some(RepositoryListDirectoryResult::path_not_found(&arguments))
+                RepositoryListDirectoryResult::try_path_not_found(&arguments)
             }
             RepositoryPathLookup::RevisionNotFound => Some(
                 RepositoryListDirectoryResult::revision_not_found(&arguments),
@@ -2929,8 +2929,10 @@ mod tests {
     #[tokio::test]
     async fn repository_file_read_reports_binary_blob() {
         let source = vec![0xff, b'\0', 0xfe];
+        let arguments = repository_read_arguments("assets/image.bin", None);
+        let path = String::from(arguments.path().as_str());
         let (transport, listener) = repository_test_transport().await;
-        let metadata = repository_file_value("assets/image.bin", source.len()).to_string();
+        let metadata = repository_file_value(path.as_str(), source.len()).to_string();
         let source_for_server = source.clone();
         let server = tokio::spawn(async move {
             let path_request = serve_test_response(
@@ -2951,10 +2953,7 @@ mod tests {
             [path_request, blob_request]
         });
         let result = transport
-            .repository_read_file(
-                repository_read_arguments("assets/image.bin", None),
-                &test_credential(),
-            )
+            .repository_read_file(arguments, &test_credential())
             .await
             .expect("binary content is a typed result");
         let requests = repository_server_result(server).await;
@@ -2963,13 +2962,13 @@ mod tests {
             result.into_json_value(),
             serde_json::json!({
                 "outcome": "binary_file",
-                "path": "assets/image.bin",
+                "path": path.as_str(),
                 "revision": REPOSITORY_REVISION,
                 "source_bytes": source.len(),
                 "truncated": false,
             })
         );
-        assert_eq!(requests, file_read_requests("assets/image.bin"));
+        assert_eq!(requests, file_read_requests(path.as_str()));
     }
 
     /// An inclusive line range returns only those complete lines while every
