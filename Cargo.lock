@@ -3099,6 +3099,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-model-runtime",
  "signalbox-persistence",
  "signalbox-tool-contract",
  "signalbox-tool-schema-derive",
