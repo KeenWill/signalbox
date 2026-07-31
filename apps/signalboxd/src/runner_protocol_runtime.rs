@@ -800,36 +800,22 @@ where
     S: RunnerRegistrationService,
 {
     let mut connections = JoinSet::new();
+    let (connection_shutdown_sender, connection_shutdown) = watch::channel(*shutdown.borrow());
     loop {
         tokio::select! {
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    while let Some(completed) = connections.join_next().await {
-                        match completed {
-                            Ok(Ok(())) => {}
-                            Ok(Err(error @ RunnerProtocolRuntimeError::Lifecycle(_))) => {
-                                return Err(error);
-                            }
-                            Ok(Err(error)) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    "runner connection closed during runtime shutdown"
-                                );
-                            }
-                            Err(error) => {
-                                return Err(RunnerProtocolRuntimeError::ConnectionTask(error));
-                            }
-                        }
-                    }
-                    return Ok(());
+                    let _ = connection_shutdown_sender.send(true);
+                    return drain_connection_tasks(&mut connections, None).await;
                 }
             }
             completed = connections.join_next(), if !connections.is_empty() => {
                 match completed {
                     Some(Ok(Ok(()))) | None => {}
                     Some(Ok(Err(error @ RunnerProtocolRuntimeError::Lifecycle(_)))) => {
-                        return Err(error);
+                        let _ = connection_shutdown_sender.send(true);
+                        return drain_connection_tasks(&mut connections, Some(error)).await;
                     }
                     Some(Ok(Err(error))) => {
                         tracing::warn!(
@@ -838,7 +824,12 @@ where
                         );
                     }
                     Some(Err(error)) => {
-                        return Err(RunnerProtocolRuntimeError::ConnectionTask(error));
+                        let _ = connection_shutdown_sender.send(true);
+                        return drain_connection_tasks(
+                            &mut connections,
+                            Some(RunnerProtocolRuntimeError::ConnectionTask(error)),
+                        )
+                        .await;
                     }
                 }
             }
@@ -851,10 +842,41 @@ where
                 connections.spawn(serve_connection(
                     stream,
                     service.clone(),
-                    shutdown.clone(),
+                    connection_shutdown.clone(),
                 ));
             }
         }
+    }
+}
+
+async fn drain_connection_tasks(
+    connections: &mut JoinSet<Result<(), RunnerProtocolRuntimeError>>,
+    mut failure: Option<RunnerProtocolRuntimeError>,
+) -> Result<(), RunnerProtocolRuntimeError> {
+    while let Some(completed) = connections.join_next().await {
+        let error = match completed {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => error,
+            Err(error) => RunnerProtocolRuntimeError::ConnectionTask(error),
+        };
+        if failure.is_none()
+            && matches!(
+                error,
+                RunnerProtocolRuntimeError::Lifecycle(_)
+                    | RunnerProtocolRuntimeError::ConnectionTask(_)
+            )
+        {
+            failure = Some(error);
+        } else {
+            tracing::warn!(
+                error = %error,
+                "runner connection closed while draining peer tasks"
+            );
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -1555,6 +1577,7 @@ fn available_correlation(message: &Message) -> AvailableCorrelation {
         Message::OperationFailed(value) => {
             AvailableCorrelation::OperationFailure(value.failure.correlation.clone())
         }
+        Message::Shutdown(value) => AvailableCorrelation::ConnectionEpoch(value.connection_epoch),
         Message::Enrolled(_)
         | Message::Resumed(_)
         | Message::ReplacementPending(_)
@@ -1571,7 +1594,6 @@ fn available_correlation(message: &Message) -> AvailableCorrelation {
         | Message::Dispatch(_)
         | Message::ResultRecorded(_)
         | Message::OperationFailureRecorded(_)
-        | Message::Shutdown(_)
         | Message::Rejected(_) => AvailableCorrelation::None,
     }
 }
@@ -2143,6 +2165,49 @@ mod tests {
         );
 
         served.expect("the unsupported connection closes after rejection");
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn initial_shutdown_rejection_preserves_its_epoch_evidence() {
+        let request_id = identity(1);
+        let advertisement = empty_advertisement();
+        let service = EnrollmentService {
+            response: enrolled_response(request_id, &advertisement),
+        };
+        let epoch = PositiveU64::try_new(7).expect("the fixture epoch is positive");
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Shutdown(Shutdown {
+                    connection_epoch: epoch,
+                    reason: ShutdownReason::RunnerShutdown,
+                }),
+            )
+            .await
+            .expect("the initial shutdown frame is sent");
+            read_frame(&mut reader)
+                .await
+                .expect("the typed rejection is received")
+                .message
+        };
+
+        let (served, observed) = tokio::join!(server, client);
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Shutdown,
+                AvailableCorrelation::ConnectionEpoch(epoch),
+                RejectionCode::CorrelationMismatch,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the pre-enrollment shutdown closes after rejection");
         assert_eq!(observed, expected);
     }
 
@@ -3024,6 +3089,40 @@ mod tests {
         assert_eq!(connection.state(), RunnerConnectionState::Lost);
         assert_eq!(connection.cause(), RunnerConnectionCause::EnrollmentRevoked);
         assert_eq!(startup_transitions, 0);
+    }
+
+    #[tokio::test]
+    async fn fatal_connection_failure_drains_a_signalled_peer_task() {
+        let (shutdown_sender, mut shutdown) = watch::channel(false);
+        let (drained_sender, drained) = tokio::sync::oneshot::channel();
+        let mut connections = JoinSet::new();
+        connections.spawn(async move {
+            shutdown
+                .changed()
+                .await
+                .expect("the connection shutdown sender remains live");
+            drained_sender
+                .send(())
+                .expect("the drain observer remains live");
+            Ok(())
+        });
+        shutdown_sender
+            .send(true)
+            .expect("the peer connection receives shutdown");
+        let primary = RunnerProtocolRuntimeError::Lifecycle(RunnerRegistrationFailure::new(
+            RunnerInboundFrameKind::Registration,
+            AvailableCorrelation::None,
+            RejectionCode::Unavailable,
+        ));
+
+        let observed = drain_connection_tasks(&mut connections, Some(primary))
+            .await
+            .expect_err("the initiating lifecycle failure remains primary");
+        drained
+            .await
+            .expect("the peer task finishes before failure propagation");
+
+        assert!(matches!(observed, RunnerProtocolRuntimeError::Lifecycle(_)));
     }
 
     #[test]

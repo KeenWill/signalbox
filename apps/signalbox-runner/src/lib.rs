@@ -10,7 +10,7 @@ pub use configuration::{
 };
 pub use protocol::{
     ConnectionEnd, EnrollmentOutcome, MessageKind, ProtocolViolation, RecoveryGap,
-    RecoveryUnavailable, RunnerConnection, RunnerConnectionError, SocketConnectError,
+    RecoveryUnavailable, RunnerConnection, RunnerConnectionError, ServeOutcome, SocketConnectError,
     connect_verified,
 };
 pub use state::{

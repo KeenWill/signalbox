@@ -57,8 +57,10 @@ the process environment at startup and also consults `HOME`:
   semantics.
 - `SIGNALBOX_RUNNER_SOCKET_PATH` — optional distinct local Unix-socket path for
   the runner wire. When absent, signalboxd replaces the process socket's final
-  extension with `.runner.sock`. An explicit value equal to the process socket
-  is a typed configuration failure. Otherwise it uses the same private-node
+  extension with `.runner.sock`. The two canonical public paths and their
+  adjacent `.lock` and `.identity` artifacts must be disjoint; any intersection,
+  including one reached through parent-directory aliases, is a typed
+  configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 
 `DATABASE_URL` is the whole database configuration channel. The SQLx driver

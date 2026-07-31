@@ -11,7 +11,7 @@ use std::{
     cell::Cell,
     env,
     ffi::OsString,
-    fmt,
+    fmt, fs,
     future::Future,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -219,7 +219,7 @@ impl HubConfiguration {
             Some(value) => required_path(RUNNER_SOCKET_PATH_ENVIRONMENT, Some(value))?,
             None => process_socket_path.with_extension("runner.sock"),
         };
-        if runner_socket_path == process_socket_path {
+        if socket_artifacts_conflict(&process_socket_path, &runner_socket_path) {
             return Err(HubConfigurationError::new(
                 RUNNER_SOCKET_PATH_ENVIRONMENT,
                 RequiredSettingFailure::Conflicts,
@@ -280,6 +280,30 @@ fn required_path(
     } else {
         Ok(PathBuf::from(value))
     }
+}
+
+fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
+    let Some(process_artifacts) = socket_artifact_paths(process_path) else {
+        return process_path == runner_path;
+    };
+    let Some(runner_artifacts) = socket_artifact_paths(runner_path) else {
+        return process_path == runner_path;
+    };
+    process_artifacts
+        .iter()
+        .any(|process| runner_artifacts.iter().any(|runner| runner == process))
+}
+
+fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
+    let file_name = path.file_name().filter(|name| !name.is_empty())?;
+    let parent = path.parent()?;
+    let resolved_parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let public = resolved_parent.join(file_name);
+    let mut lock = public.as_os_str().to_owned();
+    lock.push(".lock");
+    let mut identity = public.as_os_str().to_owned();
+    identity.push(".identity");
+    Some([public, PathBuf::from(lock), PathBuf::from(identity)])
 }
 
 /// Closed startup causes admitted to operator telemetry.
@@ -1887,6 +1911,65 @@ mod tests {
         )
         .err()
         .expect("the two listeners cannot share a filesystem path");
+
+        assert_eq!(
+            error,
+            HubConfigurationError::new(
+                RUNNER_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Conflicts,
+            )
+        );
+    }
+
+    #[test]
+    fn socket_parent_aliases_cannot_resolve_to_the_same_artifacts() {
+        let directory = tempfile::tempdir().expect("the socket fixture directory exists");
+        let canonical_parent = directory.path().join("canonical");
+        std::fs::create_dir(&canonical_parent).expect("the canonical parent exists");
+        let alias_parent = directory.path().join("alias");
+        std::os::unix::fs::symlink(&canonical_parent, &alias_parent)
+            .expect("the parent alias exists");
+        let process_socket = canonical_parent.join("signalbox.sock");
+        let runner_socket = alias_parent.join("signalbox.sock");
+
+        let error = HubConfiguration::from_values(
+            Some(OsString::from("postgres://secret")),
+            Some(OsString::from("models.toml")),
+            Some(OsString::from("templates.toml")),
+            Some(OsString::from("key")),
+            Some(OsString::from("github-token")),
+            Some(process_socket.into_os_string()),
+            Some(runner_socket.into_os_string()),
+        )
+        .err()
+        .expect("resolved listener artifacts cannot overlap");
+
+        assert_eq!(
+            error,
+            HubConfigurationError::new(
+                RUNNER_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Conflicts,
+            )
+        );
+    }
+
+    #[test]
+    fn runner_socket_cannot_collide_with_a_process_socket_sidecar() {
+        let process_socket = std::path::PathBuf::from("/tmp/signalbox.sock");
+        let mut runner_socket = process_socket.as_os_str().to_owned();
+        runner_socket.push(".lock");
+
+        let error = HubConfiguration::from_values(
+            Some(OsString::from("postgres://secret")),
+            Some(OsString::from("models.toml")),
+            Some(OsString::from("templates.toml")),
+            Some(OsString::from("key")),
+            Some(OsString::from("github-token")),
+            Some(process_socket.into_os_string()),
+            Some(runner_socket),
+        )
+        .err()
+        .expect("listener public paths cannot overlap peer sidecars");
 
         assert_eq!(
             error,

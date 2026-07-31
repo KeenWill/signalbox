@@ -537,13 +537,52 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(epoch.get()))
         .execute(&mut *transaction)
         .await?;
-        commit_mutation(transaction).await?;
-        Ok(RunnerConnectionSnapshot {
+        let snapshot = RunnerConnectionSnapshot {
             epoch,
             event_ordinal: NonZeroU64::MIN,
             state: RunnerConnectionState::Connected,
             cause: RunnerConnectionCause::Established,
-        })
+        };
+        match commit_mutation(transaction).await {
+            Ok(()) => Ok(snapshot),
+            Err(error @ RunnerProtocolStoreError::CommitAmbiguous(_)) => self
+                .reconcile_open_connection(enrollment, epoch)
+                .await?
+                .ok_or(error),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn reconcile_open_connection(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+    ) -> Result<Option<RunnerConnectionSnapshot>, RunnerProtocolStoreError> {
+        let row = sqlx::query(
+            "SELECT state_kind, cause_kind
+               FROM runner_connection_event
+              WHERE enrollment_id = $1
+                AND connection_epoch = $2
+                AND event_ordinal = 1",
+        )
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(epoch.get()))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let state: String = row.decode_column("state_kind")?;
+        let cause: String = row.decode_column("cause_kind")?;
+        if state != "connected" || cause != "established" {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
+        Ok(Some(RunnerConnectionSnapshot {
+            epoch,
+            event_ordinal: NonZeroU64::MIN,
+            state: RunnerConnectionState::Connected,
+            cause: RunnerConnectionCause::Established,
+        }))
     }
 
     /// Appends one lifecycle transition only when the caller names the current epoch.

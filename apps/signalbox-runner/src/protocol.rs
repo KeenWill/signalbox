@@ -2,7 +2,9 @@
 
 use std::{
     error::Error,
-    fmt, fs, io,
+    fmt, fs,
+    future::Future,
+    io,
     os::unix::fs::{FileTypeExt as _, MetadataExt as _},
     path::Path,
 };
@@ -259,6 +261,15 @@ pub enum EnrollmentOutcome {
 pub enum ConnectionEnd {
     DaemonShutdown { connection_epoch: PositiveU64 },
     RunnerShutdown { connection_epoch: PositiveU64 },
+}
+
+/// One serial serving-loop boundary observed without cancelling an outbound frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServeOutcome {
+    /// The daemon supplied a clean terminal order.
+    ConnectionEnded(ConnectionEnd),
+    /// Local shutdown is ready at a boundary with no in-flight write.
+    ShutdownReady,
 }
 
 /// Closed local recovery gap; no wire recovery facts are fabricated.
@@ -697,12 +708,41 @@ where
         }
     }
 
+    /// Serves until the connection ends or local shutdown reaches a clean frame boundary.
+    pub async fn serve_until_shutdown<F>(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        shutdown: F,
+    ) -> Result<ServeOutcome, RunnerConnectionError>
+    where
+        F: Future<Output = ()>,
+    {
+        tokio::pin!(shutdown);
+        loop {
+            let message = tokio::select! {
+                message = receive_message(&mut self.io) => message?,
+                () = &mut shutdown => return Ok(ServeOutcome::ShutdownReady),
+            };
+            if let Some(end) = self.serve_message(state, message).await? {
+                return Ok(ServeOutcome::ConnectionEnded(end));
+            }
+        }
+    }
+
     /// Handles one complete daemon frame; exposed for hermetic protocol harnesses.
     pub async fn serve_one(
         &mut self,
-        _state: &mut RunnerStateRoot,
+        state: &mut RunnerStateRoot,
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         let message = receive_message(&mut self.io).await?;
+        self.serve_message(state, message).await
+    }
+
+    async fn serve_message(
+        &mut self,
+        _state: &mut RunnerStateRoot,
+        message: Message,
+    ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         match message {
             Message::Heartbeat(challenge) => {
                 let acknowledgement = self.heartbeat_acknowledgement(challenge)?;
@@ -1233,6 +1273,102 @@ mod tests {
                 runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
                 lease_phase: None,
                 workspace_phase: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn local_shutdown_waits_for_an_in_flight_heartbeat_frame() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_root(&parent);
+        let receipt = issued_receipt(state.state().request_id());
+        state
+            .record_receipt(receipt)
+            .expect("the issued receipt is journaled");
+        let advertisement = empty_advertisement();
+        let frame_backpressure_bytes = 1;
+        let (runner_io, hub_io) = tokio::io::duplex(frame_backpressure_bytes);
+        let mut hub_io = BufReader::new(hub_io);
+        let (mut shutdown_sender, mut shutdown_receiver) = tokio::io::duplex(1);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before heartbeat");
+            let outcome = connection
+                .serve_until_shutdown(&mut state, async {
+                    shutdown_receiver
+                        .read_exact(&mut [0_u8])
+                        .await
+                        .expect("the local shutdown signal is delivered");
+                })
+                .await
+                .expect("the serving loop reaches a clean shutdown boundary");
+            let end = connection
+                .shutdown()
+                .await
+                .expect("the epoch-targeted shutdown frame is sent");
+            (outcome, end)
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+                }),
+            )
+            .await;
+            let buffered_prefix = hub_io
+                .fill_buf()
+                .await
+                .expect("the blocked acknowledgement exposes its first byte")
+                .len();
+            shutdown_sender
+                .write_all(&[1_u8])
+                .await
+                .expect("the runner still waits at the in-flight write");
+            let acknowledgement = receive_hub_message(&mut hub_io).await;
+            let shutdown = receive_hub_message(&mut hub_io).await;
+            (buffered_prefix, acknowledgement, shutdown)
+        };
+
+        let ((outcome, end), (buffered_prefix, acknowledgement, shutdown)) =
+            tokio::join!(runner, hub);
+        let epoch = positive(CONNECTION_EPOCH);
+
+        assert_eq!(buffered_prefix, frame_backpressure_bytes);
+        assert_eq!(outcome, ServeOutcome::ShutdownReady);
+        assert_eq!(
+            end,
+            ConnectionEnd::RunnerShutdown {
+                connection_epoch: epoch
+            }
+        );
+        assert_eq!(
+            acknowledgement,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: None,
+                workspace_phase: None,
+            })
+        );
+        assert_eq!(
+            shutdown,
+            Message::Shutdown(Shutdown {
+                connection_epoch: epoch,
+                reason: ShutdownReason::RunnerShutdown,
             })
         );
     }

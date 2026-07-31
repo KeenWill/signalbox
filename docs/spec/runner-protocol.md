@@ -105,18 +105,22 @@ the client socket. `signalbox-runner` dials that socket and never listens. The
 daemon applies the process socket's owner-private canonical parent, trusted
 ancestry, exact `0600` node mode, sidecar exclusive `flock`, rename-resistant
 path identity, effective-user peer check, and identity-safe cleanup discipline.
-The runner verifies the connected socket's pinned effective-user ownership,
-mode, and path identity before sending enrollment. The local effective user is
-the version-one trust boundary; the opaque authentication-reference identity is
-correlated with the stored enrollment but is not treated as a secret.
+Configuration rejects any intersection between the two canonical public socket
+paths and their adjacent `.lock` and `.identity` artifacts, including paths
+whose parent aliases resolve to the same directory. The runner verifies the
+connected socket's pinned effective-user ownership, mode, and path identity
+before sending enrollment. The local effective user is the version-one trust
+boundary; the opaque authentication-reference identity is correlated with the
+stored enrollment but is not treated as a secret.
 
 The daemon admits at most 64 concurrent runner connection tasks and allows ten
 seconds for the first complete frame; at the task limit it pauses acceptance,
 and an incomplete handshake expires closed. A malformed initial or established
 frame receives `malformed_frame`, while an unsupported envelope version receives
 `unsupported_version`; both use unavailable correlation and then close. An
-orderly shutdown drains admitted tasks; every runtime exit applies identity-safe
-listener-path cleanup.
+orderly shutdown drains admitted tasks. A fatal connection task first signals
+and drains every admitted peer task before its failure is propagated; every
+runtime exit applies identity-safe listener-path cleanup.
 
 Runner-wire version one is newline-delimited UTF-8 JSON with a required
 `version` and closed tagged message vocabulary. Each complete line, including
@@ -476,9 +480,12 @@ is stale evidence and cannot advance either side (INV-042, INV-021, INV-043).
 
 The hub durably assigns a new positive connection epoch before each `enrolled`
 or `resumed` acknowledgement. Every post-handshake lifecycle transition names
-that exact epoch. A newer connection fences its predecessors; a shutdown order
-or other transition naming a stale epoch receives `stale_connection` with the
-observed epoch and cannot mutate the fresh connection.
+that exact epoch. When the allocation commit result is ambiguous, the hub
+rereads the exact enrollment-and-epoch event and treats only the canonical
+`connected`/`established` first event as a committed allocation before replying.
+A newer connection fences its predecessors; a shutdown order or other transition
+naming a stale epoch receives `stale_connection` with the observed epoch and
+cannot mutate the fresh connection.
 
 The daemon sends a heartbeat challenge every five seconds. The registration-only
 runner replies with its monotonically increasing heartbeat sequence and no lease
@@ -507,18 +514,20 @@ runner to resume and fence the successor.
 
 Enrollment revocation terminalizes a still-`connected` or `suspect` epoch as
 `lost` with cause `enrollment_revoked` in the same transaction before the
-enrollment becomes revoked. A terminal connection remains unchanged. Startup
-reconciliation therefore never needs to append a lifecycle event to an already
-revoked enrollment.
+enrollment becomes revoked. The serving task's next lifecycle observation
+returns typed `enrollment_revoked` evidence and closes that physical stream. A
+terminal connection remains unchanged. Startup reconciliation therefore never
+needs to append a lifecycle event to an already revoked enrollment.
 
 The runner retries socket absence, refusal, reset, timeout, transient socket
 identity replacement, `unavailable`, and `shutting_down` without weakening any
 identity check. It reports the failed stage and uses exponential delays from one
 second through a 30-second cap, resetting after a completed enroll or resume.
 Policy, correlation, revocation, and other permanent rejections remain fatal. On
-a local termination signal, the runner gives its epoch-qualified shutdown write
-five seconds; expiry exits with typed failure and leaves the hub to record
-transport or heartbeat loss rather than presenting the runner as healthy.
+a local termination signal, the runner finishes any outbound frame already in
+progress, then gives its epoch-qualified shutdown write five seconds from the
+next clean frame boundary; expiry exits with typed failure and leaves the hub to
+record transport or heartbeat loss rather than presenting the runner as healthy.
 
 **Committed unimplemented functionality.** No present runner sends a nonempty
 reconnect inventory. Future execution support repeats resume and advertisement,

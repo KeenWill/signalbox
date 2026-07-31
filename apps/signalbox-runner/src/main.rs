@@ -2,8 +2,8 @@ use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, tim
 
 use signalbox_runner::{
     ArgumentError, RunnerConfiguration, RunnerConfigurationError, RunnerConfigurationPath,
-    RunnerConnection, RunnerConnectionError, RunnerStateError, RunnerStateRoot, SocketConnectError,
-    connect_verified,
+    RunnerConnection, RunnerConnectionError, RunnerStateError, RunnerStateRoot, ServeOutcome,
+    SocketConnectError, connect_verified,
 };
 
 const CONFIGURATION_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_CONFIG_FILE";
@@ -85,13 +85,18 @@ async fn run(
             Err(error) => return Err(RunnerDaemonError::Connection(error)),
         };
         backoff.reset();
-        let served = tokio::select! {
-            served = connection.serve(&mut state) => served,
-            _ = terminate.recv() => return shutdown_with_timeout(&mut connection).await,
-            _ = interrupt.recv() => return shutdown_with_timeout(&mut connection).await,
+        let shutdown = async {
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = interrupt.recv() => {}
+            }
         };
+        let served = connection.serve_until_shutdown(&mut state, shutdown).await;
         match served {
-            Ok(_) => return Ok(()),
+            Ok(ServeOutcome::ConnectionEnded(_)) => return Ok(()),
+            Ok(ServeOutcome::ShutdownReady) => {
+                return shutdown_with_timeout(&mut connection).await;
+            }
             Err(error) if error.is_reconnectable() => {
                 let delay = backoff.next_delay();
                 report_reconnect(ReconnectStage::Serving, &error, delay);
