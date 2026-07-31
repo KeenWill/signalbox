@@ -56,7 +56,7 @@ use signalbox_persistence::{
         PostgresReviewOrchestrationStore, ReviewOrchestrationCommand,
         ReviewOrchestrationCommandClaim, ReviewOrchestrationCommandGuard,
         ReviewOrchestrationCommandKind, ReviewOrchestrationCommandResult,
-        ReviewOrchestrationCurrentStage, ReviewOrchestrationStage,
+        ReviewOrchestrationCurrentStage, ReviewOrchestrationStage, ReviewOrchestrationStoreError,
     },
     review_workflow::{
         ReserveExternalLinkOutcome, ReviewWorkflowInsertionError, ReviewWorkflowStore,
@@ -8882,6 +8882,32 @@ fn expect_recorded_orchestration_claim(
     }
 }
 
+#[track_caller]
+fn expect_successful_concern_claim(claim: &ReviewConcernClaim) -> &ReviewConcernSuccess {
+    match claim.outcome() {
+        ReviewConcernOutcome::Succeeded(success) => success,
+        ReviewConcernOutcome::Failed { .. }
+        | ReviewConcernOutcome::Blocked { .. }
+        | ReviewConcernOutcome::Cancelled { .. }
+        | ReviewConcernOutcome::Superseded { .. } => {
+            panic!("orchestration snapshot concern claim is not successful")
+        }
+    }
+}
+
+async fn assert_orchestration_claim_waiting(
+    claim: &mut tokio::task::JoinHandle<
+        Result<ReviewOrchestrationCommandClaim, ReviewOrchestrationStoreError>,
+    >,
+) {
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), claim)
+            .await
+            .is_err(),
+        "concurrent orchestration command claim did not wait on the durable fence"
+    );
+}
+
 /// Durable orchestration facts reconstruct losslessly, seal each stage, replay
 /// equally, reject conflicting immutable input, and retain fenced command
 /// response state.
@@ -9006,7 +9032,9 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         ReviewDurableSealOutcome::Recorded
     );
     assert_eq!(
-        store.seal_complete_fanout(attempt_id, vec![claim]).await?,
+        store
+            .seal_complete_fanout(attempt_id, vec![claim.clone()])
+            .await?,
         ReviewDurableSealOutcome::Recorded
     );
     assert_eq!(
@@ -9014,8 +9042,33 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         ReviewDurableSealOutcome::Recorded
     );
     assert_eq!(
-        store.seal_judgment_plan(attempt_id, plan).await?,
+        store.seal_judgment_plan(attempt_id, plan.clone()).await?,
         ReviewDurableSealOutcome::EqualReplay
+    );
+    let interrupted_command = ReviewOrchestrationCommand {
+        command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY + 3)),
+        semantic_digest: [10; 32],
+        attempt: attempt_id,
+        kind: ReviewOrchestrationCommandKind::JudgmentEffect,
+    };
+    let interrupted_progress = store
+        .load_progress(attempt_id)
+        .await?
+        .expect("planned judgment has durable progress");
+    let interrupted_result = ReviewOrchestrationCommandResult {
+        attempt: attempt_id,
+        stage: ReviewOrchestrationStage::JudgmentIncomplete,
+        progress: interrupted_progress,
+    };
+    let interrupted_guard =
+        expect_new_orchestration_claim(store.begin_command(interrupted_command).await?);
+    assert_eq!(
+        interrupted_guard.record(interrupted_result.clone()).await?,
+        interrupted_result
+    );
+    assert_eq!(
+        store.current_stage(attempt_id).await?,
+        Some(ReviewOrchestrationCurrentStage::JudgmentIncomplete)
     );
     let accepted = fixture
         .store
@@ -9048,11 +9101,14 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         fixed.events()[1].clone(),
         ReviewTemplateDigest::new([3; 32]),
     )));
+    let applied_effect = ReviewJudgmentEffectId::new(attempt_id, finding_ref);
     assert_eq!(
-        store
-            .record_applied_judgment_effect(ReviewJudgmentEffectId::new(attempt_id, finding_ref))
-            .await?,
+        store.record_applied_judgment_effect(applied_effect).await?,
         ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store.current_stage(attempt_id).await?,
+        Some(ReviewOrchestrationCurrentStage::AwaitingRepair)
     );
     assert_eq!(
         store
@@ -9062,7 +9118,7 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
     );
     assert_eq!(
         store
-            .record_repair_outcomes(attempt_id, vec![repair])
+            .record_repair_outcomes(attempt_id, vec![repair.clone()])
             .await?,
         ReviewDurableSealOutcome::Recorded
     );
@@ -9082,6 +9138,27 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         store.current_stage(attempt_id).await?,
         Some(ReviewOrchestrationCurrentStage::Complete)
     );
+    let snapshot = store
+        .load_snapshot(attempt_id)
+        .await?
+        .expect("completed attempt has a coherent snapshot");
+    assert_eq!(snapshot.attempt, attempt);
+    assert_eq!(
+        snapshot.current_stage,
+        ReviewOrchestrationCurrentStage::Complete
+    );
+    assert_eq!(snapshot.concern_claims.len(), 1);
+    assert_eq!(snapshot.concern_claims[0].concern(), claim.concern());
+    let snapshot_success = expect_successful_concern_claim(&snapshot.concern_claims[0]);
+    assert_eq!(snapshot_success.findings().len(), 1);
+    assert_eq!(
+        snapshot_success.findings()[0].status(),
+        ReviewFindingStatus::Fixed
+    );
+    assert_eq!(snapshot.judgment_plan, Some(plan));
+    assert_eq!(snapshot.applied_judgment_effects, vec![applied_effect]);
+    assert_eq!(snapshot.repair_outcomes, Some(vec![repair]));
+    assert_eq!(snapshot.publication_outcomes, Some(Vec::new()));
 
     let command = ReviewOrchestrationCommand {
         command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
@@ -9108,6 +9185,38 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
     };
     assert!(matches!(
         store.begin_command(conflicting).await?,
+        ReviewOrchestrationCommandClaim::Conflicting
+    ));
+
+    let equal_race = ReviewOrchestrationCommand {
+        command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY + 1)),
+        ..command
+    };
+    let equal_winner = expect_new_orchestration_claim(store.begin_command(equal_race).await?);
+    let equal_store = store.clone();
+    let mut equal_loser = tokio::spawn(async move { equal_store.begin_command(equal_race).await });
+    assert_orchestration_claim_waiting(&mut equal_loser).await;
+    assert_eq!(equal_winner.record(result.clone()).await?, result);
+    let equal_replayed = expect_recorded_orchestration_claim(equal_loser.await??);
+    assert_eq!(equal_replayed, result);
+
+    let different_race = ReviewOrchestrationCommand {
+        command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY + 2)),
+        ..command
+    };
+    let different_winner =
+        expect_new_orchestration_claim(store.begin_command(different_race).await?);
+    let different_payload = ReviewOrchestrationCommand {
+        semantic_digest: [9; 32],
+        ..different_race
+    };
+    let different_store = store.clone();
+    let mut different_loser =
+        tokio::spawn(async move { different_store.begin_command(different_payload).await });
+    assert_orchestration_claim_waiting(&mut different_loser).await;
+    assert_eq!(different_winner.record(result.clone()).await?, result);
+    assert!(matches!(
+        different_loser.await??,
         ReviewOrchestrationCommandClaim::Conflicting
     ));
 
