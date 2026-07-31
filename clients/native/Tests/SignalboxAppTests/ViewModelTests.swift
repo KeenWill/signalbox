@@ -74,25 +74,30 @@ final class ViewModelTests: XCTestCase {
     func testImportedContinuationRetrySurvivesViewModelReplacementAfterUnknownSend() throws {
         let prepared = try ImportedContinuationRetryFixture.preparedCreation()
         let store = ProcessImportedContinuationRetryStore()
+        let originalConsumer = ProcessImportedContinuationRetryConsumer()
+        let replacementConsumer = ProcessImportedContinuationRetryConsumer()
         let endpointGeneration = try XCTUnwrap(store.beginAttempt())
 
         store.recordFailure(
             ImportedContinuationRetryFixture.sendOutcomeUnknownError,
             prepared: prepared,
             reusedUnresolvedCreation: false,
+            consumer: originalConsumer,
             endpointGeneration: endpointGeneration
         )
         store.endAttempt(endpointGeneration: endpointGeneration)
         let replacementViewModel = ProcessImportedConversationViewModel(
             serviceProvider: { nil },
-            continuationRetryStore: store
+            continuationRetryStore: store,
+            continuationConsumer: replacementConsumer
         )
         replacementViewModel.replaceServiceProvider { nil }
         let recovery = store.recovery(
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,
-            modelSelection: prepared.modelSelection
+            modelSelection: prepared.modelSelection,
+            consumer: replacementConsumer
         )
 
         XCTAssertEqual(recovery?.prepared, prepared)
@@ -102,12 +107,14 @@ final class ViewModelTests: XCTestCase {
     func testImportedContinuationRetrySurvivesSameEndpointReconnect() throws {
         let prepared = try ImportedContinuationRetryFixture.preparedCreation()
         let store = ProcessImportedContinuationRetryStore()
+        let consumer = ProcessImportedContinuationRetryConsumer()
         store.activateEndpoint(ImportedContinuationRetryFixture.primaryEndpoint)
         let endpointGeneration = try XCTUnwrap(store.beginAttempt())
         store.recordFailure(
             ImportedContinuationRetryFixture.sendOutcomeUnknownError,
             prepared: prepared,
             reusedUnresolvedCreation: false,
+            consumer: consumer,
             endpointGeneration: endpointGeneration
         )
         store.endAttempt(endpointGeneration: endpointGeneration)
@@ -117,14 +124,16 @@ final class ViewModelTests: XCTestCase {
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,
-            modelSelection: prepared.modelSelection
+            modelSelection: prepared.modelSelection,
+            consumer: consumer
         )
         store.activateEndpoint(ImportedContinuationRetryFixture.replacementEndpoint)
         let recoveryAfterEndpointChange = store.recovery(
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,
-            modelSelection: prepared.modelSelection
+            modelSelection: prepared.modelSelection,
+            consumer: consumer
         )
 
         XCTAssertEqual(recoveryAfterReconnect?.prepared, prepared)
@@ -135,12 +144,16 @@ final class ViewModelTests: XCTestCase {
         let firstPrepared = try ImportedContinuationRetryFixture.preparedCreation()
         let secondPrepared = try ImportedContinuationRetryFixture.secondPreparedCreation()
         let store = ProcessImportedContinuationRetryStore()
+        let firstConsumer = ProcessImportedContinuationRetryConsumer()
+        let secondConsumer = ProcessImportedContinuationRetryConsumer()
+        let resolvingConsumer = ProcessImportedContinuationRetryConsumer()
         let firstGeneration = try XCTUnwrap(store.beginAttempt())
         let competingGeneration = store.beginAttempt()
         store.recordFailure(
             ImportedContinuationRetryFixture.sendOutcomeUnknownError,
             prepared: firstPrepared,
             reusedUnresolvedCreation: false,
+            consumer: firstConsumer,
             endpointGeneration: firstGeneration
         )
         store.endAttempt(endpointGeneration: firstGeneration)
@@ -149,6 +162,7 @@ final class ViewModelTests: XCTestCase {
             ImportedContinuationRetryFixture.sendOutcomeUnknownError,
             prepared: secondPrepared,
             reusedUnresolvedCreation: false,
+            consumer: secondConsumer,
             endpointGeneration: secondGeneration
         )
         store.endAttempt(endpointGeneration: secondGeneration)
@@ -157,6 +171,7 @@ final class ViewModelTests: XCTestCase {
         let recordedSuccess = store.recordSuccess(
             secondPrepared,
             sessionID: resolvedSessionID,
+            consumer: resolvingConsumer,
             endpointGeneration: successGeneration
         )
         store.endAttempt(endpointGeneration: successGeneration)
@@ -165,13 +180,15 @@ final class ViewModelTests: XCTestCase {
             importedConversationID: firstPrepared.importedConversationID,
             throughPosition: firstPrepared.throughPosition,
             relationship: firstPrepared.relationship,
-            modelSelection: firstPrepared.modelSelection
+            modelSelection: firstPrepared.modelSelection,
+            consumer: firstConsumer
         )
         let secondRecovery = store.recovery(
             importedConversationID: secondPrepared.importedConversationID,
             throughPosition: secondPrepared.throughPosition,
             relationship: secondPrepared.relationship,
-            modelSelection: secondPrepared.modelSelection
+            modelSelection: secondPrepared.modelSelection,
+            consumer: secondConsumer
         )
 
         XCTAssertNil(competingGeneration)
@@ -184,6 +201,7 @@ final class ViewModelTests: XCTestCase {
     func testImportedContinuationRetryIgnoresOutcomeFromReplacedEndpoint() throws {
         let prepared = try ImportedContinuationRetryFixture.preparedCreation()
         let store = ProcessImportedContinuationRetryStore()
+        let consumer = ProcessImportedContinuationRetryConsumer()
         store.activateEndpoint(ImportedContinuationRetryFixture.primaryEndpoint)
         let replacedGeneration = try XCTUnwrap(store.beginAttempt())
 
@@ -192,12 +210,14 @@ final class ViewModelTests: XCTestCase {
         let recordedStaleSuccess = store.recordSuccess(
             prepared,
             sessionID: try ImportedContinuationRetryFixture.resolvedSessionID(),
+            consumer: consumer,
             endpointGeneration: replacedGeneration
         )
         store.recordFailure(
             ImportedContinuationRetryFixture.sendOutcomeUnknownError,
             prepared: prepared,
             reusedUnresolvedCreation: false,
+            consumer: consumer,
             endpointGeneration: replacedGeneration
         )
         store.endAttempt(endpointGeneration: replacedGeneration)
@@ -209,7 +229,8 @@ final class ViewModelTests: XCTestCase {
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,
-            modelSelection: prepared.modelSelection
+            modelSelection: prepared.modelSelection,
+            consumer: consumer
         )
 
         XCTAssertFalse(recordedStaleSuccess)
@@ -217,20 +238,33 @@ final class ViewModelTests: XCTestCase {
         XCTAssertNil(recovery)
     }
 
-    func testImportedContinuationResolvedReplayReturnsReceiptWithoutService() async throws {
+    func testImportedContinuationResolvedReplayIsOneShotWithoutService() async throws {
         let prepared = try ImportedContinuationRetryFixture.preparedCreation()
         let resolvedSessionID = try ImportedContinuationRetryFixture.resolvedSessionID()
         let store = ProcessImportedContinuationRetryStore()
-        let endpointGeneration = try XCTUnwrap(store.beginAttempt())
+        let awaitingConsumer = ProcessImportedContinuationRetryConsumer()
+        let resolvingConsumer = ProcessImportedContinuationRetryConsumer()
+        let failedGeneration = try XCTUnwrap(store.beginAttempt())
+        store.recordFailure(
+            ImportedContinuationRetryFixture.sendOutcomeUnknownError,
+            prepared: prepared,
+            reusedUnresolvedCreation: false,
+            consumer: awaitingConsumer,
+            endpointGeneration: failedGeneration
+        )
+        store.endAttempt(endpointGeneration: failedGeneration)
+        let successGeneration = try XCTUnwrap(store.beginAttempt())
         let recordedSuccess = store.recordSuccess(
             prepared,
             sessionID: resolvedSessionID,
-            endpointGeneration: endpointGeneration
+            consumer: resolvingConsumer,
+            endpointGeneration: successGeneration
         )
-        store.endAttempt(endpointGeneration: endpointGeneration)
+        store.endAttempt(endpointGeneration: successGeneration)
         let viewModel = ProcessImportedConversationViewModel(
             serviceProvider: { nil },
-            continuationRetryStore: store
+            continuationRetryStore: store,
+            continuationConsumer: awaitingConsumer
         )
         let conversation = try await ImportedContinuationRetryFixture.importedConversation()
 
@@ -240,10 +274,17 @@ final class ViewModelTests: XCTestCase {
             relationship: prepared.relationship,
             aliasID: try ImportedContinuationRetryFixture.aliasID()
         )
+        let laterSessionID = try? await viewModel.continueConversation(
+            conversation: conversation,
+            throughPosition: prepared.throughPosition,
+            relationship: prepared.relationship,
+            aliasID: try ImportedContinuationRetryFixture.aliasID()
+        )
 
         XCTAssertTrue(recordedSuccess)
         XCTAssertEqual(replayedSessionID, resolvedSessionID)
-        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertNil(laterSessionID)
+        XCTAssertEqual(viewModel.errorMessage, remoteTransportGateMessage)
     }
 
     func testImportedContinuationCompetingWindowPublishesBusyError() async throws {

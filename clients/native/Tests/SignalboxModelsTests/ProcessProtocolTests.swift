@@ -23,6 +23,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-033: imported continuation requests retain their closed version-one shape.
   func testImportedContinuationRequestUsesTheVersionOneFrontierShape() throws {
     let importedConversationID = "33333333-3333-4333-8333-333333333333"
     let aliasID = "44444444-4444-4444-8444-444444444444"
@@ -49,6 +50,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-033: admitted imported-entry members decode without weakening the closed shape.
   func testImportedConversationEntryDecodesItsAttestedTextPreview() throws {
     let importedEntryID = "33333333-3333-4333-8333-333333333333"
     let position = SignalboxCanonicalUInt64(rawValue: 1)
@@ -81,6 +83,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(entry.textPreview?.truncated, false)
   }
 
+  /// INV-033: omitting a required nullable imported-entry member fails explicitly.
   func testImportedConversationEntryRequiresExplicitNullablePreview() throws {
     let encoded = Data(
       """
@@ -104,6 +107,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertTrue(diagnostic.message.contains("text_preview"))
   }
 
+  /// INV-033: an unknown imported source-speaker variant fails explicitly.
   func testImportedConversationEntryRejectsUnknownSourceSpeaker() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.importedEntryWithUnknownSourceSpeakerFrame()
@@ -113,6 +117,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(diagnostic, ProcessProtocolFixture.unknownImportedSourceSpeakerDiagnostic)
   }
 
+  /// INV-033: explicit null preview admission stays distinct from an omitted member.
   func testImportedConversationEntryAcceptsAttestedSpeakerWithoutTextPreview() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.attestedSpeakerWithoutTextPreviewFrame()

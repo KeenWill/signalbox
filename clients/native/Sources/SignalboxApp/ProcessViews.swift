@@ -566,49 +566,131 @@ private struct ProcessConversationDetailScreen: View {
   }
 }
 
+final class ProcessImportedContinuationRetryConsumer {}
+
+private final class ProcessImportedContinuationWeakConsumer {
+  weak var value: ProcessImportedContinuationRetryConsumer?
+
+  init(_ value: ProcessImportedContinuationRetryConsumer) {
+    self.value = value
+  }
+
+  func matches(_ consumer: ProcessImportedContinuationRetryConsumer) -> Bool {
+    value === consumer
+  }
+}
+
 struct ProcessImportedContinuationRetryState {
   struct Recovery: Equatable {
     let prepared: SignalboxPreparedImportedSessionCreation
     let resolvedSessionID: SignalboxCanonicalUUID?
   }
 
-  private var recoveries: [Recovery] = []
+  private struct PendingRecovery {
+    let prepared: SignalboxPreparedImportedSessionCreation
+    var consumers: [ProcessImportedContinuationWeakConsumer]
+  }
 
-  func recovery(
+  private struct ResolvedReceipt {
+    let prepared: SignalboxPreparedImportedSessionCreation
+    let sessionID: SignalboxCanonicalUUID
+    let consumer: ProcessImportedContinuationWeakConsumer
+  }
+
+  private var pendingRecoveries: [PendingRecovery] = []
+  private var resolvedReceipts: [ResolvedReceipt] = []
+
+  mutating func recovery(
     importedConversationID: SignalboxCanonicalUUID,
     throughPosition: SignalboxCanonicalUInt64,
     relationship: SignalboxImportedSessionRelationship,
-    modelSelection: SignalboxModelSelection
+    modelSelection: SignalboxModelSelection,
+    consumer: ProcessImportedContinuationRetryConsumer
   ) -> Recovery? {
-    recoveries.first {
-      $0.prepared.importedConversationID == importedConversationID
-        && $0.prepared.throughPosition == throughPosition
-        && $0.prepared.relationship == relationship
-        && $0.prepared.modelSelection == modelSelection
+    pruneDeadConsumers()
+    if let receiptIndex = resolvedReceipts.firstIndex(where: {
+      Self.matchesIntent(
+        $0.prepared,
+        importedConversationID: importedConversationID,
+        throughPosition: throughPosition,
+        relationship: relationship,
+        modelSelection: modelSelection
+      ) && $0.consumer.matches(consumer)
+    }) {
+      let receipt = resolvedReceipts.remove(at: receiptIndex)
+      return Recovery(
+        prepared: receipt.prepared,
+        resolvedSessionID: receipt.sessionID
+      )
     }
+    guard
+      let pendingIndex = pendingRecoveries.firstIndex(where: {
+        Self.matchesIntent(
+          $0.prepared,
+          importedConversationID: importedConversationID,
+          throughPosition: throughPosition,
+          relationship: relationship,
+          modelSelection: modelSelection
+        )
+      })
+    else {
+      return nil
+    }
+    if !pendingRecoveries[pendingIndex].consumers.contains(where: {
+      $0.matches(consumer)
+    }) {
+      pendingRecoveries[pendingIndex].consumers.append(
+        ProcessImportedContinuationWeakConsumer(consumer)
+      )
+    }
+    return Recovery(
+      prepared: pendingRecoveries[pendingIndex].prepared,
+      resolvedSessionID: nil
+    )
   }
 
   mutating func removeAll() {
-    recoveries.removeAll()
+    pendingRecoveries.removeAll()
+    resolvedReceipts.removeAll()
   }
 
   mutating func recordSuccess(
     _ prepared: SignalboxPreparedImportedSessionCreation,
-    sessionID: SignalboxCanonicalUUID
+    sessionID: SignalboxCanonicalUUID,
+    consumer: ProcessImportedContinuationRetryConsumer
   ) {
-    recoveries.removeAll {
-      $0.prepared.importedConversationID == prepared.importedConversationID
-        && $0.prepared.throughPosition == prepared.throughPosition
-        && $0.prepared.relationship == prepared.relationship
-        && $0.prepared.modelSelection == prepared.modelSelection
+    pruneDeadConsumers()
+    guard
+      let pendingIndex = pendingRecoveries.firstIndex(where: {
+        Self.matchesIntent($0.prepared, prepared)
+      })
+    else {
+      return
     }
-    recoveries.append(Recovery(prepared: prepared, resolvedSessionID: sessionID))
+    let pending = pendingRecoveries.remove(at: pendingIndex)
+    for waitingConsumer in pending.consumers {
+      guard let waitingValue = waitingConsumer.value, waitingValue !== consumer else {
+        continue
+      }
+      resolvedReceipts.removeAll {
+        Self.matchesIntent($0.prepared, prepared)
+          && $0.consumer.matches(waitingValue)
+      }
+      resolvedReceipts.append(
+        ResolvedReceipt(
+          prepared: prepared,
+          sessionID: sessionID,
+          consumer: waitingConsumer
+        )
+      )
+    }
   }
 
   mutating func recordFailure(
     _ error: Error,
     prepared: SignalboxPreparedImportedSessionCreation?,
-    reusedUnresolvedCreation: Bool
+    reusedUnresolvedCreation: Bool,
+    consumer: ProcessImportedContinuationRetryConsumer
   ) {
     let retainsPreparedCreation: Bool
     if error is CancellationError {
@@ -625,15 +707,65 @@ struct ProcessImportedContinuationRetryState {
     guard let prepared else {
       return
     }
-    recoveries.removeAll {
-      $0.prepared.importedConversationID == prepared.importedConversationID
-        && $0.prepared.throughPosition == prepared.throughPosition
-        && $0.prepared.relationship == prepared.relationship
-        && $0.prepared.modelSelection == prepared.modelSelection
+    pruneDeadConsumers()
+    let pendingIndex = pendingRecoveries.firstIndex {
+      Self.matchesIntent($0.prepared, prepared)
     }
-    if retainsPreparedCreation {
-      recoveries.append(Recovery(prepared: prepared, resolvedSessionID: nil))
+    guard retainsPreparedCreation else {
+      if let pendingIndex {
+        pendingRecoveries.remove(at: pendingIndex)
+      }
+      return
     }
+    if let pendingIndex {
+      if !pendingRecoveries[pendingIndex].consumers.contains(where: {
+        $0.matches(consumer)
+      }) {
+        pendingRecoveries[pendingIndex].consumers.append(
+          ProcessImportedContinuationWeakConsumer(consumer)
+        )
+      }
+    } else {
+      pendingRecoveries.append(
+        PendingRecovery(
+          prepared: prepared,
+          consumers: [ProcessImportedContinuationWeakConsumer(consumer)]
+        )
+      )
+    }
+  }
+
+  private mutating func pruneDeadConsumers() {
+    for index in pendingRecoveries.indices {
+      pendingRecoveries[index].consumers.removeAll { $0.value == nil }
+    }
+    resolvedReceipts.removeAll { $0.consumer.value == nil }
+  }
+
+  private static func matchesIntent(
+    _ candidate: SignalboxPreparedImportedSessionCreation,
+    _ requested: SignalboxPreparedImportedSessionCreation
+  ) -> Bool {
+    matchesIntent(
+      candidate,
+      importedConversationID: requested.importedConversationID,
+      throughPosition: requested.throughPosition,
+      relationship: requested.relationship,
+      modelSelection: requested.modelSelection
+    )
+  }
+
+  private static func matchesIntent(
+    _ candidate: SignalboxPreparedImportedSessionCreation,
+    importedConversationID: SignalboxCanonicalUUID,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    modelSelection: SignalboxModelSelection
+  ) -> Bool {
+    candidate.importedConversationID == importedConversationID
+      && candidate.throughPosition == throughPosition
+      && candidate.relationship == relationship
+      && candidate.modelSelection == modelSelection
   }
 }
 
@@ -672,25 +804,28 @@ final class ProcessImportedContinuationRetryStore {
     importedConversationID: SignalboxCanonicalUUID,
     throughPosition: SignalboxCanonicalUInt64,
     relationship: SignalboxImportedSessionRelationship,
-    modelSelection: SignalboxModelSelection
+    modelSelection: SignalboxModelSelection,
+    consumer: ProcessImportedContinuationRetryConsumer
   ) -> ProcessImportedContinuationRetryState.Recovery? {
     state.recovery(
       importedConversationID: importedConversationID,
       throughPosition: throughPosition,
       relationship: relationship,
-      modelSelection: modelSelection
+      modelSelection: modelSelection,
+      consumer: consumer
     )
   }
 
   func recordSuccess(
     _ prepared: SignalboxPreparedImportedSessionCreation,
     sessionID: SignalboxCanonicalUUID,
+    consumer: ProcessImportedContinuationRetryConsumer,
     endpointGeneration: UInt64
   ) -> Bool {
     guard endpointGeneration == self.endpointGeneration else {
       return false
     }
-    state.recordSuccess(prepared, sessionID: sessionID)
+    state.recordSuccess(prepared, sessionID: sessionID, consumer: consumer)
     return true
   }
 
@@ -698,6 +833,7 @@ final class ProcessImportedContinuationRetryStore {
     _ error: Error,
     prepared: SignalboxPreparedImportedSessionCreation?,
     reusedUnresolvedCreation: Bool,
+    consumer: ProcessImportedContinuationRetryConsumer,
     endpointGeneration: UInt64
   ) {
     guard endpointGeneration == self.endpointGeneration else {
@@ -706,7 +842,8 @@ final class ProcessImportedContinuationRetryStore {
     state.recordFailure(
       error,
       prepared: prepared,
-      reusedUnresolvedCreation: reusedUnresolvedCreation
+      reusedUnresolvedCreation: reusedUnresolvedCreation,
+      consumer: consumer
     )
   }
 }
@@ -744,18 +881,23 @@ final class ProcessImportedConversationViewModel: ObservableObject {
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var generation: UInt64 = 0
   private let continuationRetryStore: ProcessImportedContinuationRetryStore
+  private let continuationConsumer: ProcessImportedContinuationRetryConsumer
 
   init(serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?) {
     self.serviceProvider = serviceProvider
     continuationRetryStore = ProcessImportedContinuationRetryStore()
+    continuationConsumer = ProcessImportedContinuationRetryConsumer()
   }
 
   init(
     serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?,
-    continuationRetryStore: ProcessImportedContinuationRetryStore
+    continuationRetryStore: ProcessImportedContinuationRetryStore,
+    continuationConsumer: ProcessImportedContinuationRetryConsumer =
+      ProcessImportedContinuationRetryConsumer()
   ) {
     self.serviceProvider = serviceProvider
     self.continuationRetryStore = continuationRetryStore
+    self.continuationConsumer = continuationConsumer
   }
 
   func replaceServiceProvider(
@@ -843,7 +985,8 @@ final class ProcessImportedConversationViewModel: ObservableObject {
       importedConversationID: conversation.conversationID,
       throughPosition: throughPosition,
       relationship: relationship,
-      modelSelection: selection
+      modelSelection: selection,
+      consumer: continuationConsumer
     )
     if let resolvedSessionID = recovery?.resolvedSessionID {
       errorMessage = nil
@@ -874,6 +1017,7 @@ final class ProcessImportedConversationViewModel: ObservableObject {
         continuationRetryStore.recordSuccess(
           prepared,
           sessionID: sessionID,
+          consumer: continuationConsumer,
           endpointGeneration: retryEndpointGeneration
         )
       else {
@@ -888,6 +1032,7 @@ final class ProcessImportedConversationViewModel: ObservableObject {
         error,
         prepared: preparedForAttempt,
         reusedUnresolvedCreation: reusedUnresolvedCreation,
+        consumer: continuationConsumer,
         endpointGeneration: retryEndpointGeneration
       )
       errorMessage = error.localizedDescription

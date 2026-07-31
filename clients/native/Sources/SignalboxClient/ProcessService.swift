@@ -896,10 +896,23 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     try await mutation(
       creation.request,
       success: { message in
-        guard case .sessionCreated(let sessionID) = message else {
+        switch message {
+        case .sessionCreated(let sessionID):
+          return sessionID
+        case .inputSubmitted, .toolRequestDecided, .sessionDefaults,
+          .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
+          .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
+          .sessionMetadataReplaced, .conversationImportInserted,
+          .conversationImportAlreadyImported, .conversationPageStart,
+          .conversationSummary, .conversationPageEnd, .importedConversationStart,
+          .importedConversationEntry, .importedConversationEnd, .modelAliasesStart,
+          .modelAliasSummary, .modelAliasesEnd, .transcriptSnapshotStart,
+          .transcriptTurn, .transcriptModelCallUsage, .transcriptModelCallsEnd,
+          .transcriptEntry, .transcriptTextEntry, .transcriptContent,
+          .transcriptSnapshotEnd, .sessionEvent, .providerTextDelta,
+          .protocolError, .unknown:
           return nil
         }
-        return sessionID
       }
     )
   }
