@@ -43,6 +43,17 @@ def pr_tokens(text: str) -> list[str]:
     return [match.group(0) for match in PR_TOKEN.finditer(text)]
 
 
+def fixture_root(directory: str) -> Path:
+    """Canonicalize a fixture root the way discovery canonicalizes its inputs.
+
+    ``tracked_files`` resolves every path it returns, so a root that is not
+    itself resolved can never be found to contain them. Temporary directories
+    on macOS live under ``/var``, a symlink to ``/private/var``, which makes
+    that mismatch load-bearing there while it stays invisible on Linux.
+    """
+    return Path(directory).resolve()
+
+
 def run_git(root: Path, *arguments: str) -> None:
     """Run one deterministic local-only Git fixture command."""
     disabled_hooks = root / ".disabled-git-hooks"
@@ -135,7 +146,7 @@ class DocsConsistencyTests(unittest.TestCase):
         self.environment.start()
         os.environ.pop("GITHUB_EVENT_PATH", None)
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = fixture_root(self.temporary.name)
         (self.root / "docs/spec").mkdir(parents=True)
         (self.root / "src").mkdir()
         (self.root / "AGENTS.md").write_text(
@@ -228,7 +239,7 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertNotIn(self.root / "AGENTS.md", sources)
 
     def test_tracked_file_discovery_fails_outside_a_repository(self) -> None:
-        outside = Path(tempfile.mkdtemp())
+        outside = fixture_root(tempfile.mkdtemp())
         self.addCleanup(lambda: outside.rmdir())
 
         with self.assertRaisesRegex(TrackedFilesError, "not a Git repository"):

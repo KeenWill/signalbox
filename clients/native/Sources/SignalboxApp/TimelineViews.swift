@@ -281,6 +281,9 @@ private struct MarkdownTable: View {
     }
 }
 
+/// A deterministic display subset for server-authored Markdown. It deliberately
+/// has no HTML or resource-loading path, keeping transcript rendering local and
+/// making screenshot output independent of network state.
 private enum MarkdownBlockParser {
     static func parse(_ markdown: String) -> [MarkdownBlock] {
         let lines = markdown

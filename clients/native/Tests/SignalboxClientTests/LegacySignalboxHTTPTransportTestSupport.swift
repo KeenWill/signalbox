@@ -1,4 +1,6 @@
+// Test-only transport for the retired REST client compatibility tests.
 import Foundation
+@testable import SignalboxNative
 
 public struct RecordedSignalboxRequest: Equatable, Sendable {
     public let method: String
