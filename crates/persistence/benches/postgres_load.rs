@@ -48,6 +48,18 @@ use tokio::{sync::Barrier, task::JoinSet, time::timeout};
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-benchmark-only";
+
+fn test_session_credential_pin() -> HarnessResult<signalbox_persistence::SessionCredentialPin> {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .map_err(|error| {
+        std::io::Error::other(format!("invalid benchmark credential pin: {error:?}")).into()
+    })
+}
 const ADMIN_DATABASE: &str = "signalbox_benchmark";
 const DEFAULT_DURATION_SECONDS: u64 = 60;
 const DEFAULT_POOL_SIZE: u32 = 80;
@@ -673,7 +685,7 @@ async fn create_session(pool: &PgPool, ids: OperationIds) -> HarnessResult<TurnF
             "session creation fixture was rejected: {preparation_error:?}"
         ))
     })?;
-    let outcome = CreateSessionRepository::new(pool.clone())
+    let outcome = CreateSessionRepository::new(pool.clone(), test_session_credential_pin()?)
         .handle(prepared)
         .await?;
     match outcome {

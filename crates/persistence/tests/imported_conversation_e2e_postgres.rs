@@ -52,6 +52,16 @@ const DATABASE_NAME: &str = "signalbox_imported_conversation_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
+
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
@@ -310,7 +320,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
             semantic_entries: seed_semantic_entries.into(),
             frontiers: [seed_frontier].into(),
         },
-        ImportedSessionRepository::new(pool.clone()),
+        ImportedSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     let CreateSessionFromImportedFrontierOutcome::Applied(created) = seed_service
         .execute(CreateSessionFromImportedFrontierRequest::try_new(
@@ -675,7 +685,7 @@ async fn s28_inv009_inv015_long_frontier_projection_uses_linear_physical_deltas(
             semantic_entries: seed_entries.into(),
             frontiers: [seed_frontier].into(),
         },
-        ImportedSessionRepository::new(pool.clone()),
+        ImportedSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     assert!(matches!(
         seed_service
@@ -838,7 +848,7 @@ async fn s28_inv039_process_read_preserves_long_imported_transcript() -> Result<
             semantic_entries: seed_entries.clone().into(),
             frontiers: [seed_frontier].into(),
         },
-        ImportedSessionRepository::new(pool.clone()),
+        ImportedSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     assert!(matches!(
         seed_service
