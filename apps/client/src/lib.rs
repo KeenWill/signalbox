@@ -3744,7 +3744,9 @@ mod tests {
 
         let decoded = read_review_json_file::<ReviewConcernsFile>(file.path()).await;
 
-        assert!(MAX_REVIEW_JSON_INPUT_BYTES < signalbox_process_protocol::MAX_FRAME_BYTES);
+        const {
+            assert!(MAX_REVIEW_JSON_INPUT_BYTES < signalbox_process_protocol::MAX_FRAME_BYTES);
+        }
         assert!(!matches!(
             decoded,
             Err(ClientError::ReviewInputExceedsFrame)
