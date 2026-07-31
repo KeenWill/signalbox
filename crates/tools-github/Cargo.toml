@@ -26,9 +26,11 @@ signalbox-domain = { path = "../domain" }
 signalbox-model-runtime = { path = "../model-runtime" }
 signalbox-tool-contract = { path = "../tool-contract" }
 signalbox-tools-basic = { path = "../tools-basic" }
+tracing = { version = "0.1.41", default-features = false }
 tokio = { version = "1.53.0", default-features = false, features = ["time"] }
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt"] }
 tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
     "rt-multi-thread",

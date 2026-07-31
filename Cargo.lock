@@ -3129,6 +3129,8 @@ dependencies = [
  "signalbox-tool-contract",
  "signalbox-tools-basic",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -28,7 +28,9 @@ use signalbox_application::{
 use signalbox_domain::{
     NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
 };
-use signalbox_model_runtime::{CredentialAccess, CredentialReference, CredentialValue};
+use signalbox_model_runtime::{
+    CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
+};
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
@@ -1059,7 +1061,8 @@ where
             decode_operation(kind, invocation.request().arguments()).map_err(|_| caller_bug())?;
         let credential = match self.credentials.resolve(&self.credential_reference).await {
             Ok(value) => value,
-            Err(_) => {
+            Err(error) => {
+                report_credential_access_failure(&error);
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                     detail: Some(self.credential_detail.clone()),
                 }));
@@ -1293,6 +1296,14 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
         };
         Ok(detail)
     }
+}
+
+fn report_credential_access_failure(error: &CredentialAccessError) {
+    tracing::warn!(
+        target: "signalbox_tools_github",
+        failure = ?error.failure,
+        "GitHub credential resolution failed"
+    );
 }
 
 fn caller_bug() -> GitHubExecutorError {
@@ -1774,7 +1785,7 @@ impl GitHubApiTransport {
         let response = request
             .send()
             .await
-            .map_err(|_| GitHubTransportFailure::DispatchUnknown)?;
+            .map_err(|error| classify_send_failure(error.is_connect()))?;
         if response.status().is_success() {
             return Ok(response);
         }
@@ -1900,6 +1911,14 @@ fn mutation_failure(failure: GitHubTransportFailure) -> GitHubTransportFailure {
         GitHubTransportFailure::PreDispatchInfrastructure => {
             GitHubTransportFailure::PreDispatchInfrastructure
         }
+    }
+}
+
+const fn classify_send_failure(is_connect: bool) -> GitHubTransportFailure {
+    if is_connect {
+        GitHubTransportFailure::PreDispatchInfrastructure
+    } else {
+        GitHubTransportFailure::DispatchUnknown
     }
 }
 
@@ -2176,12 +2195,12 @@ fn validate_unique_review_identities(
     threads: &[serde_json::Value],
 ) -> Result<(), GitHubTransportFailure> {
     let mut thread_ids = HashSet::new();
+    let mut comment_ids = HashSet::new();
     for thread in threads {
         let thread = required_object(thread)?;
         if !thread_ids.insert(required_string(thread, "id")?) {
             return Err(invalid_response(None));
         }
-        let mut comment_ids = HashSet::new();
         for comment in required_array(required(thread, "comments")?)? {
             let comment = required_object(comment)?;
             if !comment_ids.insert(required_string(comment, "id")?) {
@@ -2424,8 +2443,14 @@ fn nested_bool(value: &serde_json::Value, path: &[&str]) -> Result<bool, GitHubT
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
     use signalbox_application::ToolCatalog;
     use signalbox_domain::ToolName;
+    use signalbox_model_runtime::CredentialAccessFailure;
 
     use super::*;
 
@@ -2470,9 +2495,61 @@ mod tests {
     const SHORT_PATCH: &str = "";
     const OPAQUE_ID_FILLER: &str = "N";
     const CONTROLLED_OPAQUE_ID: &str = "PRRC_fixture\n";
+    const OTHER_THREAD_ID: &str = "PRRT_fixture_other";
+    const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
 
     struct SyntheticCredentials;
     struct SyntheticTransport;
+
+    #[derive(Clone, Default)]
+    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedTelemetry {
+        fn text(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .expect("captured telemetry lock is available")
+                    .clone(),
+            )
+            .expect("captured telemetry is UTF-8")
+        }
+    }
+
+    impl Write for CapturedTelemetry {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured telemetry lock is available")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_credential_failure(error: &CredentialAccessError) -> String {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            report_credential_access_failure(error);
+        });
+        output.text()
+    }
 
     fn catalog() -> CompiledToolCatalog {
         GitHubTools::try_new(
@@ -2563,6 +2640,19 @@ mod tests {
                 "pageInfo": {"hasNextPage": THREADS_TRUNCATED}
             }}}}
         })
+    }
+
+    #[test]
+    fn credential_failure_diagnostic_preserves_safe_classification() {
+        let error = CredentialAccessError::new(
+            CredentialReference::new(GITHUB_CREDENTIAL_REFERENCE),
+            CredentialAccessFailure::Unmapped,
+        );
+
+        let diagnostic = capture_credential_failure(&error);
+
+        assert!(diagnostic.contains(CREDENTIAL_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(SYNTHETIC_TOKEN));
     }
 
     #[test]
@@ -3010,6 +3100,18 @@ mod tests {
     }
 
     #[test]
+    fn send_error_classification_preserves_connect_certainty() {
+        assert_eq!(
+            classify_send_failure(true),
+            GitHubTransportFailure::PreDispatchInfrastructure
+        );
+        assert_eq!(
+            classify_send_failure(false),
+            GitHubTransportFailure::DispatchUnknown
+        );
+    }
+
+    #[test]
     fn client_setup_failure_preserves_definite_commit_outcome() {
         let failure = classify_destination_failure(PublicDestinationClientError::Infrastructure);
         let executor = GitHubTools::try_new(
@@ -3212,6 +3314,20 @@ mod tests {
                 .clone();
         response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"] =
             serde_json::json!([comment.clone(), comment]);
+
+        assert!(normalize_threads(&response).is_err());
+    }
+
+    #[test]
+    fn graphql_rejects_duplicate_review_comment_ids_across_threads() {
+        let mut response = threads_response();
+        let mut other_thread =
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0].clone();
+        other_thread["id"] = serde_json::Value::String(OTHER_THREAD_ID.to_owned());
+        let first_thread =
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0].clone();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
+            serde_json::json!([first_thread, other_thread]);
 
         assert!(normalize_threads(&response).is_err());
     }
