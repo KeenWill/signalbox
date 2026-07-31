@@ -174,6 +174,97 @@ fn search_result_cap_selects_lexically_first_file() {
 }
 
 #[test]
+fn directory_search_skips_binary_file_and_reports_omission() {
+    const BINARY_PATH: &str = "a.bin";
+    const MATCH_PATH: &str = "b.txt";
+    const MATCHING_CONTENT: &str = "needle\n";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(BINARY_PATH), [0xff]).expect("binary fixture writes");
+    fs::write(workspace.path().join(MATCH_PATH), MATCHING_CONTENT).expect("text fixture writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::SearchFiles,
+        &arguments(String::from(r#"{"path":".","pattern":"needle"}"#)),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("search arguments are valid");
+    let ReadResult::SearchFiles(result) = executor
+        .execute_operation(operation)
+        .expect("directory search skips binary file")
+    else {
+        panic!("search_files returns search matches")
+    };
+
+    assert_eq!(result.matches.len(), 1);
+    assert_eq!(result.matches[0].path, MATCH_PATH);
+    assert!(result.truncated);
+}
+
+#[test]
+fn single_file_search_rejects_binary_content() {
+    const BINARY_PATH: &str = "binary.bin";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(BINARY_PATH), [0xff]).expect("binary fixture writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::SearchFiles,
+        &arguments(format!(r#"{{"path":"{BINARY_PATH}","pattern":"needle"}}"#)),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("search arguments are valid");
+
+    let result = executor.execute_operation(operation);
+    let Err(error) = result else {
+        panic!("single binary file is a strict search failure")
+    };
+
+    assert_eq!(error, ReadFailure::NotUtf8);
+}
+
+#[test]
+fn directory_search_stops_at_aggregate_byte_budget() {
+    const FIRST_PATH: &str = "a.txt";
+    const SECOND_PATH: &str = "b.txt";
+    const THIRD_PATH: &str = "c.txt";
+    const FOURTH_PATH: &str = "d.txt";
+    const OMITTED_PATH: &str = "e.txt";
+    const NEEDLE: &str = "needle";
+
+    let filler = "x".repeat(MAX_SEARCH_FILE_BYTES + 1);
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(FIRST_PATH), &filler).expect("first fixture writes");
+    fs::write(workspace.path().join(SECOND_PATH), &filler).expect("second fixture writes");
+    fs::write(workspace.path().join(THIRD_PATH), &filler).expect("third fixture writes");
+    fs::write(workspace.path().join(FOURTH_PATH), &filler).expect("fourth fixture writes");
+    fs::write(
+        workspace.path().join(OMITTED_PATH),
+        format!("{NEEDLE}{filler}"),
+    )
+    .expect("omitted fixture writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::SearchFiles,
+        &arguments(format!(r#"{{"path":".","pattern":"{NEEDLE}"}}"#)),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("search arguments are valid");
+    let ReadResult::SearchFiles(result) = executor
+        .execute_operation(operation)
+        .expect("bounded directory search succeeds")
+    else {
+        panic!("search_files returns search matches")
+    };
+
+    assert!(result.matches.is_empty());
+    assert!(result.truncated);
+}
+
+#[test]
 fn long_line_window_contains_late_match_start() {
     const PREFIX_BYTES: usize = MAX_SEARCH_LINE_BYTES + 1;
     const NEEDLE: &str = "needle";

@@ -42,6 +42,7 @@ const DEFAULT_MAX_RESULTS: usize = 100;
 const MAX_RESULTS: usize = 256;
 const MAX_PATTERN_BYTES: usize = 4096;
 const MAX_SEARCH_FILE_BYTES: usize = 1024 * 1024;
+const MAX_SEARCH_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SEARCH_LINE_BYTES: usize = 1024;
 const MAX_WALK_ENTRIES: usize = 10_000;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded workspace-tool arguments";
@@ -267,8 +268,6 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadTools<FileSystem> {
                     definition,
                     WorkspaceReadArgumentValidator {
                         kind,
-                        filesystem: filesystem.clone(),
-                        root: root.clone(),
                         detail: invalid_arguments_detail.clone(),
                     },
                 ))
@@ -300,21 +299,17 @@ fn detail(value: &str) -> Result<ToolExecutionErrorDetail, WorkspaceReadToolCons
 }
 
 #[derive(Clone, Debug)]
-struct WorkspaceReadArgumentValidator<FileSystem> {
+struct WorkspaceReadArgumentValidator {
     kind: ReadToolKind,
-    filesystem: FileSystem,
-    root: WorkspaceRoot,
     detail: ToolExecutionErrorDetail,
 }
 
-impl<FileSystem: WorkspaceFileSystem> ToolArgumentValidator
-    for WorkspaceReadArgumentValidator<FileSystem>
-{
+impl ToolArgumentValidator for WorkspaceReadArgumentValidator {
     fn validate(
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail> {
-        decode_operation(self.kind, arguments, &self.filesystem, &self.root)
+        decode_arguments(self.kind, arguments)
             .map(|_| ())
             .map_err(|_| self.detail.clone())
     }
@@ -348,21 +343,27 @@ enum ReadOperation {
 enum InvalidReadArguments {
     Shape,
     Path(WorkspacePathRejection),
-    Filesystem,
 }
 
 fn decode_operation<FileSystem: WorkspaceFileSystem>(
     kind: ReadToolKind,
     arguments: &NormalizedToolArguments,
-    filesystem: &FileSystem,
-    root: &WorkspaceRoot,
+    _filesystem: &FileSystem,
+    _root: &WorkspaceRoot,
+) -> Result<ReadOperation, InvalidReadArguments> {
+    decode_arguments(kind, arguments)
+}
+
+fn decode_arguments(
+    kind: ReadToolKind,
+    arguments: &NormalizedToolArguments,
 ) -> Result<ReadOperation, InvalidReadArguments> {
     match kind {
         ReadToolKind::ReadFile => {
             let decoded: ReadFileArguments = serde_json::from_str(arguments.as_str())
                 .map_err(|_| InvalidReadArguments::Shape)?;
             check_read_max(decoded.max_bytes)?;
-            let path = resolve(root, filesystem, &decoded.path)?;
+            let path = checked_path(&decoded.path)?;
             Ok(ReadOperation::ReadFile {
                 path,
                 display_path: decoded.path,
@@ -373,7 +374,7 @@ fn decode_operation<FileSystem: WorkspaceFileSystem>(
             let decoded: ListDirectoryArguments = serde_json::from_str(arguments.as_str())
                 .map_err(|_| InvalidReadArguments::Shape)?;
             check_max_results(decoded.max_results)?;
-            let path = resolve(root, filesystem, &decoded.path)?;
+            let path = checked_path(&decoded.path)?;
             Ok(ReadOperation::ListDirectory {
                 path,
                 max_results: decoded.max_results,
@@ -384,7 +385,7 @@ fn decode_operation<FileSystem: WorkspaceFileSystem>(
                 .map_err(|_| InvalidReadArguments::Shape)?;
             check_max_results(decoded.max_results)?;
             let pattern = checked_glob(&decoded.pattern)?;
-            let path = resolve(root, filesystem, &decoded.path)?;
+            let path = checked_path(&decoded.path)?;
             Ok(ReadOperation::GlobFiles {
                 path,
                 pattern,
@@ -400,7 +401,7 @@ fn decode_operation<FileSystem: WorkspaceFileSystem>(
             }
             let pattern = Regex::new(&decoded.pattern).map_err(|_| InvalidReadArguments::Shape)?;
             let glob = decoded.glob.as_deref().map(checked_glob).transpose()?;
-            let path = resolve(root, filesystem, &decoded.path)?;
+            let path = checked_path(&decoded.path)?;
             Ok(ReadOperation::SearchFiles {
                 path,
                 pattern,
@@ -433,16 +434,9 @@ fn checked_glob(value: &str) -> Result<Pattern, InvalidReadArguments> {
     Pattern::new(value).map_err(|_| InvalidReadArguments::Shape)
 }
 
-fn resolve<FileSystem: WorkspaceFileSystem>(
-    root: &WorkspaceRoot,
-    filesystem: &FileSystem,
-    path: &str,
-) -> Result<PathBuf, InvalidReadArguments> {
-    root.resolve_existing(filesystem, path)
-        .map_err(|error| match error {
-            WorkspaceResolveError::Rejected(reason) => InvalidReadArguments::Path(reason),
-            WorkspaceResolveError::Io { .. } => InvalidReadArguments::Filesystem,
-        })
+fn checked_path(path: &str) -> Result<PathBuf, InvalidReadArguments> {
+    validate_relative_path(path).map_err(InvalidReadArguments::Path)?;
+    Ok(PathBuf::from(path))
 }
 
 /// Daemon-local executor for the four bounded workspace read tools.
@@ -503,11 +497,6 @@ impl<FileSystem: WorkspaceFileSystem> ToolExecutor for WorkspaceReadExecutor<Fil
             Err(InvalidReadArguments::Path(_)) => {
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                     detail: Some(self.path_rejected_detail.clone()),
-                }));
-            }
-            Err(InvalidReadArguments::Filesystem) => {
-                return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
-                    detail: Some(self.filesystem_failed_detail.clone()),
                 }));
             }
         };
@@ -701,6 +690,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
             matches: Vec::new(),
             truncated: walk.truncated,
         };
+        let mut remaining_bytes = MAX_SEARCH_TOTAL_BYTES;
         for entry in entries {
             if entry.kind != WorkspaceEntryKind::File {
                 continue;
@@ -715,12 +705,38 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
             if glob.is_some_and(|filter| !filter.matches_path(relative_to_base)) {
                 continue;
             }
-            let read = self
-                .filesystem
-                .read_file_prefix(&self.root, &entry.path, MAX_SEARCH_FILE_BYTES)
-                .map_err(map_resolve_failure)?;
-            let retained =
-                utf8_prefix(&read.bytes, MAX_SEARCH_FILE_BYTES).ok_or(ReadFailure::NotUtf8)?;
+            let max_file_bytes = if single_file {
+                MAX_SEARCH_FILE_BYTES
+            } else {
+                if remaining_bytes <= 4 {
+                    result.truncated = true;
+                    break;
+                }
+                MAX_SEARCH_FILE_BYTES.min(remaining_bytes - 4)
+            };
+            let read =
+                match self
+                    .filesystem
+                    .read_file_prefix(&self.root, &entry.path, max_file_bytes)
+                {
+                    Ok(read) => read,
+                    Err(error) if single_file => return Err(map_resolve_failure(error)),
+                    Err(_) => {
+                        result.truncated = true;
+                        continue;
+                    }
+                };
+            if !single_file {
+                remaining_bytes = remaining_bytes.saturating_sub(read.bytes.len());
+            }
+            let retained = match utf8_prefix(&read.bytes, max_file_bytes) {
+                Some(retained) => retained,
+                None if single_file => return Err(ReadFailure::NotUtf8),
+                None => {
+                    result.truncated = true;
+                    continue;
+                }
+            };
             if read.truncated || (retained.len() as u64) < read.total_bytes {
                 result.truncated = true;
             }
@@ -1112,9 +1128,41 @@ mod tests {
         };
     }
 
+    #[test]
+    fn catalog_accepts_missing_read_path_without_io() {
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let (catalog, _executor) = fixture_tools(&workspace);
+        let name = signalbox_domain::ToolName::try_new(String::from(READ_FILE_NAME))
+            .expect("fixture name is valid");
+
+        let result = catalog.validate_arguments(&name, &arguments(r#"{"path":"missing.txt"}"#));
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn missing_read_path_fails_at_execution() {
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let (_catalog, executor) = fixture_tools(&workspace);
+        let operation = decode_operation(
+            ReadToolKind::ReadFile,
+            &arguments(r#"{"path":"missing.txt"}"#),
+            &executor.filesystem,
+            &executor.root,
+        )
+        .expect("missing path is a valid request");
+
+        let result = executor.execute_operation(operation);
+        let Err(error) = result else {
+            panic!("missing path fails during execution")
+        };
+
+        assert_eq!(error, ReadFailure::Filesystem);
+    }
+
     #[cfg(unix)]
     #[test]
-    fn catalog_rejects_read_through_escaping_symlink() {
+    fn catalog_validation_does_not_resolve_read_symlink() {
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
@@ -1129,14 +1177,13 @@ mod tests {
         let name = signalbox_domain::ToolName::try_new(String::from(READ_FILE_NAME))
             .expect("fixture name is valid");
         let result = catalog.validate_arguments(&name, &arguments(r#"{"path":"escape"}"#));
-        let Err(ToolCatalogValidationFailure::InvalidArguments { .. }) = result else {
-            panic!("escaping read symlink is rejected as invalid arguments")
-        };
+
+        assert_eq!(result, Ok(()));
     }
 
     #[cfg(unix)]
     #[test]
-    fn catalog_rejects_search_root_through_escaping_symlink() {
+    fn catalog_validation_does_not_resolve_search_symlink() {
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
@@ -1149,9 +1196,8 @@ mod tests {
             .expect("fixture name is valid");
         let result = catalog
             .validate_arguments(&name, &arguments(r#"{"path":"escape","pattern":"secret"}"#));
-        let Err(ToolCatalogValidationFailure::InvalidArguments { .. }) = result else {
-            panic!("escaping search symlink is rejected as invalid arguments")
-        };
+
+        assert_eq!(result, Ok(()));
     }
 
     #[cfg(unix)]
