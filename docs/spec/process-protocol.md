@@ -3,7 +3,7 @@
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface at commit `6788e47f`. This page is the normative boundary between a
+surface at commit `18f2c185`. This page is the normative boundary between a
 local client process and `signalboxd`; domain values, PostgreSQL records, and
 wire messages remain distinct representations.
 
