@@ -646,6 +646,15 @@ fn runner_runtime_failure_class(error: &RunnerProtocolRuntimeError) -> OperatorF
         RunnerProtocolRuntimeError::Lifecycle(error) => {
             runner_lifecycle_failure_class(error.cause())
         }
+        RunnerProtocolRuntimeError::ConnectionDrainTimeout {
+            initiating: Some(error),
+            ..
+        } => runner_runtime_failure_class(error),
+        RunnerProtocolRuntimeError::ConnectionDrainTimeout {
+            initiating: None, ..
+        } => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
         RunnerProtocolRuntimeError::Decode(_)
         | RunnerProtocolRuntimeError::Encode(_)
         | RunnerProtocolRuntimeError::HandshakeTimeout

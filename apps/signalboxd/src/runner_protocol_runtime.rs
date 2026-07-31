@@ -34,6 +34,7 @@ use crate::local_socket::LocalSocketError;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const HEARTBEAT_MISSES_BEFORE_LOSS: u8 = 3;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAXIMUM_CONCURRENT_CONNECTIONS: usize = 64;
 const REGISTRATION_ONLY_CREDENTIAL_PROFILE: &str = "github-runner";
 
@@ -834,7 +835,13 @@ where
                 }
             }
             accepted = listener.accept(), if connections.len() < MAXIMUM_CONCURRENT_CONNECTIONS => {
-                let (stream, _) = accepted.map_err(RunnerProtocolRuntimeError::Accept)?;
+                let Some(stream) = accepted_stream_or_drain(
+                    accepted.map(|(stream, _)| stream),
+                    &connection_shutdown_sender,
+                    &mut connections,
+                ).await? else {
+                    return Ok(());
+                };
                 if let Err(error) = verify_runner_peer(&stream) {
                     tracing::warn!(error = %error, "runner peer failed same-user admission");
                     continue;
@@ -849,10 +856,60 @@ where
     }
 }
 
+async fn accepted_stream_or_drain(
+    accepted: io::Result<UnixStream>,
+    shutdown: &watch::Sender<bool>,
+    connections: &mut JoinSet<Result<(), RunnerProtocolRuntimeError>>,
+) -> Result<Option<UnixStream>, RunnerProtocolRuntimeError> {
+    match accepted {
+        Ok(stream) => Ok(Some(stream)),
+        Err(error) => {
+            let _ = shutdown.send(true);
+            drain_connection_tasks(connections, Some(RunnerProtocolRuntimeError::Accept(error)))
+                .await?;
+            Ok(None)
+        }
+    }
+}
+
 async fn drain_connection_tasks(
     connections: &mut JoinSet<Result<(), RunnerProtocolRuntimeError>>,
-    mut failure: Option<RunnerProtocolRuntimeError>,
+    failure: Option<RunnerProtocolRuntimeError>,
 ) -> Result<(), RunnerProtocolRuntimeError> {
+    drain_connection_tasks_with_timeout(connections, failure, CONNECTION_DRAIN_TIMEOUT).await
+}
+
+async fn drain_connection_tasks_with_timeout(
+    connections: &mut JoinSet<Result<(), RunnerProtocolRuntimeError>>,
+    mut failure: Option<RunnerProtocolRuntimeError>,
+    drain_timeout: Duration,
+) -> Result<(), RunnerProtocolRuntimeError> {
+    match timeout(
+        drain_timeout,
+        drain_connection_tasks_to_completion(connections, &mut failure),
+    )
+    .await
+    {
+        Ok(()) => match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        },
+        Err(_) => {
+            let remaining = connections.len();
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+            Err(RunnerProtocolRuntimeError::ConnectionDrainTimeout {
+                remaining,
+                initiating: failure.map(Box::new),
+            })
+        }
+    }
+}
+
+async fn drain_connection_tasks_to_completion(
+    connections: &mut JoinSet<Result<(), RunnerProtocolRuntimeError>>,
+    failure: &mut Option<RunnerProtocolRuntimeError>,
+) {
     while let Some(completed) = connections.join_next().await {
         let error = match completed {
             Ok(Ok(())) => continue,
@@ -866,17 +923,13 @@ async fn drain_connection_tasks(
                     | RunnerProtocolRuntimeError::ConnectionTask(_)
             )
         {
-            failure = Some(error);
+            *failure = Some(error);
         } else {
             tracing::warn!(
                 error = %error,
                 "runner connection closed while draining peer tasks"
             );
         }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
     }
 }
 
@@ -1160,12 +1213,20 @@ where
                             return Ok(());
                         }
                         if order.connection_epoch != context.epoch {
-                            write_stale_epoch(
+                            terminalize_protocol_rejection(
+                                &service,
+                                context,
                                 &mut writer,
                                 RunnerInboundFrameKind::Shutdown,
                                 order.connection_epoch,
-                            ).await?;
-                            continue;
+                                RunnerRegistrationFailure::new(
+                                    RunnerInboundFrameKind::Shutdown,
+                                    AvailableCorrelation::ConnectionEpoch(order.connection_epoch),
+                                    RejectionCode::StaleConnection,
+                                ),
+                            )
+                            .await?;
+                            return Ok(());
                         }
                         transition_or_reject_not_current(
                             &service,
@@ -1260,6 +1321,7 @@ const fn connection_failure_transition(
         RunnerProtocolRuntimeError::Accept(_)
         | RunnerProtocolRuntimeError::Cleanup(_)
         | RunnerProtocolRuntimeError::ConnectionTask(_)
+        | RunnerProtocolRuntimeError::ConnectionDrainTimeout { .. }
         | RunnerProtocolRuntimeError::HandshakeTimeout
         | RunnerProtocolRuntimeError::OwnershipUnavailable
         | RunnerProtocolRuntimeError::Lifecycle(_) => None,
@@ -1644,6 +1706,10 @@ pub enum RunnerProtocolRuntimeError {
     OwnershipUnavailable,
     HeartbeatSequenceExhausted,
     ConnectionTask(JoinError),
+    ConnectionDrainTimeout {
+        remaining: usize,
+        initiating: Option<Box<Self>>,
+    },
     Lifecycle(RunnerRegistrationFailure),
 }
 
@@ -1665,6 +1731,9 @@ impl fmt::Display for RunnerProtocolRuntimeError {
                 formatter.write_str("runner heartbeat sequence exhausted")
             }
             Self::ConnectionTask(_) => formatter.write_str("runner connection task failed"),
+            Self::ConnectionDrainTimeout { .. } => {
+                formatter.write_str("runner connection task drain timed out")
+            }
             Self::Lifecycle(_) => formatter.write_str("runner lifecycle persistence failed"),
         }
     }
@@ -1678,10 +1747,17 @@ impl Error for RunnerProtocolRuntimeError {
             Self::Decode(error) | Self::Encode(error) => Some(error),
             Self::Lifecycle(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
+            Self::ConnectionDrainTimeout {
+                initiating: Some(error),
+                ..
+            } => Some(error.as_ref()),
             Self::Closed
             | Self::HandshakeTimeout
             | Self::OwnershipUnavailable
-            | Self::HeartbeatSequenceExhausted => None,
+            | Self::HeartbeatSequenceExhausted
+            | Self::ConnectionDrainTimeout {
+                initiating: None, ..
+            } => None,
         }
     }
 }
@@ -2412,6 +2488,75 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn stale_shutdown_epoch_is_fatal_protocol_loss() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let runner = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Enroll(Enroll {
+                    request_id: identity(1),
+                    digest_version: DIGEST_VERSION,
+                    advertisement: empty_advertisement(),
+                }),
+            )
+            .await
+            .expect("the runner enrolls");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment acknowledgement is received")
+                .message
+            else {
+                panic!("the runner receives an enrollment acknowledgement");
+            };
+            let stale_epoch = PositiveU64::try_new(enrolled.connection_epoch.get() + 1)
+                .expect("the stale epoch fixture is positive");
+            write_message(
+                &mut writer,
+                Message::Shutdown(Shutdown {
+                    connection_epoch: stale_epoch,
+                    reason: ShutdownReason::RunnerShutdown,
+                }),
+            )
+            .await
+            .expect("the stale shutdown order is sent");
+            let refused = read_frame(&mut reader)
+                .await
+                .expect("the fatal stale-epoch rejection is received")
+                .message;
+            (enrolled, stale_epoch, refused)
+        };
+
+        let (served, (enrolled, stale_epoch, refused)) = tokio::join!(server, runner);
+        let observed = store
+            .load_connection(RunnerEnrollmentId::from_uuid(
+                enrolled.enrollment_id.into_uuid(),
+            ))
+            .await
+            .expect("the terminal connection state loads")
+            .expect("the connection lifecycle exists");
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Shutdown,
+                AvailableCorrelation::ConnectionEpoch(stale_epoch),
+                RejectionCode::StaleConnection,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the fatal stale shutdown closes the connection task");
+        assert_eq!(refused, expected);
+        assert_eq!(observed.state(), RunnerConnectionState::Lost);
+        assert_eq!(observed.cause(), RunnerConnectionCause::ProtocolFailure);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn hub_shutdown_sends_the_assigned_epoch_after_durable_shutdown() {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
@@ -3123,6 +3268,58 @@ mod tests {
             .expect("the peer task finishes before failure propagation");
 
         assert!(matches!(observed, RunnerProtocolRuntimeError::Lifecycle(_)));
+    }
+
+    #[tokio::test]
+    async fn listener_accept_failure_drains_a_signalled_peer_task() {
+        let (shutdown_sender, mut shutdown) = watch::channel(false);
+        let (drained_sender, drained) = tokio::sync::oneshot::channel();
+        let mut connections = JoinSet::new();
+        connections.spawn(async move {
+            shutdown
+                .changed()
+                .await
+                .expect("the connection shutdown sender remains live");
+            drained_sender
+                .send(())
+                .expect("the drain observer remains live");
+            Ok(())
+        });
+
+        let observed = accepted_stream_or_drain(
+            Err(io::Error::other("listener fixture failure")),
+            &shutdown_sender,
+            &mut connections,
+        )
+        .await
+        .expect_err("the listener accept failure remains primary");
+        drained
+            .await
+            .expect("the peer task finishes before accept failure propagation");
+
+        assert!(matches!(observed, RunnerProtocolRuntimeError::Accept(_)));
+    }
+
+    #[tokio::test]
+    async fn peer_task_drain_deadline_aborts_a_stuck_task_with_typed_evidence() {
+        let mut connections = JoinSet::new();
+        connections.spawn(std::future::pending::<Result<(), RunnerProtocolRuntimeError>>());
+        let expected_remaining = connections.len();
+
+        let observed = drain_connection_tasks_with_timeout(&mut connections, None, Duration::ZERO)
+            .await
+            .expect_err("the expired peer drain is typed");
+        let RunnerProtocolRuntimeError::ConnectionDrainTimeout {
+            remaining,
+            initiating,
+        } = observed
+        else {
+            panic!("the stuck task produces drain-timeout evidence");
+        };
+
+        assert_eq!(remaining, expected_remaining);
+        assert!(initiating.is_none());
+        assert!(connections.is_empty());
     }
 
     #[test]

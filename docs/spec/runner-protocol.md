@@ -118,9 +118,11 @@ seconds for the first complete frame; at the task limit it pauses acceptance,
 and an incomplete handshake expires closed. A malformed initial or established
 frame receives `malformed_frame`, while an unsupported envelope version receives
 `unsupported_version`; both use unavailable correlation and then close. An
-orderly shutdown drains admitted tasks. A fatal connection task first signals
-and drains every admitted peer task before its failure is propagated; every
-runtime exit applies identity-safe listener-path cleanup.
+orderly shutdown signals and drains admitted tasks for at most five seconds. A
+fatal connection task or listener-accept failure does the same before its
+failure is propagated. Expiry aborts the remaining tasks and returns typed
+drain-timeout evidence that retains any initiating failure; every runtime exit
+applies identity-safe listener-path cleanup.
 
 Runner-wire version one is newline-delimited UTF-8 JSON with a required
 `version` and closed tagged message vocabulary. Each complete line, including
@@ -485,7 +487,9 @@ rereads the exact enrollment-and-epoch event and treats only the canonical
 `connected`/`established` first event as a committed allocation before replying.
 A newer connection fences its predecessors; a shutdown order or other transition
 naming a stale epoch receives `stale_connection` with the observed epoch and
-cannot mutate the fresh connection.
+cannot apply its requested transition to the fresh epoch. Because
+`stale_connection` is fatal, an established stream that sends the stale shutdown
+is terminalized as `protocol_failure` and closed.
 
 The daemon sends a heartbeat challenge every five seconds. The registration-only
 runner replies with its monotonically increasing heartbeat sequence and no lease
