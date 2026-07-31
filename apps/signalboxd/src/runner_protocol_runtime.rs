@@ -8,10 +8,10 @@ use signalbox_domain::{
     RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerId,
 };
 use signalbox_persistence::runner_protocol::{
-    IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionEpoch,
-    RunnerConnectionTransition, RunnerConnectionTransitionOutcome, RunnerEnrollmentRequestFailure,
-    RunnerEnrollmentRequestId, RunnerProtocolStore, RunnerProtocolStoreError,
-    RunnerRegistrationRevision,
+    IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
+    RunnerConnectionEpoch, RunnerConnectionTransition, RunnerConnectionTransitionOutcome,
+    RunnerEnrollmentRequestFailure, RunnerEnrollmentRequestId, RunnerProtocolStore,
+    RunnerProtocolStoreError, RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
@@ -1018,17 +1018,18 @@ where
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    if transition_is_current(
+                    if transition_or_reject_not_current(
                         &service,
                         context,
+                        &mut writer,
+                        RunnerInboundFrameKind::Shutdown,
+                        context.epoch,
                         RunnerConnectionTransition::DaemonShutdown,
                     ).await? {
                         write_message(&mut writer, Message::Shutdown(Shutdown {
                             connection_epoch: context.epoch,
                             reason: ShutdownReason::DaemonShutdown,
                         })).await?;
-                    } else {
-                        write_stale_epoch(&mut writer, RunnerInboundFrameKind::Shutdown, context.epoch).await?;
                     }
                     return Ok(());
                 }
@@ -1045,11 +1046,16 @@ where
                         return Ok(());
                     }
                     Err(RunnerProtocolRuntimeError::Decode(error)) => {
-                        transition_is_current(
+                        if !transition_or_reject_not_current(
                             &service,
                             context,
+                            &mut writer,
+                            RunnerInboundFrameKind::Registration,
+                            context.epoch,
                             RunnerConnectionTransition::ProtocolFailure,
-                        ).await?;
+                        ).await? {
+                            return Ok(());
+                        }
                         write_decode_rejected(&mut writer, &error).await?;
                         return Ok(());
                     }
@@ -1057,12 +1063,14 @@ where
                 };
                 match frame.message {
                     Message::Advertise(request) => {
-                        if !transition_is_current(
+                        if !transition_or_reject_not_current(
                             &service,
                             context,
+                            &mut writer,
+                            RunnerInboundFrameKind::Advertise,
+                            context.epoch,
                             RunnerConnectionTransition::Observe,
                         ).await? {
-                            write_stale_epoch(&mut writer, RunnerInboundFrameKind::Advertise, context.epoch).await?;
                             return Ok(());
                         }
                         match service
@@ -1074,15 +1082,15 @@ where
                             }
                             Err(failure) => {
                                 let transition = rejection_terminal_transition(failure.cause());
-                                if transition_is_current(&service, context, transition).await? {
+                                if transition_or_reject_not_current(
+                                    &service,
+                                    context,
+                                    &mut writer,
+                                    RunnerInboundFrameKind::Advertise,
+                                    context.epoch,
+                                    transition,
+                                ).await? {
                                     write_rejected(&mut writer, failure).await?;
-                                } else {
-                                    write_stale_epoch(
-                                        &mut writer,
-                                        RunnerInboundFrameKind::Advertise,
-                                        context.epoch,
-                                    )
-                                    .await?;
                                 }
                                 return Ok(());
                             }
@@ -1101,12 +1109,14 @@ where
                             .await?;
                             return Ok(());
                         }
-                        if !transition_is_current(
+                        if !transition_or_reject_not_current(
                             &service,
                             context,
+                            &mut writer,
+                            RunnerInboundFrameKind::HeartbeatAck,
+                            context.epoch,
                             RunnerConnectionTransition::HeartbeatRecovered,
                         ).await? {
-                            write_stale_epoch(&mut writer, RunnerInboundFrameKind::HeartbeatAck, context.epoch).await?;
                             return Ok(());
                         }
                     }
@@ -1135,29 +1145,30 @@ where
                             ).await?;
                             continue;
                         }
-                        if !transition_is_current(
+                        transition_or_reject_not_current(
                             &service,
                             context,
+                            &mut writer,
+                            RunnerInboundFrameKind::Shutdown,
+                            order.connection_epoch,
                             RunnerConnectionTransition::RunnerShutdown,
-                        ).await? {
-                            write_stale_epoch(&mut writer, RunnerInboundFrameKind::Shutdown, order.connection_epoch).await?;
-                        }
+                        ).await?;
                         return Ok(());
                     }
                     message => {
-                        write_rejected(
+                        terminalize_protocol_rejection(
+                            &service,
+                            context,
                             &mut writer,
+                            inbound_frame_kind(&message),
+                            context.epoch,
                             RunnerRegistrationFailure::new(
                                 inbound_frame_kind(&message),
                                 available_correlation(&message),
-                                RejectionCode::Unavailable,
+                                RejectionCode::CorrelationMismatch,
                             ),
-                        ).await?;
-                        transition_is_current(
-                            &service,
-                            context,
-                            RunnerConnectionTransition::ProtocolFailure,
-                        ).await?;
+                        )
+                        .await?;
                         return Ok(());
                     }
                 }
@@ -1168,12 +1179,14 @@ where
                         write_message(&mut writer, Message::Heartbeat(challenge)).await?;
                     }
                     HeartbeatTick::Missed(1) => {
-                        if !transition_is_current(
+                        if !transition_or_reject_not_current(
                             &service,
                             context,
+                            &mut writer,
+                            RunnerInboundFrameKind::Heartbeat,
+                            context.epoch,
                             RunnerConnectionTransition::HeartbeatMissed,
                         ).await? {
-                            write_stale_epoch(&mut writer, RunnerInboundFrameKind::Heartbeat, context.epoch).await?;
                             return Ok(());
                         }
                     }
@@ -1201,6 +1214,13 @@ where
 struct ConnectionContext {
     enrollment: CanonicalUuid,
     epoch: PositiveU64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectionCurrency {
+    Current,
+    Stale,
+    EnrollmentRevoked,
 }
 
 const fn connection_failure_transition(
@@ -1245,13 +1265,64 @@ async fn transition_is_current<S>(
 where
     S: RunnerRegistrationService,
 {
+    Ok(matches!(
+        transition_currency(service, context, transition).await?,
+        ConnectionCurrency::Current
+    ))
+}
+
+async fn transition_currency<S>(
+    service: &S,
+    context: ConnectionContext,
+    transition: RunnerConnectionTransition,
+) -> Result<ConnectionCurrency, RunnerProtocolRuntimeError>
+where
+    S: RunnerRegistrationService,
+{
     match service
         .transition_connection(context.enrollment, context.epoch, transition)
         .await
         .map_err(RunnerProtocolRuntimeError::Lifecycle)?
     {
-        RunnerConnectionTransitionOutcome::Current(_) => Ok(true),
-        RunnerConnectionTransitionOutcome::Stale { .. } => Ok(false),
+        RunnerConnectionTransitionOutcome::Current(snapshot)
+            if snapshot.cause() == RunnerConnectionCause::EnrollmentRevoked =>
+        {
+            Ok(ConnectionCurrency::EnrollmentRevoked)
+        }
+        RunnerConnectionTransitionOutcome::Current(_) => Ok(ConnectionCurrency::Current),
+        RunnerConnectionTransitionOutcome::Stale { .. } => Ok(ConnectionCurrency::Stale),
+    }
+}
+
+async fn transition_or_reject_not_current<S>(
+    service: &S,
+    context: ConnectionContext,
+    writer: &mut OwnedWriteHalf,
+    offending_kind: RunnerInboundFrameKind,
+    evidence_epoch: PositiveU64,
+    transition: RunnerConnectionTransition,
+) -> Result<bool, RunnerProtocolRuntimeError>
+where
+    S: RunnerRegistrationService,
+{
+    match transition_currency(service, context, transition).await? {
+        ConnectionCurrency::Current => Ok(true),
+        ConnectionCurrency::Stale => {
+            write_stale_epoch(writer, offending_kind, evidence_epoch).await?;
+            Ok(false)
+        }
+        ConnectionCurrency::EnrollmentRevoked => {
+            write_rejected(
+                writer,
+                RunnerRegistrationFailure::new(
+                    offending_kind,
+                    AvailableCorrelation::ConnectionEpoch(evidence_epoch),
+                    RejectionCode::EnrollmentRevoked,
+                ),
+            )
+            .await?;
+            Ok(false)
+        }
     }
 }
 
@@ -1263,14 +1334,17 @@ async fn terminalize_heartbeat_timeout<S>(
 where
     S: RunnerRegistrationService,
 {
-    if !transition_is_current(
+    if !transition_or_reject_not_current(
         service,
         context,
+        writer,
+        RunnerInboundFrameKind::Heartbeat,
+        context.epoch,
         RunnerConnectionTransition::HeartbeatTimeout,
     )
     .await?
     {
-        write_stale_epoch(writer, RunnerInboundFrameKind::Heartbeat, context.epoch).await?;
+        return Ok(());
     }
     Ok(())
 }
@@ -1286,16 +1360,17 @@ async fn terminalize_protocol_rejection<S>(
 where
     S: RunnerRegistrationService,
 {
-    if transition_is_current(
+    if transition_or_reject_not_current(
         service,
         context,
+        writer,
+        offending_kind,
+        evidence_epoch,
         RunnerConnectionTransition::ProtocolFailure,
     )
     .await?
     {
         write_rejected(writer, failure).await?;
-    } else {
-        write_stale_epoch(writer, offending_kind, evidence_epoch).await?;
     }
     Ok(())
 }
@@ -2805,28 +2880,126 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn out_of_state_enroll_is_a_fatal_protocol_failure() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let advertisement = empty_advertisement();
+        let request_id = identity(1);
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            let enrollment = Enroll {
+                request_id,
+                digest_version: DIGEST_VERSION,
+                advertisement,
+            };
+            write_message(&mut writer, Message::Enroll(enrollment.clone()))
+                .await
+                .expect("the enrollment request is sent");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment response is received")
+                .message
+            else {
+                panic!("the durable service returns an enrolled receipt");
+            };
+            write_message(&mut writer, Message::Enroll(enrollment))
+                .await
+                .expect("the out-of-state enrollment is sent");
+            let rejected = read_frame(&mut reader)
+                .await
+                .expect("the fatal rejection is received")
+                .message;
+            (enrolled, rejected)
+        };
+
+        let (served, (enrolled, rejected)) = tokio::join!(server, client);
+        let enrollment_id = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+        let connection = store
+            .load_connection(enrollment_id)
+            .await
+            .expect("the terminal connection loads")
+            .expect("the connection lifecycle exists");
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Enroll,
+                AvailableCorrelation::Enrollment(request_id),
+                RejectionCode::CorrelationMismatch,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the out-of-state frame closes after terminalization");
+        assert_eq!(rejected, expected);
+        assert_eq!(connection.state(), RunnerConnectionState::Lost);
+        assert_eq!(connection.cause(), RunnerConnectionCause::ProtocolFailure);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn revocation_terminalizes_a_live_connection_before_enrollment_state_changes() {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
-        let enrolled = service
-            .enroll(Enroll {
-                request_id: identity(1),
-                digest_version: DIGEST_VERSION,
-                advertisement: empty_advertisement(),
-            })
+        let client_store = store.clone();
+        let advertisement = empty_advertisement();
+        let request_id = identity(1);
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Enroll(Enroll {
+                    request_id,
+                    digest_version: DIGEST_VERSION,
+                    advertisement: advertisement.clone(),
+                }),
+            )
             .await
-            .expect("the real registration service enrolls the runner");
-        let enrollment_id = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
-        let mut enrollment = store
-            .load_enrollment(enrollment_id)
+            .expect("the enrollment request is sent");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment response is received")
+                .message
+            else {
+                panic!("the durable service returns an enrolled receipt");
+            };
+            let enrollment_id = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+            let mut enrollment = client_store
+                .load_enrollment(enrollment_id)
+                .await
+                .expect("the enrollment loads")
+                .expect("the enrollment exists");
+            let revoked = client_store
+                .revoke_enrollment(&mut enrollment)
+                .await
+                .expect("revocation and connection terminalization commit together");
+            write_message(
+                &mut writer,
+                Message::Advertise(Advertise {
+                    enrollment_id: enrolled.enrollment_id,
+                    runner_id: enrolled.runner_id,
+                    authentication_id: enrolled.authentication_id,
+                    registration_revision: enrolled.registration_revision,
+                    advertisement,
+                }),
+            )
             .await
-            .expect("the enrollment loads")
-            .expect("the enrollment exists");
+            .expect("the revoked runner sends its next ordinary frame");
+            let rejected = read_frame(&mut reader)
+                .await
+                .expect("the revocation rejection is received")
+                .message;
+            (enrolled, rejected, revoked)
+        };
 
-        let revoked = store
-            .revoke_enrollment(&mut enrollment)
-            .await
-            .expect("revocation and connection terminalization commit together");
+        let (served, (enrolled, rejected, revoked)) = tokio::join!(server, client);
+        let enrollment_id = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
         let connection = store
             .load_connection(enrollment_id)
             .await
@@ -2836,8 +3009,18 @@ mod tests {
             .mark_orphaned_connections_lost()
             .await
             .expect("startup reconciliation ignores the terminal connection");
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Advertise,
+                AvailableCorrelation::ConnectionEpoch(enrolled.connection_epoch),
+                RejectionCode::EnrollmentRevoked,
+            )
+            .into_rejected(),
+        );
 
+        served.expect("the runtime closes the revoked physical connection");
         assert!(revoked);
+        assert_eq!(rejected, expected);
         assert_eq!(connection.state(), RunnerConnectionState::Lost);
         assert_eq!(connection.cause(), RunnerConnectionCause::EnrollmentRevoked);
         assert_eq!(startup_transitions, 0);
