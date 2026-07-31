@@ -4,15 +4,18 @@ This page specifies the implemented runner-protocol domain foundation as
 verified against the implementing stack through PR #260
 (`agent/runner-protocol-domain`); its durable Postgres representation and
 restart-recovery authority were verified through PR #267
-(`agent/runner-persistence`). The corrected reconstitution mismatch contract was
-re-verified through PR #322 (`agent/docs-discipline`; pinned and pinned-loss
-request mismatches). It owns logical runner enrollment, daemon-authoritative
-catalog validation, runner leases, the independent session-composition axes,
-session placement and affinity, credential-profile grants, and workspace
-requirements. The tool registry's common declarations remain owned by
-[tool loop](tool-loop.md); session transcript and frontier mechanics remain
-owned by [sessions and transcript](sessions-and-transcript.md); physical tool
-attempts remain owned by [tool loop](tool-loop.md). Invariant tags cite
+(`agent/runner-persistence`). Sandbox, repository-entry, permission-override,
+manifest-recovery, structural wire, and persistence-adapter contracts were
+re-verified through PR #350 (`agent/runner-wire-protocol`). The corrected
+reconstitution mismatch contract was re-verified through PR #322
+(`agent/docs-discipline`; pinned and pinned-loss request mismatches). It owns
+logical runner enrollment, daemon-authoritative catalog validation, runner
+leases, the independent session-composition axes, session placement and
+affinity, credential-profile grants, and workspace requirements. The tool
+registry's common declarations remain owned by [tool loop](tool-loop.md);
+session transcript and frontier mechanics remain owned by
+[sessions and transcript](sessions-and-transcript.md); physical tool attempts
+remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant test index](../invariants.md).
 
 The executable runner build-out is a foundation proposal at the bottom of its
