@@ -26,7 +26,9 @@ templates, and orchestration template digests are verified through PR #349
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
-verified through PR #373 (`agent/adapter-wiring`). Invariant law lives in
+verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
+pull-request, workspace, and conversation tool families are verified through PR
+#377 (`agent/tools-daemon-wiring`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration and credential paragraphs are the foundation proposal at the
 bottom of their implementing stack and become verified only with those child
