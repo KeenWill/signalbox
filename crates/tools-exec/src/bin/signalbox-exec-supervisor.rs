@@ -112,6 +112,9 @@ mod linux {
     }
 
     fn launch(arguments: Vec<OsString>) -> ExitCode {
+        if read_control_byte().is_err() {
+            return ExitCode::FAILURE;
+        }
         let status = match run_target(arguments, false) {
             Ok(status) => LauncherStatus::Exited {
                 code: status.code(),
@@ -282,6 +285,11 @@ mod linux {
         arguments: Vec<OsString>,
         timeout: Duration,
     ) -> SupervisorStatus {
+        if read_control_byte().is_err() {
+            return SupervisorStatus::SupervisionFailed {
+                stage: SupervisorFailureStage::Cleanup,
+            };
+        }
         let pidfd_reservation = match preflight_process_tree() {
             Ok(reservation) => reservation,
             Err(()) => {
@@ -295,7 +303,7 @@ mod linux {
             .arg(LAUNCH_MODE)
             .arg(program)
             .args(arguments)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         let mut child = match command.spawn() {
@@ -307,6 +315,13 @@ mod linux {
             }
         };
         drop(pidfd_reservation);
+        let Some(mut launcher_control) = child.stdin.take() else {
+            terminate_child(&mut child);
+            cleanup_untracked_children(std::process::id());
+            return SupervisorStatus::SupervisionFailed {
+                stage: SupervisorFailureStage::Cleanup,
+            };
+        };
         let Some(launcher_stdout) = child.stdout.take() else {
             terminate_child(&mut child);
             cleanup_untracked_children(std::process::id());
@@ -326,6 +341,19 @@ mod linux {
                 };
             }
         };
+        if read_control_byte().is_err() || launcher_control.write_all(&[1]).is_err() {
+            let cleanup = tree.finish(&mut child);
+            let _ = emit_launcher_stdout(launcher_reader, false);
+            return match cleanup {
+                CleanupStatus::Complete { .. } => SupervisorStatus::Cancelled,
+                CleanupStatus::ProcessTreeUnsupported { .. } | CleanupStatus::Failed { .. } => {
+                    SupervisorStatus::SupervisionFailed {
+                        stage: SupervisorFailureStage::Cleanup,
+                    }
+                }
+            };
+        }
+        drop(launcher_control);
         let started = Instant::now();
         let cancelled = cancellation_signal();
         let status = loop {
@@ -503,6 +531,11 @@ mod linux {
             reader_cancelled.store(true, Ordering::Release);
         });
         cancelled
+    }
+
+    fn read_control_byte() -> Result<(), ()> {
+        let mut byte = [0_u8; 1];
+        std::io::stdin().read_exact(&mut byte).map_err(|_| ())
     }
 
     struct ProcessTreeGuard {
@@ -809,7 +842,7 @@ mod linux {
     fn process_start_time(pid: u32) -> Result<Option<u64>, ()> {
         let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if process_gone(&error) => return Ok(None),
             Err(_) => return Err(()),
         };
         let command_end = stat.rfind(')').ok_or(())?;
@@ -822,6 +855,11 @@ mod linux {
         Ok(Some(start_time))
     }
 
+    fn process_gone(error: &std::io::Error) -> bool {
+        error.kind() == std::io::ErrorKind::NotFound
+            || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error())
+    }
+
     #[derive(Clone, Copy)]
     enum ProcessChildrenError {
         Gone,
@@ -830,7 +868,7 @@ mod linux {
 
     fn process_children(pid: u32) -> Result<Vec<u32>, ProcessChildrenError> {
         let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
+            if process_gone(&error) {
                 ProcessChildrenError::Gone
             } else {
                 ProcessChildrenError::Unsupported
@@ -855,7 +893,7 @@ mod linux {
                         .map_err(|_| ProcessChildrenError::Unsupported)?;
                     children.extend(parsed);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if process_gone(&error) => {}
                 Err(_) => return Err(ProcessChildrenError::Unsupported),
             }
         }
@@ -901,6 +939,13 @@ mod linux {
         use super::*;
 
         const CHILD_FIXTURE_NAME: &str = "linux::tests::child_fixture";
+
+        #[test]
+        fn esrch_is_process_absence_evidence() {
+            let error = std::io::Error::from_raw_os_error(rustix::io::Errno::SRCH.raw_os_error());
+
+            assert!(process_gone(&error));
+        }
 
         #[test]
         fn exited_pidfd_is_retired_before_another_ancestry_pass()
