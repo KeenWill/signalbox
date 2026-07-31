@@ -8,11 +8,9 @@ use std::{
 };
 
 use rustix::process::geteuid;
-use serde_json::json;
 use signalbox_runner_wire::{
-    Advertise, Advertisement, CanonicalUuid, DIGEST_VERSION, DetailName, Digest, Enroll,
-    FailureCategory, FailureDetail, Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES,
-    Message, OperationCorrelation, OperationFailed, OperationFailure, PositiveU64,
+    Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest, Enroll,
+    Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message, PositiveU64,
     ReconnectInventory, Registered, RejectionCode, Resume, ShutdownReason, ValueError,
     advertisement_digest, decode_line, encode_line,
 };
@@ -129,6 +127,27 @@ impl Error for SocketConnectError {
     }
 }
 
+impl SocketConnectError {
+    /// Reports whether a hub restart can make a later connection attempt valid.
+    pub fn is_reconnectable(&self) -> bool {
+        match self {
+            Self::InspectSocket(error) => error.kind() == io::ErrorKind::NotFound,
+            Self::Connect(error) => matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::TimedOut
+            ),
+            Self::ReinspectSocket(error) => error.kind() == io::ErrorKind::NotFound,
+            Self::InvalidSocketIdentity
+            | Self::InspectPeer(_)
+            | Self::PeerOwnerMismatch { .. }
+            | Self::SocketIdentityChanged => false,
+        }
+    }
+}
+
 /// Closed runner-wire message identity used in typed diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MessageKind {
@@ -240,13 +259,7 @@ pub enum EnrollmentOutcome {
 /// Honest terminal outcome of one established connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionEnd {
-    DaemonShutdown {
-        connection_epoch: PositiveU64,
-    },
-    UnsupportedOperationRefused {
-        operation: MessageKind,
-        category: FailureCategory,
-    },
+    DaemonShutdown { connection_epoch: PositiveU64 },
 }
 
 /// Closed local recovery gap; no wire recovery facts are fabricated.
@@ -326,6 +339,15 @@ pub enum ProtocolViolation {
         prior: PositiveU64,
         observed: PositiveU64,
     },
+    RegistrationRevisionExhausted {
+        prior: PositiveU64,
+    },
+    InitialRegistrationRevision {
+        observed: PositiveU64,
+    },
+    ResumeAdvertisementChangedWithoutRevision {
+        revision: PositiveU64,
+    },
     ResumeDirectives,
     HeartbeatSequenceDidNotAdvance {
         prior: PositiveU64,
@@ -342,6 +364,7 @@ pub enum ProtocolViolation {
     FailureAcknowledgementMismatch,
     InvalidShutdownReason,
     PendingRegistrationMutation,
+    ConnectionCorrelationMismatch,
 }
 
 impl fmt::Display for ProtocolViolation {
@@ -368,6 +391,21 @@ impl fmt::Display for ProtocolViolation {
                 "registration revision {} did not advance from {}",
                 observed.get(),
                 prior.get()
+            ),
+            Self::RegistrationRevisionExhausted { prior } => write!(
+                formatter,
+                "registration revision {} has no successor",
+                prior.get()
+            ),
+            Self::InitialRegistrationRevision { observed } => write!(
+                formatter,
+                "initial registration revision {} is not one",
+                observed.get()
+            ),
+            Self::ResumeAdvertisementChangedWithoutRevision { revision } => write!(
+                formatter,
+                "resume changed advertisement without advancing registration revision {}",
+                revision.get()
             ),
             Self::ResumeDirectives => {
                 formatter.write_str("resume directives do not match the sent inventory")
@@ -399,6 +437,9 @@ impl fmt::Display for ProtocolViolation {
             Self::PendingRegistrationMutation => {
                 formatter.write_str("pending replacement cannot mutate registration")
             }
+            Self::ConnectionCorrelationMismatch => {
+                formatter.write_str("runner operation names a stale or foreign connection")
+            }
         }
     }
 }
@@ -417,9 +458,11 @@ pub enum RunnerConnectionError {
     PeerRejected {
         code: RejectionCode,
         offending_kind: String,
+        available_correlation: Box<AvailableCorrelation>,
     },
     Violation(ProtocolViolation),
     InvalidLocalFrame(ValueError),
+    RecoveryUnavailable(RecoveryUnavailable),
 }
 
 impl fmt::Display for RunnerConnectionError {
@@ -436,9 +479,11 @@ impl fmt::Display for RunnerConnectionError {
             Self::PeerRejected {
                 code,
                 offending_kind,
+                ..
             } => write!(formatter, "daemon rejected {offending_kind} with {code:?}"),
             Self::Violation(error) => write!(formatter, "runner protocol violation: {error}"),
             Self::InvalidLocalFrame(_) => formatter.write_str("runner local frame is invalid"),
+            Self::RecoveryUnavailable(error) => error.fmt(formatter),
         }
     }
 }
@@ -451,6 +496,7 @@ impl Error for RunnerConnectionError {
             Self::Read(error) | Self::Write(error) => Some(error),
             Self::Violation(error) => Some(error),
             Self::InvalidLocalFrame(error) => Some(error),
+            Self::RecoveryUnavailable(error) => Some(error),
             Self::PeerClosed | Self::PeerRejected { .. } => None,
         }
     }
@@ -459,6 +505,13 @@ impl Error for RunnerConnectionError {
 impl From<RunnerStateError> for RunnerConnectionError {
     fn from(value: RunnerStateError) -> Self {
         Self::State(value)
+    }
+}
+
+impl RunnerConnectionError {
+    /// Reports whether transport loss can be repaired by exact receipt resume.
+    pub const fn is_reconnectable(&self) -> bool {
+        matches!(self, Self::PeerClosed | Self::Read(_) | Self::Write(_))
     }
 }
 
@@ -541,6 +594,15 @@ where
                         ProtocolViolation::RegistrationRevisionRegressed {
                             prior: receipt.registration_revision(),
                             observed: resumed.registration_revision,
+                        },
+                    ));
+                }
+                if resumed.registration_revision == receipt.registration_revision()
+                    && digest != *receipt.advertisement_digest()
+                {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::ResumeAdvertisementChangedWithoutRevision {
+                            revision: resumed.registration_revision,
                         },
                     ));
                 }
@@ -659,34 +721,32 @@ where
                 ProtocolViolation::InvalidShutdownReason,
             )),
             Message::WorkspaceProvision(provision) => {
-                let correlation = OperationCorrelation::Provision(provision.correlation);
-                self.refuse_unsupported(
-                    MessageKind::WorkspaceProvision,
-                    correlation,
-                    FailureCategory::SandboxUnavailable,
-                )
-                .await
-                .map(Some)
+                self.validate_connection_correlation(
+                    provision.correlation.runner_id,
+                    provision.correlation.registration_revision,
+                )?;
+                Err(RunnerConnectionError::RecoveryUnavailable(
+                    self.recovery_unavailable(),
+                ))
             }
             Message::WorkspaceRelease(release) => {
-                let correlation = OperationCorrelation::Release(release.correlation);
-                self.refuse_unsupported(
-                    MessageKind::WorkspaceRelease,
-                    correlation,
-                    FailureCategory::WorkspaceCleanupFailed,
-                )
-                .await
-                .map(Some)
+                if release.correlation.runner_id != self.receipt.runner_id() {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::ConnectionCorrelationMismatch,
+                    ));
+                }
+                Err(RunnerConnectionError::RecoveryUnavailable(
+                    self.recovery_unavailable(),
+                ))
             }
             Message::LeaseOffer(offer) => {
-                let correlation = OperationCorrelation::LeaseOffer(offer.correlation);
-                self.refuse_unsupported(
-                    MessageKind::LeaseOffer,
-                    correlation,
-                    FailureCategory::LeaseAdmissionRefused,
-                )
-                .await
-                .map(Some)
+                self.validate_connection_correlation(
+                    offer.correlation.runner_id,
+                    offer.correlation.registration_revision,
+                )?;
+                Err(RunnerConnectionError::RecoveryUnavailable(
+                    self.recovery_unavailable(),
+                ))
             }
             Message::Rejected(rejected) => Err(rejected_error(rejected)),
             other => Err(RunnerConnectionError::Violation(
@@ -761,42 +821,17 @@ where
         Ok(acknowledgement)
     }
 
-    async fn refuse_unsupported(
-        &mut self,
-        operation: MessageKind,
-        correlation: OperationCorrelation,
-        category: FailureCategory,
-    ) -> Result<ConnectionEnd, RunnerConnectionError> {
-        let detail = FailureDetail::try_new(
-            DetailName::try_new("runner.runtime-unavailable".to_owned())
-                .map_err(RunnerConnectionError::InvalidLocalFrame)?,
-            format!("{operation} has no compiled runtime provider"),
-            json!({}),
-        )
-        .map_err(RunnerConnectionError::InvalidLocalFrame)?;
-        send_message(
-            &mut self.io,
-            Message::OperationFailed(OperationFailed {
-                failure: OperationFailure {
-                    correlation: correlation.clone(),
-                    category,
-                    detail,
-                },
-            }),
-        )
-        .await?;
-        match receive_message(&mut self.io).await? {
-            Message::OperationFailureRecorded(recorded) if recorded.correlation == correlation => {
-                Ok(ConnectionEnd::UnsupportedOperationRefused {
-                    operation,
-                    category,
-                })
-            }
-            Message::OperationFailureRecorded(_) => Err(RunnerConnectionError::Violation(
-                ProtocolViolation::FailureAcknowledgementMismatch,
-            )),
-            Message::Rejected(rejected) => Err(rejected_error(rejected)),
-            other => Err(unexpected(MessageKind::OperationFailureRecorded, &other)),
+    fn validate_connection_correlation(
+        &self,
+        runner: CanonicalUuid,
+        revision: PositiveU64,
+    ) -> Result<(), RunnerConnectionError> {
+        if runner == self.receipt.runner_id() && revision == self.receipt.registration_revision() {
+            Ok(())
+        } else {
+            Err(RunnerConnectionError::Violation(
+                ProtocolViolation::ConnectionCorrelationMismatch,
+            ))
         }
     }
 }
@@ -814,6 +849,7 @@ fn accept_enrollment(
             if enrolled.advertisement_digest != expected_digest {
                 return Err(digest_mismatch());
             }
+            validate_initial_revision(enrolled.registration_revision)?;
             Ok((
                 EnrollmentReceipt::new(
                     request_id,
@@ -834,6 +870,7 @@ fn accept_enrollment(
             if pending.advertisement_digest != expected_digest {
                 return Err(digest_mismatch());
             }
+            validate_initial_revision(pending.registration_revision)?;
             Ok((
                 EnrollmentReceipt::new(
                     request_id,
@@ -852,12 +889,25 @@ fn accept_enrollment(
     }
 }
 
+fn validate_initial_revision(observed: PositiveU64) -> Result<(), RunnerConnectionError> {
+    if observed.get() == 1 {
+        Ok(())
+    } else {
+        Err(RunnerConnectionError::Violation(
+            ProtocolViolation::InitialRegistrationRevision { observed },
+        ))
+    }
+}
+
 fn validate_registered(
     registered: &Registered,
     prior: PositiveU64,
     expected_digest: &Digest,
 ) -> Result<(), RunnerConnectionError> {
-    if registered.registration_revision <= prior {
+    let expected = prior.get().checked_add(1).ok_or({
+        RunnerConnectionError::Violation(ProtocolViolation::RegistrationRevisionExhausted { prior })
+    })?;
+    if registered.registration_revision.get() != expected {
         return Err(RunnerConnectionError::Violation(
             ProtocolViolation::RegistrationRevisionDidNotAdvance {
                 prior,
@@ -890,6 +940,7 @@ fn rejected_error(rejected: signalbox_runner_wire::Rejected) -> RunnerConnection
     RunnerConnectionError::PeerRejected {
         code: rejected.code,
         offending_kind: rejected.offending_kind,
+        available_correlation: Box::new(rejected.available_correlation),
     }
 }
 
@@ -937,8 +988,7 @@ mod tests {
     use uuid::Uuid;
 
     use signalbox_runner_wire::{
-        Enrolled, OperationFailureRecorded, ReconnectDirectives, Resumed, Shutdown,
-        WorkspaceProvision,
+        Enrolled, ReconnectDirectives, Resumed, Shutdown, WorkspaceProvision,
     };
 
     use super::*;
@@ -1009,7 +1059,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enrollment_round_trips_exact_explicit_advertisement_and_journals_receipt() {
+    async fn enrollment_publishes_the_exact_durable_receipt() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let advertisement = empty_advertisement();
@@ -1056,7 +1106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_resumes_exact_journaled_identities_and_updates_revision() {
+    async fn restart_resume_commits_the_canonical_registration_head() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut first = state_root(&parent);
         let receipt = issued_receipt(first.state().request_id());
@@ -1113,7 +1163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heartbeat_ack_repeats_challenge_and_advances_runner_sequence() {
+    async fn heartbeat_challenge_receives_the_exact_acknowledgement() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -1154,7 +1204,7 @@ mod tests {
             .await;
             receive_hub_message(&mut hub_io).await
         };
-        let ((connection, outcome), acknowledgement) = tokio::join!(runner, hub);
+        let ((_connection, outcome), acknowledgement) = tokio::join!(runner, hub);
 
         assert_eq!(outcome, None);
         assert_eq!(
@@ -1166,18 +1216,19 @@ mod tests {
                 workspace_phase: None,
             })
         );
-        assert_eq!(
-            connection.recovery_unavailable().gap(),
-            RecoveryGap::UnbornHeadNotRepresentable
-        );
-        assert_eq!(
-            connection.runner_shutdown_unavailable().runner_id(),
-            connection.receipt().runner_id()
-        );
+    }
+
+    #[test]
+    fn recovery_seam_names_the_unborn_head_gap() {
+        let unavailable = RecoveryUnavailable {
+            gap: RecoveryGap::UnbornHeadNotRepresentable,
+        };
+
+        assert_eq!(unavailable.gap(), RecoveryGap::UnbornHeadNotRepresentable);
     }
 
     #[tokio::test]
-    async fn advertise_accepts_exact_registered_digest_and_journals_new_revision() {
+    async fn registered_reply_commits_the_exact_successor_receipt() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -1244,7 +1295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_workspace_provision_is_exactly_refused_and_acknowledged() {
+    async fn workspace_provision_stops_at_the_typed_recovery_seam() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -1268,11 +1319,11 @@ mod tests {
         let runner = async {
             let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
                 .await
-                .expect("resume completes before refusal");
+                .expect("resume completes before the unavailable operation");
             connection
                 .serve_one(&mut state)
                 .await
-                .expect("the unsupported operation is refused")
+                .expect_err("the recovery-dependent operation is unavailable")
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
@@ -1291,42 +1342,15 @@ mod tests {
                 }),
             )
             .await;
-            let failure = receive_hub_message(&mut hub_io).await;
-            send_hub_message(
-                &mut hub_io,
-                Message::OperationFailureRecorded(OperationFailureRecorded {
-                    correlation: OperationCorrelation::Provision(correlation.clone()),
-                }),
-            )
-            .await;
-            failure
         };
-        let (outcome, failure) = tokio::join!(runner, hub);
+        let (error, ()) = tokio::join!(runner, hub);
 
-        assert_eq!(
-            outcome,
-            Some(ConnectionEnd::UnsupportedOperationRefused {
-                operation: MessageKind::WorkspaceProvision,
-                category: FailureCategory::SandboxUnavailable,
+        assert!(matches!(
+            error,
+            RunnerConnectionError::RecoveryUnavailable(RecoveryUnavailable {
+                gap: RecoveryGap::UnbornHeadNotRepresentable,
             })
-        );
-        let expected_detail = FailureDetail::try_new(
-            DetailName::try_new("runner.runtime-unavailable".to_owned())
-                .expect("the fixture detail name is valid"),
-            "workspace_provision has no compiled runtime provider".to_owned(),
-            json!({}),
-        )
-        .expect("the fixture failure detail is bounded");
-        assert_eq!(
-            failure,
-            Message::OperationFailed(OperationFailed {
-                failure: OperationFailure {
-                    correlation: OperationCorrelation::Provision(correlation),
-                    category: FailureCategory::SandboxUnavailable,
-                    detail: expected_detail,
-                },
-            })
-        );
+        ));
     }
 
     #[tokio::test]

@@ -167,6 +167,8 @@ struct StateDocument {
 pub enum StateResource {
     /// Owner-private root directory.
     Root,
+    /// Directory that durably publishes a newly created state root.
+    RootParent,
     /// Current durable state document.
     StateDocument,
     /// Single-use replacement document used for atomic publication.
@@ -177,6 +179,7 @@ impl fmt::Display for StateResource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Root => "runner state root",
+            Self::RootParent => "runner state root parent",
             Self::StateDocument => "runner state document",
             Self::TemporaryDocument => "runner temporary state document",
         })
@@ -234,6 +237,11 @@ pub enum RunnerStateError {
     RequestMismatch,
     /// A lifecycle update was attempted in the wrong state.
     InvalidTransition,
+    /// Atomic rename completed, but durability of the published state is unknown.
+    CommitAmbiguous {
+        /// Directory-fsync failure after the state-document rename.
+        source: io::Error,
+    },
     /// One exact resource operation failed and retains its source error.
     Io {
         operation: StateOperation,
@@ -264,6 +272,9 @@ impl fmt::Display for RunnerStateError {
             Self::InvalidTransition => {
                 formatter.write_str("runner durable-state transition is invalid")
             }
+            Self::CommitAmbiguous { .. } => {
+                formatter.write_str("runner durable-state commit outcome is ambiguous")
+            }
             Self::Io {
                 operation,
                 resource,
@@ -276,7 +287,7 @@ impl fmt::Display for RunnerStateError {
 impl Error for RunnerStateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io { source, .. } => Some(source),
+            Self::Io { source, .. } | Self::CommitAmbiguous { source } => Some(source),
             Self::InvalidRootPath
             | Self::InvalidRootIdentity
             | Self::RootBusy
@@ -322,6 +333,24 @@ impl RunnerStateRoot {
                         source,
                     },
                 )?;
+                let parent = path.parent().ok_or(RunnerStateError::InvalidRootPath)?;
+                let parent = File::from(
+                    open(
+                        parent,
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(|error| RunnerStateError::Io {
+                        operation: StateOperation::Open,
+                        resource: StateResource::RootParent,
+                        source: rustix_error(error),
+                    })?,
+                );
+                parent.sync_all().map_err(|source| RunnerStateError::Io {
+                    operation: StateOperation::Sync,
+                    resource: StateResource::RootParent,
+                    source,
+                })?;
             }
             Err(source) => {
                 return Err(RunnerStateError::Io {
@@ -330,7 +359,7 @@ impl RunnerStateRoot {
                     source,
                 });
             }
-        }
+        };
 
         let path_metadata = fs::symlink_metadata(path).map_err(|source| RunnerStateError::Io {
             operation: StateOperation::Inspect,
@@ -506,7 +535,7 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
         }
     })?;
     let mut temporary = File::from(descriptor);
-    let result = (|| {
+    let prepared = (|| {
         temporary
             .write_all(&encoded)
             .map_err(|source| RunnerStateError::Io {
@@ -514,30 +543,26 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
                 resource: StateResource::TemporaryDocument,
                 source,
             })?;
-        temporary
-            .sync_all()
-            .map_err(|source| RunnerStateError::Io {
-                operation: StateOperation::Sync,
-                resource: StateResource::TemporaryDocument,
-                source,
-            })?;
-        renameat(directory, temporary_name.as_str(), directory, STATE_FILE).map_err(|error| {
-            RunnerStateError::Io {
-                operation: StateOperation::Rename,
-                resource: StateResource::StateDocument,
-                source: rustix_error(error),
-            }
-        })?;
-        directory.sync_all().map_err(|source| RunnerStateError::Io {
+        temporary.sync_all().map_err(|source| RunnerStateError::Io {
             operation: StateOperation::Sync,
-            resource: StateResource::Root,
+            resource: StateResource::TemporaryDocument,
             source,
         })
     })();
-    if result.is_err() {
+    if let Err(error) = prepared {
         let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
+        return Err(error);
     }
-    result
+    renameat(directory, temporary_name.as_str(), directory, STATE_FILE).map_err(|error| {
+        RunnerStateError::Io {
+            operation: StateOperation::Rename,
+            resource: StateResource::StateDocument,
+            source: rustix_error(error),
+        }
+    })?;
+    directory
+        .sync_all()
+        .map_err(|source| RunnerStateError::CommitAmbiguous { source })
 }
 
 fn rustix_error(error: rustix::io::Errno) -> io::Error {

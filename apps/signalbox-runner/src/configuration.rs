@@ -5,7 +5,7 @@ use std::{
     error::Error,
     ffi::{OsStr, OsString},
     fmt, fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde::Deserialize;
@@ -13,6 +13,7 @@ use signalbox_runner_wire::{Advertisement, ProfileName, RepositoryKey, ValueErro
 use url::Url;
 
 const CONFIGURATION_VERSION: u64 = 1;
+const RESERVED_MODEL_PROFILE: &str = "anthropic-primary";
 
 /// A checked source for the runner configuration document.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -173,7 +174,7 @@ impl RunnerConfiguration {
         if !valid_absolute_path(&raw.bubblewrap_path) {
             return Err(RunnerConfigurationError::InvalidBubblewrapPath);
         }
-        validate_read_only_paths(&raw.read_only_paths)?;
+        validate_read_only_paths(&raw.read_only_paths, &raw.runner_root)?;
         validate_network_hosts(&raw.allowed_network_hosts)?;
         validate_git_author(&raw.git_author_name, &raw.git_author_email)?;
         let credentials = validate_credentials(&raw.credentials)?;
@@ -272,14 +273,28 @@ fn valid_absolute_path(path: &Path) -> bool {
         && path.file_name().is_some_and(|name| {
             !name.is_empty() && name != OsStr::new(".") && name != OsStr::new("..")
         })
+        && path
+            .components()
+            .all(|component| !matches!(component, Component::CurDir | Component::ParentDir))
 }
 
-fn validate_read_only_paths(paths: &[PathBuf]) -> Result<(), RunnerConfigurationError> {
+fn validate_read_only_paths(
+    paths: &[PathBuf],
+    runner_root: &Path,
+) -> Result<(), RunnerConfigurationError> {
     if paths.is_empty() || paths.iter().any(|path| !valid_absolute_path(path)) {
         return Err(RunnerConfigurationError::InvalidReadOnlyPaths);
     }
     let unique: BTreeSet<&PathBuf> = paths.iter().collect();
-    if unique.len() != paths.len() {
+    if unique.len() != paths.len()
+        || paths.iter().any(|path| {
+            path.starts_with(runner_root)
+                || runner_root.starts_with(path)
+                || paths.iter().any(|other| {
+                    path != other && (path.starts_with(other) || other.starts_with(path))
+                })
+        })
+    {
         return Err(RunnerConfigurationError::InvalidReadOnlyPaths);
     }
     Ok(())
@@ -312,11 +327,19 @@ fn validate_credentials(
     credentials: &BTreeMap<String, RawCredential>,
 ) -> Result<BTreeMap<ProfileName, RunnerCredentialConfiguration>, RunnerConfigurationError> {
     let mut profiles = BTreeMap::new();
+    let mut files = BTreeSet::new();
+    let mut environments = BTreeSet::new();
     for (name, credential) in credentials {
         let profile = ProfileName::try_new(name.clone())
             .map_err(|_| RunnerConfigurationError::InvalidCredentials)?;
+        if profile.as_str() == RESERVED_MODEL_PROFILE {
+            return Err(RunnerConfigurationError::InvalidCredentials);
+        }
         if !valid_absolute_path(&credential.file)
             || !valid_environment_name(&credential.injection_env)
+            || reserved_environment_name(&credential.injection_env)
+            || !files.insert(credential.file.clone())
+            || !environments.insert(credential.injection_env.clone())
         {
             return Err(RunnerConfigurationError::InvalidCredentials);
         }
@@ -329,6 +352,14 @@ fn validate_credentials(
         }
     }
     Ok(profiles)
+}
+
+fn reserved_environment_name(value: &str) -> bool {
+    value.starts_with("SIGNALBOX_")
+        || value.starts_with("ANTHROPIC_")
+        || value.starts_with("OPENAI_")
+        || value.starts_with("LD_")
+        || value.starts_with("DYLD_")
 }
 
 fn valid_environment_name(value: &str) -> bool {
@@ -377,6 +408,7 @@ fn validate_clone_url(value: &str) -> Result<(), RunnerConfigurationError> {
         .ok_or(RunnerConfigurationError::InvalidRepositories)?
         .collect::<Vec<_>>();
     if parsed.scheme() != "https"
+        || parsed.as_str() != value
         || parsed.host_str() != Some("github.com")
         || parsed.username() != ""
         || parsed.password().is_some()
@@ -542,6 +574,38 @@ credentials = {}
     const CONFIGURED_CREDENTIAL_FILE: &str = "/run/secrets/github-token";
     const CONFIGURED_INJECTION_ENV: &str = "GH_TOKEN";
 
+    struct ConfiguredFixture {
+        document: String,
+        profile: ProfileName,
+        repository: RepositoryKey,
+    }
+
+    fn configured_fixture() -> ConfiguredFixture {
+        ConfiguredFixture {
+            document: EMPTY_CONFIGURATION
+                .replace(
+                    "allowed_network_hosts = []",
+                    "allowed_network_hosts = [\"github.com\"]",
+                )
+                .replace(
+                    "repositories = {}\ncredentials = {}",
+                    &format!(
+                        r#"[repositories.{CONFIGURED_REPOSITORY}]
+clone_url = "{CONFIGURED_CLONE_URL}"
+credential_profile = "{CONFIGURED_PROFILE}"
+
+[credentials.{CONFIGURED_PROFILE}]
+file = "{CONFIGURED_CREDENTIAL_FILE}"
+injection_env = "{CONFIGURED_INJECTION_ENV}""#,
+                    ),
+                ),
+            profile: ProfileName::try_new(CONFIGURED_PROFILE.to_owned())
+                .expect("the configured profile name is valid"),
+            repository: RepositoryKey::try_new(CONFIGURED_REPOSITORY.to_owned())
+                .expect("the configured repository key is valid"),
+        }
+    }
+
     #[test]
     fn configuration_preserves_all_six_explicit_empty_inventories() {
         let configuration = RunnerConfiguration::parse(EMPTY_CONFIGURATION)
@@ -574,71 +638,119 @@ credentials = {}
     }
 
     #[test]
-    fn configuration_round_trips_exact_credential_and_repository_advertisement_axes() {
-        let document = EMPTY_CONFIGURATION
-            .replace(
-                "allowed_network_hosts = []",
-                "allowed_network_hosts = [\"github.com\"]",
-            )
-            .replace(
-                "repositories = {}\ncredentials = {}",
-                r#"[repositories.signalbox]
-clone_url = "https://github.com/KeenWill/signalbox.git"
-credential_profile = "github-runner"
-
-[credentials.github-runner]
-file = "/run/secrets/github-token"
-injection_env = "GH_TOKEN""#,
-            );
-        let profile = ProfileName::try_new(CONFIGURED_PROFILE.to_owned())
-            .expect("the configured profile name is valid");
-        let repository = RepositoryKey::try_new(CONFIGURED_REPOSITORY.to_owned())
-            .expect("the configured repository key is valid");
-
-        let configuration = RunnerConfiguration::parse(&document)
+    fn configuration_advertises_the_exact_configured_credential_profile() {
+        let fixture = configured_fixture();
+        let configuration = RunnerConfiguration::parse(&fixture.document)
             .expect("the configured credential and repository are valid");
 
         assert_eq!(
-            configuration.advertisement(),
-            &Advertisement {
-                capability_classes: Vec::new(),
-                tools: Vec::new(),
-                workspace_capabilities: Vec::new(),
-                sandbox_profiles: Vec::new(),
-                credential_profiles: vec![profile.clone()],
-                repositories: vec![signalbox_runner_wire::RepositoryEntry {
-                    key: repository.clone(),
-                    credential_profile: Some(profile.clone()),
-                }],
-            }
+            configuration.advertisement().credential_profiles,
+            vec![fixture.profile]
         );
+    }
+
+    #[test]
+    fn configuration_advertises_the_exact_repository_profile_pair() {
+        let fixture = configured_fixture();
+        let configuration = RunnerConfiguration::parse(&fixture.document)
+            .expect("the configured credential and repository are valid");
+
         assert_eq!(
-            configuration
-                .credential(&profile)
-                .expect("the advertised credential resolves")
-                .file(),
-            Path::new(CONFIGURED_CREDENTIAL_FILE)
+            configuration.advertisement().repositories,
+            vec![signalbox_runner_wire::RepositoryEntry {
+                key: fixture.repository,
+                credential_profile: Some(fixture.profile),
+            }]
         );
+    }
+
+    #[test]
+    fn configured_credential_resolves_its_exact_non_secret_structure() {
+        let fixture = configured_fixture();
+        let configuration = RunnerConfiguration::parse(&fixture.document)
+            .expect("the configured credential and repository are valid");
+        let credential = configuration
+            .credential(&fixture.profile)
+            .expect("the advertised credential resolves");
+
+        assert_eq!(credential.file(), Path::new(CONFIGURED_CREDENTIAL_FILE));
+        assert_eq!(credential.injection_env(), CONFIGURED_INJECTION_ENV);
+    }
+
+    #[test]
+    fn configured_repository_resolves_its_exact_non_secret_structure() {
+        let fixture = configured_fixture();
+        let configuration = RunnerConfiguration::parse(&fixture.document)
+            .expect("the configured credential and repository are valid");
+        let repository = configuration
+            .repository(&fixture.repository)
+            .expect("the advertised repository resolves");
+
+        assert_eq!(repository.clone_url(), CONFIGURED_CLONE_URL);
+        assert_eq!(repository.credential_profile(), Some(&fixture.profile));
+    }
+
+    #[test]
+    fn configuration_rejects_a_dynamic_loader_credential_environment() {
+        let document = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, "LD_PRELOAD");
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("a dynamic-loader environment must fail closed");
+
         assert_eq!(
-            configuration
-                .credential(&profile)
-                .expect("the advertised credential resolves")
-                .injection_env(),
-            CONFIGURED_INJECTION_ENV
+            error.to_string(),
+            "runner credential configuration is invalid"
         );
-        assert_eq!(
-            configuration
-                .repository(&repository)
-                .expect("the advertised repository resolves")
-                .clone_url(),
-            CONFIGURED_CLONE_URL
+    }
+
+    #[test]
+    fn configuration_rejects_duplicate_credential_environments() {
+        let document = configured_fixture().document.replace(
+            &format!("[credentials.{CONFIGURED_PROFILE}]"),
+            &format!(
+                "[credentials.second]\nfile = \"/run/secrets/second\"\ninjection_env = \"{CONFIGURED_INJECTION_ENV}\"\n\n[credentials.{CONFIGURED_PROFILE}]"
+            ),
         );
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("duplicate injection environments must fail closed");
+
         assert_eq!(
-            configuration
-                .repository(&repository)
-                .expect("the advertised repository resolves")
-                .credential_profile(),
-            Some(&profile)
+            error.to_string(),
+            "runner credential configuration is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_normalized_clone_url_spelling() {
+        let document = configured_fixture()
+            .document
+            .replace("https://github.com", "https://GITHUB.com");
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("a normalized-away host spelling must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner repository configuration is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_nested_read_only_paths() {
+        let document = EMPTY_CONFIGURATION.replace(
+            "read_only_paths = [\"/usr\"]",
+            "read_only_paths = [\"/usr\", \"/usr/lib\"]",
+        );
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("nested read-only paths must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner read-only path inventory is invalid"
         );
     }
 
