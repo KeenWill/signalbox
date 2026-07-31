@@ -6,21 +6,27 @@ use signalbox_tools_exec::{
     CaptureCompleteness, ProcessOutcome, ProcessRequest, ProcessRunner, TokioProcessRunner,
 };
 
+const OBSERVED_OUTPUT: &str = "12345";
+const CAPTURE_BYTES: usize = 4;
+
 #[tokio::test]
 async fn production_runner_reports_observed_bytes_beyond_limit()
 -> Result<(), Box<dyn std::error::Error>> {
     let request = ProcessRequest {
         program: OsString::from("/usr/bin/printf"),
-        arguments: vec![OsString::from("12345")],
+        arguments: vec![OsString::from(OBSERVED_OUTPUT)],
         working_directory: std::env::current_dir()?,
         timeout: Duration::from_secs(5),
-        capture_bytes: 4,
+        capture_bytes: CAPTURE_BYTES,
         environment: BTreeMap::new(),
     };
 
     let result = TokioProcessRunner.run(request).await;
 
-    assert_eq!(result.stdout.bytes, b"1234");
+    assert_eq!(
+        result.stdout.bytes,
+        OBSERVED_OUTPUT.as_bytes()[..CAPTURE_BYTES]
+    );
     assert_eq!(result.stdout.completeness, CaptureCompleteness::Truncated);
     Ok(())
 }

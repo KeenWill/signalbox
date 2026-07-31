@@ -1006,6 +1006,8 @@ mod tests {
 
     use super::*;
 
+    const SANDBOXED_STDOUT: &str = "checked";
+
     #[derive(Clone, Debug)]
     struct FakeRunner {
         availability: BwrapAvailability,
@@ -1163,8 +1165,10 @@ mod tests {
     async fn sandboxed_request_uses_bwrap_profile_and_workspace_mount() -> Result<(), Box<dyn Error>>
     {
         let root = std::env::current_dir()?;
-        let runner =
-            FakeRunner::returning(BwrapAvailability::Available, successful_process(b"checked"));
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_process(SANDBOXED_STDOUT.as_bytes()),
+        );
         let observation = runner.clone();
         let mut command_runner = SandboxedCommandRunner::try_new(runner, &root)?;
         let arguments = ExecArguments {
@@ -1202,7 +1206,7 @@ mod tests {
                 .windows(chdir_arguments.len())
                 .any(|arguments| arguments == chdir_arguments)
         );
-        assert_eq!(result.stdout.text, "checked");
+        assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
         Ok(())
     }
 }
