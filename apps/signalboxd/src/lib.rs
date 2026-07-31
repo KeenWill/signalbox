@@ -48,7 +48,7 @@ pub use conversation_introspection::{
 };
 pub use daemon_tools::{
     DaemonToolCatalog, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
-    DaemonToolsConstructionError,
+    DaemonToolsConstructionError, PinnedWorkspaceFileSystem,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};

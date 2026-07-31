@@ -365,7 +365,7 @@ fn visible_imported_entry(
 ) -> Result<VisibleEntry, ConversationIntrospectionError> {
     let position = NonZeroU64::new(entry.position().as_u64())
         .ok_or_else(ConversationIntrospectionError::caller_bug)?;
-    let kind = imported_speaker_kind(entry.source_speaker());
+    let kind = imported_content_kind(entry.source_speaker(), entry.content());
     let content = match entry.content() {
         ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text)) => {
             text.as_str().to_owned()
@@ -391,6 +391,18 @@ fn visible_imported_entry(
         kind,
         content,
     })
+}
+
+fn imported_content_kind(
+    speaker: &ImportedSourceAttestation<ImportedSpeaker>,
+    content: &ImportedTranscriptContent,
+) -> TranscriptEntryKind {
+    match content {
+        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(_)) => {
+            imported_speaker_kind(speaker)
+        }
+        _ => TranscriptEntryKind::System,
+    }
 }
 
 fn imported_speaker_kind(
@@ -454,5 +466,25 @@ impl TranscriptPageBuilder {
 
     fn finish(self, has_more: bool) -> TranscriptPage {
         TranscriptPage::new(self.entries, has_more)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_domain::ImportedMessageContentAbsence;
+
+    use super::*;
+
+    #[test]
+    fn non_text_import_with_attested_user_speaker_is_a_system_marker() {
+        let speaker = ImportedSourceAttestation::Attested(ImportedSpeaker::User);
+        let content = ImportedTranscriptContent::MessageContentAbsent(
+            ImportedMessageContentAbsence::EmptyBlockArray,
+        );
+
+        assert_eq!(
+            imported_content_kind(&speaker, &content),
+            TranscriptEntryKind::System
+        );
     }
 }

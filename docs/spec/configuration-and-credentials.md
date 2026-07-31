@@ -425,22 +425,24 @@ only as a model catalog, but production startup rejects that absence. When the
 array is present it must already be complete: an unknown, missing, or duplicate
 family; an unknown field; any fixed value with another spelling; a relative
 workspace root; or a dependency field on the wrong family is a sanitized
-configuration failure. The root is opened and pinned by both workspace suites
-during tool construction, so a nonexistent, non-directory, or final-symlink root
-also fails startup. The GitHub policy admits exactly
-`https://api.github.com:443`; neither GitHub-backed suite can widen it from a
-model argument.
+configuration failure. The root is opened once during tool construction and its
+pinned authority is cloned into both workspace suites, so a nonexistent,
+non-directory, or final-symlink root also fails startup. The GitHub policy
+admits exactly `https://api.github.com:443`; neither GitHub-backed suite can
+widen it from a model argument.
 
 Composition preserves each compiled declaration's permission default and feeds
 it unchanged into the existing durable approval flow. Exact-revision code-host
-and pull-request reads and all workspace reads are automatic; code-host
-mutations, GitHub review publication, and every workspace mutation require an
-owner decision. Reading the invoking session's transcript is automatic, while
+and pull-request reads and all workspace reads default to `Auto`; code-host
+mutations, GitHub review publication, and every workspace mutation default to
+`Confirm`. Reading the invoking session's transcript defaults to `Auto`, while
 listing conversations and reading another native or imported conversation
-require an owner decision. A confirmed request creates the ordinary durable
-approval wait exposed by the process protocol; execution does not enter its
-transport or filesystem boundary until an approval is recorded. No composition
-layer downgrades `Confirm` to `Auto`.
+default to `Confirm`. With the session posture disabled, a confirmed request
+creates the ordinary durable approval wait exposed by the process protocol;
+execution does not enter its transport or filesystem boundary until a
+per-request approval is recorded. A session frozen with `ApproveAll` instead
+receives the existing explicit `SessionBlanket` approval and does not park. No
+composition layer changes a declaration from `Confirm` to `Auto`.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and

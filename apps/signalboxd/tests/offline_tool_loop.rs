@@ -2180,6 +2180,10 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         "max_bytes": 131072
     })
     .to_string();
+    let expected_tool_use_content = format!(
+        "{}\n{arguments}",
+        signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
+    );
     let (execution, runtime) = fixture.execution(
         [
             tool_use_script(&[(
@@ -2195,19 +2199,25 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
     execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
-    let result = continuation_result_json(&runtime)?;
-    let entries = result["entries"]
-        .as_array()
-        .expect("conversation result carries entries");
-
     assert_eq!(
-        result["session_id"],
-        serde_json::json!(fixture.session.into_uuid().to_string())
+        continuation_result_json(&runtime)?,
+        serde_json::json!({
+            "session_id": fixture.session.into_uuid().to_string(),
+            "entries": [{
+                "position": 1,
+                "kind": "user",
+                "content": FIXTURE_USER_CONTENT,
+                "content_truncated": false
+            }, {
+                "position": 2,
+                "kind": "tool_use",
+                "content": expected_tool_use_content,
+                "content_truncated": false
+            }],
+            "next_after": null,
+            "truncated": false
+        })
     );
-    assert!(entries.iter().any(|entry| {
-        entry["kind"] == serde_json::json!("user")
-            && entry["content"] == serde_json::json!(FIXTURE_USER_CONTENT)
-    }));
     assert_commissioned_catalog(&runtime.received_operations()[0]);
     Ok(())
 }

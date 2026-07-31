@@ -28,13 +28,94 @@ use signalbox_tools_github::{
 };
 use signalbox_tools_workspace::{
     LocalWorkspaceFileSystem, WORKSPACE_MUTATION_TOOL_NAMES, WORKSPACE_READ_TOOL_NAMES,
-    WorkspaceFileSystem, WorkspaceMutationExecutor, WorkspaceMutationFileSystem,
-    WorkspaceMutationTools, WorkspaceReadExecutor, WorkspaceReadTools,
+    WorkspaceDirectoryRead, WorkspaceEntryKind, WorkspaceFileBytes, WorkspaceFileMutation,
+    WorkspaceFileSystem, WorkspaceMutationCommitError, WorkspaceMutationExecutor,
+    WorkspaceMutationFileSystem, WorkspaceMutationPath, WorkspaceMutationSnapshot,
+    WorkspaceMutationSnapshotError, WorkspaceMutationTools, WorkspaceReadExecutor,
+    WorkspaceReadTools, WorkspaceResolveError, WorkspaceRoot, WorkspaceRootError,
 };
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use crate::{FileCredentialAccess, PostgresConversationIntrospection};
+
+/// Daemon-local filesystem adapter that shares one pinned root across both
+/// workspace suites.
+#[derive(Clone, Debug)]
+pub struct PinnedWorkspaceFileSystem {
+    root: WorkspaceRoot,
+    local: LocalWorkspaceFileSystem,
+}
+
+impl PinnedWorkspaceFileSystem {
+    /// Opens the configured root exactly once for process-lifetime sharing.
+    pub fn try_new(root: &Path) -> Result<Self, WorkspaceRootError> {
+        let local = LocalWorkspaceFileSystem;
+        let root = WorkspaceRoot::try_new(&local, root)?;
+        Ok(Self { root, local })
+    }
+}
+
+impl WorkspaceFileSystem for PinnedWorkspaceFileSystem {
+    fn open_root(&self, _root: &Path) -> Result<WorkspaceRoot, WorkspaceRootError> {
+        Ok(self.root.clone())
+    }
+
+    fn entry_kind(
+        &self,
+        root: &WorkspaceRoot,
+        path: &Path,
+    ) -> Result<WorkspaceEntryKind, WorkspaceResolveError> {
+        self.local.entry_kind(root, path)
+    }
+
+    fn read_directory(
+        &self,
+        root: &WorkspaceRoot,
+        path: &Path,
+        max_entries: usize,
+        max_inspections: usize,
+        max_path_bytes: usize,
+    ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError> {
+        self.local
+            .read_directory(root, path, max_entries, max_inspections, max_path_bytes)
+    }
+
+    fn read_file_prefix(
+        &self,
+        root: &WorkspaceRoot,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
+        self.local.read_file_prefix(root, path, max_bytes)
+    }
+}
+
+impl WorkspaceMutationFileSystem for PinnedWorkspaceFileSystem {
+    type Root = WorkspaceRoot;
+
+    fn open_root(&self, _root: &Path) -> Result<Self::Root, WorkspaceMutationSnapshotError> {
+        Ok(self.root.clone())
+    }
+
+    fn snapshot(
+        &self,
+        root: &Self::Root,
+        paths: &[WorkspaceMutationPath],
+        max_file_bytes: usize,
+    ) -> Result<WorkspaceMutationSnapshot, WorkspaceMutationSnapshotError> {
+        self.local.snapshot(root, paths, max_file_bytes)
+    }
+
+    fn commit_atomically(
+        &self,
+        root: &Self::Root,
+        expected: &WorkspaceMutationSnapshot,
+        mutations: &[WorkspaceFileMutation],
+    ) -> Result<(), WorkspaceMutationCommitError> {
+        self.local.commit_atomically(root, expected, mutations)
+    }
+}
 
 struct ComposedToolFamilies<
     Transport,
@@ -86,7 +167,7 @@ impl<Clock>
         FileCredentialAccess,
         GitHubCodeHostTransport,
         GitHubApiTransport,
-        LocalWorkspaceFileSystem,
+        PinnedWorkspaceFileSystem,
         PostgresConversationIntrospection,
     >
 {
@@ -108,11 +189,12 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         let github = GitHubTools::try_new_production(credentials, github_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;
-        let workspace_read = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace_root)
+        let workspace = PinnedWorkspaceFileSystem::try_new(workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
-        let workspace_mutation =
-            WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace_root)
-                .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
+        let workspace_read = WorkspaceReadTools::try_new(workspace.clone(), workspace_root)
+            .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
+        let workspace_mutation = WorkspaceMutationTools::try_new(workspace, workspace_root)
+            .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool))
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
@@ -564,7 +646,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt, time::SystemTime};
+    use std::{fmt, fs, time::SystemTime};
 
     use signalbox_application::ToolCatalog;
     use signalbox_model_runtime::{
@@ -705,6 +787,55 @@ mod tests {
             .iter()
             .map(|definition| definition.name().as_str())
             .collect()
+    }
+
+    #[test]
+    fn pinned_workspace_filesystem_shares_one_root_after_path_replacement() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured_root = parent.path().join("workspace");
+        let moved_root = parent.path().join("original-workspace");
+        let original_path = "original.txt";
+        let replacement_path = "replacement.txt";
+        let original_content = "original workspace";
+        let replacement_content = "replacement workspace";
+        fs::create_dir(&configured_root).expect("fixture workspace exists");
+        fs::write(configured_root.join(original_path), original_content)
+            .expect("fixture content is written");
+        let filesystem =
+            PinnedWorkspaceFileSystem::try_new(&configured_root).expect("fixture root is pinned");
+
+        fs::rename(&configured_root, &moved_root).expect("fixture root is atomically moved");
+        fs::create_dir(&configured_root).expect("replacement workspace exists");
+        fs::write(configured_root.join(replacement_path), replacement_content)
+            .expect("replacement content is written");
+
+        let read_root = WorkspaceFileSystem::open_root(&filesystem, &configured_root)
+            .expect("read suite receives the pinned root");
+        let mutation_root = WorkspaceMutationFileSystem::open_root(&filesystem, &configured_root)
+            .expect("mutation suite receives the pinned root");
+        let read = WorkspaceFileSystem::read_file_prefix(
+            &filesystem,
+            &read_root,
+            Path::new(original_path),
+            original_content.len(),
+        )
+        .expect("read suite observes original workspace");
+        let mutation_path =
+            WorkspaceMutationPath::try_new(original_path).expect("fixture path is valid");
+        let snapshot = WorkspaceMutationFileSystem::snapshot(
+            &filesystem,
+            &mutation_root,
+            std::slice::from_ref(&mutation_path),
+            original_content.len(),
+        )
+        .expect("mutation suite observes original workspace");
+        let expected_snapshot_content = Some(original_content.to_owned());
+
+        assert_eq!(read.bytes, original_content.as_bytes());
+        assert_eq!(
+            snapshot.content(&mutation_path),
+            Some(&expected_snapshot_content)
+        );
     }
 
     /// The merged process-lifetime catalog exposes every daemon declaration in
