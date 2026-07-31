@@ -6356,6 +6356,22 @@ impl ReviewRuntimeDriver {
         .await
     }
 
+    async fn reject_recorded_import_after_progress(
+        &mut self,
+        attempt: CanonicalUuid,
+        pass: CanonicalUuid,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_invalid(ClientRequest::RecordReviewImportOutcome {
+            command_id: command()?,
+            attempt_id: attempt,
+            pass_id: Some(pass),
+            external_link_id: None,
+            context_digest: Some(CanonicalDigest::try_new("11".repeat(32))?),
+            outcome: ReviewImportTerminalOutcome::Succeeded,
+        })
+        .await
+    }
+
     async fn record_concern(
         &mut self,
         attempt: CanonicalUuid,
@@ -6782,6 +6798,9 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         },
     ];
     driver.record_complete_concerns(attempt, &concerns).await?;
+    driver
+        .reject_recorded_import_after_progress(attempt, import.pass)
+        .await?;
 
     let analysis = driver
         .create_completed_turn_pass(

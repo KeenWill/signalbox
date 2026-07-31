@@ -461,6 +461,7 @@ async fn prevalidate_submission(
                     .map_err(map_store_error)?
                     .as_ref()
                     == Some(outcome)
+                    && recorded_submission_is_current(store, attempt, current, submission).await?
         }
         ClientSubmission::Concern { concern, outcome } => {
             let fresh_stage = matches!(
@@ -480,7 +481,9 @@ async fn prevalidate_submission(
                 .await
                 .map_err(map_store_error)?;
             match claims.iter().find(|claim| claim.concern() == concern) {
-                Some(existing) if existing == &candidate => true,
+                Some(existing) if existing == &candidate => {
+                    recorded_submission_is_current(store, attempt, current, submission).await?
+                }
                 Some(existing) => {
                     fresh_stage && matches!(existing.outcome(), ReviewConcernOutcome::Failed { .. })
                 }
@@ -495,6 +498,7 @@ async fn prevalidate_submission(
                     .map_err(map_store_error)?
                     .as_ref()
                     == Some(plan)
+                    && recorded_submission_is_current(store, attempt, current, submission).await?
         }
         ClientSubmission::JudgmentEffect { finding, outcome } => {
             let plan = store
@@ -516,6 +520,7 @@ async fn prevalidate_submission(
             let effect = ReviewJudgmentEffectId::new(attempt.id(), *finding);
             if applied.contains(&effect) {
                 matches!(outcome, ReviewJudgmentEffectOutcome::Applied(_))
+                    && recorded_submission_is_current(store, attempt, current, submission).await?
             } else {
                 matches!(
                     current,
@@ -535,6 +540,7 @@ async fn prevalidate_submission(
                     .map_err(map_store_error)?
                     .as_ref()
                     == Some(outcomes)
+                    && recorded_submission_is_current(store, attempt, current, submission).await?
         }
         ClientSubmission::Publication(outcomes) => {
             current == ReviewOrchestrationCurrentStage::AwaitingPublication
@@ -544,11 +550,29 @@ async fn prevalidate_submission(
                     .map_err(map_store_error)?
                     .as_ref()
                     == Some(outcomes)
+                    && recorded_submission_is_current(store, attempt, current, submission).await?
         }
     };
     admitted
         .then_some(())
         .ok_or(ReviewOrchestrationRuntimeError::Rejected)
+}
+
+async fn recorded_submission_is_current(
+    store: &PostgresReviewOrchestrationStore,
+    attempt: &ReviewOrchestrationAttempt,
+    current: ReviewOrchestrationCurrentStage,
+    submission: &ClientSubmission,
+) -> Result<bool, ReviewOrchestrationRuntimeError> {
+    let recorded = submission_stage(store, attempt, submission).await?;
+    Ok(recorded_stage_is_current(current, recorded))
+}
+
+fn recorded_stage_is_current(
+    current: ReviewOrchestrationCurrentStage,
+    recorded: ReviewOrchestrationStage,
+) -> bool {
+    current_to_stage(current) == recorded
 }
 
 async fn submission_stage(
@@ -1529,8 +1553,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ReviewOrchestrationRuntimeError, ReviewOrchestrationServiceError,
-        ReviewOrchestrationStoreError, RunnerError, map_service_error,
+        ReviewOrchestrationCurrentStage, ReviewOrchestrationRuntimeError,
+        ReviewOrchestrationServiceError, ReviewOrchestrationStage, ReviewOrchestrationStoreError,
+        RunnerError, map_service_error, recorded_stage_is_current,
     };
 
     #[test]
@@ -1555,5 +1580,21 @@ mod tests {
             map_service_error(error),
             ReviewOrchestrationRuntimeError::Rejected,
         );
+    }
+
+    #[test]
+    fn equal_stage_submission_is_admitted_at_its_recorded_stage() {
+        assert!(recorded_stage_is_current(
+            ReviewOrchestrationCurrentStage::AwaitingConcerns,
+            ReviewOrchestrationStage::AwaitingConcerns,
+        ));
+    }
+
+    #[test]
+    fn equal_stage_submission_is_rejected_after_progress_advances() {
+        assert!(!recorded_stage_is_current(
+            ReviewOrchestrationCurrentStage::Complete,
+            ReviewOrchestrationStage::AwaitingConcerns,
+        ));
     }
 }

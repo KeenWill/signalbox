@@ -2171,11 +2171,11 @@ where
         let mut first_concern_error = None;
         while let Some(joined) = tasks.join_next().await {
             match joined {
-                Err(_) => retain_first_error(
+                Err(_) => retain_concern_error(
                     &mut first_concern_error,
                     ReviewOrchestrationServiceError::ConcernTaskTerminated,
                 ),
-                Ok((_, _, Err(error))) => retain_first_error(
+                Ok((_, _, Err(error))) => retain_concern_error(
                     &mut first_concern_error,
                     ReviewOrchestrationServiceError::Runner(error),
                 ),
@@ -2188,11 +2188,11 @@ where
                         )
                         .await;
                     match seal {
-                        Err(error) => retain_first_error(
+                        Err(error) => retain_concern_error(
                             &mut first_concern_error,
                             ReviewOrchestrationServiceError::Store(error),
                         ),
-                        Ok(ReviewDurableSealOutcome::Conflict) => retain_first_error(
+                        Ok(ReviewDurableSealOutcome::Conflict) => retain_concern_error(
                             &mut first_concern_error,
                             ReviewOrchestrationServiceError::DurableConflict,
                         ),
@@ -2373,9 +2373,16 @@ where
     }
 }
 
-fn retain_first_error<Error>(first: &mut Option<Error>, candidate: Error) {
-    if first.is_none() {
-        *first = Some(candidate);
+fn retain_concern_error<StoreError, RunnerError>(
+    retained: &mut Option<ReviewOrchestrationServiceError<StoreError, RunnerError>>,
+    candidate: ReviewOrchestrationServiceError<StoreError, RunnerError>,
+) {
+    let replaces_runner = matches!(
+        retained.as_ref(),
+        Some(ReviewOrchestrationServiceError::Runner(_))
+    ) && !matches!(&candidate, ReviewOrchestrationServiceError::Runner(_));
+    if retained.is_none() || replaces_runner {
+        *retained = Some(candidate);
     }
 }
 
@@ -2453,6 +2460,38 @@ mod tests {
         Partial,
         Complete,
         ConcernRunnerError,
+    }
+
+    #[test]
+    fn concern_store_failure_replaces_an_expected_runner_wait() {
+        let mut retained: Option<ReviewOrchestrationServiceError<&str, &str>> =
+            Some(ReviewOrchestrationServiceError::Runner("awaiting input"));
+
+        retain_concern_error(
+            &mut retained,
+            ReviewOrchestrationServiceError::Store("write failed"),
+        );
+
+        assert!(matches!(
+            retained,
+            Some(ReviewOrchestrationServiceError::Store("write failed"))
+        ));
+    }
+
+    #[test]
+    fn concern_durable_conflict_replaces_an_expected_runner_wait() {
+        let mut retained: Option<ReviewOrchestrationServiceError<&str, &str>> =
+            Some(ReviewOrchestrationServiceError::Runner("awaiting input"));
+
+        retain_concern_error(
+            &mut retained,
+            ReviewOrchestrationServiceError::DurableConflict,
+        );
+
+        assert!(matches!(
+            retained,
+            Some(ReviewOrchestrationServiceError::DurableConflict)
+        ));
     }
 
     #[derive(Debug)]
