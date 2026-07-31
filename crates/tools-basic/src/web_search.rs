@@ -879,7 +879,9 @@ fn build_provider_request(
     if credential_text.is_empty() {
         return Err(WebSearchTransportFailure::InvalidCredential);
     }
-    if request.query().contains(credential_text) {
+    if request.query().contains(credential_text)
+        || form_decoded_contains(request.query(), credential.expose_bytes())
+    {
         return Err(WebSearchTransportFailure::RequestFailed);
     }
     let mut url = Url::parse(endpoint.url).map_err(|_| WebSearchTransportFailure::RequestFailed)?;
@@ -888,7 +890,9 @@ fn build_provider_request(
         .append_pair("count", BRAVE_RESULT_COUNT_QUERY)
         .append_pair("result_filter", "web")
         .append_pair("text_decorations", "false");
-    if url.as_str().contains(credential_text) {
+    if url.as_str().contains(credential_text)
+        || form_decoded_contains(url.as_str(), credential.expose_bytes())
+    {
         return Err(WebSearchTransportFailure::RequestFailed);
     }
     let mut credential_header = HeaderValue::from_bytes(credential.expose_bytes())
@@ -942,8 +946,7 @@ struct BraveResponse {
     #[serde(rename = "type")]
     response_type: String,
     query: BraveQueryFacts,
-    #[serde(default)]
-    web: Option<BraveWebResults>,
+    web: BraveWebResults,
 }
 
 #[derive(serde::Deserialize)]
@@ -953,7 +956,6 @@ struct BraveQueryFacts {
 
 #[derive(serde::Deserialize)]
 struct BraveWebResults {
-    #[serde(default)]
     results: Vec<BraveResult>,
 }
 
@@ -985,7 +987,7 @@ fn decode_brave_response(body: &[u8]) -> Result<WebSearchResponse, WebSearchTran
     } else {
         WebSearchPageCompleteness::Complete
     };
-    let raw_results = response.web.map_or_else(Vec::new, |web| web.results);
+    let raw_results = response.web.results;
     if raw_results.len() > MAX_PROVIDER_RESULTS {
         return Err(WebSearchTransportFailure::InvalidResponse);
     }
@@ -2320,6 +2322,16 @@ mod tests {
         ));
     }
 
+    /// INV-035: a reversibly encoded API key in the query fails before URL
+    /// serialization can double-encode it or dispatch it to the provider.
+    #[test]
+    fn brave_request_rejects_percent_encoded_query_credential_collision() {
+        assert!(matches!(
+            build_brave_request(URL_ENCODED_COLLISION_VALUE, URL_ENCODED_COLLISION_KEY),
+            Err(WebSearchTransportFailure::RequestFailed)
+        ));
+    }
+
     /// INV-035: a key matching fixed provider URL text fails before the URL
     /// can be dispatched or recorded.
     #[test]
@@ -2699,6 +2711,28 @@ mod tests {
             "web": {
                 "type": "search",
                 "results": [],
+            },
+        }))
+        .expect("recorded response fixture encodes");
+
+        assert!(matches!(
+            decode_provider_response(WebSearchProvider::Brave, &body),
+            Err(WebSearchTransportFailure::InvalidResponse)
+        ));
+    }
+
+    /// A success envelope without a provider result list cannot fabricate an
+    /// authoritative empty page.
+    #[test]
+    fn brave_response_without_result_list_is_invalid() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "type": "search",
+            "query": {
+                "original": FIXTURE_QUERY,
+                "more_results_available": false,
+            },
+            "web": {
+                "type": "search",
             },
         }))
         .expect("recorded response fixture encodes");
