@@ -12,10 +12,9 @@ async fn real_bwrap_profile_hides_ambient_home_directory() -> Result<(), Box<dyn
 }
 
 async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error::Error>> {
-    if !procfs_children_available()
-        || std::env::var_os("CI").is_none()
-            && std::env::var_os("SIGNALBOX_RUN_BWRAP_INTEGRATION").is_none()
-    {
+    let ci = std::env::var_os("CI").is_some();
+    let opted_in = std::env::var_os("SIGNALBOX_RUN_BWRAP_INTEGRATION").is_some();
+    if !real_bwrap_gate(procfs_children_available(), ci, opted_in).map_err(std::io::Error::other)? {
         return Ok(());
     }
     let root = std::env::current_dir()?;
@@ -34,6 +33,20 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
     assert_eq!(result.confinement, ExecutionConfinement::FilesystemConfined);
     assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
     Ok(())
+}
+
+fn real_bwrap_gate(
+    procfs_children_available: bool,
+    ci: bool,
+    opted_in: bool,
+) -> Result<bool, &'static str> {
+    if !procfs_children_available {
+        if ci {
+            return Err("CI requires /proc task children support for the real bwrap profile");
+        }
+        return Ok(false);
+    }
+    Ok(ci || opted_in)
 }
 
 fn procfs_children_available() -> bool {
@@ -57,4 +70,22 @@ fn procfs_children_available() -> bool {
 fn bwrap_gate_distinguishes_missing_from_unusable_evidence() {
     assert_ne!(BwrapAvailability::Missing, BwrapAvailability::Unusable);
     assert_ne!(BwrapAvailability::TimedOut, BwrapAvailability::Unusable);
+}
+
+#[test]
+fn real_bwrap_gate_rejects_missing_procfs_support_in_ci() {
+    assert_eq!(
+        real_bwrap_gate(false, true, false),
+        Err("CI requires /proc task children support for the real bwrap profile")
+    );
+}
+
+#[test]
+fn real_bwrap_gate_skips_missing_procfs_support_outside_ci() {
+    assert_eq!(real_bwrap_gate(false, false, true), Ok(false));
+}
+
+#[test]
+fn real_bwrap_gate_runs_with_ci_and_procfs_support() {
+    assert_eq!(real_bwrap_gate(true, true, false), Ok(true));
 }

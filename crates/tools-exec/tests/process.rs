@@ -15,6 +15,7 @@ const EXPLICIT_ENVIRONMENT_NAME: &str = "SIGNALBOX_EXEC_FIXTURE";
 const EXPLICIT_ENVIRONMENT_VALUE: &str = "visible";
 const SUCCESSFUL_EXIT_CODE: i32 = 0;
 const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
+const TARGET_TERMINATION_SIGNAL: &str = "PIPE";
 const REPLACEMENT_SUPERVISOR_EXIT_CODE: i32 = 99;
 const SUPERVISOR_PIN_DIRECTORY: &str = "signalbox-exec-supervisor-pin";
 
@@ -171,6 +172,35 @@ async fn production_dispatcher_marks_started_target_that_exits_127()
                 code: Some(LEGITIMATE_TARGET_EXIT_CODE),
             }
         );
+        assert_eq!(result.stderr.bytes, EXPECTED_DISPATCH_MARKER);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn production_dispatcher_preserves_target_signal_termination()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let supervisor = std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+        let request = ProcessRequest {
+            program: supervisor.into_os_string(),
+            arguments: vec![
+                OsString::from(DISPATCH_MODE),
+                fixture_program("sh")?.into_os_string(),
+                OsString::from("-c"),
+                OsString::from(format!("kill -{TARGET_TERMINATION_SIGNAL} $$")),
+            ],
+            working_directory: std::env::current_dir()?,
+            timeout: Duration::from_secs(5),
+            capture_bytes: 1024,
+            environment: BTreeMap::new(),
+            environment_inheritance: ProcessEnvironment::Clear,
+        };
+
+        let result = production_runner()?.run(request).await;
+
+        assert_eq!(result.outcome, ProcessOutcome::Exited { code: None });
         assert_eq!(result.stderr.bytes, EXPECTED_DISPATCH_MARKER);
         Ok(())
     })

@@ -142,12 +142,8 @@ mod linux {
         if let Some(code) = status.code() {
             return ExitCode::from(code as u8);
         }
-        if let Some(signal) = status
-            .signal()
-            .and_then(rustix::process::Signal::from_named_raw)
-            && let Some(pid) = rustix::process::Pid::from_raw(std::process::id() as i32)
-        {
-            let _ = rustix::process::kill_process(pid, signal);
+        if let Some(signal) = status.signal() {
+            let _ = signal_hook::low_level::emulate_default_handler(signal);
         }
         ExitCode::FAILURE
     }
@@ -679,25 +675,37 @@ mod linux {
         #[test]
         fn reaped_root_is_not_reintroduced_as_an_ancestry_root()
         -> Result<(), Box<dyn std::error::Error>> {
-            let mut child = Command::new(std::env::current_exe()?)
-                .args(["--ignored", "--exact", CHILD_FIXTURE_NAME])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-            let raw_pid = child.id();
-            let process = pin_process(raw_pid)
-                .map_err(|()| std::io::Error::other("pin process"))?
-                .ok_or_else(|| std::io::Error::other("child process disappeared"))?;
-            let tracked = Arc::new(Mutex::new(BTreeMap::from([(raw_pid, process)])));
-            child.wait()?;
+            with_procfs_children_support(|| {
+                let mut child = Command::new(std::env::current_exe()?)
+                    .args(["--ignored", "--exact", CHILD_FIXTURE_NAME])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?;
+                let raw_pid = child.id();
+                let process = pin_process(raw_pid)
+                    .map_err(|()| std::io::Error::other("pin process"))?
+                    .ok_or_else(|| std::io::Error::other("child process disappeared"))?;
+                let tracked = Arc::new(Mutex::new(BTreeMap::from([(raw_pid, process)])));
+                child.wait()?;
 
-            let changed = observe_descendants(raw_pid, std::process::id(), &tracked)
-                .map_err(|()| std::io::Error::other("observe descendants"))?;
-            let tracked = tracked.lock().unwrap_or_else(PoisonError::into_inner);
+                let changed = observe_descendants(raw_pid, std::process::id(), &tracked)
+                    .map_err(|()| std::io::Error::other("observe descendants"))?;
+                let tracked = tracked.lock().unwrap_or_else(PoisonError::into_inner);
 
-            assert!(changed);
-            assert!(!tracked.contains_key(&raw_pid));
-            Ok(())
+                assert!(changed);
+                assert!(!tracked.contains_key(&raw_pid));
+                Ok(())
+            })
+        }
+
+        fn with_procfs_children_support<Test>(test: Test) -> Result<(), Box<dyn std::error::Error>>
+        where
+            Test: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+        {
+            if process_children(std::process::id()).is_err() {
+                return Ok(());
+            }
+            test()
         }
 
         #[test]
