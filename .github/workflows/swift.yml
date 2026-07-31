@@ -25,10 +25,40 @@ permissions:
   contents: read
 
 jobs:
+  swift-change-scope:
+    name: Swift native change scope
+    runs-on: ubuntu-latest
+    outputs:
+      native: ${{ steps.paths.outputs.native }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed paths
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          native=false
+          while IFS= read -r path; do
+            case "$path" in
+              clients/native/* | .github/workflows/swift.yml)
+                native=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "native=$native" >> "$GITHUB_OUTPUT"
+
   # Not `validate`: rust.yml already publishes a job by that name, and a status
   # check is identified by its job name alone, so two `validate` jobs would be
   # one ambiguous check that branch protection cannot require independently.
   swift-validate:
+    needs: swift-change-scope
+    if: needs.swift-change-scope.outputs.native == 'true'
     # macos-latest is the macOS 26 arm64 image. The project was created with
     # Xcode 26.4.1 and targets iOS 26.4, so it needs an Xcode 26.4+ toolchain
     # with a matching simulator runtime; the image ships Xcode 26.6 with the
