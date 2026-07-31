@@ -1755,7 +1755,72 @@ fn validate_review_orchestration_snapshot(
             return Err(FrameValidationError::ReviewShape);
         }
     }
+    let pending_concern_count = snapshot
+        .concerns
+        .iter()
+        .filter(|concern| concern.status == ReviewOrchestrationConcernStatus::Pending)
+        .count();
+    let all_concerns_succeeded = snapshot
+        .concerns
+        .iter()
+        .all(|concern| concern.status == ReviewOrchestrationConcernStatus::Succeeded);
     let counts = snapshot.counts;
+    let no_judgment_or_terminal_counts = counts.judgment_member_count.value() == 0
+        && counts.judgment_effect_applied_count.value() == 0
+        && counts.repair_fixed_count.value() == 0
+        && counts.publication_published_count.value() == 0;
+    let judgment_is_complete =
+        counts.judgment_effect_applied_count.value() == counts.judgment_member_count.value();
+    let judgment_is_incomplete =
+        counts.judgment_member_count.value() > counts.judgment_effect_applied_count.value();
+    let state_matches_facts = match snapshot.state {
+        ReviewOrchestrationState::AwaitingImport | ReviewOrchestrationState::ImportIncomplete => {
+            pending_concern_count == snapshot.concerns.len()
+                && counts.finding_count.value() == 0
+                && no_judgment_or_terminal_counts
+        }
+        ReviewOrchestrationState::AwaitingConcerns => {
+            pending_concern_count > 0 && no_judgment_or_terminal_counts
+        }
+        ReviewOrchestrationState::FanoutIncomplete => {
+            pending_concern_count == 0 && !all_concerns_succeeded && no_judgment_or_terminal_counts
+        }
+        ReviewOrchestrationState::AwaitingJudgment => {
+            all_concerns_succeeded && no_judgment_or_terminal_counts
+        }
+        ReviewOrchestrationState::AwaitingJudgmentEffects
+        | ReviewOrchestrationState::JudgmentIncomplete => {
+            all_concerns_succeeded
+                && judgment_is_incomplete
+                && counts.repair_fixed_count.value() == 0
+                && counts.publication_published_count.value() == 0
+        }
+        ReviewOrchestrationState::AwaitingRepair => {
+            all_concerns_succeeded
+                && judgment_is_complete
+                && counts.repair_fixed_count.value() == 0
+                && counts.publication_published_count.value() == 0
+        }
+        ReviewOrchestrationState::RepairIncomplete => {
+            all_concerns_succeeded
+                && judgment_is_complete
+                && counts.publication_published_count.value() == 0
+        }
+        ReviewOrchestrationState::AwaitingPublication => {
+            all_concerns_succeeded
+                && judgment_is_complete
+                && counts.publication_published_count.value() == 0
+        }
+        ReviewOrchestrationState::PublicationIncomplete => {
+            all_concerns_succeeded
+                && judgment_is_complete
+                && counts.publication_published_count.value() < counts.judgment_member_count.value()
+        }
+        ReviewOrchestrationState::Complete => all_concerns_succeeded && judgment_is_complete,
+    };
+    if !state_matches_facts {
+        return Err(FrameValidationError::ReviewShape);
+    }
     if counts.finding_count.value() > MAX_REVIEW_ORCHESTRATION_MEMBERS as u64
         || counts.judgment_member_count.value() > counts.finding_count.value()
         || counts.judgment_effect_applied_count.value() > counts.judgment_member_count.value()
@@ -4777,6 +4842,34 @@ mod tests {
         CanonicalUuid::from_uuid(Uuid::from_u128(value))
     }
 
+    fn orchestration_snapshot_fixture(
+        state: ReviewOrchestrationState,
+        status: ReviewOrchestrationConcernStatus,
+        pass_id: Option<CanonicalUuid>,
+        counts: ReviewOrchestrationCounts,
+    ) -> Result<ReviewOrchestrationSnapshot, Box<dyn std::error::Error>> {
+        let digest = CanonicalDigest::try_new("ab".repeat(32))?;
+        Ok(ReviewOrchestrationSnapshot {
+            attempt_id: uuid(3),
+            target_id: uuid(4),
+            state,
+            concern_set_version: String::from("initial-five"),
+            stage_template_digests: ReviewOrchestrationStageTemplateDigests {
+                import: digest.clone(),
+                judgment: digest.clone(),
+                repair: digest.clone(),
+                publication: digest.clone(),
+            },
+            concerns: vec![ReviewOrchestrationConcernSnapshot {
+                key: String::from("correctness"),
+                template_digest: digest,
+                status,
+                pass_id,
+            }],
+            counts,
+        })
+    }
+
     fn metadata(archived: bool) -> Result<SessionMetadata, Box<dyn std::error::Error>> {
         Ok(SessionMetadata::try_new(
             Some(String::from("Planning")),
@@ -6880,6 +6973,56 @@ mod tests {
         )?;
         let encoded = encode_server_line(&frame)?;
         assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn review_orchestration_snapshot_rejects_terminal_state_with_pending_concern()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = orchestration_snapshot_fixture(
+            ReviewOrchestrationState::Complete,
+            ReviewOrchestrationConcernStatus::Pending,
+            None,
+            ReviewOrchestrationCounts {
+                finding_count: CanonicalU64::new(0),
+                judgment_member_count: CanonicalU64::new(0),
+                judgment_effect_applied_count: CanonicalU64::new(0),
+                repair_fixed_count: CanonicalU64::new(0),
+                publication_published_count: CanonicalU64::new(0),
+            },
+        )?;
+
+        let frame = ServerFrame::try_new(
+            request(18)?,
+            ServerMessage::ReviewOrchestration { snapshot },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ReviewShape));
+        Ok(())
+    }
+
+    #[test]
+    fn review_orchestration_snapshot_rejects_incomplete_state_with_complete_judgment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = orchestration_snapshot_fixture(
+            ReviewOrchestrationState::AwaitingJudgmentEffects,
+            ReviewOrchestrationConcernStatus::Succeeded,
+            Some(uuid(5)),
+            ReviewOrchestrationCounts {
+                finding_count: CanonicalU64::new(1),
+                judgment_member_count: CanonicalU64::new(1),
+                judgment_effect_applied_count: CanonicalU64::new(1),
+                repair_fixed_count: CanonicalU64::new(0),
+                publication_published_count: CanonicalU64::new(0),
+            },
+        )?;
+
+        let frame = ServerFrame::try_new(
+            request(19)?,
+            ServerMessage::ReviewOrchestration { snapshot },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ReviewShape));
         Ok(())
     }
 

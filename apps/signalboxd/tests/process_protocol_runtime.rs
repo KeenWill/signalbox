@@ -6011,6 +6011,16 @@ impl ReviewRuntimeDriver {
         request: ClientRequest,
         expected: ServerMessage,
     ) -> Result<(), Box<dyn Error>> {
+        self.request_with_lost_orchestration_receipt(command_id, request.clone())
+            .await?;
+        self.request_expect(request, expected).await
+    }
+
+    async fn request_with_lost_orchestration_receipt(
+        &mut self,
+        command_id: CommandId,
+        request: ClientRequest,
+    ) -> Result<(), Box<dyn Error>> {
         sqlx::query(
             "INSERT INTO test_rejected_review_orchestration_receipt (command_id) VALUES ($1)",
         )
@@ -6018,7 +6028,7 @@ impl ReviewRuntimeDriver {
         .execute(&self.pool)
         .await?;
         let request_id = self.request_id();
-        self.connection.request(request_id, request.clone()).await?;
+        self.connection.request(request_id, request).await?;
         assert_eq!(
             protocol_error_code(response_within(&mut self.connection).await?.message()),
             ErrorCode::CommitAmbiguous,
@@ -6030,7 +6040,7 @@ impl ReviewRuntimeDriver {
         .execute(&self.pool)
         .await?;
         assert_eq!(removed.rows_affected(), 1);
-        self.request_expect(request, expected).await
+        Ok(())
     }
 
     async fn request_invalid(&mut self, request: ClientRequest) -> Result<(), Box<dyn Error>> {
@@ -6178,6 +6188,21 @@ impl ReviewRuntimeDriver {
             turn,
             frontier: CanonicalUuid::from_uuid(frontier),
         })
+    }
+
+    async fn reject_mismatched_pass_completion(
+        &mut self,
+        fixture: ReviewPassFixture,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_invalid(ClientRequest::CompleteReviewPass {
+            command_id: command()?,
+            run_id: fixture.run,
+            pass_id: fixture.pass,
+            turn_id: Some(fixture.turn),
+            output_frontier_id: Some(review_identity(0xdead)),
+            outcome: ReviewPassTerminalOutcome::Succeeded,
+        })
+        .await
     }
 
     async fn complete_result_free_pass(
@@ -6651,6 +6676,7 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
             0xc000,
         )
         .await?;
+    driver.reject_mismatched_pass_completion(import).await?;
     driver.complete_result_free_pass(import).await?;
     driver.record_import(attempt, import.pass).await?;
 
@@ -6879,30 +6905,24 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         )
         .await?;
     let repair_command = command()?;
+    let repair_request = ClientRequest::RecordReviewRepairOutcomes {
+        command_id: repair_command,
+        attempt_id: attempt,
+        outcomes: vec![
+            ReviewRepairOutcome {
+                finding_id: findings.accepted_and_fixed,
+                event_pass_id: Some(repair.pass),
+                outcome: ReviewRepairTerminalOutcome::Fixed,
+            },
+            ReviewRepairOutcome {
+                finding_id: findings.accepted_and_published,
+                event_pass_id: None,
+                outcome: ReviewRepairTerminalOutcome::Failed,
+            },
+        ],
+    };
     driver
-        .request_expect_after_lost_orchestration_receipt(
-            repair_command,
-            ClientRequest::RecordReviewRepairOutcomes {
-                command_id: repair_command,
-                attempt_id: attempt,
-                outcomes: vec![
-                    ReviewRepairOutcome {
-                        finding_id: findings.accepted_and_fixed,
-                        event_pass_id: Some(repair.pass),
-                        outcome: ReviewRepairTerminalOutcome::Fixed,
-                    },
-                    ReviewRepairOutcome {
-                        finding_id: findings.accepted_and_published,
-                        event_pass_id: None,
-                        outcome: ReviewRepairTerminalOutcome::Failed,
-                    },
-                ],
-            },
-            ServerMessage::ReviewOrchestrationAdvanced {
-                attempt_id: attempt,
-                state: ReviewOrchestrationState::AwaitingPublication,
-            },
-        )
+        .request_with_lost_orchestration_receipt(repair_command, repair_request.clone())
         .await?;
 
     let external_link = review_identity(0xd000);
@@ -6961,6 +6981,15 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
             ServerMessage::ReviewOrchestrationAdvanced {
                 attempt_id: attempt,
                 state: ReviewOrchestrationState::Complete,
+            },
+        )
+        .await?;
+    driver
+        .request_expect(
+            repair_request,
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: ReviewOrchestrationState::AwaitingPublication,
             },
         )
         .await?;

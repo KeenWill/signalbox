@@ -2225,7 +2225,7 @@ where
             complete_queued_review_pass(current_run, current_pass)
         }
         (ReviewPassTerminalOutcome::Succeeded, Some(turn), Some(frontier)) => {
-            complete_review_pass(
+            let Some(completed) = complete_review_pass(
                 writer,
                 version,
                 request_id,
@@ -2239,9 +2239,13 @@ where
                 },
             )
             .await?
+            else {
+                return Ok(());
+            };
+            Some(completed)
         }
         (ReviewPassTerminalOutcome::Failed, Some(turn), None) => {
-            complete_review_pass(
+            let Some(completed) = complete_review_pass(
                 writer,
                 version,
                 request_id,
@@ -2253,9 +2257,13 @@ where
                 },
             )
             .await?
+            else {
+                return Ok(());
+            };
+            Some(completed)
         }
         (ReviewPassTerminalOutcome::Blocked, Some(turn), None) => {
-            complete_review_pass(
+            let Some(completed) = complete_review_pass(
                 writer,
                 version,
                 request_id,
@@ -2268,9 +2276,13 @@ where
                 },
             )
             .await?
+            else {
+                return Ok(());
+            };
+            Some(completed)
         }
         (ReviewPassTerminalOutcome::Cancelled, Some(turn), None) => {
-            complete_review_pass(
+            let Some(completed) = complete_review_pass(
                 writer,
                 version,
                 request_id,
@@ -2282,8 +2294,12 @@ where
                 },
             )
             .await?
+            else {
+                return Ok(());
+            };
+            Some(completed)
         }
-        _ => None,
+        _ => return write_review_invalid(writer, version, request_id).await,
     };
     let Some((run, pass)) = completed.map(|(pass, run)| (run, pass)) else {
         return write_review_invalid(writer, version, request_id).await;

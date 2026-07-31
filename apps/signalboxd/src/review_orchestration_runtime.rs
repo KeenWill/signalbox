@@ -8,10 +8,10 @@ use signalbox_application::{
     ReviewJudgmentEffectOutcome, ReviewJudgmentEffectSuccess, ReviewJudgmentEffectWork,
     ReviewJudgmentPlan, ReviewJudgmentPlanMember as ApplicationPlanMember,
     ReviewOrchestrationAttempt, ReviewOrchestrationAttemptId, ReviewOrchestrationAttemptStore,
-    ReviewOrchestrationOutcome, ReviewOrchestrationPassRunner, ReviewOrchestrationService,
-    ReviewOrchestrationServiceError, ReviewPassIncompleteStatus, ReviewPlannedDisposition,
-    ReviewPublicationMemberOutcome, ReviewPublicationSuccess, ReviewPublicationWork,
-    ReviewRepairMemberOutcome, ReviewRepairSuccess, ReviewRepairWork, ReviewTemplateDigest,
+    ReviewOrchestrationPassRunner, ReviewOrchestrationService, ReviewOrchestrationServiceError,
+    ReviewPassIncompleteStatus, ReviewPlannedDisposition, ReviewPublicationMemberOutcome,
+    ReviewPublicationSuccess, ReviewPublicationWork, ReviewRepairMemberOutcome,
+    ReviewRepairSuccess, ReviewRepairWork, ReviewTemplateDigest,
 };
 use signalbox_domain::{
     DurableCommandId, ReviewExternalLinkId, ReviewFinding, ReviewFindingEvent, ReviewFindingId,
@@ -78,13 +78,14 @@ pub(crate) async fn execute_review_orchestration_request(
 ) -> Result<ServerMessage, ReviewOrchestrationRuntimeError> {
     let (command_id, attempt_id, kind) = mutation_identity(&request)?;
     let store = PostgresReviewOrchestrationStore::new(pool.clone());
+    let command = ReviewOrchestrationCommand {
+        command_id,
+        semantic_digest,
+        attempt: attempt_id,
+        kind,
+    };
     let claim = store
-        .begin_command(ReviewOrchestrationCommand {
-            command_id,
-            semantic_digest,
-            attempt: attempt_id,
-            kind,
-        })
+        .begin_command(command)
         .await
         .map_err(map_store_error)?;
     let guard = match claim {
@@ -107,37 +108,30 @@ pub(crate) async fn execute_review_orchestration_request(
     if let Some(current) = prepared.current {
         prevalidate_submission(&store, &prepared.attempt, current, &prepared.submission).await?;
     }
-    let start = matches!(prepared.submission, ClientSubmission::AwaitingImport);
-    let mut service = ReviewOrchestrationService::new(store.clone(), prepared.submission);
-    let outcome = match service.execute(prepared.attempt.clone()).await {
-        Ok(outcome) => Some(outcome),
-        Err(ReviewOrchestrationServiceError::Runner(RunnerError::AwaitingInput)) => None,
+    let mut service = ReviewOrchestrationService::new(store.clone(), prepared.submission.clone());
+    match service.execute(prepared.attempt.clone()).await {
+        Ok(_) | Err(ReviewOrchestrationServiceError::Runner(RunnerError::AwaitingInput)) => {}
         Err(error) => return Err(map_service_error(error)),
-    };
-    let stage = if start {
-        ReviewOrchestrationStage::Started
-    } else if let Some(outcome) = outcome {
-        outcome_stage(&outcome)
-    } else {
-        current_to_stage(
-            store
-                .current_stage(prepared.attempt.id())
-                .await
-                .map_err(map_post_effect_store_error)?
-                .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?,
-        )
-    };
+    }
+    let stage = submission_stage(&store, &prepared.attempt, &prepared.submission).await?;
     let progress = store
         .load_progress(prepared.attempt.id())
         .await
         .map_err(map_post_effect_store_error)?
         .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+    let recovered = store
+        .record_command_recovery(
+            command,
+            ReviewOrchestrationCommandResult {
+                attempt: prepared.attempt.id(),
+                stage,
+                progress,
+            },
+        )
+        .await
+        .map_err(map_post_effect_store_error)?;
     let result = guard
-        .record(ReviewOrchestrationCommandResult {
-            attempt: prepared.attempt.id(),
-            stage,
-            progress,
-        })
+        .record(recovered)
         .await
         .map_err(map_post_effect_store_error)?;
     Ok(message_from_recorded(result))
@@ -553,6 +547,87 @@ async fn prevalidate_submission(
     admitted
         .then_some(())
         .ok_or(ReviewOrchestrationRuntimeError::Rejected)
+}
+
+async fn submission_stage(
+    store: &PostgresReviewOrchestrationStore,
+    attempt: &ReviewOrchestrationAttempt,
+    submission: &ClientSubmission,
+) -> Result<ReviewOrchestrationStage, ReviewOrchestrationRuntimeError> {
+    match submission {
+        ClientSubmission::AwaitingImport => Ok(ReviewOrchestrationStage::Started),
+        ClientSubmission::Import(ReviewImportOutcome::Succeeded { .. }) => {
+            Ok(ReviewOrchestrationStage::AwaitingConcerns)
+        }
+        ClientSubmission::Import(ReviewImportOutcome::Incomplete { .. }) => {
+            Ok(ReviewOrchestrationStage::ImportIncomplete)
+        }
+        ClientSubmission::Concern { .. } => {
+            let claims = store
+                .load_concern_claims(attempt.id())
+                .await
+                .map_err(map_post_effect_store_error)?;
+            if claims.len() < attempt.concerns().len() {
+                return Ok(ReviewOrchestrationStage::AwaitingConcerns);
+            }
+            if claims.len() != attempt.concerns().len() {
+                return Err(internal(ReviewOrchestrationInternalCause::StoreCorruption));
+            }
+            if claims
+                .iter()
+                .all(|claim| matches!(claim.outcome(), ReviewConcernOutcome::Succeeded(_)))
+            {
+                Ok(ReviewOrchestrationStage::AwaitingJudgment)
+            } else {
+                Ok(ReviewOrchestrationStage::FanoutIncomplete)
+            }
+        }
+        ClientSubmission::JudgmentPlan(plan) => Ok(if plan.members().is_empty() {
+            ReviewOrchestrationStage::AwaitingRepair
+        } else {
+            ReviewOrchestrationStage::AwaitingJudgmentEffects
+        }),
+        ClientSubmission::JudgmentEffect { finding, outcome } => {
+            if !matches!(outcome, ReviewJudgmentEffectOutcome::Applied(_)) {
+                return Ok(ReviewOrchestrationStage::JudgmentIncomplete);
+            }
+            let plan = store
+                .load_judgment_plan(attempt.id())
+                .await
+                .map_err(map_post_effect_store_error)?
+                .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+            let ordinal = plan
+                .members()
+                .iter()
+                .position(|member| member.finding() == *finding)
+                .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+            Ok(if ordinal + 1 == plan.members().len() {
+                ReviewOrchestrationStage::AwaitingRepair
+            } else {
+                ReviewOrchestrationStage::AwaitingJudgmentEffects
+            })
+        }
+        ClientSubmission::Repair(outcomes) => Ok(
+            if outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, ReviewRepairMemberOutcome::Blocked(_)))
+            {
+                ReviewOrchestrationStage::RepairIncomplete
+            } else {
+                ReviewOrchestrationStage::AwaitingPublication
+            },
+        ),
+        ClientSubmission::Publication(outcomes) => Ok(
+            if outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, ReviewPublicationMemberOutcome::Published(_)))
+            {
+                ReviewOrchestrationStage::Complete
+            } else {
+                ReviewOrchestrationStage::PublicationIncomplete
+            },
+        ),
+    }
 }
 
 fn authenticate_frozen_attempt_templates(
@@ -1197,27 +1272,6 @@ fn concern_pass(outcome: &ReviewConcernOutcome) -> Option<CanonicalUuid> {
         ReviewConcernOutcome::Cancelled { pass } => *pass,
     };
     pass.map(|value| CanonicalUuid::from_uuid(value.pass().into_uuid()))
-}
-
-fn outcome_stage(outcome: &ReviewOrchestrationOutcome) -> ReviewOrchestrationStage {
-    match outcome {
-        ReviewOrchestrationOutcome::ImportIncomplete(_) => {
-            ReviewOrchestrationStage::ImportIncomplete
-        }
-        ReviewOrchestrationOutcome::FanoutIncomplete(_) => {
-            ReviewOrchestrationStage::FanoutIncomplete
-        }
-        ReviewOrchestrationOutcome::JudgmentIncomplete { .. } => {
-            ReviewOrchestrationStage::JudgmentIncomplete
-        }
-        ReviewOrchestrationOutcome::RepairIncomplete { .. } => {
-            ReviewOrchestrationStage::RepairIncomplete
-        }
-        ReviewOrchestrationOutcome::PublicationIncomplete { .. } => {
-            ReviewOrchestrationStage::PublicationIncomplete
-        }
-        ReviewOrchestrationOutcome::Complete { .. } => ReviewOrchestrationStage::Complete,
-    }
 }
 
 fn message_from_recorded(result: ReviewOrchestrationCommandResult) -> ServerMessage {

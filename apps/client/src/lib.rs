@@ -28,12 +28,14 @@ use signalbox_process_protocol::{
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
     ConversationOriginFilter, ConversationSummary, ErrorCode, InputContent, InputDelivery,
     MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
-    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
-    ReviewPublicationOutcome, ReviewRepairOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage,
-    SessionEvent, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
-    decode_server_line, encode_server_line,
+    ModelSelection, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
+    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
+    ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SystemPromptMember,
+    SystemPromptText, ToolBatchState, ToolDecision, TurnState, decode_server_line,
+    encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -47,7 +49,7 @@ mod presentation;
 mod transcript;
 
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
-const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES;
+const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Smallest bounded metadata page the process protocol admits.
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
@@ -3049,7 +3051,7 @@ async fn review(
                 ServerMessage::ReviewOrchestrationAdvanced {
                     attempt_id: recorded,
                     state,
-                } if recorded == attempt_id && review_concern_state_is_coherent(state) => {
+                } if recorded == attempt_id && review_concern_state_is_coherent(outcome, state) => {
                     output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
                     Ok(())
                 }
@@ -3071,6 +3073,7 @@ async fn review(
             members_file,
         } => {
             let file: ReviewJudgmentMembersFile = read_review_json_file(&members_file).await?;
+            let plan_is_empty = file.members.is_empty();
             let command_id = review_command_identity(output, command_id)?;
             let mut connection = client
                 .mutation_request(ClientRequest::RecordReviewJudgmentPlan {
@@ -3083,10 +3086,10 @@ async fn review(
             match connection.message().await.map_err(ClientError::mutation)? {
                 ServerMessage::ReviewOrchestrationAdvanced {
                     attempt_id: recorded,
-                    state:
-                        ReviewOrchestrationState::AwaitingJudgmentEffects
-                        | ReviewOrchestrationState::AwaitingRepair,
-                } if recorded == attempt_id => {
+                    state,
+                } if recorded == attempt_id
+                    && review_judgment_plan_state_is_coherent(plan_is_empty, state) =>
+                {
                     output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
                     Ok(())
                 }
@@ -3122,7 +3125,9 @@ async fn review(
                 ServerMessage::ReviewOrchestrationAdvanced {
                     attempt_id: recorded,
                     state,
-                } if recorded == attempt_id && review_judgment_effect_state_is_coherent(state) => {
+                } if recorded == attempt_id
+                    && review_judgment_effect_state_is_coherent(outcome, state) =>
+                {
                     output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
                     Ok(())
                 }
@@ -3143,6 +3148,10 @@ async fn review(
             outcomes_file,
         } => {
             let file: ReviewRepairOutcomesFile = read_review_json_file(&outcomes_file).await?;
+            let has_blocked = file
+                .outcomes
+                .iter()
+                .any(|outcome| outcome.outcome == ReviewRepairTerminalOutcome::Blocked);
             let command_id = review_command_identity(output, command_id)?;
             let mut connection = client
                 .mutation_request(ClientRequest::RecordReviewRepairOutcomes {
@@ -3154,10 +3163,10 @@ async fn review(
             match connection.message().await.map_err(ClientError::mutation)? {
                 ServerMessage::ReviewOrchestrationAdvanced {
                     attempt_id: recorded,
-                    state:
-                        ReviewOrchestrationState::RepairIncomplete
-                        | ReviewOrchestrationState::AwaitingPublication,
-                } if recorded == attempt_id => {
+                    state,
+                } if recorded == attempt_id
+                    && review_repair_state_is_coherent(has_blocked, state) =>
+                {
                     output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
                     Ok(())
                 }
@@ -3178,6 +3187,10 @@ async fn review(
             outcomes_file,
         } => {
             let file: ReviewPublicationOutcomesFile = read_review_json_file(&outcomes_file).await?;
+            let all_published = file
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.outcome == ReviewPublicationTerminalOutcome::Published);
             let command_id = review_command_identity(output, command_id)?;
             let mut connection = client
                 .mutation_request(ClientRequest::RecordReviewPublicationOutcomes {
@@ -3189,10 +3202,10 @@ async fn review(
             match connection.message().await.map_err(ClientError::mutation)? {
                 ServerMessage::ReviewOrchestrationAdvanced {
                     attempt_id: recorded,
-                    state:
-                        ReviewOrchestrationState::PublicationIncomplete
-                        | ReviewOrchestrationState::Complete,
-                } if recorded == attempt_id => {
+                    state,
+                } if recorded == attempt_id
+                    && review_publication_state_is_coherent(all_published, state) =>
+                {
                     output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
                     Ok(())
                 }
@@ -3506,21 +3519,72 @@ const fn review_import_state_is_coherent(
     }
 }
 
-const fn review_concern_state_is_coherent(state: ReviewOrchestrationState) -> bool {
+const fn review_concern_state_is_coherent(
+    outcome: ReviewConcernTerminalOutcome,
+    state: ReviewOrchestrationState,
+) -> bool {
+    match outcome {
+        ReviewConcernTerminalOutcome::Succeeded => matches!(
+            state,
+            ReviewOrchestrationState::AwaitingConcerns | ReviewOrchestrationState::AwaitingJudgment
+        ),
+        ReviewConcernTerminalOutcome::Failed
+        | ReviewConcernTerminalOutcome::Blocked
+        | ReviewConcernTerminalOutcome::Cancelled => matches!(
+            state,
+            ReviewOrchestrationState::AwaitingConcerns | ReviewOrchestrationState::FanoutIncomplete
+        ),
+    }
+}
+
+const fn review_judgment_plan_state_is_coherent(
+    plan_is_empty: bool,
+    state: ReviewOrchestrationState,
+) -> bool {
     matches!(
-        state,
-        ReviewOrchestrationState::AwaitingConcerns
-            | ReviewOrchestrationState::FanoutIncomplete
-            | ReviewOrchestrationState::AwaitingJudgment
+        (plan_is_empty, state),
+        (true, ReviewOrchestrationState::AwaitingRepair)
+            | (false, ReviewOrchestrationState::AwaitingJudgmentEffects)
     )
 }
 
-const fn review_judgment_effect_state_is_coherent(state: ReviewOrchestrationState) -> bool {
+const fn review_judgment_effect_state_is_coherent(
+    outcome: ReviewJudgmentEffectTerminalOutcome,
+    state: ReviewOrchestrationState,
+) -> bool {
+    match outcome {
+        ReviewJudgmentEffectTerminalOutcome::Applied => matches!(
+            state,
+            ReviewOrchestrationState::AwaitingJudgmentEffects
+                | ReviewOrchestrationState::AwaitingRepair
+        ),
+        ReviewJudgmentEffectTerminalOutcome::Failed
+        | ReviewJudgmentEffectTerminalOutcome::Blocked
+        | ReviewJudgmentEffectTerminalOutcome::Cancelled => {
+            matches!(state, ReviewOrchestrationState::JudgmentIncomplete)
+        }
+    }
+}
+
+const fn review_repair_state_is_coherent(
+    has_blocked: bool,
+    state: ReviewOrchestrationState,
+) -> bool {
     matches!(
-        state,
-        ReviewOrchestrationState::AwaitingJudgmentEffects
-            | ReviewOrchestrationState::JudgmentIncomplete
-            | ReviewOrchestrationState::AwaitingRepair
+        (has_blocked, state),
+        (true, ReviewOrchestrationState::RepairIncomplete)
+            | (false, ReviewOrchestrationState::AwaitingPublication)
+    )
+}
+
+const fn review_publication_state_is_coherent(
+    all_published: bool,
+    state: ReviewOrchestrationState,
+) -> bool {
+    matches!(
+        (all_published, state),
+        (true, ReviewOrchestrationState::Complete)
+            | (false, ReviewOrchestrationState::PublicationIncomplete)
     )
 }
 
@@ -3585,11 +3649,13 @@ mod tests {
         ConversationOriginFilter, ConversationSummary, FrameEncodeError, ImportedContentKind,
         ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
         ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
-        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot,
-        ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity,
-        ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision,
-        TurnState, decode_client_line, encode_server_line,
+        ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
+        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
+        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -3606,9 +3672,12 @@ mod tests {
         await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
         decide, imported, model_call_recovery_transition, open_scanned_import_source, read_input,
         read_review_json_file, read_system_prompt_file, reconcile_turn, review,
-        review_finding_event_status, review_pass_completion_is_coherent, run, search,
-        session_recovery_transition, socket_path, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        review_concern_state_is_coherent, review_finding_event_status,
+        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
+        review_pass_completion_is_coherent, review_publication_state_is_coherent,
+        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
+        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
+        terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -3665,6 +3734,70 @@ mod tests {
 
         assert!(matches!(decoded, Err(ClientError::ReviewInputExceedsFrame)));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_json_file_bound_reserves_request_envelope_headroom()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), vec![b'x'; MAX_REVIEW_JSON_INPUT_BYTES])?;
+
+        let decoded = read_review_json_file::<ReviewConcernsFile>(file.path()).await;
+
+        assert!(MAX_REVIEW_JSON_INPUT_BYTES < signalbox_process_protocol::MAX_FRAME_BYTES);
+        assert!(!matches!(
+            decoded,
+            Err(ClientError::ReviewInputExceedsFrame)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn concern_acknowledgement_correlates_the_submitted_outcome() {
+        assert!(review_concern_state_is_coherent(
+            ReviewConcernTerminalOutcome::Succeeded,
+            ReviewOrchestrationState::AwaitingJudgment,
+        ));
+        assert!(!review_concern_state_is_coherent(
+            ReviewConcernTerminalOutcome::Failed,
+            ReviewOrchestrationState::AwaitingJudgment,
+        ));
+    }
+
+    #[test]
+    fn judgment_acknowledgements_correlate_the_submitted_facts() {
+        assert!(review_judgment_plan_state_is_coherent(
+            true,
+            ReviewOrchestrationState::AwaitingRepair,
+        ));
+        assert!(!review_judgment_effect_state_is_coherent(
+            ReviewJudgmentEffectTerminalOutcome::Blocked,
+            ReviewOrchestrationState::AwaitingRepair,
+        ));
+    }
+
+    #[test]
+    fn repair_acknowledgement_correlates_the_blocked_barrier() {
+        assert!(review_repair_state_is_coherent(
+            true,
+            ReviewOrchestrationState::RepairIncomplete,
+        ));
+        assert!(!review_repair_state_is_coherent(
+            true,
+            ReviewOrchestrationState::AwaitingPublication,
+        ));
+    }
+
+    #[test]
+    fn publication_acknowledgement_correlates_the_complete_inventory() {
+        assert!(review_publication_state_is_coherent(
+            true,
+            ReviewOrchestrationState::Complete,
+        ));
+        assert!(!review_publication_state_is_coherent(
+            false,
+            ReviewOrchestrationState::Complete,
+        ));
     }
 
     #[test]

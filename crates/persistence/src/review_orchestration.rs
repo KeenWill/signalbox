@@ -47,20 +47,20 @@ const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
     review_orchestration_concern,
     review_orchestration_concern_claim,
     review_orchestration_concern_finding,
-    review_orchestration_fanout_member,
     review_orchestration_fanout_seal,
+    review_orchestration_fanout_member,
     review_orchestration_import,
-    review_orchestration_judgment_effect,
-    review_orchestration_judgment_member,
     review_orchestration_judgment_plan,
-    review_orchestration_publication_inventory,
+    review_orchestration_judgment_member,
+    review_orchestration_judgment_effect,
     review_orchestration_publication_inventory_seal,
-    review_orchestration_publication_outcome,
+    review_orchestration_publication_inventory,
     review_orchestration_publication_outcome_seal,
-    review_orchestration_repair_inventory,
+    review_orchestration_publication_outcome,
     review_orchestration_repair_inventory_seal,
-    review_orchestration_repair_outcome,
+    review_orchestration_repair_inventory,
     review_orchestration_repair_outcome_seal,
+    review_orchestration_repair_outcome,
     review_pass,
     review_pass_finding_inventory_seal,
     review_pass_produced_finding,
@@ -76,6 +76,37 @@ pub struct PostgresReviewOrchestrationStore {
 }
 
 impl PostgresReviewOrchestrationStore {
+    /// Records the response recovered after the aggregate effect commits and
+    /// before the owner-global command receipt is committed.
+    pub async fn record_command_recovery(
+        &self,
+        command: ReviewOrchestrationCommand,
+        result: ReviewOrchestrationCommandResult,
+    ) -> Result<ReviewOrchestrationCommandResult, ReviewOrchestrationStoreError> {
+        if result.attempt != command.attempt {
+            return Err(corruption(
+                "orchestration command recovery names another attempt",
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let inserted = insert_command_recovery(&mut transaction, &command, &result).await?;
+        if inserted {
+            commit_or_ambiguous(transaction).await?;
+            return Ok(result);
+        }
+        let inspection = inspect_command_recovery(&mut transaction, command).await?;
+        transaction.rollback().await?;
+        match inspection {
+            CommandInspection::Recorded(existing) if existing == result => Ok(existing),
+            CommandInspection::Recorded(_) | CommandInspection::Conflicting => Err(corruption(
+                "orchestration command recovery conflicts with its immutable record",
+            )),
+            CommandInspection::New => Err(corruption(
+                "orchestration command recovery conflict disappeared",
+            )),
+        }
+    }
+
     /// Binds orchestration storage to the same guarded pool as review workflow storage.
     pub fn new(pool: PgPool) -> Self {
         Self {
@@ -463,8 +494,10 @@ impl PostgresReviewOrchestrationStore {
         command: ReviewOrchestrationCommand,
     ) -> Result<ReviewOrchestrationCommandClaim, ReviewOrchestrationStoreError> {
         let mut transaction = self.pool.begin().await?;
-        match inspect_command(&mut transaction, command).await? {
+        let command_inspection = inspect_command(&mut transaction, command).await?;
+        match command_inspection {
             CommandInspection::Recorded(result) => {
+                validate_recorded_recovery(&mut transaction, command, &result).await?;
                 transaction.commit().await?;
                 return Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result));
             }
@@ -473,6 +506,11 @@ impl PostgresReviewOrchestrationStore {
                 return Ok(ReviewOrchestrationCommandClaim::Conflicting);
             }
             CommandInspection::New => {}
+        }
+        let recovery = inspect_command_recovery(&mut transaction, command).await?;
+        if matches!(&recovery, CommandInspection::Conflicting) {
+            transaction.rollback().await?;
+            return Ok(ReviewOrchestrationCommandClaim::Conflicting);
         }
         let inserted = sqlx::query(
             "INSERT INTO durable_command
@@ -490,6 +528,7 @@ impl PostgresReviewOrchestrationStore {
         if !inserted {
             return match inspect_command(&mut transaction, command).await? {
                 CommandInspection::Recorded(result) => {
+                    validate_recorded_recovery(&mut transaction, command, &result).await?;
                     transaction.commit().await?;
                     Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result))
                 }
@@ -501,6 +540,11 @@ impl PostgresReviewOrchestrationStore {
                     "orchestration command claim lost its registry race",
                 )),
             };
+        }
+        if let CommandInspection::Recorded(result) = recovery {
+            insert_command_receipt(&mut transaction, &command, &result).await?;
+            commit_or_ambiguous(transaction).await?;
+            return Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result));
         }
         Ok(ReviewOrchestrationCommandClaim::New(
             ReviewOrchestrationCommandGuard {
@@ -1706,6 +1750,96 @@ fn decode_optional_referenced_finding(
     }
 }
 
+async fn inspect_command_recovery(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: ReviewOrchestrationCommand,
+) -> Result<CommandInspection, ReviewOrchestrationStoreError> {
+    let row = sqlx::query(
+        "SELECT semantic_digest, attempt_id, operation_kind, result_stage,
+                import_recorded, concern_claim_count, fanout_sealed,
+                judgment_plan_sealed, judgment_effect_count,
+                repair_inventory_count, repair_outcomes_recorded,
+                publication_inventory_count, publication_outcomes_recorded
+           FROM review_orchestration_command_recovery WHERE command_id = $1",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(CommandInspection::New);
+    };
+    let digest: Vec<u8> = row.try_get("semantic_digest")?;
+    if digest.as_slice() != command.semantic_digest
+        || ReviewOrchestrationAttemptId::from_uuid(row.try_get("attempt_id")?) != command.attempt
+        || row.try_get::<String, _>("operation_kind")? != encode_command_kind(command.kind)
+    {
+        return Ok(CommandInspection::Conflicting);
+    }
+    Ok(CommandInspection::Recorded(decode_command_result(&row)?))
+}
+
+async fn validate_recorded_recovery(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: ReviewOrchestrationCommand,
+    result: &ReviewOrchestrationCommandResult,
+) -> Result<(), ReviewOrchestrationStoreError> {
+    match inspect_command_recovery(transaction, command).await? {
+        CommandInspection::New => Ok(()),
+        CommandInspection::Recorded(recovered) if recovered == *result => Ok(()),
+        CommandInspection::Recorded(_) | CommandInspection::Conflicting => Err(corruption(
+            "orchestration command receipt contradicts its recovery record",
+        )),
+    }
+}
+
+async fn insert_command_recovery(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ReviewOrchestrationCommand,
+    result: &ReviewOrchestrationCommandResult,
+) -> Result<bool, ReviewOrchestrationStoreError> {
+    let inserted = sqlx::query(
+        "INSERT INTO review_orchestration_command_recovery
+            (command_id, semantic_digest, attempt_id, operation_kind, result_stage,
+             import_recorded, concern_claim_count, fanout_sealed,
+             judgment_plan_sealed, judgment_effect_count, repair_inventory_count,
+             repair_outcomes_recorded, publication_inventory_count,
+             publication_outcomes_recorded)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id))
+    .bind(command.semantic_digest.as_slice())
+    .bind(command.attempt.as_uuid())
+    .bind(encode_command_kind(command.kind))
+    .bind(encode_stage(result.stage))
+    .bind(result.progress.import_recorded)
+    .bind(count_i64(result.progress.concern_claim_count)?)
+    .bind(result.progress.fanout_sealed)
+    .bind(result.progress.judgment_plan_sealed)
+    .bind(count_i64(result.progress.judgment_effect_count)?)
+    .bind(
+        result
+            .progress
+            .repair_inventory_count
+            .map(count_i64)
+            .transpose()?,
+    )
+    .bind(result.progress.repair_outcomes_recorded)
+    .bind(
+        result
+            .progress
+            .publication_inventory_count
+            .map(count_i64)
+            .transpose()?,
+    )
+    .bind(result.progress.publication_outcomes_recorded)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    Ok(inserted)
+}
+
 enum CommandInspection {
     New,
     Recorded(ReviewOrchestrationCommandResult),
@@ -2062,4 +2196,67 @@ impl From<ReviewWorkflowStoreError> for ReviewOrchestrationStoreError {
 
 const fn corruption(detail: &'static str) -> ReviewOrchestrationStoreError {
     ReviewOrchestrationStoreError::Corruption(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REVIEW_SNAPSHOT_LOCKS;
+
+    fn lock_position(table: &str) -> usize {
+        REVIEW_SNAPSHOT_LOCKS
+            .find(table)
+            .expect("the orchestration snapshot lock inventory names the table")
+    }
+
+    #[test]
+    fn snapshot_locks_each_parent_and_seal_before_its_written_members() {
+        assert!(
+            lock_position("review_orchestration_attempt,")
+                < lock_position("review_orchestration_concern,")
+        );
+        assert!(
+            lock_position("review_orchestration_concern,")
+                < lock_position("review_orchestration_concern_claim,")
+        );
+        assert!(
+            lock_position("review_orchestration_concern_claim,")
+                < lock_position("review_orchestration_concern_finding,")
+        );
+        assert!(
+            lock_position("review_orchestration_fanout_seal,")
+                < lock_position("review_orchestration_fanout_member,")
+        );
+        assert!(
+            lock_position("review_orchestration_judgment_plan,")
+                < lock_position("review_orchestration_judgment_member,")
+        );
+        assert!(
+            lock_position("review_orchestration_judgment_member,")
+                < lock_position("review_orchestration_judgment_effect,")
+        );
+        assert!(
+            lock_position("review_orchestration_repair_inventory_seal,")
+                < lock_position("review_orchestration_repair_inventory,")
+        );
+        assert!(
+            lock_position("review_orchestration_repair_inventory,")
+                < lock_position("review_orchestration_repair_outcome_seal,")
+        );
+        assert!(
+            lock_position("review_orchestration_repair_outcome_seal,")
+                < lock_position("review_orchestration_repair_outcome,")
+        );
+        assert!(
+            lock_position("review_orchestration_publication_inventory_seal,")
+                < lock_position("review_orchestration_publication_inventory,")
+        );
+        assert!(
+            lock_position("review_orchestration_publication_inventory,")
+                < lock_position("review_orchestration_publication_outcome_seal,")
+        );
+        assert!(
+            lock_position("review_orchestration_publication_outcome_seal,")
+                < lock_position("review_orchestration_publication_outcome,")
+        );
+    }
 }
