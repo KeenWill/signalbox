@@ -324,7 +324,9 @@ pool-capacity budget, leaving two connections reserved for non-snapshot work; a
 pool with fewer than four configured connections cannot start the process
 listener. The database-global snapshot admission loser rolls back its
 transaction before an exponential retry wait that begins at 10 ms and is capped
-at 100 ms.
+at 100 ms. Admission is bounded to five seconds, after which the read reports
+unavailable; daemon shutdown cancels the admission wait and releases its
+capacity.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the

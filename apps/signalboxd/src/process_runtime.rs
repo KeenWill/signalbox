@@ -1454,16 +1454,20 @@ where
             else {
                 return Ok(());
             };
-            handle_read_review_orchestration(
-                writer,
-                version,
-                request_id,
-                request,
-                &services.pool,
-                services.template_configuration.as_ref(),
-                snapshot_permit,
+            run_until_shutdown(
+                &mut shutdown,
+                handle_read_review_orchestration(
+                    writer,
+                    version,
+                    request_id,
+                    request,
+                    &services.pool,
+                    services.template_configuration.as_ref(),
+                    snapshot_permit,
+                ),
             )
             .await
+            .unwrap_or(Ok(()))
         }
         ClientRequest::ReadReviewTarget { target_id } => {
             handle_read_review_target(writer, version, request_id, target_id, &services.pool).await

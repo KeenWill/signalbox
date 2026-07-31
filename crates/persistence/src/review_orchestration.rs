@@ -4,7 +4,7 @@
 //! run, pass, finding, event, and external-link values are always reconstructed
 //! through [`ReviewWorkflowStore`].
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use signalbox_application::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
@@ -32,6 +32,7 @@ use crate::{
 const STORAGE_VERSION: i16 = 1;
 const SNAPSHOT_ADMISSION_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
 const SNAPSHOT_ADMISSION_MAX_BACKOFF: Duration = Duration::from_millis(100);
+const SNAPSHOT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
     accepted_input,
     turn_lifecycle,
@@ -320,6 +321,12 @@ impl PostgresReviewOrchestrationStore {
     }
 
     async fn begin_snapshot_guard(
+        &self,
+    ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
+        bounded_snapshot_admission(self.wait_for_snapshot_guard()).await
+    }
+
+    async fn wait_for_snapshot_guard(
         &self,
     ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
         let mut backoff = SNAPSHOT_ADMISSION_INITIAL_BACKOFF;
@@ -1723,6 +1730,21 @@ fn encode_disposition(
     }
 }
 
+async fn bounded_snapshot_admission<Output>(
+    operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
+) -> Result<Output, ReviewOrchestrationStoreError> {
+    bounded_snapshot_admission_with_timeout(operation, SNAPSHOT_ADMISSION_TIMEOUT).await
+}
+
+async fn bounded_snapshot_admission_with_timeout<Output>(
+    operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
+    timeout: Duration,
+) -> Result<Output, ReviewOrchestrationStoreError> {
+    tokio::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut)?
+}
+
 fn decode_finding_ref(
     row: &PgRow,
     finding_column: &str,
@@ -2161,6 +2183,7 @@ fn ordinal_i32(value: usize) -> Result<i32, ReviewOrchestrationStoreError> {
 pub enum ReviewOrchestrationStoreError {
     Database(sqlx::Error),
     CommitAmbiguous(sqlx::Error),
+    SnapshotAdmissionTimedOut,
     Workflow(ReviewWorkflowStoreError),
     Corruption(&'static str),
 }
@@ -2175,6 +2198,9 @@ impl fmt::Display for ReviewOrchestrationStoreError {
                 formatter,
                 "review orchestration commit is ambiguous: {error}"
             ),
+            Self::SnapshotAdmissionTimedOut => {
+                formatter.write_str("review orchestration snapshot admission timed out")
+            }
             Self::Workflow(error) => write!(
                 formatter,
                 "review orchestration canonical evidence failed: {error}"
@@ -2192,7 +2218,7 @@ impl Error for ReviewOrchestrationStoreError {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::Workflow(error) => Some(error),
-            Self::Corruption(_) => None,
+            Self::SnapshotAdmissionTimedOut | Self::Corruption(_) => None,
         }
     }
 }
@@ -2215,12 +2241,30 @@ const fn corruption(detail: &'static str) -> ReviewOrchestrationStoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::REVIEW_SNAPSHOT_LOCKS;
+    use super::{
+        REVIEW_SNAPSHOT_LOCKS, ReviewOrchestrationStoreError,
+        bounded_snapshot_admission_with_timeout,
+    };
 
     fn lock_position(table: &str) -> usize {
         REVIEW_SNAPSHOT_LOCKS
             .find(table)
             .expect("the orchestration snapshot lock inventory names the table")
+    }
+
+    #[tokio::test]
+    async fn snapshot_admission_timeout_is_typed() {
+        let pending = std::future::pending::<Result<(), ReviewOrchestrationStoreError>>();
+
+        let error =
+            bounded_snapshot_admission_with_timeout(pending, std::time::Duration::from_millis(1))
+                .await
+                .expect_err("snapshot admission must be time bounded");
+
+        assert!(matches!(
+            error,
+            ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut
+        ));
     }
 
     #[test]
