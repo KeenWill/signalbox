@@ -27,7 +27,9 @@ use signalbox_tool_contract::{
 use tokio::{io::AsyncReadExt, process::Command};
 
 #[cfg(target_os = "linux")]
-use crate::supervisor_protocol::{SupervisorSpawnFailure, SupervisorStatus};
+use crate::supervisor_protocol::{
+    SupervisorFailureStage, SupervisorSpawnFailure, SupervisorStatus,
+};
 
 pub const SANDBOXED_EXEC_NAME: &str = "sandboxed_exec";
 pub const UNSANDBOXED_EXEC_NAME: &str = "unsandboxed_exec";
@@ -701,7 +703,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     remaining,
                     capture_bytes,
                 );
-                sandbox_process_result(self.runner.run(request).await)
+                sandbox_process_result(self.runner.run(request).await, capture_bytes)
             }
             BwrapAvailability::Missing | BwrapAvailability::Unusable => ExecResult {
                 confinement: ExecutionConfinement::SandboxRefused { availability },
@@ -1045,7 +1047,7 @@ pub enum ProcessOutcome {
     },
     /// The bounded deadline elapsed and the entire observed process tree was killed.
     TimedOut,
-    /// No process tree was started.
+    /// No requested process tree was started.
     SpawnFailed {
         /// Closed sanitized spawn classification.
         reason: ProcessSpawnFailure,
@@ -1079,8 +1081,10 @@ pub enum ProcessSpawnFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessSupervisionFailure {
-    /// Waiting for the process-group leader failed.
+    /// Waiting for the supervised process tree failed.
     Wait,
+    /// Killing or reaping the process tree failed.
+    Cleanup,
     /// Reading standard output failed.
     Stdout,
     /// Reading standard error failed.
@@ -1157,11 +1161,13 @@ fn process_result(confinement: ExecutionConfinement, result: ProcessRunResult) -
     }
 }
 
-fn sandbox_process_result(mut result: ProcessRunResult) -> ExecResult {
+fn sandbox_process_result(mut result: ProcessRunResult, capture_bytes: usize) -> ExecResult {
     let dispatched = result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER);
     if result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER) {
         result.stderr.bytes.drain(..SANDBOX_DISPATCH_MARKER.len());
     }
+    truncate_process_output(&mut result.stdout, capture_bytes);
+    truncate_process_output(&mut result.stderr, capture_bytes);
     if dispatched {
         return process_result(ExecutionConfinement::FilesystemConfined, result);
     }
@@ -1172,6 +1178,13 @@ fn sandbox_process_result(mut result: ProcessRunResult) -> ExecResult {
         },
         stdout: output_capture(result.stdout),
         stderr: output_capture(result.stderr),
+    }
+}
+
+fn truncate_process_output(output: &mut ProcessOutput, limit: usize) {
+    if output.bytes.len() > limit {
+        output.bytes.truncate(limit);
+        output.completeness = CaptureCompleteness::Truncated;
     }
 }
 
@@ -1296,7 +1309,8 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         .current_dir(&request.working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .process_group(0);
     if request.environment_inheritance == ProcessEnvironment::Clear {
         command.env_clear();
     }
@@ -1315,6 +1329,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             });
         }
     };
+    let supervisor_pid = child.id();
     let control = child.stdin.take();
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
@@ -1336,26 +1351,51 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             });
         }
     };
-    let stdout_task = tokio::spawn(read_supervised_stdout(stdout, request.capture_bytes));
-    let stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
+    let mut stdout_task = tokio::spawn(read_supervised_stdout(stdout, request.capture_bytes));
+    let mut stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
     let outer_deadline = request.timeout.saturating_add(Duration::from_secs(2));
-    let waited = tokio::time::timeout(outer_deadline, child.wait()).await;
+    let outer_deadline = tokio::time::Instant::now() + outer_deadline;
+    let waited = tokio::time::timeout_at(outer_deadline, child.wait()).await;
     drop(control);
     let wait_failure = match waited {
-        Ok(Ok(_)) => None,
-        Ok(Err(_)) => Some(ProcessOutcome::SupervisionFailed {
-            reason: ProcessSupervisionFailure::Wait,
-        }),
+        Ok(Ok(status)) if status.success() => None,
+        Ok(Ok(_)) => {
+            kill_supervisor_process_group(supervisor_pid);
+            Some(ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            })
+        }
+        Ok(Err(_)) => {
+            kill_supervisor_process_group(supervisor_pid);
+            Some(ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            })
+        }
         Err(_) => {
+            kill_supervisor_process_group(supervisor_pid);
             let _ = child.kill().await;
-            let _ = child.wait().await;
             Some(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Wait,
             })
         }
     };
-    let stdout = stdout_task.await;
-    let stderr = stderr_task.await;
+    let captures = tokio::time::timeout_at(outer_deadline, async {
+        let stdout = (&mut stdout_task).await;
+        let stderr = (&mut stderr_task).await;
+        (stdout, stderr)
+    })
+    .await;
+    let (stdout, stderr) = match captures {
+        Ok(captures) => captures,
+        Err(_) => {
+            kill_supervisor_process_group(supervisor_pid);
+            stdout_task.abort();
+            stderr_task.abort();
+            return empty_process_result(ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Cleanup,
+            });
+        }
+    };
     match (stdout, stderr) {
         (Ok(Ok((stdout, status))), Ok(Ok(stderr))) => ProcessRunResult {
             outcome: wait_failure.unwrap_or_else(|| supervisor_outcome(status)),
@@ -1368,12 +1408,23 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
                 completeness: stderr.completeness,
             },
         },
-        (Ok(Err(_)) | Err(_), _) => empty_process_result(ProcessOutcome::SupervisionFailed {
-            reason: ProcessSupervisionFailure::Stdout,
-        }),
-        (_, Ok(Err(_)) | Err(_)) => empty_process_result(ProcessOutcome::SupervisionFailed {
-            reason: ProcessSupervisionFailure::Stderr,
-        }),
+        (Ok(Err(_)) | Err(_), _) => {
+            empty_process_result(wait_failure.unwrap_or(ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Stdout,
+            }))
+        }
+        (_, Ok(Err(_)) | Err(_)) => {
+            empty_process_result(wait_failure.unwrap_or(ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Stderr,
+            }))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kill_supervisor_process_group(raw_pid: Option<u32>) {
+    if let Some(pid) = raw_pid.and_then(|raw_pid| rustix::process::Pid::from_raw(raw_pid as i32)) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
     }
 }
 
@@ -1392,11 +1443,15 @@ fn supervisor_outcome(status: SupervisorStatus) -> ProcessOutcome {
                 SupervisorSpawnFailure::Other => ProcessSpawnFailure::Other,
             },
         },
-        SupervisorStatus::Cancelled | SupervisorStatus::SupervisionFailed => {
-            ProcessOutcome::SupervisionFailed {
-                reason: ProcessSupervisionFailure::Wait,
-            }
-        }
+        SupervisorStatus::Cancelled => ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Wait,
+        },
+        SupervisorStatus::SupervisionFailed { stage } => ProcessOutcome::SupervisionFailed {
+            reason: match stage {
+                SupervisorFailureStage::Wait => ProcessSupervisionFailure::Wait,
+                SupervisorFailureStage::Cleanup => ProcessSupervisionFailure::Cleanup,
+            },
+        },
     }
 }
 
@@ -1426,10 +1481,28 @@ mod tests {
 
     const SANDBOXED_STDOUT: &str = "checked";
     const SANDBOXED_WORKING_DIRECTORY: &str = "crate";
+    const SETUP_CAPTURE_BYTES: usize = 4;
+    const SETUP_STDOUT: &[u8] = b"12345";
+    const SETUP_STDERR: &[u8] = b"67890";
     const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
     const REQUEST_TIMEOUT_SECONDS: u64 = 1;
     const SLOW_PROBE_DELAY: Duration = Duration::from_millis(1_100);
     const TEST_SANDBOX_LAUNCHER: &str = "/fixture/signalbox-exec-supervisor";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_supervision_failure_remains_distinct() {
+        let outcome = supervisor_outcome(SupervisorStatus::SupervisionFailed {
+            stage: SupervisorFailureStage::Cleanup,
+        });
+
+        assert_eq!(
+            outcome,
+            ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Cleanup,
+            }
+        );
+    }
 
     struct ReplacementWorkspace {
         path: PathBuf,
@@ -1975,6 +2048,49 @@ mod tests {
                 reason: ProcessSpawnFailure::SandboxSetup,
             }
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandbox_setup_output_excludes_the_dispatch_marker_reserve()
+    -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            ProcessRunResult {
+                outcome: ProcessOutcome::Exited { code: Some(1) },
+                stdout: ProcessOutput {
+                    bytes: SETUP_STDOUT.to_vec(),
+                    completeness: CaptureCompleteness::Complete,
+                },
+                stderr: ProcessOutput {
+                    bytes: SETUP_STDERR.to_vec(),
+                    completeness: CaptureCompleteness::Complete,
+                },
+            },
+        );
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, root)?;
+        let arguments = ExecArguments {
+            program: String::from("missing-target"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner
+            .run_with_capture(arguments, SETUP_CAPTURE_BYTES)
+            .await;
+
+        assert_eq!(
+            result.stdout.text.as_bytes(),
+            &SETUP_STDOUT[..SETUP_CAPTURE_BYTES]
+        );
+        assert_eq!(
+            result.stderr.text.as_bytes(),
+            &SETUP_STDERR[..SETUP_CAPTURE_BYTES]
+        );
+        assert_eq!(result.stdout.completeness, CaptureCompleteness::Truncated);
+        assert_eq!(result.stderr.completeness, CaptureCompleteness::Truncated);
         Ok(())
     }
 
