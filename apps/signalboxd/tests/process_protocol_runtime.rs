@@ -5977,6 +5977,28 @@ impl ReviewRuntimeDriver {
         )
         .execute(&runtime.pool)
         .await?;
+        sqlx::query(
+            "CREATE TABLE test_rejected_review_orchestration_recovery (command_id uuid PRIMARY KEY)",
+        )
+        .execute(&runtime.pool)
+        .await?;
+        sqlx::query(
+            "CREATE FUNCTION test_review_orchestration_recovery_allowed(candidate uuid)
+             RETURNS boolean LANGUAGE sql
+             RETURN NOT EXISTS (
+                 SELECT 1 FROM test_rejected_review_orchestration_recovery
+                  WHERE command_id = candidate
+             )",
+        )
+        .execute(&runtime.pool)
+        .await?;
+        sqlx::query(
+            "ALTER TABLE review_orchestration_command_recovery
+             ADD CONSTRAINT test_reject_orchestration_recovery
+             CHECK (test_review_orchestration_recovery_allowed(command_id))",
+        )
+        .execute(&runtime.pool)
+        .await?;
         Ok(Self {
             connection: Connection::connect(runtime.socket()).await?,
             pool: runtime.pool.clone(),
@@ -6035,6 +6057,33 @@ impl ReviewRuntimeDriver {
         );
         let removed = sqlx::query(
             "DELETE FROM test_rejected_review_orchestration_receipt WHERE command_id = $1",
+        )
+        .bind(command_id.into_uuid())
+        .execute(&self.pool)
+        .await?;
+        assert_eq!(removed.rows_affected(), 1);
+        Ok(())
+    }
+
+    async fn request_with_lost_orchestration_recovery(
+        &mut self,
+        command_id: CommandId,
+        request: ClientRequest,
+    ) -> Result<(), Box<dyn Error>> {
+        sqlx::query(
+            "INSERT INTO test_rejected_review_orchestration_recovery (command_id) VALUES ($1)",
+        )
+        .bind(command_id.into_uuid())
+        .execute(&self.pool)
+        .await?;
+        let request_id = self.request_id();
+        self.connection.request(request_id, request).await?;
+        assert_eq!(
+            protocol_error_code(response_within(&mut self.connection).await?.message()),
+            ErrorCode::CommitAmbiguous,
+        );
+        let removed = sqlx::query(
+            "DELETE FROM test_rejected_review_orchestration_recovery WHERE command_id = $1",
         )
         .bind(command_id.into_uuid())
         .execute(&self.pool)
@@ -6356,20 +6405,40 @@ impl ReviewRuntimeDriver {
         .await
     }
 
-    async fn reject_recorded_import_after_progress(
+    async fn record_import_with_lost_recovery(
+        &mut self,
+        attempt: CanonicalUuid,
+        pass: CanonicalUuid,
+    ) -> Result<ClientRequest, Box<dyn Error>> {
+        let command_id = command()?;
+        let request = ClientRequest::RecordReviewImportOutcome {
+            command_id,
+            attempt_id: attempt,
+            pass_id: Some(pass),
+            external_link_id: None,
+            context_digest: Some(CanonicalDigest::try_new("11".repeat(32))?),
+            outcome: ReviewImportTerminalOutcome::Succeeded,
+        };
+        self.request_with_lost_orchestration_recovery(command_id, request.clone())
+            .await?;
+        Ok(request)
+    }
+
+    async fn reject_fresh_import_after_progress(
         &mut self,
         attempt: CanonicalUuid,
         pass: CanonicalUuid,
     ) -> Result<(), Box<dyn Error>> {
-        self.request_invalid(ClientRequest::RecordReviewImportOutcome {
+        let request = ClientRequest::RecordReviewImportOutcome {
             command_id: command()?,
             attempt_id: attempt,
             pass_id: Some(pass),
             external_link_id: None,
             context_digest: Some(CanonicalDigest::try_new("11".repeat(32))?),
             outcome: ReviewImportTerminalOutcome::Succeeded,
-        })
-        .await
+        };
+        self.request_invalid(request.clone()).await?;
+        self.request_invalid(request).await
     }
 
     async fn record_concern(
@@ -6392,6 +6461,55 @@ impl ReviewRuntimeDriver {
                 attempt_id: attempt,
                 state: expected_state,
             },
+        )
+        .await
+    }
+
+    async fn record_concern_with_lost_recovery(
+        &mut self,
+        attempt: CanonicalUuid,
+        concern: &ReviewConcernEvidence,
+    ) -> Result<ClientRequest, Box<dyn Error>> {
+        let command_id = command()?;
+        let request = ClientRequest::RecordReviewConcernOutcome {
+            command_id,
+            attempt_id: attempt,
+            concern: concern.key.clone(),
+            pass_id: Some(concern.pass),
+            outcome: ReviewConcernTerminalOutcome::Succeeded,
+        };
+        self.request_with_lost_orchestration_recovery(command_id, request.clone())
+            .await?;
+        Ok(request)
+    }
+
+    async fn record_concerns_after_first(
+        &mut self,
+        attempt: CanonicalUuid,
+        concerns: &[ReviewConcernEvidence],
+    ) -> Result<(), Box<dyn Error>> {
+        self.record_concern(
+            attempt,
+            &concerns[1],
+            ReviewOrchestrationState::AwaitingConcerns,
+        )
+        .await?;
+        self.record_concern(
+            attempt,
+            &concerns[2],
+            ReviewOrchestrationState::AwaitingConcerns,
+        )
+        .await?;
+        self.record_concern(
+            attempt,
+            &concerns[3],
+            ReviewOrchestrationState::AwaitingConcerns,
+        )
+        .await?;
+        self.record_concern(
+            attempt,
+            &concerns[4],
+            ReviewOrchestrationState::AwaitingJudgment,
         )
         .await
     }
@@ -6711,7 +6829,9 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         .await?;
     driver.reject_mismatched_pass_completion(import).await?;
     driver.complete_result_free_pass(import).await?;
-    driver.record_import(attempt, import.pass).await?;
+    let import_retry = driver
+        .record_import_with_lost_recovery(attempt, import.pass)
+        .await?;
     driver.reject_restart_after_import(attempt).await?;
 
     let correctness = driver
@@ -6806,9 +6926,32 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
             pass: documentation.pass,
         },
     ];
-    driver.record_complete_concerns(attempt, &concerns).await?;
+    let first_concern_retry = driver
+        .record_concern_with_lost_recovery(attempt, &concerns[0])
+        .await?;
     driver
-        .reject_recorded_import_after_progress(attempt, import.pass)
+        .record_concerns_after_first(attempt, &concerns)
+        .await?;
+    driver
+        .request_expect(
+            import_retry,
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: ReviewOrchestrationState::AwaitingConcerns,
+            },
+        )
+        .await?;
+    driver
+        .request_expect(
+            first_concern_retry,
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: ReviewOrchestrationState::AwaitingConcerns,
+            },
+        )
+        .await?;
+    driver
+        .reject_fresh_import_after_progress(attempt, import.pass)
         .await?;
 
     let analysis = driver

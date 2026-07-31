@@ -419,17 +419,24 @@ and file content. Equality is the closed operation kind plus SHA-256 of the
 validated semantic request object; frame version and request identity are
 excluded. Before hashing, the daemon canonicalizes a complete
 `record_review_findings` request into finding-identity order, so array order
-does not distinguish the same semantic inventory. An orchestration effect is
+does not distinguish the same semantic inventory. Before an orchestration
+effect, the adapter commits an immutable typed intent binding command identity,
+semantic digest, attempt, and closed operation kind. The effect and an
+append-only marker naming its exact command commit atomically. They are
 followed, while the daemon still holds exclusive review-mutation admission, by
 an append-only recovery result containing the operation-derived stage and
-progress. Only then does the daemon commit the typed owner-global receipt. The
-two records constrain operation kind, stage, and constituent progress as one
-coherent shape. A recovery-only result reserves its identity across every
-owner-global command family until the typed receipt is materialized. If receipt
-commit is lost, an equal retry materializes it from the recovery result and
-returns that original operation-stage response rather than the aggregate's later
-state. A recorded receipt is inspected before mutable aggregate-state
-preconditions. A semantically equal start similarly preserves
+progress. The typed owner-global receipt then atomically replaces the intent.
+The intent, recovery, and receipt constraints keep operation kind, stage, and
+constituent progress coherent. If the process stops after the effect but before
+recovery, the intent preserves exact-retry identity and the effect marker proves
+that this command caused the operation-specific durable effect; the retry must
+also authenticate that equal effect independently of the aggregate current
+stage, reconstruct progress for the original operation stage without later
+facts, and finish the recovery and receipt. A fresh command at the later stage
+remains rejected. If receipt commit is lost, an equal retry materializes it from
+the recovery result and returns that original operation-stage response rather
+than later aggregate state. A recorded receipt is inspected before mutable
+aggregate-state preconditions. A semantically equal start similarly preserves
 `review_orchestration_started`; a different frozen attempt fails closed. Fresh
 run admission creates its run and sole pass in one transaction; recovery also
 recognizes and completes a matching run-only intermediate committed by the

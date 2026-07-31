@@ -8857,12 +8857,33 @@ fn expect_new_orchestration_claim(
     claim: ReviewOrchestrationCommandClaim,
 ) -> ReviewOrchestrationCommandGuard {
     match claim {
-        ReviewOrchestrationCommandClaim::New(guard) => guard,
+        ReviewOrchestrationCommandClaim::New(guard) => {
+            assert!(!guard.is_pending());
+            guard
+        }
         ReviewOrchestrationCommandClaim::ExistingRecorded(_) => {
             panic!("fresh orchestration command unexpectedly replayed")
         }
         ReviewOrchestrationCommandClaim::Conflicting => {
             panic!("fresh orchestration command unexpectedly conflicted")
+        }
+    }
+}
+
+#[track_caller]
+fn expect_pending_orchestration_claim(
+    claim: ReviewOrchestrationCommandClaim,
+) -> ReviewOrchestrationCommandGuard {
+    match claim {
+        ReviewOrchestrationCommandClaim::New(guard) => {
+            assert!(guard.is_pending());
+            guard
+        }
+        ReviewOrchestrationCommandClaim::ExistingRecorded(_) => {
+            panic!("pending orchestration command unexpectedly replayed")
+        }
+        ReviewOrchestrationCommandClaim::Conflicting => {
+            panic!("pending orchestration command unexpectedly conflicted")
         }
     }
 }
@@ -8880,19 +8901,6 @@ fn expect_recorded_orchestration_claim(
             panic!("recorded orchestration command unexpectedly conflicted")
         }
     }
-}
-
-async fn assert_orchestration_claim_waiting(
-    claim: &mut tokio::task::JoinHandle<
-        Result<ReviewOrchestrationCommandClaim, ReviewOrchestrationStoreError>,
-    >,
-) {
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), claim)
-            .await
-            .is_err(),
-        "concurrent orchestration command claim did not wait on the durable fence"
-    );
 }
 
 struct PreparedOrchestrationFixture {
@@ -9290,11 +9298,10 @@ async fn review_orchestration_recovery_reserves_global_command_identity()
     Ok(())
 }
 
-/// The deferred registry guard rejects a cross-kind receipt even if its
-/// transaction began before it could observe the recovery reservation.
+/// A pending orchestration intent immediately rejects a cross-kind registry row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn review_orchestration_recovery_blocks_cross_kind_registry_commit()
+async fn review_orchestration_intent_blocks_cross_kind_registry_insert()
 -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x7af;
 
@@ -9304,6 +9311,19 @@ async fn review_orchestration_recovery_blocks_cross_kind_registry_commit()
     let result = incomplete_judgment_result(&fixture).await?;
     let guard = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
     let mut transaction = pool.begin().await?;
+    let error = sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'review_workflow', 1, transaction_timestamp())",
+    )
+    .bind(command.command_id.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("intent already reserves the owner-global command identity");
+    assert_sqlstate(&error, "23505");
+    transaction.rollback().await?;
+    drop(guard);
+
     assert_eq!(
         fixture
             .store
@@ -9311,34 +9331,6 @@ async fn review_orchestration_recovery_blocks_cross_kind_registry_commit()
             .await?,
         result
     );
-    drop(guard);
-
-    sqlx::query(
-        "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'review_workflow', 1, transaction_timestamp())",
-    )
-    .bind(command.command_id.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO review_workflow_command
-            (command_id, command_kind, storage_version, semantic_digest,
-             operation_kind, result_kind, result_target_id)
-         VALUES ($1, 'review_workflow', 1, $2, 'create_target',
-                 'target_created', $3)",
-    )
-    .bind(command.command_id.into_uuid())
-    .bind([19_u8; 32].as_slice())
-    .bind(fixture.attempt.target().into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-
-    let error = transaction
-        .commit()
-        .await
-        .expect_err("recovery reserves the command identity at commit");
-    assert_sqlstate(&error, "23505");
     assert_eq!(
         expect_recorded_orchestration_claim(fixture.store.begin_command(command).await?),
         result
@@ -9378,11 +9370,11 @@ async fn review_orchestration_command_receipt_replays_and_conflicts() -> Result<
     Ok(())
 }
 
-/// An equal concurrent orchestration claim waits for and replays the winner.
+/// An equal concurrent orchestration claim observes the durable pending intent and replays.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn review_orchestration_equal_command_claim_waits_and_replays() -> Result<(), Box<dyn Error>>
-{
+async fn review_orchestration_equal_command_claim_resumes_pending_and_replays()
+-> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x7ad;
 
     let (_container, pool) = migrated_postgres().await?;
@@ -9390,23 +9382,16 @@ async fn review_orchestration_equal_command_claim_waits_and_replays() -> Result<
     let command = orchestration_command(&fixture, COMMAND_IDENTITY, [15; 32]);
     let result = incomplete_judgment_result(&fixture).await?;
     let winner = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
-    let contender_store = fixture.store.clone();
-    let mut contender = tokio::spawn(async move { contender_store.begin_command(command).await });
-    assert_orchestration_claim_waiting(&mut contender).await;
+    let contender = expect_pending_orchestration_claim(fixture.store.begin_command(command).await?);
     assert_eq!(winner.record(result.clone()).await?, result);
-
-    assert_eq!(
-        expect_recorded_orchestration_claim(contender.await??),
-        result
-    );
+    assert_eq!(contender.record(result.clone()).await?, result);
     Ok(())
 }
 
-/// A conflicting concurrent orchestration claim waits for and rejects the
-/// winner's different immutable payload.
+/// A conflicting command immediately rejects against the durable pending intent.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn review_orchestration_conflicting_command_claim_waits_and_rejects()
+async fn review_orchestration_conflicting_command_rejects_pending_intent()
 -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x7ae;
 
@@ -9415,20 +9400,15 @@ async fn review_orchestration_conflicting_command_claim_waits_and_rejects()
     let command = orchestration_command(&fixture, COMMAND_IDENTITY, [16; 32]);
     let result = incomplete_judgment_result(&fixture).await?;
     let winner = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
-    let contender_store = fixture.store.clone();
     let conflicting = ReviewOrchestrationCommand {
         semantic_digest: [17; 32],
         ..command
     };
-    let mut contender =
-        tokio::spawn(async move { contender_store.begin_command(conflicting).await });
-    assert_orchestration_claim_waiting(&mut contender).await;
-    assert_eq!(winner.record(result).await?.attempt, fixture.attempt_id);
-
     assert!(matches!(
-        contender.await??,
+        fixture.store.begin_command(conflicting).await?,
         ReviewOrchestrationCommandClaim::Conflicting
     ));
+    assert_eq!(winner.record(result).await?.attempt, fixture.attempt_id);
     Ok(())
 }
 

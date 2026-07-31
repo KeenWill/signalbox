@@ -195,9 +195,16 @@ fn inspection_query() -> &'static str {
         // SQL text.
         let mut query = String::from("SELECT command.command_kind, command.storage_version");
         for definition in COMMAND_KIND_DEFINITIONS {
-            query.push_str(", EXISTS (SELECT 1 FROM ");
+            query.push_str(", (EXISTS (SELECT 1 FROM ");
             query.push_str(definition.typed_table);
-            query.push_str(" AS typed WHERE typed.command_id = command.command_id) AS ");
+            query.push_str(" AS typed WHERE typed.command_id = command.command_id)");
+            if definition.kind == CommandKind::ReviewOrchestration {
+                query.push_str(
+                    " OR EXISTS (SELECT 1 FROM review_orchestration_command_intent AS intent
+                       WHERE intent.command_id = command.command_id)",
+                );
+            }
+            query.push_str(") AS ");
             query.push_str(definition.spelling);
         }
         query.push_str(" FROM durable_command AS command WHERE command.command_id = $1");

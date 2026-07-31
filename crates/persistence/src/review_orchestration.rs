@@ -24,7 +24,7 @@ use signalbox_domain::{
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
-    command_registry::{self, CommandKind, REVIEW_ORCHESTRATION_KIND, RegistryInspectionError},
+    command_registry::REVIEW_ORCHESTRATION_KIND,
     mapping::durable_command_id_to_uuid,
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
 };
@@ -75,6 +75,7 @@ const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
 pub struct PostgresReviewOrchestrationStore {
     pool: PgPool,
     workflow: ReviewWorkflowStore,
+    effect_command: Option<ReviewOrchestrationCommand>,
 }
 
 impl PostgresReviewOrchestrationStore {
@@ -100,7 +101,9 @@ impl PostgresReviewOrchestrationStore {
         transaction.rollback().await?;
         match inspection {
             CommandInspection::Recorded(existing) if existing == result => Ok(existing),
-            CommandInspection::Recorded(_) | CommandInspection::Conflicting => Err(corruption(
+            CommandInspection::Recorded(_)
+            | CommandInspection::Conflicting
+            | CommandInspection::Pending => Err(corruption(
                 "orchestration command recovery conflicts with its immutable record",
             )),
             CommandInspection::New => Err(corruption(
@@ -114,7 +117,35 @@ impl PostgresReviewOrchestrationStore {
         Self {
             workflow: ReviewWorkflowStore::new(pool.clone()),
             pool,
+            effect_command: None,
         }
+    }
+    /// Binds primary orchestration effects to one already-claimed durable command.
+    pub fn for_command(pool: PgPool, command: ReviewOrchestrationCommand) -> Self {
+        Self {
+            workflow: ReviewWorkflowStore::new(pool.clone()),
+            pool,
+            effect_command: Some(command),
+        }
+    }
+
+    /// Reports whether this exact pending command already committed its primary effect.
+    pub async fn command_effect_is_recorded(
+        &self,
+        command: ReviewOrchestrationCommand,
+    ) -> Result<bool, ReviewOrchestrationStoreError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM review_orchestration_command_effect
+                 WHERE command_id = $1 AND attempt_id = $2 AND operation_kind = $3
+            )",
+        )
+        .bind(durable_command_id_to_uuid(command.command_id))
+        .bind(command.attempt.as_uuid())
+        .bind(encode_command_kind(command.kind))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(ReviewOrchestrationStoreError::Database)
     }
 
     /// Loads and fail-closed reconstructs one immutable attempt.
@@ -212,6 +243,45 @@ impl PostgresReviewOrchestrationStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(Some(decode_progress(&row)?))
+    }
+
+    /// Loads concern-barrier facts as they stood when one concern effect landed.
+    pub async fn load_concern_replay_facts(
+        &self,
+        attempt: ReviewOrchestrationAttemptId,
+        concern: &ReviewKey,
+    ) -> Result<Option<(usize, bool)>, ReviewOrchestrationStoreError> {
+        let row = sqlx::query(
+            "WITH candidate AS (
+                 SELECT max(effect_sequence) AS effect_sequence
+                   FROM review_orchestration_concern_claim
+                  WHERE attempt_id = $1 AND concern_key = $2
+             ), claims_at_effect AS (
+                 SELECT DISTINCT ON (claim.concern_key)
+                        claim.concern_key, claim.outcome_kind
+                   FROM review_orchestration_concern_claim AS claim
+                   JOIN candidate
+                     ON claim.effect_sequence <= candidate.effect_sequence
+                  WHERE claim.attempt_id = $1
+                  ORDER BY claim.concern_key, claim.claim_ordinal DESC
+             )
+             SELECT (SELECT effect_sequence FROM candidate) AS effect_sequence,
+                    count(*) AS claim_count,
+                    COALESCE(bool_and(outcome_kind = 'succeeded'), false) AS all_succeeded
+               FROM claims_at_effect",
+        )
+        .bind(attempt.as_uuid())
+        .bind(concern.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        let sequence: Option<i64> = row.try_get("effect_sequence")?;
+        if sequence.is_none() {
+            return Ok(None);
+        }
+        Ok(Some((
+            decode_count(row.try_get("claim_count")?)?,
+            row.try_get("all_succeeded")?,
+        )))
     }
 
     /// Derives the deterministic daemon-visible stage from validated durable facts.
@@ -473,16 +543,22 @@ pub enum ReviewOrchestrationCommandClaim {
     New(ReviewOrchestrationCommandGuard),
 }
 
-/// An uncommitted registry claim fencing one owner-global command identity.
+/// A durable pending command claim awaiting its typed response receipt.
 pub struct ReviewOrchestrationCommandGuard {
-    transaction: Transaction<'static, Postgres>,
+    pool: PgPool,
     command: ReviewOrchestrationCommand,
+    pending: bool,
 }
 
 impl ReviewOrchestrationCommandGuard {
-    /// Records the exact response state and commits the fenced command claim.
+    /// Reports whether this exact identity resumed a previously committed intent.
+    pub const fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Records the exact response state and atomically replaces its durable intent.
     pub async fn record(
-        mut self,
+        self,
         result: ReviewOrchestrationCommandResult,
     ) -> Result<ReviewOrchestrationCommandResult, ReviewOrchestrationStoreError> {
         if result.attempt != self.command.attempt {
@@ -490,8 +566,24 @@ impl ReviewOrchestrationCommandGuard {
                 "orchestration command result names another attempt",
             ));
         }
-        insert_command_receipt(&mut self.transaction, &self.command, &result).await?;
-        self.transaction
+        let mut transaction = self.pool.begin().await?;
+        match inspect_command(&mut transaction, self.command).await? {
+            CommandInspection::Pending => {}
+            CommandInspection::Recorded(existing) if existing == result => {
+                transaction.commit().await?;
+                return Ok(existing);
+            }
+            CommandInspection::Recorded(_)
+            | CommandInspection::Conflicting
+            | CommandInspection::New => {
+                return Err(corruption(
+                    "orchestration command intent changed before receipt replacement",
+                ));
+            }
+        }
+        insert_command_receipt(&mut transaction, &self.command, &result).await?;
+        delete_command_intent(&mut transaction, &self.command).await?;
+        transaction
             .commit()
             .await
             .map_err(ReviewOrchestrationStoreError::CommitAmbiguous)?;
@@ -500,79 +592,80 @@ impl ReviewOrchestrationCommandGuard {
 }
 
 impl PostgresReviewOrchestrationStore {
-    /// Claims an owner-global command before its separately durable effect.
+    /// Durably claims an owner-global command before its separately durable effect.
     ///
-    /// The returned new guard keeps the registry insertion uncommitted. A
-    /// concurrent reuse blocks at that insertion, so no distinct payload can
-    /// perform an effect before command identity is decided.
+    /// A fresh claim commits an immutable typed intent. An exact retry observes
+    /// that intent as pending, while a distinct payload conflicts before it can
+    /// perform an effect.
     pub async fn begin_command(
         &self,
         command: ReviewOrchestrationCommand,
     ) -> Result<ReviewOrchestrationCommandClaim, ReviewOrchestrationStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let command_inspection = inspect_command(&mut transaction, command).await?;
-        match command_inspection {
+        let mut inspection = inspect_command(&mut transaction, command).await?;
+        let mut fresh = false;
+        if matches!(inspection, CommandInspection::New) {
+            let inserted = sqlx::query(
+                "INSERT INTO durable_command
+                    (command_id, command_kind, storage_version, claimed_at)
+                 VALUES ($1, $2, $3, transaction_timestamp())
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(durable_command_id_to_uuid(command.command_id))
+            .bind(REVIEW_ORCHESTRATION_KIND)
+            .bind(STORAGE_VERSION)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+                == 1;
+            if inserted {
+                insert_command_intent(&mut transaction, &command).await?;
+                inspection = CommandInspection::Pending;
+                fresh = true;
+            } else {
+                inspection = inspect_command(&mut transaction, command).await?;
+            }
+        }
+        match inspection {
             CommandInspection::Recorded(result) => {
                 validate_recorded_recovery(&mut transaction, command, &result).await?;
                 transaction.commit().await?;
-                return Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result));
+                Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result))
             }
             CommandInspection::Conflicting => {
                 transaction.rollback().await?;
-                return Ok(ReviewOrchestrationCommandClaim::Conflicting);
+                Ok(ReviewOrchestrationCommandClaim::Conflicting)
             }
-            CommandInspection::New => {}
-        }
-        let recovery = inspect_command_recovery(&mut transaction, command).await?;
-        if matches!(&recovery, CommandInspection::Conflicting) {
-            transaction.rollback().await?;
-            return Ok(ReviewOrchestrationCommandClaim::Conflicting);
-        }
-        let inserted = sqlx::query(
-            "INSERT INTO durable_command
-                (command_id, command_kind, storage_version, claimed_at)
-             VALUES ($1, $2, $3, transaction_timestamp())
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(durable_command_id_to_uuid(command.command_id))
-        .bind(REVIEW_ORCHESTRATION_KIND)
-        .bind(STORAGE_VERSION)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected()
-            == 1;
-        if !inserted {
-            return match inspect_command(&mut transaction, command).await? {
-                CommandInspection::Recorded(result) => {
-                    validate_recorded_recovery(&mut transaction, command, &result).await?;
-                    transaction.commit().await?;
-                    Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result))
+            CommandInspection::Pending => {
+                match inspect_command_recovery(&mut transaction, command).await? {
+                    CommandInspection::Recorded(result) => {
+                        insert_command_receipt(&mut transaction, &command, &result).await?;
+                        delete_command_intent(&mut transaction, &command).await?;
+                        commit_or_ambiguous(transaction).await?;
+                        Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result))
+                    }
+                    CommandInspection::Conflicting => {
+                        transaction.rollback().await?;
+                        Ok(ReviewOrchestrationCommandClaim::Conflicting)
+                    }
+                    CommandInspection::New => {
+                        commit_or_ambiguous(transaction).await?;
+                        let guard = ReviewOrchestrationCommandGuard {
+                            pool: self.pool.clone(),
+                            command,
+                            pending: !fresh,
+                        };
+                        Ok(ReviewOrchestrationCommandClaim::New(guard))
+                    }
+                    CommandInspection::Pending => Err(corruption(
+                        "orchestration recovery inspection returned a pending intent",
+                    )),
                 }
-                CommandInspection::Conflicting => {
-                    transaction.rollback().await?;
-                    Ok(ReviewOrchestrationCommandClaim::Conflicting)
-                }
-                CommandInspection::New => Err(corruption(
-                    "orchestration command claim lost its registry race",
-                )),
-            };
+            }
+            CommandInspection::New => Err(corruption(
+                "orchestration command claim remained new after registry insertion",
+            )),
         }
-        let recovery = inspect_command_recovery(&mut transaction, command).await?;
-        if matches!(&recovery, CommandInspection::Conflicting) {
-            transaction.rollback().await?;
-            return Ok(ReviewOrchestrationCommandClaim::Conflicting);
-        }
-        if let CommandInspection::Recorded(result) = recovery {
-            insert_command_receipt(&mut transaction, &command, &result).await?;
-            commit_or_ambiguous(transaction).await?;
-            return Ok(ReviewOrchestrationCommandClaim::ExistingRecorded(result));
-        }
-        Ok(ReviewOrchestrationCommandClaim::New(
-            ReviewOrchestrationCommandGuard {
-                transaction,
-                command,
-            },
-        ))
     }
 }
 
@@ -625,6 +718,13 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
                 .execute(&mut *transaction)
                 .await?;
             }
+            insert_effect_marker(
+                self,
+                &mut transaction,
+                attempt.id(),
+                ReviewOrchestrationCommandKind::Start,
+            )
+            .await?;
             commit_or_ambiguous(transaction).await?;
             return Ok(ReviewDurableSealOutcome::Recorded);
         }
@@ -699,6 +799,7 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
     ) -> Result<ReviewDurableSealOutcome, Self::Error> {
         self.verify_import_evidence(&outcome).await?;
         let (kind, pass, link, template, context) = encode_import(&outcome);
+        let mut transaction = self.pool.begin().await?;
         let inserted = sqlx::query(
             "INSERT INTO review_orchestration_import
                 (attempt_id, outcome_kind, pass_id, external_link_id,
@@ -711,19 +812,27 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
         .bind(link.map(|value| value.into_uuid()))
         .bind(template.bytes().as_slice())
         .bind(context.as_ref().map(<[u8; 32]>::as_slice))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?
         .rows_affected()
             == 1;
         if inserted {
-            Ok(ReviewDurableSealOutcome::Recorded)
-        } else {
-            Ok(match self.load_import(attempt).await? {
-                Some(existing) if existing == outcome => ReviewDurableSealOutcome::EqualReplay,
-                Some(_) => ReviewDurableSealOutcome::Conflict,
-                None => return Err(corruption("import conflict disappeared")),
-            })
+            insert_effect_marker(
+                self,
+                &mut transaction,
+                attempt,
+                ReviewOrchestrationCommandKind::Import,
+            )
+            .await?;
+            commit_or_ambiguous(transaction).await?;
+            return Ok(ReviewDurableSealOutcome::Recorded);
         }
+        transaction.rollback().await?;
+        Ok(match self.load_import(attempt).await? {
+            Some(existing) if existing == outcome => ReviewDurableSealOutcome::EqualReplay,
+            Some(_) => ReviewDurableSealOutcome::Conflict,
+            None => return Err(corruption("import conflict disappeared")),
+        })
     }
 
     async fn load_concern_claims(
@@ -824,6 +933,13 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
                 .await?;
             }
         }
+        insert_effect_marker(
+            self,
+            &mut transaction,
+            attempt,
+            ReviewOrchestrationCommandKind::Concern,
+        )
+        .await?;
         commit_or_ambiguous(transaction).await?;
         Ok(ReviewDurableSealOutcome::Recorded)
     }
@@ -1155,6 +1271,32 @@ impl PostgresReviewOrchestrationStore {
     }
 }
 
+async fn insert_effect_marker(
+    store: &PostgresReviewOrchestrationStore,
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: ReviewOrchestrationAttemptId,
+    kind: ReviewOrchestrationCommandKind,
+) -> Result<(), ReviewOrchestrationStoreError> {
+    let Some(command) = store.effect_command else {
+        return Ok(());
+    };
+    if command.attempt != attempt || command.kind != kind {
+        return Err(corruption(
+            "orchestration effect command does not match the primary effect",
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO review_orchestration_command_effect
+            (command_id, attempt_id, operation_kind) VALUES ($1,$2,$3)",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id))
+    .bind(attempt.as_uuid())
+    .bind(encode_command_kind(kind))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn seal_judgment_plan_impl(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
@@ -1220,6 +1362,13 @@ async fn seal_judgment_plan_impl(
         .execute(&mut *transaction)
         .await?;
     }
+    insert_effect_marker(
+        store,
+        &mut transaction,
+        attempt,
+        ReviewOrchestrationCommandKind::JudgmentPlan,
+    )
+    .await?;
     commit_or_ambiguous(transaction).await?;
     Ok(ReviewDurableSealOutcome::Recorded)
 }
@@ -1335,6 +1484,7 @@ async fn record_applied_effect_impl(
     if usize::try_from(ordinal).ok() != Some(applied.len()) {
         return Ok(ReviewDurableSealOutcome::Conflict);
     }
+    let mut transaction = store.pool.begin().await?;
     sqlx::query(
         "INSERT INTO review_orchestration_judgment_effect
             (attempt_id, effect_ordinal, finding_id) VALUES ($1,$2,$3)",
@@ -1342,8 +1492,16 @@ async fn record_applied_effect_impl(
     .bind(effect.attempt().as_uuid())
     .bind(ordinal)
     .bind(effect.finding().finding().into_uuid())
-    .execute(&store.pool)
+    .execute(&mut *transaction)
     .await?;
+    insert_effect_marker(
+        store,
+        &mut transaction,
+        effect.attempt(),
+        ReviewOrchestrationCommandKind::JudgmentEffect,
+    )
+    .await?;
+    commit_or_ambiguous(transaction).await?;
     Ok(ReviewDurableSealOutcome::Recorded)
 }
 
@@ -1492,6 +1650,13 @@ async fn record_repairs(
         .execute(&mut *transaction)
         .await?;
     }
+    insert_effect_marker(
+        store,
+        &mut transaction,
+        attempt,
+        ReviewOrchestrationCommandKind::Repair,
+    )
+    .await?;
     commit_or_ambiguous(transaction).await?;
     Ok(ReviewDurableSealOutcome::Recorded)
 }
@@ -1614,6 +1779,13 @@ async fn record_publications(
         .execute(&mut *transaction)
         .await?;
     }
+    insert_effect_marker(
+        store,
+        &mut transaction,
+        attempt,
+        ReviewOrchestrationCommandKind::Publication,
+    )
+    .await?;
     commit_or_ambiguous(transaction).await?;
     Ok(ReviewDurableSealOutcome::Recorded)
 }
@@ -1822,7 +1994,9 @@ async fn validate_recorded_recovery(
     match inspect_command_recovery(transaction, command).await? {
         CommandInspection::New => Ok(()),
         CommandInspection::Recorded(recovered) if recovered == *result => Ok(()),
-        CommandInspection::Recorded(_) | CommandInspection::Conflicting => Err(corruption(
+        CommandInspection::Recorded(_)
+        | CommandInspection::Conflicting
+        | CommandInspection::Pending => Err(corruption(
             "orchestration command receipt contradicts its recovery record",
         )),
     }
@@ -1878,6 +2052,7 @@ async fn insert_command_recovery(
 
 enum CommandInspection {
     New,
+    Pending,
     Recorded(ReviewOrchestrationCommandResult),
     Conflicting,
 }
@@ -1886,38 +2061,105 @@ async fn inspect_command(
     transaction: &mut Transaction<'_, Postgres>,
     command: ReviewOrchestrationCommand,
 ) -> Result<CommandInspection, ReviewOrchestrationStoreError> {
-    let kind = command_registry::inspect(transaction, command.command_id)
-        .await
-        .map_err(registry_error)?;
-    match kind {
-        None => Ok(CommandInspection::New),
-        Some(CommandKind::ReviewOrchestration) => {
-            let row = sqlx::query(
-                "SELECT semantic_digest, attempt_id, operation_kind, result_stage,
+    let registry = sqlx::query(
+        "SELECT command_kind, storage_version
+           FROM durable_command WHERE command_id = $1",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(registry) = registry else {
+        return Ok(CommandInspection::New);
+    };
+    if registry.try_get::<String, _>("command_kind")? != REVIEW_ORCHESTRATION_KIND {
+        return Ok(CommandInspection::Conflicting);
+    }
+    if registry.try_get::<i16, _>("storage_version")? != STORAGE_VERSION {
+        return Err(corruption(
+            "orchestration command registry version is unsupported",
+        ));
+    }
+    let receipt = sqlx::query(
+        "SELECT semantic_digest, attempt_id, operation_kind, result_stage,
                         import_recorded, concern_claim_count, fanout_sealed,
                         judgment_plan_sealed, judgment_effect_count,
                         repair_inventory_count, repair_outcomes_recorded,
                         publication_inventory_count, publication_outcomes_recorded
                    FROM review_orchestration_command WHERE command_id = $1",
-            )
-            .bind(durable_command_id_to_uuid(command.command_id))
-            .fetch_optional(&mut **transaction)
-            .await?;
-            let Some(row) = row else {
-                return Ok(CommandInspection::New);
-            };
-            let digest: Vec<u8> = row.try_get("semantic_digest")?;
-            if digest.as_slice() != command.semantic_digest
-                || ReviewOrchestrationAttemptId::from_uuid(row.try_get("attempt_id")?)
-                    != command.attempt
-                || row.try_get::<String, _>("operation_kind")? != encode_command_kind(command.kind)
-            {
-                return Ok(CommandInspection::Conflicting);
-            }
-            Ok(CommandInspection::Recorded(decode_command_result(&row)?))
+    )
+    .bind(durable_command_id_to_uuid(command.command_id))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some(row) = receipt {
+        let digest: Vec<u8> = row.try_get("semantic_digest")?;
+        if digest.as_slice() != command.semantic_digest
+            || ReviewOrchestrationAttemptId::from_uuid(row.try_get("attempt_id")?)
+                != command.attempt
+            || row.try_get::<String, _>("operation_kind")? != encode_command_kind(command.kind)
+        {
+            return Ok(CommandInspection::Conflicting);
         }
-        Some(_) => Ok(CommandInspection::Conflicting),
+        return Ok(CommandInspection::Recorded(decode_command_result(&row)?));
     }
+    let intent = sqlx::query(
+        "SELECT semantic_digest, attempt_id, operation_kind
+                   FROM review_orchestration_command_intent WHERE command_id = $1",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = intent else {
+        return Err(corruption(
+            "orchestration command registry entry has no intent or receipt",
+        ));
+    };
+    let digest: Vec<u8> = row.try_get("semantic_digest")?;
+    if digest.as_slice() != command.semantic_digest
+        || ReviewOrchestrationAttemptId::from_uuid(row.try_get("attempt_id")?) != command.attempt
+        || row.try_get::<String, _>("operation_kind")? != encode_command_kind(command.kind)
+    {
+        return Ok(CommandInspection::Conflicting);
+    }
+    Ok(CommandInspection::Pending)
+}
+
+async fn insert_command_intent(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ReviewOrchestrationCommand,
+) -> Result<(), ReviewOrchestrationStoreError> {
+    sqlx::query(
+        "INSERT INTO review_orchestration_command_intent
+            (command_id, command_kind, storage_version, semantic_digest,
+             attempt_id, operation_kind)
+         VALUES ($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id))
+    .bind(REVIEW_ORCHESTRATION_KIND)
+    .bind(STORAGE_VERSION)
+    .bind(command.semantic_digest.as_slice())
+    .bind(command.attempt.as_uuid())
+    .bind(encode_command_kind(command.kind))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn delete_command_intent(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ReviewOrchestrationCommand,
+) -> Result<(), ReviewOrchestrationStoreError> {
+    let deleted =
+        sqlx::query("DELETE FROM review_orchestration_command_intent WHERE command_id = $1")
+            .bind(durable_command_id_to_uuid(command.command_id))
+            .execute(&mut **transaction)
+            .await?
+            .rows_affected();
+    if deleted != 1 {
+        return Err(corruption(
+            "orchestration command intent disappeared before receipt replacement",
+        ));
+    }
+    Ok(())
 }
 
 async fn insert_command_receipt(
@@ -2058,15 +2300,6 @@ fn count_i64(value: usize) -> Result<i64, ReviewOrchestrationStoreError> {
 
 fn decode_count(value: i64) -> Result<usize, ReviewOrchestrationStoreError> {
     usize::try_from(value).map_err(|_| corruption("stored orchestration count is invalid"))
-}
-
-fn registry_error(error: RegistryInspectionError) -> ReviewOrchestrationStoreError {
-    match error {
-        RegistryInspectionError::Database(error) => ReviewOrchestrationStoreError::Database(error),
-        RegistryInspectionError::Corruption(_) => {
-            corruption("owner-global command registry is corrupt")
-        }
-    }
 }
 
 async fn commit_or_ambiguous(

@@ -765,17 +765,20 @@ appends or attaches the effect. Thus every committed intermediate point remains
 a domain-reconstitutable aggregate; a process crash cannot expose a state that
 the store's own loaders classify as corruption.
 
-Every review mutation carries an owner-global command identity. The daemon binds
-that identity to the digest and closed kind of the validated semantic request.
-The operation answer is derived from the submitted outcome and its completed
-barrier facts, then stored in an append-only recovery record before the typed
-owner-global receipt. Because the daemon retains exclusive review-mutation
-admission through both writes, a later stage cannot overtake the recovery
-record. An equal retry with a lost receipt materializes the receipt from that
-record and returns the original operation-stage answer even after the aggregate
-later advances. Recorded receipts are inspected before mutable aggregate-state
-validation; distinct command-identity reuse fails closed. This representation is
-the durable review-command contract.
+Every review mutation carries an owner-global command identity. Before its
+aggregate effect, the adapter commits a typed intent binding that identity to
+the validated semantic request. The primary aggregate effect commits atomically
+with an append-only marker of the exact command. The operation answer is then
+derived from the submitted outcome and completed barrier facts, then stored in
+an append-only recovery record before the intent is atomically replaced by the
+typed receipt. Exclusive admission prevents overlap while the process lives; the
+durable intent covers a stop after the effect and before recovery. An exact
+retry authenticates the equal durable effect independently of later aggregate
+stage, reconstructs the original operation-stage answer without later facts, and
+completes recovery. A fresh stale command remains rejected. A lost receipt is
+materialized from its recovery record. Recorded receipts are inspected before
+mutable aggregate-state validation; distinct command-identity reuse fails
+closed. This representation is the durable review-command contract.
 
 The terminal client exposes target creation, run admission and activation,
 single-finding read-only completion, finding listing, target, run, and finding

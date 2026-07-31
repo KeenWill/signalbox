@@ -24,7 +24,8 @@ use signalbox_persistence::{
         PostgresReviewOrchestrationStore, ReviewOrchestrationCommand,
         ReviewOrchestrationCommandClaim, ReviewOrchestrationCommandKind,
         ReviewOrchestrationCommandResult, ReviewOrchestrationCurrentStage,
-        ReviewOrchestrationSnapshotFacts, ReviewOrchestrationStage, ReviewOrchestrationStoreError,
+        ReviewOrchestrationProgress, ReviewOrchestrationSnapshotFacts, ReviewOrchestrationStage,
+        ReviewOrchestrationStoreError,
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
     session::{SessionRepository, SessionRepositoryError},
@@ -77,25 +78,37 @@ pub(crate) async fn execute_review_orchestration_request(
     templates: &SessionTemplateConfiguration,
 ) -> Result<ServerMessage, ReviewOrchestrationRuntimeError> {
     let (command_id, attempt_id, kind) = mutation_identity(&request)?;
-    let store = PostgresReviewOrchestrationStore::new(pool.clone());
     let command = ReviewOrchestrationCommand {
         command_id,
         semantic_digest,
         attempt: attempt_id,
         kind,
     };
+    let store = PostgresReviewOrchestrationStore::for_command(pool.clone(), command);
     let claim = store
         .begin_command(command)
         .await
         .map_err(map_store_error)?;
-    let guard = match claim {
+    let (guard, pending) = match claim {
         ReviewOrchestrationCommandClaim::ExistingRecorded(result) => {
             return Ok(message_from_recorded(result));
         }
         ReviewOrchestrationCommandClaim::Conflicting => {
             return Err(ReviewOrchestrationRuntimeError::ConflictingReuse);
         }
-        ReviewOrchestrationCommandClaim::New(guard) => guard,
+        ReviewOrchestrationCommandClaim::New(guard) => {
+            let pending = guard.is_pending();
+            (guard, pending)
+        }
+    };
+
+    let effect_recorded = if pending {
+        store
+            .command_effect_is_recorded(command)
+            .await
+            .map_err(map_store_error)?
+    } else {
+        false
     };
 
     let prepared = prepare_mutation(request, &pool, templates).await?;
@@ -105,26 +118,49 @@ pub(crate) async fn execute_review_orchestration_request(
     {
         return Err(internal(ReviewOrchestrationInternalCause::ServiceContract));
     }
-    if let Some(current) = prepared.current {
-        prevalidate_submission(&store, &prepared.attempt, current, &prepared.submission).await?;
-    }
+    let admission = match prepared.current {
+        Some(current) => {
+            prevalidate_submission(
+                &store,
+                &prepared.attempt,
+                current,
+                &prepared.submission,
+                effect_recorded,
+            )
+            .await?
+        }
+        None => SubmissionAdmission::Fresh,
+    };
     let mut service = ReviewOrchestrationService::new(store.clone(), prepared.submission.clone());
     match service.execute(prepared.attempt.clone()).await {
         Ok(_) | Err(ReviewOrchestrationServiceError::Runner(RunnerError::AwaitingInput)) => {}
         Err(error) => return Err(map_service_error(error)),
     }
-    let stage = submission_stage(
-        &store,
-        &prepared.attempt,
-        &prepared.submission,
-        map_post_effect_store_error,
-    )
-    .await?;
-    let progress = store
+    let current_progress = store
         .load_progress(prepared.attempt.id())
         .await
         .map_err(map_post_effect_store_error)?
         .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+    let (stage, progress) = if admission == SubmissionAdmission::EqualEffectReplay {
+        replay_result(
+            &store,
+            &prepared.attempt,
+            &prepared.submission,
+            current_progress,
+        )
+        .await?
+    } else {
+        (
+            submission_stage(
+                &store,
+                &prepared.attempt,
+                &prepared.submission,
+                map_post_effect_store_error,
+            )
+            .await?,
+            current_progress,
+        )
+    };
     let recovered = store
         .record_command_recovery(
             command,
@@ -188,6 +224,12 @@ enum ClientSubmission {
     },
     Repair(Vec<ReviewRepairMemberOutcome>),
     Publication(Vec<ReviewPublicationMemberOutcome>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubmissionAdmission {
+    Fresh,
+    EqualEffectReplay,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -454,20 +496,27 @@ async fn prevalidate_submission(
     attempt: &ReviewOrchestrationAttempt,
     current: ReviewOrchestrationCurrentStage,
     submission: &ClientSubmission,
-) -> Result<(), ReviewOrchestrationRuntimeError> {
+    effect_recorded: bool,
+) -> Result<SubmissionAdmission, ReviewOrchestrationRuntimeError> {
     let admitted = match submission {
         ClientSubmission::AwaitingImport => {
-            current == ReviewOrchestrationCurrentStage::AwaitingImport
+            effect_recorded.then_some(SubmissionAdmission::EqualEffectReplay)
         }
         ClientSubmission::Import(outcome) => {
-            current == ReviewOrchestrationCurrentStage::AwaitingImport
-                || store
+            if effect_recorded
+                && store
                     .load_import(attempt.id())
                     .await
                     .map_err(map_store_error)?
                     .as_ref()
                     == Some(outcome)
-                    && recorded_submission_is_current(store, attempt, current, submission).await?
+            {
+                Some(SubmissionAdmission::EqualEffectReplay)
+            } else if current == ReviewOrchestrationCurrentStage::AwaitingImport {
+                Some(SubmissionAdmission::Fresh)
+            } else {
+                None
+            }
         }
         ClientSubmission::Concern { concern, outcome } => {
             let fresh_stage = matches!(
@@ -487,24 +536,35 @@ async fn prevalidate_submission(
                 .await
                 .map_err(map_store_error)?;
             match claims.iter().find(|claim| claim.concern() == concern) {
-                Some(existing) if existing == &candidate => {
-                    recorded_submission_is_current(store, attempt, current, submission).await?
+                Some(existing) if effect_recorded && existing == &candidate => {
+                    Some(SubmissionAdmission::EqualEffectReplay)
                 }
-                Some(existing) => {
-                    fresh_stage && matches!(existing.outcome(), ReviewConcernOutcome::Failed { .. })
+                Some(existing)
+                    if fresh_stage
+                        && matches!(existing.outcome(), ReviewConcernOutcome::Failed { .. }) =>
+                {
+                    Some(SubmissionAdmission::Fresh)
                 }
-                None => fresh_stage,
+                Some(_) => None,
+                None if fresh_stage => Some(SubmissionAdmission::Fresh),
+                None => None,
             }
         }
         ClientSubmission::JudgmentPlan(plan) => {
-            current == ReviewOrchestrationCurrentStage::AwaitingJudgment
-                || store
+            if effect_recorded
+                && store
                     .load_judgment_plan(attempt.id())
                     .await
                     .map_err(map_store_error)?
                     .as_ref()
                     == Some(plan)
-                    && recorded_submission_is_current(store, attempt, current, submission).await?
+            {
+                Some(SubmissionAdmission::EqualEffectReplay)
+            } else if current == ReviewOrchestrationCurrentStage::AwaitingJudgment {
+                Some(SubmissionAdmission::Fresh)
+            } else {
+                None
+            }
         }
         ClientSubmission::JudgmentEffect { finding, outcome } => {
             let plan = store
@@ -524,61 +584,221 @@ async fn prevalidate_submission(
                 return Err(internal(ReviewOrchestrationInternalCause::StoreCorruption));
             }
             let effect = ReviewJudgmentEffectId::new(attempt.id(), *finding);
-            if applied.contains(&effect) {
+            if effect_recorded && applied.contains(&effect) {
                 matches!(outcome, ReviewJudgmentEffectOutcome::Applied(_))
-                    && recorded_submission_is_current(store, attempt, current, submission).await?
+                    .then_some(SubmissionAdmission::EqualEffectReplay)
             } else {
-                matches!(
+                (matches!(
                     current,
                     ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
                         | ReviewOrchestrationCurrentStage::JudgmentIncomplete
                 ) && plan
                     .members()
                     .get(applied.len())
-                    .is_some_and(|member| member.finding() == *finding)
+                    .is_some_and(|member| member.finding() == *finding))
+                .then_some(SubmissionAdmission::Fresh)
             }
         }
         ClientSubmission::Repair(outcomes) => {
-            current == ReviewOrchestrationCurrentStage::AwaitingRepair
-                || store
+            if effect_recorded
+                && store
                     .load_repair_outcomes(attempt.id())
                     .await
                     .map_err(map_store_error)?
                     .as_ref()
                     == Some(outcomes)
-                    && recorded_submission_is_current(store, attempt, current, submission).await?
+            {
+                Some(SubmissionAdmission::EqualEffectReplay)
+            } else if current == ReviewOrchestrationCurrentStage::AwaitingRepair {
+                Some(SubmissionAdmission::Fresh)
+            } else {
+                None
+            }
         }
         ClientSubmission::Publication(outcomes) => {
-            current == ReviewOrchestrationCurrentStage::AwaitingPublication
-                || store
+            if effect_recorded
+                && store
                     .load_publication_outcomes(attempt.id())
                     .await
                     .map_err(map_store_error)?
                     .as_ref()
                     == Some(outcomes)
-                    && recorded_submission_is_current(store, attempt, current, submission).await?
+            {
+                Some(SubmissionAdmission::EqualEffectReplay)
+            } else if current == ReviewOrchestrationCurrentStage::AwaitingPublication {
+                Some(SubmissionAdmission::Fresh)
+            } else {
+                None
+            }
         }
     };
-    admitted
-        .then_some(())
-        .ok_or(ReviewOrchestrationRuntimeError::Rejected)
+    admitted.ok_or(ReviewOrchestrationRuntimeError::Rejected)
 }
 
-async fn recorded_submission_is_current(
+async fn replay_result(
     store: &PostgresReviewOrchestrationStore,
     attempt: &ReviewOrchestrationAttempt,
-    current: ReviewOrchestrationCurrentStage,
     submission: &ClientSubmission,
-) -> Result<bool, ReviewOrchestrationRuntimeError> {
-    let recorded = submission_stage(store, attempt, submission, map_store_error).await?;
-    Ok(recorded_stage_is_current(current, recorded))
+    current: ReviewOrchestrationProgress,
+) -> Result<(ReviewOrchestrationStage, ReviewOrchestrationProgress), ReviewOrchestrationRuntimeError>
+{
+    let mut progress = empty_progress(true);
+    match submission {
+        ClientSubmission::AwaitingImport => {
+            Ok((ReviewOrchestrationStage::Started, empty_progress(false)))
+        }
+        ClientSubmission::Import(ReviewImportOutcome::Succeeded { .. }) => {
+            Ok((ReviewOrchestrationStage::AwaitingConcerns, progress))
+        }
+        ClientSubmission::Import(ReviewImportOutcome::Incomplete { .. }) => {
+            Ok((ReviewOrchestrationStage::ImportIncomplete, progress))
+        }
+        ClientSubmission::Concern { concern, .. } => {
+            let (claim_count, all_succeeded) = store
+                .load_concern_replay_facts(attempt.id(), concern)
+                .await
+                .map_err(map_post_effect_store_error)?
+                .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+            if claim_count == 0 || claim_count > attempt.concerns().len() {
+                return Err(internal(ReviewOrchestrationInternalCause::StoreCorruption));
+            }
+            progress.concern_claim_count = claim_count;
+            if claim_count < attempt.concerns().len() {
+                return Ok((ReviewOrchestrationStage::AwaitingConcerns, progress));
+            }
+            if all_succeeded {
+                progress.fanout_sealed = true;
+                Ok((ReviewOrchestrationStage::AwaitingJudgment, progress))
+            } else {
+                Ok((ReviewOrchestrationStage::FanoutIncomplete, progress))
+            }
+        }
+        ClientSubmission::JudgmentPlan(plan) => {
+            progress.concern_claim_count = required_attempt_concern_count(attempt)?;
+            progress.fanout_sealed = true;
+            progress.judgment_plan_sealed = true;
+            if plan.members().is_empty() {
+                progress.repair_inventory_count = Some(0);
+                Ok((ReviewOrchestrationStage::AwaitingRepair, progress))
+            } else {
+                Ok((ReviewOrchestrationStage::AwaitingJudgmentEffects, progress))
+            }
+        }
+        ClientSubmission::JudgmentEffect { finding, outcome } => {
+            if !matches!(outcome, ReviewJudgmentEffectOutcome::Applied(_)) {
+                return Err(internal(ReviewOrchestrationInternalCause::StoreCorruption));
+            }
+            let plan = store
+                .load_judgment_plan(attempt.id())
+                .await
+                .map_err(map_post_effect_store_error)?
+                .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+            let ordinal = plan
+                .members()
+                .iter()
+                .position(|member| member.finding() == *finding)
+                .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+            let applied_count = ordinal + 1;
+            if current.judgment_effect_count < applied_count {
+                return Err(internal(ReviewOrchestrationInternalCause::StoreCorruption));
+            }
+            progress.concern_claim_count = required_attempt_concern_count(attempt)?;
+            progress.fanout_sealed = true;
+            progress.judgment_plan_sealed = true;
+            progress.judgment_effect_count = applied_count;
+            if applied_count == plan.members().len() {
+                progress.repair_inventory_count = Some(required_repair_inventory_count(&current)?);
+                Ok((ReviewOrchestrationStage::AwaitingRepair, progress))
+            } else {
+                Ok((ReviewOrchestrationStage::AwaitingJudgmentEffects, progress))
+            }
+        }
+        ClientSubmission::Repair(outcomes) => {
+            let plan = store
+                .load_judgment_plan(attempt.id())
+                .await
+                .map_err(map_post_effect_store_error)?
+                .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+            progress.concern_claim_count = required_attempt_concern_count(attempt)?;
+            progress.fanout_sealed = true;
+            progress.judgment_plan_sealed = true;
+            progress.judgment_effect_count = plan.members().len();
+            progress.repair_inventory_count = Some(outcomes.len());
+            progress.repair_outcomes_recorded = true;
+            if outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, ReviewRepairMemberOutcome::Blocked(_)))
+            {
+                Ok((ReviewOrchestrationStage::RepairIncomplete, progress))
+            } else {
+                progress.publication_inventory_count =
+                    Some(required_publication_inventory_count(&current)?);
+                Ok((ReviewOrchestrationStage::AwaitingPublication, progress))
+            }
+        }
+        ClientSubmission::Publication(outcomes) => {
+            let plan = store
+                .load_judgment_plan(attempt.id())
+                .await
+                .map_err(map_post_effect_store_error)?
+                .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+            progress.concern_claim_count = required_attempt_concern_count(attempt)?;
+            progress.fanout_sealed = true;
+            progress.judgment_plan_sealed = true;
+            progress.judgment_effect_count = plan.members().len();
+            progress.repair_inventory_count = Some(required_repair_inventory_count(&current)?);
+            progress.repair_outcomes_recorded = true;
+            progress.publication_inventory_count = Some(outcomes.len());
+            progress.publication_outcomes_recorded = true;
+            let stage = if outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, ReviewPublicationMemberOutcome::Published(_)))
+            {
+                ReviewOrchestrationStage::Complete
+            } else {
+                ReviewOrchestrationStage::PublicationIncomplete
+            };
+            Ok((stage, progress))
+        }
+    }
 }
 
-fn recorded_stage_is_current(
-    current: ReviewOrchestrationCurrentStage,
-    recorded: ReviewOrchestrationStage,
-) -> bool {
-    current_to_stage(current) == recorded
+fn empty_progress(import_recorded: bool) -> ReviewOrchestrationProgress {
+    ReviewOrchestrationProgress {
+        import_recorded,
+        concern_claim_count: 0,
+        fanout_sealed: false,
+        judgment_plan_sealed: false,
+        judgment_effect_count: 0,
+        repair_inventory_count: None,
+        repair_outcomes_recorded: false,
+        publication_inventory_count: None,
+        publication_outcomes_recorded: false,
+    }
+}
+
+fn required_attempt_concern_count(
+    attempt: &ReviewOrchestrationAttempt,
+) -> Result<usize, ReviewOrchestrationRuntimeError> {
+    (!attempt.concerns().is_empty())
+        .then_some(attempt.concerns().len())
+        .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))
+}
+
+fn required_repair_inventory_count(
+    progress: &ReviewOrchestrationProgress,
+) -> Result<usize, ReviewOrchestrationRuntimeError> {
+    progress
+        .repair_inventory_count
+        .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))
+}
+
+fn required_publication_inventory_count(
+    progress: &ReviewOrchestrationProgress,
+) -> Result<usize, ReviewOrchestrationRuntimeError> {
+    progress
+        .publication_inventory_count
+        .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))
 }
 
 async fn submission_stage(
@@ -1567,9 +1787,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ReviewOrchestrationCurrentStage, ReviewOrchestrationRuntimeError,
-        ReviewOrchestrationServiceError, ReviewOrchestrationStage, ReviewOrchestrationStoreError,
-        RunnerError, map_service_error, map_store_error, recorded_stage_is_current,
+        ReviewOrchestrationRuntimeError, ReviewOrchestrationServiceError,
+        ReviewOrchestrationStoreError, RunnerError, map_service_error, map_store_error,
     };
 
     #[test]
@@ -1606,21 +1825,5 @@ mod tests {
                 commit_ambiguous: false,
             },
         );
-    }
-
-    #[test]
-    fn equal_stage_submission_is_admitted_at_its_recorded_stage() {
-        assert!(recorded_stage_is_current(
-            ReviewOrchestrationCurrentStage::AwaitingConcerns,
-            ReviewOrchestrationStage::AwaitingConcerns,
-        ));
-    }
-
-    #[test]
-    fn equal_stage_submission_is_rejected_after_progress_advances() {
-        assert!(!recorded_stage_is_current(
-            ReviewOrchestrationCurrentStage::Complete,
-            ReviewOrchestrationStage::AwaitingConcerns,
-        ));
     }
 }
