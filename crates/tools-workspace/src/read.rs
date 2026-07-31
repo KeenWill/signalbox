@@ -13,6 +13,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
+    ToolResultText, ToolResultTextFailure,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -46,6 +47,7 @@ const MAX_SEARCH_FILE_BYTES: usize = 1024 * 1024;
 const MAX_SEARCH_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SEARCH_LINE_BYTES: usize = 1024;
 const MAX_WALK_ENTRIES: usize = 10_000;
+const MAX_WALK_PATH_BYTES: usize = 4 * 1024 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded workspace-tool arguments";
 const PATH_REJECTED_DETAIL: &str = "workspace path rejected";
 const FILESYSTEM_FAILED_DETAIL: &str = "workspace filesystem operation failed";
@@ -506,10 +508,7 @@ impl<FileSystem: WorkspaceFileSystem> ToolExecutor for WorkspaceReadExecutor<Fil
             }
         };
         let evidence = match self.execute_operation(operation) {
-            Ok(value) => ToolExecutorEvidence::CompletedText(
-                serde_json::to_string(&value)
-                    .map_err(|_| WorkspaceReadExecutorError::ResultEncoding)?,
-            ),
+            Ok(value) => ToolExecutorEvidence::CompletedText(encode_read_result(value)?),
             Err(ReadFailure::PathRejected) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.path_rejected_detail.clone()),
             },
@@ -541,13 +540,89 @@ fn kind_for_name(name: &str) -> Option<ReadToolKind> {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 #[serde(untagged)]
 enum ReadResult {
     ReadFile(ReadFileResult),
     ListDirectory(ListDirectoryResult),
     GlobFiles(GlobFilesResult),
     SearchFiles(SearchFilesResult),
+}
+
+impl ReadResult {
+    fn evidence_units(&self) -> usize {
+        match self {
+            Self::ReadFile(result) => result.content.len(),
+            Self::ListDirectory(result) => result.entries.len(),
+            Self::GlobFiles(result) => result.matches.len(),
+            Self::SearchFiles(result) => result.matches.len(),
+        }
+    }
+
+    fn truncated_to(&self, units: usize) -> Self {
+        match self {
+            Self::ReadFile(result) => {
+                let mut result = result.clone();
+                let mut boundary = units.min(result.content.len());
+                while !result.content.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                result.content.truncate(boundary);
+                result.bytes_read = boundary;
+                result.truncated = true;
+                Self::ReadFile(result)
+            }
+            Self::ListDirectory(result) => {
+                let mut result = result.clone();
+                result.entries.truncate(units);
+                result.truncated = true;
+                Self::ListDirectory(result)
+            }
+            Self::GlobFiles(result) => {
+                let mut result = result.clone();
+                result.matches.truncate(units);
+                result.truncated = true;
+                Self::GlobFiles(result)
+            }
+            Self::SearchFiles(result) => {
+                let mut result = result.clone();
+                result.matches.truncate(units);
+                result.truncated = true;
+                Self::SearchFiles(result)
+            }
+        }
+    }
+}
+
+fn encode_admitted_result(
+    result: &ReadResult,
+) -> Result<Option<String>, WorkspaceReadExecutorError> {
+    let encoded =
+        serde_json::to_string(result).map_err(|_| WorkspaceReadExecutorError::ResultEncoding)?;
+    match ToolResultText::try_new(encoded) {
+        Ok(admitted) => Ok(Some(admitted.into_string())),
+        Err(error) if matches!(error.failure(), ToolResultTextFailure::TooLarge { .. }) => Ok(None),
+        Err(_) => Err(WorkspaceReadExecutorError::ResultEncoding),
+    }
+}
+
+fn encode_read_result(result: ReadResult) -> Result<String, WorkspaceReadExecutorError> {
+    if let Some(encoded) = encode_admitted_result(&result)? {
+        return Ok(encoded);
+    }
+    let mut lower = 0_usize;
+    let mut upper = result.evidence_units();
+    while lower < upper {
+        let candidate_units = lower + (upper - lower).div_ceil(2);
+        let candidate = result.truncated_to(candidate_units);
+        if encode_admitted_result(&candidate)?.is_some() {
+            lower = candidate_units;
+        } else {
+            upper = candidate_units - 1;
+        }
+    }
+    let truncated = result.truncated_to(lower);
+    encode_admitted_result(&truncated)?.ok_or(WorkspaceReadExecutorError::ResultEncoding)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -616,7 +691,13 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
     ) -> Result<ListDirectoryResult, ReadFailure> {
         let read = self
             .filesystem
-            .read_directory(&self.root, path, max_results, MAX_WALK_ENTRIES)
+            .read_directory(
+                &self.root,
+                path,
+                max_results,
+                MAX_WALK_ENTRIES,
+                MAX_WALK_PATH_BYTES,
+            )
             .map_err(map_resolve_failure)?;
         let entries = read.entries;
         let truncated = read.truncated;
@@ -797,13 +878,24 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
     }
 
     fn walk(&self, start: &Path) -> Result<WalkResult, ReadFailure> {
+        self.walk_with_limits(start, MAX_WALK_ENTRIES, MAX_WALK_PATH_BYTES)
+    }
+
+    fn walk_with_limits(
+        &self,
+        start: &Path,
+        max_entries: usize,
+        max_path_bytes: usize,
+    ) -> Result<WalkResult, ReadFailure> {
         let mut pending = vec![start.to_owned()];
         let mut entries = Vec::new();
         let mut visited = 0_usize;
         let mut inspected = 0_usize;
+        let mut inspected_path_bytes = 0_usize;
         while let Some(directory) = pending.pop() {
-            let remaining_entries = MAX_WALK_ENTRIES.saturating_sub(visited);
-            let remaining_inspections = MAX_WALK_ENTRIES.saturating_sub(inspected);
+            let remaining_entries = max_entries.saturating_sub(visited);
+            let remaining_inspections = max_entries.saturating_sub(inspected);
+            let remaining_path_bytes = max_path_bytes.saturating_sub(inspected_path_bytes);
             let read = self
                 .filesystem
                 .read_directory(
@@ -811,6 +903,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
                     &directory,
                     remaining_entries,
                     remaining_inspections,
+                    remaining_path_bytes,
                 )
                 .map_err(map_resolve_failure)?;
             let directory_truncated = read.truncated;
@@ -824,6 +917,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
                 entries.push(child);
             }
             inspected = inspected.saturating_add(read.inspected_entries);
+            inspected_path_bytes = inspected_path_bytes.saturating_add(read.inspected_path_bytes);
             if directory_truncated {
                 return Ok(WalkResult {
                     entries,
@@ -839,7 +933,10 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
 }
 
 fn utf8_prefix(bytes: &[u8], max_bytes: usize) -> Option<&str> {
-    let mut boundary = bytes.len().min(max_bytes);
+    let mut boundary = max_bytes.min(bytes.len());
+    if std::str::from_utf8(bytes).is_err_and(|error| error.valid_up_to() < boundary) {
+        return None;
+    }
     loop {
         match std::str::from_utf8(&bytes[..boundary]) {
             Ok(value) => return Some(value),
@@ -862,7 +959,7 @@ fn bounded_match_window(value: &str, match_start: usize, max_bytes: usize) -> (&
     if value.len() <= max_bytes {
         return (value, 1, false);
     }
-    let start = if match_start < max_bytes {
+    let mut start = if match_start < max_bytes {
         0
     } else {
         match_start
@@ -870,6 +967,17 @@ fn bounded_match_window(value: &str, match_start: usize, max_bytes: usize) -> (&
     let mut end = start.saturating_add(max_bytes).min(value.len());
     while !value.is_char_boundary(end) {
         end -= 1;
+    }
+    let match_end = value[match_start..]
+        .chars()
+        .next()
+        .map_or(match_start, |character| match_start + character.len_utf8());
+    if end < match_end {
+        end = match_end;
+        start = end.saturating_sub(max_bytes);
+        while !value.is_char_boundary(start) {
+            start += 1;
+        }
     }
     (&value[start..end], start + 1, true)
 }

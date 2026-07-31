@@ -330,3 +330,112 @@ fn long_line_window_contains_late_match_start() {
     assert_eq!(text_start_column, PREFIX_BYTES + 1);
     assert!(truncated);
 }
+
+#[test]
+fn long_line_window_keeps_multibyte_match_crossing_the_byte_boundary() {
+    const PREFIX_BYTES: usize = MAX_SEARCH_LINE_BYTES - 1;
+    const MATCHED_SCALAR: &str = "é";
+
+    let line = format!("{}{MATCHED_SCALAR}", "x".repeat(PREFIX_BYTES));
+    let (window, text_start_column, truncated) =
+        bounded_match_window(&line, PREFIX_BYTES, MAX_SEARCH_LINE_BYTES);
+
+    assert!(window.ends_with(MATCHED_SCALAR));
+    assert_eq!(window.len(), MAX_SEARCH_LINE_BYTES);
+    assert_eq!(text_start_column, 2);
+    assert!(truncated);
+}
+
+#[test]
+fn malformed_utf8_starting_before_the_byte_boundary_is_rejected() {
+    const MAX_BYTES: usize = 2;
+    const MALFORMED: &[u8] = b"a\xc3x";
+
+    assert_eq!(utf8_prefix(MALFORMED, MAX_BYTES), None);
+}
+
+#[test]
+fn valid_utf8_scalar_crossing_the_byte_boundary_is_trimmed() {
+    const MAX_BYTES: usize = 2;
+    const CONTENT: &[u8] = "aé".as_bytes();
+
+    assert_eq!(utf8_prefix(CONTENT, MAX_BYTES), Some("a"));
+}
+
+#[test]
+fn escaped_read_content_is_truncated_to_result_text_admission() {
+    const FILE_PATH: &str = "control.txt";
+
+    let content = "\0".repeat(MAX_READ_BYTES);
+    let content_bytes = content.len();
+    let result = ReadResult::ReadFile(ReadFileResult {
+        path: String::from(FILE_PATH),
+        content,
+        bytes_read: content_bytes,
+        total_bytes: content_bytes as u64,
+        truncated: false,
+    });
+
+    let encoded = encode_read_result(result).expect("bounded result encoding succeeds");
+    let admitted = ToolResultText::try_new(encoded.clone()).expect("encoded result is admitted");
+    let decoded: serde_json::Value =
+        serde_json::from_str(admitted.as_str()).expect("encoded result is JSON");
+    let retained = decoded["content"]
+        .as_str()
+        .expect("read result content is text");
+    let bytes_read = decoded["bytes_read"]
+        .as_u64()
+        .expect("read byte count is unsigned") as usize;
+
+    assert_eq!(retained.len(), bytes_read);
+    assert!(bytes_read < content_bytes);
+    assert_eq!(decoded["truncated"], serde_json::Value::Bool(true));
+}
+
+#[test]
+fn escaped_search_evidence_is_truncated_to_result_text_admission() {
+    const FILE_PATH: &str = "control.txt";
+
+    let evidence = SearchMatch {
+        path: String::from(FILE_PATH),
+        line: 1,
+        column: 1,
+        text_start_column: 1,
+        text: "\0".repeat(MAX_SEARCH_LINE_BYTES),
+        line_truncated: false,
+    };
+    let result = ReadResult::SearchFiles(SearchFilesResult {
+        matches: std::iter::repeat_n(evidence, MAX_RESULTS).collect(),
+        truncated: false,
+    });
+
+    let encoded = encode_read_result(result).expect("bounded result encoding succeeds");
+    let admitted = ToolResultText::try_new(encoded.clone()).expect("encoded result is admitted");
+    let decoded: serde_json::Value =
+        serde_json::from_str(admitted.as_str()).expect("encoded result is JSON");
+    let retained_matches = decoded["matches"]
+        .as_array()
+        .expect("search result matches are an array");
+
+    assert!(retained_matches.len() < MAX_RESULTS);
+    assert_eq!(decoded["truncated"], serde_json::Value::Bool(true));
+}
+
+#[test]
+fn recursive_walk_stops_at_aggregate_generated_path_byte_budget() {
+    const FIRST_DIRECTORY: &str = "a";
+    const NESTED_DIRECTORY: &str = "a/b";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::create_dir_all(workspace.path().join(NESTED_DIRECTORY))
+        .expect("nested fixture directories create");
+    let executor = fixture_executor(&workspace);
+
+    let walk = executor
+        .walk_with_limits(Path::new("."), MAX_WALK_ENTRIES, FIRST_DIRECTORY.len())
+        .expect("bounded traversal succeeds");
+
+    assert_eq!(walk.entries.len(), 1);
+    assert_eq!(walk.entries[0].path, PathBuf::from(FIRST_DIRECTORY));
+    assert!(walk.truncated);
+}

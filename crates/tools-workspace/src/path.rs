@@ -266,6 +266,8 @@ pub struct WorkspaceDirectoryRead {
     pub entries: Vec<WorkspaceDirectoryEntry>,
     /// Number of non-dot entries inspected through no-follow metadata.
     pub inspected_entries: usize,
+    /// Aggregate root-relative path bytes admitted before metadata inspection.
+    pub inspected_path_bytes: usize,
     /// Whether additional entries were observed but omitted.
     pub truncated: bool,
 }
@@ -299,6 +301,7 @@ pub trait WorkspaceFileSystem: Clone + Send + Sync + 'static {
         path: &Path,
         max_entries: usize,
         max_inspections: usize,
+        max_path_bytes: usize,
     ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError>;
     /// Reads a bounded prefix plus four lookahead bytes from a regular file.
     fn read_file_prefix(
@@ -334,11 +337,13 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         path: &Path,
         max_entries: usize,
         max_inspections: usize,
+        max_path_bytes: usize,
     ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError> {
         let descriptor = open_relative(root, path, OFlags::RDONLY | OFlags::DIRECTORY)?;
         let mut directory = Dir::new(descriptor).map_err(|source| resolve_io(path, source))?;
         let mut retained = BinaryHeap::with_capacity(max_entries);
         let mut inspected = 0_usize;
+        let mut inspected_path_bytes = 0_usize;
         let mut inspection_truncated = false;
         while let Some(entry) = directory.read() {
             let entry = entry.map_err(|source| resolve_io(path, source))?;
@@ -350,6 +355,20 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
                 inspection_truncated = true;
                 break;
             }
+            let candidate_path_bytes = if path == Path::new(".") {
+                name_bytes.len()
+            } else {
+                path.as_os_str()
+                    .as_bytes()
+                    .len()
+                    .saturating_add(1)
+                    .saturating_add(name_bytes.len())
+            };
+            if candidate_path_bytes > max_path_bytes.saturating_sub(inspected_path_bytes) {
+                inspection_truncated = true;
+                break;
+            }
+            inspected_path_bytes = inspected_path_bytes.saturating_add(candidate_path_bytes);
             let name = OsStr::from_bytes(name_bytes);
             let entry_path = if path == Path::new(".") {
                 PathBuf::from(name)
@@ -377,6 +396,7 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         Ok(WorkspaceDirectoryRead {
             entries: retained.into_sorted_vec(),
             inspected_entries: inspected,
+            inspected_path_bytes,
             truncated: inspection_truncated || inspected > max_entries,
         })
     }
@@ -572,10 +592,11 @@ mod tests {
             WorkspaceRoot::try_new(&filesystem, workspace.path()).expect("fixture root is valid");
 
         let read = filesystem
-            .read_directory(&root, Path::new("."), 1, 1)
+            .read_directory(&root, Path::new("."), 1, 1, FILE_PATH.len())
             .expect("bounded directory read succeeds");
 
         assert_eq!(read.inspected_entries, 1);
+        assert_eq!(read.inspected_path_bytes, FILE_PATH.len());
         assert_eq!(read.entries.len(), 1);
         assert_eq!(read.entries[0].path, PathBuf::from(FILE_PATH));
         assert!(!read.truncated);
@@ -595,13 +616,34 @@ mod tests {
             WorkspaceRoot::try_new(&filesystem, workspace.path()).expect("fixture root is valid");
 
         let read = filesystem
-            .read_directory(&root, Path::new("."), 2, 1)
+            .read_directory(&root, Path::new("."), 2, 1, usize::MAX)
             .expect("bounded directory read succeeds");
 
         assert_eq!(read.inspected_entries, 1);
         assert_eq!(read.entries.len(), 1);
         assert!(read.truncated);
     }
+
+    #[test]
+    fn directory_read_stops_before_generated_path_byte_budget() {
+        const FILE_PATH: &str = "only.txt";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        std::fs::write(workspace.path().join(FILE_PATH), "fixture").expect("fixture file writes");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root =
+            WorkspaceRoot::try_new(&filesystem, workspace.path()).expect("fixture root is valid");
+
+        let read = filesystem
+            .read_directory(&root, Path::new("."), 1, 1, FILE_PATH.len() - 1)
+            .expect("bounded directory read succeeds");
+
+        assert_eq!(read.inspected_entries, 0);
+        assert_eq!(read.inspected_path_bytes, 0);
+        assert!(read.entries.is_empty());
+        assert!(read.truncated);
+    }
+
     #[cfg(unix)]
     #[test]
     fn final_symlink_has_typed_rejection() {
