@@ -3534,6 +3534,33 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn repository_escaping_directory_values_have_complete_entry_shape() {
+        let values = repository_escaping_directory_values(1);
+
+        assert_eq!(values.len(), 1);
+        let path = values[0]["path"].clone();
+        assert_eq!(
+            values[0],
+            serde_json::json!({
+                "_links": {
+                    "git": path,
+                    "html": path,
+                    "self": path,
+                },
+                "download_url": path,
+                "git_url": path,
+                "html_url": path,
+                "name": path,
+                "path": path,
+                "size": 0,
+                "target": path,
+                "type": "symlink",
+                "url": path,
+            })
+        );
+    }
+
     fn repository_directory_entries(count: usize) -> Vec<serde_json::Value> {
         (0..count)
             .map(|index| {
