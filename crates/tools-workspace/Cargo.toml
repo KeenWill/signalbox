@@ -1,0 +1,24 @@
+[package]
+name = "signalbox-tools-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+glob = "0.3.3"
+regex = "1.12.2"
+schemars = "1.0.4"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+signalbox-application = { path = "../application" }
+signalbox-domain = { path = "../domain" }
+signalbox-tool-contract = { path = "../tool-contract" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
