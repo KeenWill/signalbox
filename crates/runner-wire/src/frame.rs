@@ -1013,10 +1013,9 @@ impl Message {
 }
 
 fn validate_advertisement(version: u64, advertisement: &Advertisement) -> Result<(), ValueError> {
-    if version != DIGEST_VERSION {
-        return Err(ValueError::Digest);
-    }
     advertisement.validate()?;
-    let _ = advertisement_digest(advertisement)?;
+    if version == DIGEST_VERSION {
+        let _ = advertisement_digest(advertisement)?;
+    }
     Ok(())
 }
