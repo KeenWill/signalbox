@@ -1891,13 +1891,33 @@ async fn insert_grant_if_new(
             .filter(|revision| *revision > 0)
             .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
         let row = sqlx::query(
-            "SELECT registration_enrollment_id, registration_revision,
-                    placement_event_ordinal
-               FROM runner_credential_grant
-              WHERE session_id = $1
-                AND lineage_origin_event_ordinal = $2
-                AND runner_id = $3
-                AND grant_revision = $4",
+            "WITH RECURSIVE grant_line AS (
+                 SELECT grant_record.*
+                   FROM runner_credential_grant AS grant_record
+                  WHERE grant_record.session_id = $1
+                    AND grant_record.lineage_origin_event_ordinal = $2
+                    AND grant_record.runner_id = $3
+                    AND grant_record.grant_revision = $4
+                 UNION ALL
+                 SELECT predecessor.*
+                   FROM grant_line AS successor
+                   JOIN runner_credential_grant AS predecessor
+                     ON predecessor.session_id = successor.session_id
+                    AND predecessor.lineage_origin_event_ordinal =
+                        successor.lineage_origin_event_ordinal
+                    AND predecessor.runner_id = successor.prior_runner_id
+                    AND predecessor.grant_revision = successor.prior_grant_revision
+             )
+             SELECT grant_line.registration_enrollment_id,
+                    grant_line.registration_revision,
+                    grant_line.placement_event_ordinal
+               FROM grant_line
+               JOIN runner_session_placement_record AS placement
+                 ON placement.session_id = grant_line.session_id
+                AND placement.event_ordinal = grant_line.placement_event_ordinal
+              WHERE placement.pinned_credential_profile_name IS NOT NULL
+              ORDER BY grant_line.grant_revision DESC
+              LIMIT 1",
         )
         .bind(grant.session().into_uuid())
         .bind(grant_origin)
@@ -2429,14 +2449,40 @@ async fn load_grant_for_placement(
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
-    let grant_event = row.decode_column::<Decimal>("placement_event_ordinal")?;
-    let policy_event = if pinned_profile.is_none() && revoked == StoredGrantRevocation::Revoked {
-        grant_event
-            .checked_sub(Decimal::from(1_u64))
-            .ok_or(RunnerProtocolCorruption::CrossWiredReference)?
-    } else {
-        grant_event
-    };
+    let policy_event: Decimal = sqlx::query_scalar(
+        "WITH RECURSIVE grant_line AS (
+             SELECT grant_record.*
+               FROM runner_credential_grant AS grant_record
+              WHERE grant_record.session_id = $1
+                AND grant_record.lineage_origin_event_ordinal = $2
+                AND grant_record.runner_id = $3
+                AND grant_record.grant_revision = $4
+             UNION ALL
+             SELECT predecessor.*
+               FROM grant_line AS successor
+               JOIN runner_credential_grant AS predecessor
+                 ON predecessor.session_id = successor.session_id
+                AND predecessor.lineage_origin_event_ordinal =
+                    successor.lineage_origin_event_ordinal
+                AND predecessor.runner_id = successor.prior_runner_id
+                AND predecessor.grant_revision = successor.prior_grant_revision
+         )
+         SELECT grant_line.placement_event_ordinal
+           FROM grant_line
+           JOIN runner_session_placement_record AS policy_placement
+             ON policy_placement.session_id = grant_line.session_id
+            AND policy_placement.event_ordinal = grant_line.placement_event_ordinal
+          WHERE policy_placement.pinned_credential_profile_name IS NOT NULL
+          ORDER BY grant_line.grant_revision DESC
+          LIMIT 1",
+    )
+    .bind(session.into_uuid())
+    .bind(origin)
+    .bind(runner)
+    .bind(Decimal::from(revision.get()))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
     let policy_placement = sqlx::query(
         "SELECT *
            FROM runner_session_placement_record

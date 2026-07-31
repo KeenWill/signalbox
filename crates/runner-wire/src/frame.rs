@@ -1002,7 +1002,10 @@ impl Message {
             | Self::Dispatch(_)
             | Self::ResultRecorded(_)
             | Self::Shutdown(_) => Ok(()),
-            Self::Rejected(value) => value.available_correlation.validate(),
+            Self::Rejected(value) => {
+                DetailName::try_new(value.offending_kind.clone())?;
+                value.available_correlation.validate()
+            }
         }
     }
 }

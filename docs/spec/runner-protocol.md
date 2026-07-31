@@ -1318,15 +1318,17 @@ registration tool inventory; explicit profile replacement may select a checked
 subset. The store retains normalized grant snapshots and append-only issued,
 replaced, and revoked audit events. Grant relations contain only profile names,
 tool names, pair approval posture, and typed audit correlations: there is no
-credential-value or generic payload column. A stored grant preserves an explicit
-profile approval exactly; only a genuinely absent policy pair may use the
-session-policy fallback. Truncation of immutable grant audit evidence is
-rejected. Lease insertion joins the current unrevoked grant and exact
-tool/profile pair atomically with dispatch authorization. Durable admission
-requires provenance matching the effective profile/override posture: `Automatic`
-only for `Auto`, and an exact owner confirmation for `SessionPolicy`. The
-daemon-local dangerous blanket is never accepted for runner insertion, including
-a direct lease-row insert (INV-035, INV-045).
+credential-value or generic payload column. A stored grant preserves the exact
+approval derived from placement policy: an exact per-tool override wins, a
+workspace-restricted sandbox is automatic without an override, a pure tool is
+automatic without either, and every other pair uses session policy. Truncation
+of immutable grant audit evidence is rejected. Lease insertion joins the current
+unrevoked grant and exact tool/profile pair atomically with dispatch
+authorization. Durable admission requires provenance matching that stored
+placement-policy result: `Automatic` requires policy-derived automatic approval,
+and `SessionPolicy` requires an exact owner confirmation. The daemon-local
+dangerous blanket is never accepted for runner insertion, including a direct
+lease-row insert (INV-035, INV-045).
 
 ## Workspace provisioning and recovery
 

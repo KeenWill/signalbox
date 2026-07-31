@@ -1942,8 +1942,11 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
                 credential_profile: None,
                 sandbox: RunnerSandboxProfile::Ambient,
                 working_directory: directory,
-                relative_path: WorkspaceRelativePath::try_new("sessions/session/1/repo".to_owned())
-                    .expect("the fixture workspace path is relative"),
+                relative_path: WorkspaceRelativePath::try_new(format!(
+                    "sessions/{}/1/repo",
+                    uuid(SESSION)
+                ))
+                .expect("the fixture workspace path is relative"),
                 manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x80)),
                 recovery: Some(WorkspaceRecovery::Commit {
                     revision: WorkspaceRevision::try_new("c".repeat(40))
@@ -4114,8 +4117,11 @@ async fn s32_inv044_profile_replacement_preserves_workspace_origin_revision()
                 credential_profile: None,
                 sandbox: RunnerSandboxProfile::WorkspaceRestricted,
                 working_directory,
-                relative_path: WorkspaceRelativePath::try_new("sessions/session/1/work".to_owned())
-                    .expect("the private-root path is relative"),
+                relative_path: WorkspaceRelativePath::try_new(format!(
+                    "sessions/{}/1/work",
+                    uuid(SESSION)
+                ))
+                .expect("the private-root path is relative"),
                 manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x81)),
                 recovery: None,
             }),
@@ -4457,8 +4463,11 @@ async fn s32_inv045_profile_free_tombstone_uses_predecessor_approval_policy()
                 credential_profile: None,
                 sandbox: RunnerSandboxProfile::WorkspaceRestricted,
                 working_directory: first_directory,
-                relative_path: WorkspaceRelativePath::try_new("sessions/session/1/work".to_owned())
-                    .expect("the private-root path is relative"),
+                relative_path: WorkspaceRelativePath::try_new(format!(
+                    "sessions/{}/1/work",
+                    uuid(SESSION)
+                ))
+                .expect("the private-root path is relative"),
                 manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x80)),
                 recovery: None,
             }),
@@ -4545,6 +4554,52 @@ async fn s32_inv045_profile_free_tombstone_uses_predecessor_approval_policy()
 
     assert_eq!(reloaded_lost.placement(), &profile_free_lost);
     assert_eq!(reloaded_lost.grant(), Some(&tombstone));
+    let later_enrollment = RunnerEnrollment::new(
+        RunnerEnrollmentId::from_uuid(uuid(LATER_ENROLLMENT)),
+        RunnerId::from_uuid(uuid(LATER_RUNNER)),
+        RunnerAuthenticationId::from_uuid(uuid(LATER_AUTHENTICATION)),
+        [class()],
+    );
+    store.insert_enrollment(&later_enrollment).await?;
+    let later_registration = store.register(&later_enrollment, advertisement()).await?;
+    let second_profile_free = profile_free_lost
+        .replace_lost_runner(
+            SessionRunnerPlacementRequest {
+                selector: RunnerSelector::CapabilityClass(class()),
+                working_directory: WorkingDirectorySelection::RunnerDefault,
+                credential_profile: None,
+                workspace: WorkspaceRequirement::None,
+                sandbox: RunnerSandboxProfile::Ambient,
+                permission_overrides: no_permission_overrides(),
+            },
+            later_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/later".to_owned())
+                .expect("the later runner directory is valid"),
+            None,
+            Some(tombstone),
+        )
+        .expect("a second profile-free replacement carries the original approvals");
+    let successor_tombstone = second_profile_free
+        .grant
+        .as_ref()
+        .expect("the second profile-free replacement advances the tombstone");
+    store
+        .store_placement(
+            &second_profile_free.placement,
+            Some(&later_registration),
+            Some(successor_tombstone),
+        )
+        .await?;
+    let reloaded_successor = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the successor tombstone remains loadable from active policy");
+
+    assert_eq!(
+        reloaded_successor.placement(),
+        &second_profile_free.placement
+    );
+    assert_eq!(reloaded_successor.grant(), Some(successor_tombstone));
     drop(pool);
     Ok(())
 }

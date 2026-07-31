@@ -130,6 +130,24 @@ struct DecodedEnvelope<'a> {
     payload: &'a RawValue,
 }
 
+#[derive(Deserialize)]
+struct RawOperationFailed<'a> {
+    #[serde(borrow)]
+    failure: RawOperationFailure<'a>,
+}
+
+#[derive(Deserialize)]
+struct RawOperationFailure<'a> {
+    #[serde(borrow)]
+    detail: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct RawFailureDetail<'a> {
+    #[serde(borrow)]
+    payload: &'a RawValue,
+}
+
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum FrameKind {
@@ -212,7 +230,17 @@ fn decode_payload(kind: FrameKind, payload: &RawValue) -> Result<Message, FrameE
         FrameKind::Dispatch => parse!(Dispatch, Dispatch),
         FrameKind::Result => parse!(Result, ResultFrame),
         FrameKind::ResultRecorded => parse!(ResultRecorded, ResultRecorded),
-        FrameKind::OperationFailed => parse!(OperationFailed, OperationFailed),
+        FrameKind::OperationFailed => {
+            let raw = serde_json::from_str::<RawOperationFailed<'_>>(payload.get())?;
+            if raw.failure.detail.get().len() > MAX_FAILURE_DETAIL_BYTES {
+                return Err(FrameError::InvalidValue(ValueError::FailureDetail));
+            }
+            let detail = serde_json::from_str::<RawFailureDetail<'_>>(raw.failure.detail.get())?;
+            if detail.payload.get().len() > MAX_FAILURE_PAYLOAD_BYTES {
+                return Err(FrameError::InvalidValue(ValueError::FailureDetail));
+            }
+            parse!(OperationFailed, OperationFailed)
+        }
         FrameKind::OperationFailureRecorded => {
             parse!(OperationFailureRecorded, OperationFailureRecorded)
         }

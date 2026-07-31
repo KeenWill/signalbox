@@ -462,6 +462,28 @@ fn failure_detail_rejects_ninth_container() {
 }
 
 #[test]
+fn decoder_rejects_failure_payload_over_raw_received_byte_bound() {
+    let payload_text = "a".repeat(350);
+    let valid = frame(Message::OperationFailed(OperationFailed {
+        failure: OperationFailure {
+            correlation: OperationCorrelation::Release(release_correlation()),
+            category: FailureCategory::WorkspaceCleanupFailed,
+            detail: detail(json!({"value": payload_text.clone()})),
+        },
+    }));
+    let encoded = String::from_utf8(
+        encode_line(&valid).unwrap_or_else(|error| panic!("failure frame encodes: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("failure frame is UTF-8: {error}"));
+    let compact = serde_json::to_string(&payload_text)
+        .unwrap_or_else(|error| panic!("payload text serializes: {error}"));
+    let escaped = format!("\"{}\"", "\\u0061".repeat(350));
+    let received = encoded.replacen(&compact, &escaped, 1);
+
+    assert!(decode_line(received.as_bytes()).is_err());
+}
+
+#[test]
 fn manifest_rejects_partial_repository_union() {
     let mut invalid = manifest();
     invalid.recovery = None;
@@ -729,6 +751,28 @@ fn failure_detail_rejects_signed_payload_number() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn rejected_frame_rejects_free_form_offending_kind() {
+    let invalid = Message::Rejected(Rejected {
+        offending_kind: "not a frame kind".to_owned(),
+        available_correlation: AvailableCorrelation::None,
+        code: RejectionCode::MalformedFrame,
+    });
+
+    assert!(Frame::try_new(invalid).is_err());
+}
+
+#[test]
+fn rejected_frame_rejects_oversized_offending_kind() {
+    let invalid = Message::Rejected(Rejected {
+        offending_kind: "x".repeat(65),
+        available_correlation: AvailableCorrelation::None,
+        code: RejectionCode::MalformedFrame,
+    });
+
+    assert!(Frame::try_new(invalid).is_err());
 }
 
 #[test]

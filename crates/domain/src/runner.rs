@@ -2801,6 +2801,17 @@ fn validate_placement(
         return Err(RunnerDomainError::WorkingDirectoryMismatch);
     }
     let common_workspace_facts_match = |actual: &ProvisionedWorkspace| {
+        let terminal = if actual.repository.is_some() {
+            "repo"
+        } else {
+            "work"
+        };
+        let expected_relative_path = format!(
+            "sessions/{}/{}/{}",
+            actual.session.as_uuid(),
+            actual.placement_revision.get(),
+            terminal,
+        );
         actual.session == session
             && match workspace_revision_match {
                 WorkspaceRevisionMatch::Exact => actual.placement_revision == revision,
@@ -2809,6 +2820,7 @@ fn validate_placement(
             && actual.runner == registration.runner
             && actual.sandbox == request.sandbox
             && actual.working_directory == directory
+            && actual.relative_path.as_str() == expected_relative_path
     };
     match (&request.workspace, &workspace) {
         (WorkspaceRequirement::None, None)
@@ -6189,8 +6201,11 @@ mod tests {
             credential_profile: None,
             sandbox: RunnerSandboxProfile::Ambient,
             working_directory: directory("/workspace/session"),
-            relative_path: WorkspaceRelativePath::try_new("sessions/session/1/repo".to_owned())
-                .expect("the fixture relative path is valid"),
+            relative_path: WorkspaceRelativePath::try_new(format!(
+                "sessions/{}/1/repo",
+                session_id(SESSION).as_uuid()
+            ))
+            .expect("the fixture relative path is valid"),
             manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b00)),
             recovery: Some(WorkspaceRecovery::Commit {
                 revision: WorkspaceRevision::try_new("c".repeat(40))
@@ -6227,6 +6242,52 @@ mod tests {
     }
 
     #[test]
+    fn s32_inv044_workspace_rejects_nondeterministic_relative_path() {
+        let registration = registration();
+        let request = SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        };
+        let private_root = ProvisionedWorkspace {
+            session: session_id(SESSION),
+            placement_revision: RunnerGeneration::one(),
+            runner: registration.runner(),
+            repository: None,
+            canonical_clone_url_digest: None,
+            credential_profile: None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: directory("/workspace/session"),
+            relative_path: WorkspaceRelativePath::try_new(format!(
+                "sessions/{}/1/alternate",
+                session_id(SESSION).as_uuid()
+            ))
+            .expect("the mismatched path remains structurally safe"),
+            manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b01)),
+            recovery: None,
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::new(session_id(SESSION), request).pin_and_offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                directory("/workspace/session"),
+                Some(private_root),
+                authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            ),
+            Err(RunnerDomainError::WorkspaceMismatch)
+        );
+    }
+
+    #[test]
     fn s32_ambient_runner_default_rejects_a_managed_private_root() {
         let registration = registration();
         let request = SessionRunnerPlacementRequest {
@@ -6246,8 +6307,11 @@ mod tests {
             credential_profile: None,
             sandbox: RunnerSandboxProfile::Ambient,
             working_directory: directory("/workspace/session"),
-            relative_path: WorkspaceRelativePath::try_new("sessions/session/1/work".to_owned())
-                .expect("the fixture relative path is valid"),
+            relative_path: WorkspaceRelativePath::try_new(format!(
+                "sessions/{}/1/work",
+                session_id(SESSION).as_uuid()
+            ))
+            .expect("the fixture relative path is valid"),
             manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b01)),
             recovery: None,
         };
@@ -6448,8 +6512,11 @@ mod tests {
             credential_profile: Some(profile("readonly")),
             sandbox: RunnerSandboxProfile::Ambient,
             working_directory: directory("/workspace/session"),
-            relative_path: WorkspaceRelativePath::try_new("sessions/session/1/repo".to_owned())
-                .expect("the fixture relative path is valid"),
+            relative_path: WorkspaceRelativePath::try_new(format!(
+                "sessions/{}/1/repo",
+                session_id(SESSION).as_uuid()
+            ))
+            .expect("the fixture relative path is valid"),
             manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b02)),
             recovery: Some(WorkspaceRecovery::Commit {
                 revision: WorkspaceRevision::try_new("c".repeat(40))
