@@ -22,13 +22,17 @@ use rustix::{
     fd::OwnedFd,
     fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
 };
+use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
     ConversationOriginFilter, ConversationSummary, ErrorCode, InputContent, InputDelivery,
     MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ReviewPassSnapshot, ReviewRunSnapshot, ServerFrame, ServerMessage,
-    SessionEvent, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
+    ModelSelection, ReviewFindingEvent, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
+    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ReviewRepairOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
+    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
     decode_server_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
@@ -43,6 +47,7 @@ mod presentation;
 mod transcript;
 
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
+const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES;
 const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Smallest bounded metadata page the process protocol admits.
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
@@ -51,7 +56,32 @@ const MAX_METADATA_PAGE_SIZE: u64 = 100;
 /// Largest finding inventory one review run can own.
 const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewConcernsFile {
+    concerns: Vec<ReviewOrchestrationConcernInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewJudgmentMembersFile {
+    members: Vec<ReviewJudgmentPlanMember>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewRepairOutcomesFile {
+    outcomes: Vec<ReviewRepairOutcome>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewPublicationOutcomesFile {
+    outcomes: Vec<ReviewPublicationOutcome>,
+}
+
 /// One complete bounded `list_session_metadata` request.
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionMetadataPageRequest {
     pub(crate) required_tags: Vec<String>,
@@ -534,6 +564,26 @@ async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError>
         return Err(ClientError::SourceExceedsFrame);
     }
     Ok(source)
+}
+
+async fn read_review_json_file<Value: DeserializeOwned>(path: &Path) -> Result<Value, ClientError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(ClientError::review_input_file)?;
+    let read_limit = u64::try_from(MAX_REVIEW_JSON_INPUT_BYTES)
+        .ok()
+        .and_then(|bound| bound.checked_add(1))
+        .ok_or(ClientError::Protocol("review JSON read bound overflow"))?;
+    let mut bounded = file.take(read_limit);
+    let mut bytes = Vec::new();
+    bounded
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(ClientError::review_input_file)?;
+    if bytes.len() > MAX_REVIEW_JSON_INPUT_BYTES {
+        return Err(ClientError::ReviewInputExceedsFrame);
+    }
+    serde_json::from_slice(&bytes).map_err(ClientError::review_input_json)
 }
 
 async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, ClientError> {
@@ -2757,6 +2807,375 @@ async fn review(
                 .mutation()),
             }
         }
+        ReviewCommand::CompletePass {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            outcome,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::CompleteReviewPass {
+                    command_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                    output_frontier_id,
+                    outcome,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewPassCompleted {
+                    run_id: recorded_run,
+                    pass_id: recorded_pass,
+                    state,
+                } if recorded_run == run_id
+                    && recorded_pass == pass_id
+                    && review_pass_completion_is_coherent(outcome, state) =>
+                {
+                    output.review_acknowledgement(&format!(
+                        "run={recorded_run} pass={recorded_pass} completed"
+                    ))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review pass completion returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordFindingEvent {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            finding_id,
+            event_ordinal,
+            event,
+        } => {
+            let expected_status = review_finding_event_status(&event);
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewFindingEvent {
+                    command_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                    output_frontier_id,
+                    finding_id,
+                    event_ordinal,
+                    event,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewFindingEventRecorded {
+                    finding_id: recorded,
+                    status,
+                } if recorded == finding_id && status == expected_status => {
+                    output.review_acknowledgement(&format!("finding={recorded} event recorded"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review finding event returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::StartOrchestration {
+            command_id,
+            attempt_id,
+            target_id,
+            concern_set_version,
+            import_template_name,
+            judgment_template_name,
+            repair_template_name,
+            publication_template_name,
+            concerns_file,
+        } => {
+            let file: ReviewConcernsFile = read_review_json_file(&concerns_file).await?;
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::StartReviewOrchestration {
+                    command_id,
+                    attempt_id,
+                    target_id,
+                    concern_set_version,
+                    import_template_name,
+                    judgment_template_name,
+                    repair_template_name,
+                    publication_template_name,
+                    concerns: file.concerns,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewOrchestrationStarted {
+                    attempt_id: recorded,
+                } if recorded == attempt_id => {
+                    output.review_acknowledgement(&format!("attempt={recorded} started"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review orchestration start returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordImportOutcome {
+            command_id,
+            attempt_id,
+            pass_id,
+            external_link_id,
+            context_digest,
+            outcome,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewImportOutcome {
+                    command_id,
+                    attempt_id,
+                    pass_id,
+                    external_link_id,
+                    context_digest,
+                    outcome,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewOrchestrationAdvanced {
+                    attempt_id: recorded,
+                    state,
+                } if recorded == attempt_id && review_import_state_is_coherent(outcome, state) => {
+                    output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review import outcome returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordConcernOutcome {
+            command_id,
+            attempt_id,
+            concern,
+            pass_id,
+            outcome,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewConcernOutcome {
+                    command_id,
+                    attempt_id,
+                    concern,
+                    pass_id,
+                    outcome,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewOrchestrationAdvanced {
+                    attempt_id: recorded,
+                    state,
+                } if recorded == attempt_id && review_concern_state_is_coherent(state) => {
+                    output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review concern outcome returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordJudgmentPlan {
+            command_id,
+            attempt_id,
+            analysis_pass_id,
+            members_file,
+        } => {
+            let file: ReviewJudgmentMembersFile = read_review_json_file(&members_file).await?;
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewJudgmentPlan {
+                    command_id,
+                    attempt_id,
+                    analysis_pass_id,
+                    members: file.members,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewOrchestrationAdvanced {
+                    attempt_id: recorded,
+                    state:
+                        ReviewOrchestrationState::AwaitingJudgmentEffects
+                        | ReviewOrchestrationState::AwaitingRepair,
+                } if recorded == attempt_id => {
+                    output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review judgment plan returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordJudgmentEffect {
+            command_id,
+            attempt_id,
+            finding_id,
+            event_pass_id,
+            outcome,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewJudgmentEffect {
+                    command_id,
+                    attempt_id,
+                    finding_id,
+                    event_pass_id,
+                    outcome,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewOrchestrationAdvanced {
+                    attempt_id: recorded,
+                    state,
+                } if recorded == attempt_id && review_judgment_effect_state_is_coherent(state) => {
+                    output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review judgment effect returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordRepairOutcomes {
+            command_id,
+            attempt_id,
+            outcomes_file,
+        } => {
+            let file: ReviewRepairOutcomesFile = read_review_json_file(&outcomes_file).await?;
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewRepairOutcomes {
+                    command_id,
+                    attempt_id,
+                    outcomes: file.outcomes,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewOrchestrationAdvanced {
+                    attempt_id: recorded,
+                    state:
+                        ReviewOrchestrationState::RepairIncomplete
+                        | ReviewOrchestrationState::AwaitingPublication,
+                } if recorded == attempt_id => {
+                    output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review repair outcomes returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordPublicationOutcomes {
+            command_id,
+            attempt_id,
+            outcomes_file,
+        } => {
+            let file: ReviewPublicationOutcomesFile = read_review_json_file(&outcomes_file).await?;
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewPublicationOutcomes {
+                    command_id,
+                    attempt_id,
+                    outcomes: file.outcomes,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewOrchestrationAdvanced {
+                    attempt_id: recorded,
+                    state:
+                        ReviewOrchestrationState::PublicationIncomplete
+                        | ReviewOrchestrationState::Complete,
+                } if recorded == attempt_id => {
+                    output.review_acknowledgement(&format!("attempt={recorded} advanced"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review publication outcomes returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::ReadOrchestration { attempt_id } => {
+            let mut connection = client
+                .request(ClientRequest::ReadReviewOrchestration { attempt_id })
+                .await?;
+            match connection.message().await? {
+                ServerMessage::ReviewOrchestration { snapshot }
+                    if snapshot.attempt_id == attempt_id =>
+                {
+                    output.review_orchestration(&snapshot)?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail)),
+                _ => Err(ClientError::Protocol(
+                    "review orchestration read returned an unexpected response",
+                )),
+            }
+        }
         ReviewCommand::ReadTarget { target_id } => {
             let mut connection = client
                 .request(ClientRequest::ReadReviewTarget { target_id })
@@ -2905,6 +3324,74 @@ async fn review(
     }
 }
 
+const fn review_pass_completion_is_coherent(
+    outcome: ReviewPassTerminalOutcome,
+    state: ReviewPassLifecycle,
+) -> bool {
+    matches!(
+        (outcome, state),
+        (
+            ReviewPassTerminalOutcome::Succeeded,
+            ReviewPassLifecycle::Succeeded
+        ) | (
+            ReviewPassTerminalOutcome::Failed,
+            ReviewPassLifecycle::Failed
+        ) | (
+            ReviewPassTerminalOutcome::Blocked,
+            ReviewPassLifecycle::Blocked
+        ) | (
+            ReviewPassTerminalOutcome::Cancelled,
+            ReviewPassLifecycle::Cancelled
+        )
+    )
+}
+
+const fn review_finding_event_status(event: &ReviewFindingEvent) -> ReviewFindingStatus {
+    match event {
+        ReviewFindingEvent::Accepted {} => ReviewFindingStatus::Accepted,
+        ReviewFindingEvent::Rejected { .. } => ReviewFindingStatus::Rejected,
+        ReviewFindingEvent::Duplicate { .. } => ReviewFindingStatus::Duplicate,
+        ReviewFindingEvent::Superseded { .. } => ReviewFindingStatus::Superseded,
+        ReviewFindingEvent::Stale {} => ReviewFindingStatus::Stale,
+        ReviewFindingEvent::Fixed {} => ReviewFindingStatus::Fixed,
+        ReviewFindingEvent::BlockedWithReason { .. } => ReviewFindingStatus::BlockedWithReason,
+    }
+}
+
+const fn review_import_state_is_coherent(
+    outcome: ReviewImportTerminalOutcome,
+    state: ReviewOrchestrationState,
+) -> bool {
+    match outcome {
+        ReviewImportTerminalOutcome::Succeeded => {
+            matches!(state, ReviewOrchestrationState::AwaitingConcerns)
+        }
+        ReviewImportTerminalOutcome::Failed
+        | ReviewImportTerminalOutcome::Blocked
+        | ReviewImportTerminalOutcome::Cancelled => {
+            matches!(state, ReviewOrchestrationState::ImportIncomplete)
+        }
+    }
+}
+
+const fn review_concern_state_is_coherent(state: ReviewOrchestrationState) -> bool {
+    matches!(
+        state,
+        ReviewOrchestrationState::AwaitingConcerns
+            | ReviewOrchestrationState::FanoutIncomplete
+            | ReviewOrchestrationState::AwaitingJudgment
+    )
+}
+
+const fn review_judgment_effect_state_is_coherent(state: ReviewOrchestrationState) -> bool {
+    matches!(
+        state,
+        ReviewOrchestrationState::AwaitingJudgmentEffects
+            | ReviewOrchestrationState::JudgmentIncomplete
+            | ReviewOrchestrationState::AwaitingRepair
+    )
+}
+
 fn review_run_response_is_coherent(
     run: &ReviewRunSnapshot,
     pass: Option<&ReviewPassSnapshot>,
@@ -2965,11 +3452,12 @@ mod tests {
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         ConversationOriginFilter, ConversationSummary, FrameEncodeError, ImportedContentKind,
         ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
-        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, ReviewFindingInput,
-        ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
-        ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
-        ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState,
-        decode_client_line, encode_server_line,
+        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, ReviewFindingEvent,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind,
+        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
+        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -2980,15 +3468,82 @@ mod tests {
 
     use super::{
         ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
-        MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
-        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
-        await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
-        decide, imported, model_call_recovery_transition, open_scanned_import_source, read_input,
-        read_system_prompt_file, reconcile_turn, review, run, search, session_recovery_transition,
-        socket_path, stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
-        terminal_snapshot_state, tool_recovery_transition,
+        MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES, ProcessClient, ReviewCommand,
+        ReviewConcernsFile, SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt,
+        ThroughPositionArgument, TurnTerminal, TurnWaitMode, await_turn_terminal,
+        collect_import_paths, continue_imported, conversations, create, decide, imported,
+        model_call_recovery_transition, open_scanned_import_source, read_input,
+        read_review_json_file, read_system_prompt_file, reconcile_turn, review,
+        review_finding_event_status, review_pass_completion_is_coherent, run, search,
+        session_recovery_transition, socket_path, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    #[tokio::test]
+    async fn review_concerns_file_decodes_its_exact_wrapper()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(
+            file.path(),
+            br#"{"concerns":[{"key":"correctness","template_name":"review.correctness"}]}"#,
+        )?;
+
+        let decoded: ReviewConcernsFile = read_review_json_file(file.path()).await?;
+
+        assert_eq!(decoded.concerns.len(), 1);
+        assert_eq!(decoded.concerns[0].key, "correctness");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_concerns_file_rejects_an_unknown_wrapper_member()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(
+            file.path(),
+            br#"{"concerns":[{"key":"correctness","template_name":"review.correctness"}],"future":true}"#,
+        )?;
+
+        let decoded = read_review_json_file::<ReviewConcernsFile>(file.path()).await;
+
+        assert!(matches!(decoded, Err(ClientError::ReviewInputJson(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_json_file_rejects_content_beyond_the_frame_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), vec![b'x'; MAX_REVIEW_JSON_INPUT_BYTES + 1])?;
+
+        let decoded = read_review_json_file::<ReviewConcernsFile>(file.path()).await;
+
+        assert!(matches!(decoded, Err(ClientError::ReviewInputExceedsFrame)));
+        Ok(())
+    }
+
+    #[test]
+    fn review_pass_completion_response_requires_the_exact_terminal_state() {
+        assert!(review_pass_completion_is_coherent(
+            ReviewPassTerminalOutcome::Succeeded,
+            ReviewPassLifecycle::Succeeded,
+        ));
+        assert!(!review_pass_completion_is_coherent(
+            ReviewPassTerminalOutcome::Succeeded,
+            ReviewPassLifecycle::Failed,
+        ));
+    }
+
+    #[test]
+    fn review_finding_event_response_requires_the_derived_status() {
+        let event = ReviewFindingEvent::Fixed {};
+
+        assert_eq!(
+            review_finding_event_status(&event),
+            ReviewFindingStatus::Fixed
+        );
+    }
 
     #[test]
     fn coherent_review_run_response_is_accepted() {
