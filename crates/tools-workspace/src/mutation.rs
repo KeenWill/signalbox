@@ -172,12 +172,16 @@ impl WorkspaceMutationSnapshot {
     ) -> Result<Self, WorkspaceMutationSnapshotError> {
         let mut collected = BTreeMap::new();
         for file in files {
-            let path = file.path.clone();
-            if collected.insert(file.path, file.content).is_some() {
-                return Err(WorkspaceMutationSnapshotError {
-                    path: Some(path),
-                    kind: WorkspaceMutationSnapshotErrorKind::DuplicatePath,
-                });
+            match collected.entry(file.path) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(file.content);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    return Err(WorkspaceMutationSnapshotError {
+                        path: Some(entry.key().clone()),
+                        kind: WorkspaceMutationSnapshotErrorKind::DuplicatePath,
+                    });
+                }
             }
         }
         Ok(Self { files: collected })
@@ -730,11 +734,16 @@ fn planned_mutation(
 ) -> Result<WorkspaceFileMutation, MutationFailure> {
     match operation {
         PlannedPatchOperation::Add { path, content }
-        | PlannedPatchOperation::Update { path, content } => Ok(WorkspaceFileMutation::Write {
-            path: WorkspaceMutationPath::try_new(path.clone())
-                .map_err(|_| MutationFailure::Patch)?,
-            content: content.clone(),
-        }),
+        | PlannedPatchOperation::Update { path, content } => {
+            if content.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES {
+                return Err(MutationFailure::Patch);
+            }
+            Ok(WorkspaceFileMutation::Write {
+                path: WorkspaceMutationPath::try_new(path.clone())
+                    .map_err(|_| MutationFailure::Patch)?,
+                content: content.clone(),
+            })
+        }
         PlannedPatchOperation::Delete { path } => Ok(WorkspaceFileMutation::Delete {
             path: WorkspaceMutationPath::try_new(path.clone())
                 .map_err(|_| MutationFailure::Patch)?,
