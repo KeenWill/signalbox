@@ -1011,7 +1011,9 @@ mod tests {
 
     const SYNTHETIC_KEY: &str = "fixture-search-key";
     const FIXTURE_QUERY: &str = "bounded rust search";
+    const FIXTURE_RESULT_TITLE: &str = "Synthetic result";
     const FIXTURE_RESULT_URL: &str = "https://example.com/result";
+    const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
     const PROVIDER_REJECTION_STATUS: u16 = 429;
 
     struct CountingCredentials {
@@ -1273,8 +1275,8 @@ mod tests {
         assert_eq!(value["truncated"], true);
     }
 
-    /// Provider-controlled successful fields are credential-scrubbed before
-    /// entering completed tool evidence.
+    /// INV-035: provider-controlled successful fields are credential-scrubbed
+    /// before entering completed tool evidence.
     #[test]
     fn web_search_success_evidence_redacts_reflected_credential() {
         let reflected = WebSearchResult::try_new(WebSearchResultFields {
@@ -1294,8 +1296,8 @@ mod tests {
         assert!(content.contains("[redacted]"));
     }
 
-    /// JSON-aware error sanitization decodes an escaped credential before the
-    /// body can enter durable failure evidence.
+    /// INV-035: JSON-aware error sanitization decodes an escaped credential
+    /// before the body can enter durable failure evidence.
     #[test]
     fn web_search_error_body_redacts_json_escaped_credential() {
         let body = br#"{"message":"fixture-search-\u006bey"}"#.to_vec();
@@ -1307,8 +1309,8 @@ mod tests {
         assert!(detail.as_str().contains("[redacted]"));
     }
 
-    /// Error redaction precedes evidence truncation, so a credential crossing
-    /// the retained prefix is replaced atomically before the suffix is added.
+    /// INV-035: error redaction precedes evidence truncation, so a credential
+    /// crossing the retained prefix is replaced before the suffix is added.
     #[test]
     fn web_search_error_body_is_redacted_before_truncation() {
         let reflected = format!(
@@ -1331,16 +1333,20 @@ mod tests {
     #[test]
     fn brave_request_uses_the_mapped_endpoint_and_parameters() {
         let built = brave_request();
+        let endpoint = Url::parse(BRAVE_SEARCH_ENDPOINT).expect("provider endpoint is valid");
         let parameters = built
             .url()
             .query_pairs()
             .into_owned()
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(built.url().scheme(), "https");
-        assert_eq!(built.url().host_str(), Some("api.search.brave.com"));
-        assert_eq!(built.url().port_or_known_default(), Some(443));
-        assert_eq!(built.url().path(), "/res/v1/web/search");
+        assert_eq!(built.url().scheme(), endpoint.scheme());
+        assert_eq!(built.url().host_str(), endpoint.host_str());
+        assert_eq!(
+            built.url().port_or_known_default(),
+            endpoint.port_or_known_default()
+        );
+        assert_eq!(built.url().path(), endpoint.path());
         assert_eq!(parameters.get("q").map(String::as_str), Some(FIXTURE_QUERY));
         assert_eq!(
             parameters.get("count").map(String::as_str),
@@ -1356,8 +1362,8 @@ mod tests {
         );
     }
 
-    /// The API key is header-only, marked sensitive, and absent from both the
-    /// request URL and its diagnostic rendering.
+    /// INV-035: the API key is header-only, marked sensitive, and absent from
+    /// both the request URL and its diagnostic rendering.
     #[test]
     fn brave_request_never_records_credential_in_url_or_debug() {
         let built = brave_request();
@@ -1372,8 +1378,8 @@ mod tests {
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
     }
 
-    /// Provider response and error diagnostics never render provider-controlled
-    /// fields that could reflect the API key.
+    /// INV-035: provider response and error diagnostics never render
+    /// provider-controlled fields that could reflect the API key.
     #[test]
     fn web_search_debug_output_omits_reflected_credential() {
         let reflected = WebSearchResult::try_new(WebSearchResultFields {
@@ -1398,26 +1404,33 @@ mod tests {
     /// provider's pagination fact; no transport or network is involved.
     #[test]
     fn brave_recorded_response_decodes_structured_results() {
-        let body = br#"{
-            "type":"search",
-            "query":{"original":"bounded rust search","more_results_available":false},
-            "web":{"type":"search","results":[{
-                "type":"search_result",
-                "title":"Synthetic result",
-                "url":"https://example.com/result",
-                "description":"Synthetic recorded snippet"
-            }]}
-        }"#;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "type": "search",
+            "query": {
+                "original": FIXTURE_QUERY,
+                "more_results_available": false,
+            },
+            "web": {
+                "type": "search",
+                "results": [{
+                    "type": "search_result",
+                    "title": FIXTURE_RESULT_TITLE,
+                    "url": FIXTURE_RESULT_URL,
+                    "description": FIXTURE_RESULT_SNIPPET,
+                }],
+            },
+        }))
+        .expect("recorded response fixture encodes");
 
-        let response = decode_provider_response(WebSearchProvider::Brave, body)
+        let response = decode_provider_response(WebSearchProvider::Brave, &body)
             .expect("recorded provider response decodes");
         let [decoded] = response.results() else {
             panic!("recorded response contains one web result")
         };
 
-        assert_eq!(decoded.title(), "Synthetic result");
+        assert_eq!(decoded.title(), FIXTURE_RESULT_TITLE);
         assert_eq!(decoded.url(), FIXTURE_RESULT_URL);
-        assert_eq!(decoded.snippet(), "Synthetic recorded snippet");
+        assert_eq!(decoded.snippet(), FIXTURE_RESULT_SNIPPET);
         assert!(!response.more_results_available());
     }
 }
