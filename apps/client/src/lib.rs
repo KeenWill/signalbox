@@ -28,11 +28,11 @@ use signalbox_process_protocol::{
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
     ConversationOriginFilter, ConversationSummary, ErrorCode, InputContent, InputDelivery,
     MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ReviewFindingEvent, ReviewFindingStatus, ReviewImportTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
-    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
-    ReviewRepairOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
-    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
+    ModelSelection, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewRepairOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage,
+    SessionEvent, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
     decode_server_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
@@ -60,6 +60,12 @@ const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
 #[serde(deny_unknown_fields)]
 struct ReviewConcernsFile {
     concerns: Vec<ReviewOrchestrationConcernInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewFindingsFile {
+    findings: Vec<ReviewFindingInput>,
 }
 
 #[derive(Deserialize)]
@@ -2807,6 +2813,52 @@ async fn review(
                 .mutation()),
             }
         }
+        ReviewCommand::RecordFindings {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            findings_file,
+        } => {
+            let file: ReviewFindingsFile = read_review_json_file(&findings_file).await?;
+            let finding_count = file.findings.len();
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewFindings {
+                    command_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                    output_frontier_id,
+                    findings: file.findings,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewFindingsRecorded {
+                    run_id: recorded_run,
+                    pass_id: recorded_pass,
+                    finding_count: recorded_count,
+                } if recorded_run == run_id
+                    && recorded_pass == pass_id
+                    && usize::try_from(recorded_count.value()) == Ok(finding_count) =>
+                {
+                    output.review_acknowledgement(&format!(
+                        "run={recorded_run} pass={recorded_pass} findings={finding_count} recorded"
+                    ))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review finding inventory admission returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
         ReviewCommand::CompletePass {
             command_id,
             run_id,
@@ -3469,16 +3521,28 @@ mod tests {
     use super::{
         ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES, ProcessClient, ReviewCommand,
-        ReviewConcernsFile, SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt,
-        ThroughPositionArgument, TurnTerminal, TurnWaitMode, await_turn_terminal,
-        collect_import_paths, continue_imported, conversations, create, decide, imported,
-        model_call_recovery_transition, open_scanned_import_source, read_input,
+        ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest, SnapshotSelection,
+        SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
+        await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
+        decide, imported, model_call_recovery_transition, open_scanned_import_source, read_input,
         read_review_json_file, read_system_prompt_file, reconcile_turn, review,
         review_finding_event_status, review_pass_completion_is_coherent, run, search,
         session_recovery_transition, socket_path, stop_turn, submit_input, terminal_event_state,
         terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    #[tokio::test]
+    async fn review_findings_file_decodes_an_empty_complete_inventory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), br#"{"findings":[]}"#)?;
+
+        let decoded: ReviewFindingsFile = read_review_json_file(file.path()).await?;
+
+        assert!(decoded.findings.is_empty());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn review_concerns_file_decodes_its_exact_wrapper()

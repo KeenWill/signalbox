@@ -1641,6 +1641,7 @@ The `review` command adds these headless workflow verbs:
 - `activate-pass <run> <pass> --turn-id <turn>`;
 - `complete-pass <run> <pass> --outcome <succeeded|failed|blocked|cancelled> [--turn-id <turn>] [--output-frontier-id <frontier>]`;
 - `record-finding <run> <pass> --turn-id <turn> --output-frontier-id <frontier> --finding-id <finding> --file-path <path> --title <text> --body <text> --severity <severity> --is-real-confidence <basis-points> --severity-label-confidence <basis-points> --category <key>`;
+- `record-findings <run> <pass> --turn-id <turn> --output-frontier-id <frontier> --findings-file <path>`;
 - `record-finding-event <run> <pass> --turn-id <turn> [--output-frontier-id <frontier>] --finding-id <finding> --event-ordinal <decimal> --event <accepted|rejected|duplicate|superseded|stale|fixed|blocked-with-reason>`;
 - `start-orchestration <attempt> <target> --concern-set-version <key> --import-template-name <name> --judgment-template-name <name> --repair-template-name <name> --publication-template-name <name> --concerns-file <path>`;
 - `record-import-outcome <attempt> --outcome <succeeded|failed|blocked|cancelled> [--pass-id <pass>] [--external-link-id <link>] [--context-digest <digest>]`;
@@ -1667,16 +1668,19 @@ variant fields or pass/frontier/link/digest evidence that contradicts the
 selected closed outcome before socket I/O.
 
 Only bounded inventories use JSON files. Their exact top-level wrappers are
-`{"concerns":[...]}` for `--concerns-file`, `{"members":[...]}` for
-`--members-file`, and `{"outcomes":[...]}` for either outcomes file. Every
-wrapper and nested protocol object denies unknown members; canonical UUID,
-decimal, digest, tag, nullable-member, uniqueness, and outcome-correlation rules
-remain those of the wire request. The terminal reads at most 8 MiB plus one
-byte, refuses an oversized or malformed file before printing a command identity,
-and then lets ordinary request validation enforce the 32-concern and
-1,024-member bounds before connecting. Exact ambiguous retry therefore needs the
-same file bytes semantically decoded to the same closed inventory, as well as
-the same scalar arguments and printed command identity.
+`{"findings":[...]}` for `--findings-file`, `{"concerns":[...]}` for
+`--concerns-file`, `{"members":[...]}` for `--members-file`, and
+`{"outcomes":[...]}` for either outcomes file. The findings inventory may be
+empty and seals the read-only pass exactly once; `record-finding` remains the
+one-finding convenience form. Every wrapper and nested protocol object denies
+unknown members; canonical UUID, decimal, digest, tag, nullable-member,
+uniqueness, and outcome-correlation rules remain those of the wire request. The
+terminal reads at most 8 MiB plus one byte, refuses an oversized or malformed
+file before printing a command identity, and then lets ordinary request
+validation enforce the 32-concern and 1,024-member bounds before connecting.
+Exact ambiguous retry therefore needs the same file bytes semantically decoded
+to the same closed inventory, as well as the same scalar arguments and printed
+command identity.
 
 Orchestration reads validate the selected attempt and the protocol-level frozen
 inventory correlations before output. The first line reports attempt, target,

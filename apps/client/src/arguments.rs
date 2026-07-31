@@ -157,6 +157,14 @@ pub(crate) enum ReviewCommand {
         output_frontier_id: CanonicalUuid,
         finding: ReviewFindingInput,
     },
+    RecordFindings {
+        command_id: Option<CommandId>,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        findings_file: PathBuf,
+    },
     CompletePass {
         command_id: Option<CommandId>,
         run_id: CanonicalUuid,
@@ -345,6 +353,8 @@ enum ReviewSubcommand {
     ActivatePass(ActivateReviewPassArguments),
     /// Conclude one read-only pass with exactly one finding.
     RecordFinding(RecordReviewFindingArguments),
+    /// Conclude one read-only pass with a complete JSON finding inventory.
+    RecordFindings(RecordReviewFindingsArguments),
     /// Conclude one pass without another typed result payload.
     CompletePass(CompleteReviewPassArguments),
     /// Conclude one result-bearing pass with one finding-machine event.
@@ -459,6 +469,22 @@ struct RecordReviewFindingArguments {
     category: String,
     #[arg(long)]
     recommended_fix: Option<String>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewFindingsArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
+    output_frontier_id: CanonicalUuid,
+    #[arg(long, value_name = "PATH")]
+    findings_file: PathBuf,
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
@@ -1388,6 +1414,14 @@ pub(crate) fn parse(
                     },
                 }
             }
+            ReviewSubcommand::RecordFindings(arguments) => ReviewCommand::RecordFindings {
+                command_id: arguments.command_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                turn_id: arguments.turn_id,
+                output_frontier_id: arguments.output_frontier_id,
+                findings_file: arguments.findings_file,
+            },
             ReviewSubcommand::CompletePass(arguments) => {
                 let valid = matches!(
                     (
