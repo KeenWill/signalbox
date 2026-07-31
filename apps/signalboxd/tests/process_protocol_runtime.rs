@@ -5203,6 +5203,86 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     runtime.stop().await
 }
 
+/// Configuration-owned limits reject an oversized dedicated summary while
+/// retaining the adapter-reported terminal usage as durable evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn explicit_compaction_over_limit_retains_usage_without_summary() -> Result<(), Box<dyn Error>>
+{
+    let usage = TokenUsage {
+        input_tokens: Some(17),
+        output_tokens: Some(257),
+        cache_creation_input_tokens: Some(3),
+        cache_read_input_tokens: Some(11),
+    };
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "oversized summary must not persist",
+        usage,
+    ));
+    let mut runtime = RunningRuntime::start_with_compaction(summary_runtime).await?;
+    let (mut connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::CompactSession {
+                command_id: command()?,
+                session_id,
+                through_position: None,
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        protocol_error_code(response_within(&mut connection).await?.message()),
+        ErrorCode::Unavailable
+    );
+    let stored = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        ),
+    >(
+        "SELECT state_kind, terminal_disposition_kind,
+                input_tokens::bigint, output_tokens::bigint,
+                cache_creation_input_tokens::bigint, cache_read_input_tokens::bigint
+           FROM context_compaction_model_call
+          WHERE session_id = $1",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        stored,
+        (
+            String::from("terminal"),
+            String::from("known_failed"),
+            usage.input_tokens.map(|value| value as i64),
+            usage.output_tokens.map(|value| value as i64),
+            usage.cache_creation_input_tokens.map(|value| value as i64),
+            usage.cache_read_input_tokens.map(|value| value as i64),
+        )
+    );
+    let summary_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1 AND payload_kind = 'context_summary'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(summary_count, 0);
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// INV-012 / INV-014 / INV-015: exact authorization, completion, and failure
 /// retries replay their durable outcomes without duplicate summary evidence.
 #[tokio::test(flavor = "multi_thread")]
@@ -5259,14 +5339,27 @@ async fn inv012_inv014_inv015_compaction_lifecycle_retries_are_exact() -> Result
     let PrepareContextCompactionOutcome::Prepared(failed) = failed_outcome else {
         panic!("the failure replay fixture must prepare its call");
     };
+    repository.authorize(&failed).await?;
+    let failed_usage = ContextCompactionTokenUsage::unreported()
+        .with_input_tokens(Some(17))
+        .with_output_tokens(Some(257));
     repository
-        .fail(&failed, FailedContextCompactionDisposition::KnownFailed)
+        .fail_with_usage(
+            &failed,
+            FailedContextCompactionDisposition::KnownFailed,
+            failed_usage,
+        )
         .await?;
     repository
-        .fail(&failed, FailedContextCompactionDisposition::KnownFailed)
+        .fail_with_usage(
+            &failed,
+            FailedContextCompactionDisposition::KnownFailed,
+            failed_usage,
+        )
         .await?;
-    let failed_state = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT call.state_kind, call.terminal_disposition_kind, command.result_kind
+    let failed_state = sqlx::query_as::<_, (String, String, String, Option<i64>, Option<i64>)>(
+        "SELECT call.state_kind, call.terminal_disposition_kind, command.result_kind,
+                call.input_tokens::bigint, call.output_tokens::bigint
            FROM context_compaction_model_call AS call
            JOIN compact_session_command AS command
              ON command.model_call_id = call.model_call_id
@@ -5282,6 +5375,8 @@ async fn inv012_inv014_inv015_compaction_lifecycle_retries_are_exact() -> Result
             String::from("terminal"),
             String::from("known_failed"),
             String::from("failed"),
+            failed_usage.input_tokens().map(|value| value as i64),
+            failed_usage.output_tokens().map(|value| value as i64),
         )
     );
 

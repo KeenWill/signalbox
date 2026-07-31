@@ -234,8 +234,32 @@ pub async fn current_session_credential(
     session: SessionId,
     family: &str,
 ) -> Result<ModelCallCredentialReference, sqlx::Error> {
+    current_session_credential_with_migration_fallback(pool, session, family, None).await
+}
+
+/// Loads an exact current credential, then a provenance-gated migration alias.
+pub async fn current_session_credential_with_migration_fallback(
+    pool: &PgPool,
+    session: SessionId,
+    family: &str,
+    migration_fallback_family: Option<&str>,
+) -> Result<ModelCallCredentialReference, sqlx::Error> {
     let mut connection = pool.acquire().await?;
-    load_current_session_credential(&mut connection, session.into_uuid(), family).await
+    match load_current_session_credential(&mut connection, session.into_uuid(), family).await {
+        Ok(reference) => Ok(reference),
+        Err(sqlx::Error::RowNotFound) => match migration_fallback_family {
+            Some(fallback_family) => {
+                load_migrated_session_credential(
+                    &mut connection,
+                    session.into_uuid(),
+                    fallback_family,
+                )
+                .await
+            }
+            None => Err(sqlx::Error::RowNotFound),
+        },
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

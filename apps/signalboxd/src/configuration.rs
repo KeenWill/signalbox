@@ -109,6 +109,12 @@ impl ResolvedModelRoute {
         matches!(self.adapter, ModelAdapter::Anthropic)
     }
 
+    /// Legacy credential family admitted only while a migration event is current.
+    pub fn migration_credential_family(&self) -> Option<&'static str> {
+        self.uses_anthropic_adapter()
+            .then_some(MIGRATED_ANTHROPIC_MODEL_FAMILY)
+    }
+
     /// Non-secret credential profile pinned for new sessions.
     pub fn credential_profile(&self) -> &str {
         &self.credential_profile
@@ -807,8 +813,9 @@ mod tests {
 
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
-        HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES, ModelAdapter,
-        UnknownSessionModel, credential_bytes, validate_alias_count,
+        HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
+        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, UnknownSessionModel, credential_bytes,
+        validate_alias_count,
     };
 
     const CONFIGURATION: &str = r#"
@@ -871,12 +878,13 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .resolve(signalbox_domain::FrozenModelSelection::Direct(selection))
                 .is_ok()
         );
+        let route = configuration
+            .resolve_direct_model(selection)
+            .expect("fixture selection has an adapter route");
+        assert_eq!(route.adapter(), ModelAdapter::Anthropic);
         assert_eq!(
-            configuration
-                .resolve_direct_model(selection)
-                .expect("fixture selection has an adapter route")
-                .adapter(),
-            ModelAdapter::Anthropic
+            route.migration_credential_family(),
+            Some(MIGRATED_ANTHROPIC_MODEL_FAMILY)
         );
     }
 

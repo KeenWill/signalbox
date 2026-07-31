@@ -142,6 +142,7 @@ use crate::{
         ReviewOrchestrationInternalCause, ReviewOrchestrationRuntimeError,
         execute_review_orchestration_request, read_review_orchestration_request,
     },
+    usage_limits::context_compaction_usage_exceeds_configured_limits,
 };
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -4058,10 +4059,11 @@ where
         .await;
     };
     let credential_reference =
-        match signalbox_persistence::session_credentials::current_session_credential(
+        match signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
             &services.pool,
             session,
             route.model_family(),
+            route.migration_credential_family(),
         )
         .await
         {
@@ -4237,6 +4239,39 @@ where
         .with_output_tokens(result.usage.output_tokens)
         .with_cache_creation_input_tokens(result.usage.cache_creation_input_tokens)
         .with_cache_read_input_tokens(result.usage.cache_read_input_tokens);
+    let exceeds_limits = context_compaction_usage_exceeds_configured_limits(
+        &services.model_configuration.runtime_model_catalog(),
+        prepared.target(),
+        result.usage,
+    )
+    .unwrap_or(true);
+    if exceeds_limits {
+        if let Err(repository_error) = fail_context_compaction_with_usage_until_resolved(
+            &repository,
+            &prepared,
+            FailedContextCompactionDisposition::KnownFailed,
+            usage,
+        )
+        .await
+        {
+            return write_context_compaction_repository_error(
+                writer,
+                version,
+                request_id,
+                session,
+                services.recovery_reporter.as_ref(),
+                repository_error,
+            )
+            .await;
+        }
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    }
     let applied = match complete_context_compaction_until_resolved(
         &repository,
         &prepared,
@@ -4841,6 +4876,27 @@ async fn fail_context_compaction_until_resolved(
 ) -> Result<(), ContextCompactionRepositoryError> {
     loop {
         match repository.fail(prepared, disposition).await {
+            Ok(()) => return Ok(()),
+            Err(
+                ContextCompactionRepositoryError::Database(_)
+                | ContextCompactionRepositoryError::CommitAmbiguous(_),
+            ) => sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn fail_context_compaction_with_usage_until_resolved(
+    repository: &ContextCompactionRepository,
+    prepared: &PreparedContextCompaction,
+    disposition: FailedContextCompactionDisposition,
+    usage: ContextCompactionTokenUsage,
+) -> Result<(), ContextCompactionRepositoryError> {
+    loop {
+        match repository
+            .fail_with_usage(prepared, disposition, usage)
+            .await
+        {
             Ok(()) => return Ok(()),
             Err(
                 ContextCompactionRepositoryError::Database(_)

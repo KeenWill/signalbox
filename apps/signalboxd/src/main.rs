@@ -48,9 +48,8 @@ use signalboxd::{
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
     SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime,
-    usage_limits::{UsageLimitedContextCompactionModel, UsageLimitedModelCallProvider},
+    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -844,11 +843,9 @@ async fn run_hub(
             SanitizedStartupCause::Static("codex_cli_construction_failed"),
         )
     })?;
-    let context_compaction_model: Arc<dyn ContextCompactionModel> =
-        Arc::new(UsageLimitedContextCompactionModel::new(
-            RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
-            runtime_models.clone(),
-        ));
+    let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
+        RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
+    );
     let provider = RuntimeModelCallProvider::new(runtime, runtime_models.clone());
     let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
