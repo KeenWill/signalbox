@@ -315,8 +315,9 @@ Each kind's field sequence is complete and fixed here:
   revision. A revision is exactly 40 or 64 lowercase hexadecimal bytes, and a
   branch name is within the existing 255-byte validated-ref cap. Repository key,
   clone-URL digest, and recovery are present together for a repository worktree
-  and absent together for a private root; credential profile remains
-  independently optional
+  and absent together for a private root; for a repository worktree the
+  credential profile remains independently optional, while a private root
+  records none
   ([workspace provisioning and recovery](#workspace-provisioning-and-recovery));
   and
 - `clone-url` — the single configuration-validated canonical URL text.

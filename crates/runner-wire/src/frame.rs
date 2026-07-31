@@ -9,8 +9,8 @@ use crate::{
         advertisement_digest, leak_page_digest, workspace_manifest_digest,
     },
     value::{
-        CanonicalUuid, Digest, EffectClass, PositiveU64, ProfileName, RepositoryKey, ResultBounds,
-        SandboxProfile, TerminalResult, ValueError, WireToolName,
+        CanonicalUuid, DetailName, Digest, EffectClass, PositiveU64, ProfileName, RepositoryKey,
+        ResultBounds, SandboxProfile, TerminalResult, ValueError, WireToolName,
     },
 };
 
@@ -245,7 +245,7 @@ pub const MAX_FAILURE_DETAIL_DEPTH: usize = 8;
 #[serde(deny_unknown_fields)]
 pub struct FailureDetail {
     /// Runner-specific checked detail code.
-    pub code: WireToolName,
+    pub code: DetailName,
     /// Exact nonempty retained message.
     pub message: String,
     /// Bounded structured payload, `{}` when no additional facts exist.
@@ -254,11 +254,7 @@ pub struct FailureDetail {
 
 impl FailureDetail {
     /// Checks all exact detail and payload bounds.
-    pub fn try_new(
-        code: WireToolName,
-        message: String,
-        payload: Value,
-    ) -> Result<Self, ValueError> {
+    pub fn try_new(code: DetailName, message: String, payload: Value) -> Result<Self, ValueError> {
         if message.is_empty()
             || message.len() > MAX_FAILURE_MESSAGE_BYTES
             || message.contains('\0')
@@ -308,7 +304,7 @@ fn validate_detail_value(value: &Value, depth: usize) -> Result<(), ValueError> 
                 return Err(ValueError::FailureDetail);
             }
             for (key, value) in values {
-                WireToolName::try_new(key.clone()).map_err(|_| ValueError::FailureDetail)?;
+                DetailName::try_new(key.clone()).map_err(|_| ValueError::FailureDetail)?;
                 validate_detail_value(
                     value,
                     depth + usize::from(value.is_object() || value.is_array()),
@@ -601,6 +597,30 @@ fn directive_matches<T: PartialEq>(directive: Option<&Directive<T>>, item: Optio
     matches!((directive, item), (None, None))
         || matches!((directive, item), (Some(directive), Some(item)) if &directive.correlation == item)
 }
+/// Closed workspace-operation correlations admitted by heartbeat failure state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "correlation",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WorkspaceFailureCorrelation {
+    /// Provisioning failed before durable acknowledgement.
+    Provision(ProvisionCorrelation),
+    /// Release cleanup failed before durable acknowledgement.
+    Release(ReleaseCorrelation),
+}
+
+impl WorkspaceFailureCorrelation {
+    fn validate(&self) -> Result<(), ValueError> {
+        match self {
+            Self::Provision(correlation) => correlation.validate(),
+            Self::Release(_) => Ok(()),
+        }
+    }
+}
+
 /// Workspace phase admitted in a heartbeat acknowledgement.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
@@ -614,7 +634,9 @@ pub enum HeartbeatWorkspacePhase {
     /// Release completion is unrecorded.
     ReleaseCompleted { correlation: ReleaseCorrelation },
     /// Workspace operation failure is unrecorded.
-    FailureUnrecorded { correlation: OperationCorrelation },
+    FailureUnrecorded {
+        correlation: WorkspaceFailureCorrelation,
+    },
 }
 
 /// Available correlation returned in a rejected frame.
@@ -713,6 +735,17 @@ fn validate_ready_correlation(
 ) -> Result<(), ValueError> {
     ready.validate()?;
     let manifest = &ready.manifest;
+    let terminal = if manifest.repository.is_some() {
+        "repo"
+    } else {
+        "work"
+    };
+    let expected_relative_path = format!(
+        "sessions/{}/{}/{}",
+        correlation.session_id,
+        correlation.placement_revision.get(),
+        terminal
+    );
     if manifest.lifecycle == crate::ManifestLifecycle::Ready
         && manifest.session == correlation.session_id
         && manifest.placement_revision == correlation.placement_revision
@@ -720,6 +753,7 @@ fn validate_ready_correlation(
         && manifest.repository == correlation.repository
         && manifest.sandbox_profile == correlation.sandbox_profile
         && manifest.credential_profile == correlation.credential_profile
+        && manifest.relative_path.as_str() == expected_relative_path
     {
         Ok(())
     } else {
@@ -912,12 +946,11 @@ impl Message {
                         | HeartbeatWorkspacePhase::ReadyUnrecorded { correlation } => {
                             correlation.validate()?
                         }
-                        HeartbeatWorkspacePhase::FailureUnrecorded {
-                            correlation: OperationCorrelation::Provision(correlation),
-                        } => correlation.validate()?,
+                        HeartbeatWorkspacePhase::FailureUnrecorded { correlation } => {
+                            correlation.validate()?
+                        }
                         HeartbeatWorkspacePhase::ReleaseAccepted { .. }
-                        | HeartbeatWorkspacePhase::ReleaseCompleted { .. }
-                        | HeartbeatWorkspacePhase::FailureUnrecorded { .. } => {}
+                        | HeartbeatWorkspacePhase::ReleaseCompleted { .. } => {}
                     }
                 }
                 Ok(())

@@ -6191,6 +6191,7 @@ pub enum RunnerDomainError {
     DuplicateWorkspaceCapability(WorkspaceCapability),
     DuplicateSandboxProfile(RunnerSandboxProfile),
     TooManyPermissionOverrides,
+    TooManyAdvertisedRepositories,
     UndeclaredProfileTool(ToolName),
     UnsupportedDaemonIdempotency(ToolName),
     EnrollmentRevoked,
@@ -6332,6 +6333,7 @@ impl RunnerCatalog {
 }
 pub struct RunnerAdvertisement { /* private */ }
 impl RunnerAdvertisement {
+    pub const MAX_REPOSITORIES: usize;
     pub fn new(
         classes: impl IntoIterator<Item = RunnerCapabilityClass>,
         tools: impl IntoIterator<Item = ToolName>,

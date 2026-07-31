@@ -41,6 +41,11 @@ fn tool(value: &str) -> WireToolName {
         .unwrap_or_else(|error| panic!("tool fixture is valid: {error}"))
 }
 
+fn detail_name(value: &str) -> DetailName {
+    DetailName::try_new(value.to_owned())
+        .unwrap_or_else(|error| panic!("detail-name fixture is valid: {error}"))
+}
+
 fn profile(value: &str) -> ProfileName {
     ProfileName::try_new(value.to_owned())
         .unwrap_or_else(|error| panic!("profile fixture is valid: {error}"))
@@ -153,7 +158,7 @@ fn dispatch_at_complete_line_bytes(bytes: usize) -> Frame {
 
 fn detail(value: serde_json::Value) -> FailureDetail {
     FailureDetail::try_new(
-        tool("runner_failure"),
+        detail_name("runner.failure"),
         "synthetic failure".to_owned(),
         value,
     )
@@ -248,6 +253,18 @@ fn decoder_rejects_unsupported_version() {
 }
 
 #[test]
+fn decoder_reports_unsupported_version_before_future_kind() {
+    let Err(FrameError::UnsupportedVersion(actual)) = decode_line(
+        br#"{"version":2,"kind":"future","payload":{}}
+"#,
+    ) else {
+        panic!("version two must fail before closed-kind decoding");
+    };
+
+    assert_eq!(actual, 2);
+}
+
+#[test]
 fn decoder_rejects_zero_positive_sequence() {
     assert!(decode_line(br#"{"version":1,"kind":"heartbeat","payload":{"sequence":0,"last_accepted_peer_sequence":0}}
 "#).is_err());
@@ -263,6 +280,29 @@ fn decoder_rejects_noncanonical_uuid() {
 fn decoder_rejects_json_null_for_absent_only_phase() {
     assert!(decode_line(br#"{"version":1,"kind":"heartbeat_ack","payload":{"challenge_sequence":1,"runner_sequence":1,"lease_phase":null}}
 "#).is_err());
+}
+
+#[test]
+fn heartbeat_rejects_lease_offer_as_workspace_failure_correlation() {
+    let mut encoded = serde_json::to_vec(&json!({
+        "version": 1,
+        "kind": "heartbeat_ack",
+        "payload": {
+            "challenge_sequence": 1,
+            "runner_sequence": 1,
+            "workspace_phase": {
+                "phase": "failure_unrecorded",
+                "correlation": {
+                    "kind": "lease_offer",
+                    "correlation": lease_correlation()
+                }
+            }
+        }
+    }))
+    .unwrap_or_else(|error| panic!("heartbeat acknowledgement serializes: {error}"));
+    encoded.push(b'\n');
+
+    assert!(decode_line(&encoded).is_err());
 }
 
 #[test]
@@ -368,7 +408,7 @@ fn operation_failure_rejects_category_correlation_mismatch() {
 fn failure_detail_rejects_unchecked_member_name() {
     assert!(
         FailureDetail::try_new(
-            tool("runner_failure"),
+            detail_name("runner.failure"),
             "synthetic failure".to_owned(),
             json!({"bad key": true})
         )
@@ -377,10 +417,21 @@ fn failure_detail_rejects_unchecked_member_name() {
 }
 
 #[test]
+fn failure_detail_accepts_catalog_key_grammar_for_code_and_payload() {
+    let actual = FailureDetail::try_new(
+        detail_name("git.clone"),
+        "synthetic failure".to_owned(),
+        json!({"git.ref": true}),
+    );
+
+    assert!(actual.is_ok());
+}
+
+#[test]
 fn failure_detail_rejects_ninth_container() {
     assert!(
         FailureDetail::try_new(
-            tool("runner_failure"),
+            detail_name("runner.failure"),
             "synthetic failure".to_owned(),
             deeply_nested_detail()
         )
@@ -424,6 +475,24 @@ fn ready_frame_rejects_manifest_digest_disagreement() {
         ready: ReadyManifest {
             manifest: manifest(),
             manifest_digest: digest(EXPECTED_ADVERTISEMENT_DIGEST),
+        },
+    });
+
+    assert!(Frame::try_new(invalid).is_err());
+}
+
+#[test]
+fn ready_frame_rejects_nondeterministic_relative_path() {
+    let mut ready_manifest = manifest();
+    ready_manifest.relative_path =
+        "sessions/00000000-0000-4000-8000-000000000002/3/alternate".to_owned();
+    let manifest_digest = workspace_manifest_digest(&ready_manifest)
+        .unwrap_or_else(|error| panic!("changed manifest digests: {error}"));
+    let invalid = Message::WorkspaceReady(WorkspaceReady {
+        correlation: provision_correlation(),
+        ready: ReadyManifest {
+            manifest: ready_manifest,
+            manifest_digest,
         },
     });
 
@@ -498,7 +567,9 @@ fn advertisement_rejects_duplicate_repository_key_with_different_profile() {
 
 #[test]
 fn failure_detail_rejects_empty_message() {
-    assert!(FailureDetail::try_new(tool("runner_failure"), String::new(), json!({})).is_err());
+    assert!(
+        FailureDetail::try_new(detail_name("runner.failure"), String::new(), json!({})).is_err()
+    );
 }
 
 #[test]
@@ -600,7 +671,7 @@ fn failure_detail_rejects_payload_string_over_message_bound() {
 
     assert!(
         FailureDetail::try_new(
-            tool("runner_failure"),
+            detail_name("runner.failure"),
             "synthetic failure".to_owned(),
             payload,
         )
@@ -612,7 +683,7 @@ fn failure_detail_rejects_payload_string_over_message_bound() {
 fn failure_detail_rejects_signed_payload_number() {
     assert!(
         FailureDetail::try_new(
-            tool("runner_failure"),
+            detail_name("runner.failure"),
             "synthetic failure".to_owned(),
             json!({"number": -1}),
         )

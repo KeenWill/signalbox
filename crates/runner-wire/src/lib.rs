@@ -125,7 +125,7 @@ pub fn encode_line(frame: &Frame) -> Result<Vec<u8>, FrameError> {
 #[serde(deny_unknown_fields)]
 struct DecodedEnvelope<'a> {
     version: u64,
-    kind: FrameKind,
+    kind: String,
     #[serde(borrow)]
     payload: &'a RawValue,
 }
@@ -175,7 +175,8 @@ pub fn decode_line(line: &[u8]) -> Result<Frame, FrameError> {
     if envelope.version != PROTOCOL_VERSION {
         return Err(FrameError::UnsupportedVersion(envelope.version));
     }
-    let message = decode_payload(envelope.kind, envelope.payload)?;
+    let kind = serde_json::from_value::<FrameKind>(serde_json::Value::String(envelope.kind))?;
+    let message = decode_payload(kind, envelope.payload)?;
     Frame::try_new(message)
 }
 

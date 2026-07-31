@@ -55,6 +55,8 @@ pub enum RunnerDomainError {
     DuplicateSandboxProfile(RunnerSandboxProfile),
     /// The placement contains too many per-tool permission overrides.
     TooManyPermissionOverrides,
+    /// The advertisement contains too many repository entries.
+    TooManyAdvertisedRepositories,
     /// A credential profile names a tool absent from the catalog.
     UndeclaredProfileTool(ToolName),
     /// An idempotent tool is incorrectly admissible on the daemon.
@@ -702,6 +704,9 @@ pub struct RunnerAdvertisement {
 }
 
 impl RunnerAdvertisement {
+    /// Maximum repository entries in one runner advertisement.
+    pub const MAX_REPOSITORIES: usize = 64;
+
     /// Collects one availability-only runner advertisement.
     pub fn new(
         classes: impl IntoIterator<Item = RunnerCapabilityClass>,
@@ -876,6 +881,9 @@ impl RunnerEnrollment {
     ) -> Result<PreparedRunnerRegistration, RunnerDomainError> {
         if self.state != RunnerEnrollmentState::Active {
             return Err(RunnerDomainError::EnrollmentRevoked);
+        }
+        if advertisement.repositories.len() > RunnerAdvertisement::MAX_REPOSITORIES {
+            return Err(RunnerDomainError::TooManyAdvertisedRepositories);
         }
         // At most one outstanding preparation exists per enrollment
         // authority, so nothing can advance the shared registration revision
@@ -2489,6 +2497,12 @@ impl SessionRunnerPlacement {
         if !registration_preserves_snapshot(&self.request, &before, registration) {
             return Err(RunnerDomainError::RegistrationChanged);
         }
+        if before.workspace.as_ref().is_some_and(|workspace| {
+            workspace.repository.is_some()
+                && workspace.credential_profile.as_ref() != Some(&profile)
+        }) {
+            return Err(RunnerDomainError::CredentialProfileUnavailable);
+        }
         let revision = self
             .revision
             .checked_next()
@@ -2717,10 +2731,6 @@ fn registration_preserves_snapshot(
             .runner_required_tools
             .iter()
             .all(|tool| registration.tool(tool).is_some())
-        && request
-            .permission_overrides
-            .iter()
-            .all(|(tool, _)| registration.tool(tool).is_some())
         && pinned
             .credential_profile
             .as_ref()
@@ -4034,6 +4044,11 @@ mod tests {
     }
 
     #[test]
+    fn s30_workspace_branch_accepts_closing_bracket() {
+        assert!(WorkspaceBranchName::try_new("topic]ok".to_owned()).is_ok());
+    }
+
+    #[test]
     fn s30_workspace_relative_path_rejects_absolute_value() {
         assert_eq!(
             WorkspaceRelativePath::try_new("/sessions/one".to_owned()),
@@ -4331,6 +4346,23 @@ mod tests {
             Err(RunnerDomainError::RepositoryProfileUnavailable(profile(
                 "readonly"
             )))
+        );
+    }
+
+    #[test]
+    fn s30_inv042_registration_rejects_oversized_repository_inventory() {
+        let repositories = (0..=RunnerAdvertisement::MAX_REPOSITORIES).map(|index| {
+            RunnerRepositoryEntry::new(
+                WorkspaceRepositoryKey::try_new(format!("repository_{index}"))
+                    .expect("the generated repository key is valid"),
+                None,
+            )
+        });
+        let advertisement = RunnerAdvertisement::new([class()], [], [], [], [], repositories);
+
+        assert_eq!(
+            enrollment().register(advertisement, &catalog()),
+            Err(RunnerDomainError::TooManyAdvertisedRepositories)
         );
     }
 
@@ -5632,6 +5664,51 @@ mod tests {
     }
 
     #[test]
+    fn s30_inv042_inv044_combined_tool_override_omission_retains_daemon_fallback() {
+        let registration = registration();
+        let mut request = placement_request(profile("readonly"));
+        request.permission_overrides = RunnerToolPermissionOverrides::try_new([(
+            tool("inspect"),
+            RunnerToolPermissionOverride::Confirm,
+        )])
+        .expect("the exact combined-tool override is valid");
+        let pin = SessionRunnerPlacement::new(session_id(SESSION), request)
+            .pin_and_offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("the combined tool pins with its exact override");
+        let expected_state = pin.placement.state().clone();
+        let narrowed_registration = enrollment_for_registration(&registration)
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("deploy"), tool("sync")],
+                    [profile("readonly")],
+                    [WorkspaceCapability::WorktreePerSession],
+                    sandbox_profiles(),
+                    [],
+                ),
+                &catalog(),
+            )
+            .expect("omitting the combined tool remains a valid registration");
+        let reconciled = pin
+            .placement
+            .reconcile_registration(&narrowed_registration)
+            .expect("the immutable override does not turn fallback into runner affinity");
+
+        assert_eq!(reconciled.state(), &expected_state);
+    }
+
+    #[test]
     fn s30_inv044_lost_placement_cannot_offer_another_lease() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
@@ -6230,6 +6307,85 @@ mod tests {
                 lease_offer_request("inspect"),
             ),
             Err(RunnerDomainError::GrantRevoked)
+        );
+    }
+
+    #[test]
+    fn s32_inv044_inv045_repository_profile_replacement_requires_reprovisioning() {
+        let expected_enrollment = enrollment();
+        let registration = expected_enrollment
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("inspect"), tool("deploy"), tool("sync")],
+                    [profile("readonly"), profile("admin")],
+                    [WorkspaceCapability::WorktreePerSession],
+                    sandbox_profiles(),
+                    [RunnerRepositoryEntry::new(
+                        repository_key(),
+                        Some(profile("readonly")),
+                    )],
+                ),
+                &catalog(),
+            )
+            .expect("the repository entry binds its configured clone profile");
+        let request = SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile("readonly")),
+            workspace: WorkspaceRequirement::RepositoryWorktree {
+                repository: repository_key(),
+            },
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        };
+        let workspace = ProvisionedWorkspace {
+            session: session_id(SESSION),
+            placement_revision: RunnerGeneration::one(),
+            runner: registration.runner(),
+            repository: Some(repository_key()),
+            canonical_clone_url_digest: Some(
+                CanonicalCloneUrlDigest::try_new("b".repeat(64))
+                    .expect("the fixture clone URL digest is canonical"),
+            ),
+            credential_profile: Some(profile("readonly")),
+            sandbox: RunnerSandboxProfile::Ambient,
+            working_directory: directory("/workspace/session"),
+            relative_path: WorkspaceRelativePath::try_new("sessions/session/1/repo".to_owned())
+                .expect("the fixture relative path is valid"),
+            manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b02)),
+            recovery: Some(WorkspaceRecovery::Commit {
+                revision: WorkspaceRevision::try_new("c".repeat(40))
+                    .expect("the fixture recovery revision is canonical"),
+            }),
+        };
+        let mut pin = SessionRunnerPlacement::new(session_id(SESSION), request)
+            .pin_and_offer_lease(
+                &expected_enrollment,
+                &registration,
+                directory("/workspace/session"),
+                Some(workspace),
+                authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("the configured profile provisions the repository");
+        let grant = pin
+            .grant
+            .take()
+            .expect("the configured profile creates a grant");
+
+        assert_eq!(
+            pin.placement.replace_credential_profile(
+                grant,
+                &registration,
+                profile("admin"),
+                [tool("deploy")],
+            ),
+            Err(RunnerDomainError::CredentialProfileUnavailable)
         );
     }
 

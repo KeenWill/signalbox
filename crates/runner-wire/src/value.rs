@@ -208,6 +208,33 @@ impl<'de> Deserialize<'de> for CapabilityName {
     }
 }
 
+/// A checked failure-detail name with the portable catalog-key grammar.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct DetailName(String);
+
+impl DetailName {
+    /// Checks the exact bounded catalog-key spelling.
+    pub fn try_new(value: String) -> Result<Self, ValueError> {
+        WorkspaceRepositoryKey::try_new(value.clone())
+            .map(|_| Self(value))
+            .map_err(|_| ValueError::PortableName)
+    }
+
+    /// Returns the checked text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for DetailName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
 /// A domain-validated tool name.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]

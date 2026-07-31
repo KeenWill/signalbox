@@ -17,9 +17,9 @@ use signalbox_domain::{
     CanonicalCloneUrlDigest, CredentialDispatchAuthorization, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState, CredentialProfileName,
     CredentialProfilePolicy, CredentialToolApproval, EndedToolAttempt, PinnedRunnerPlacement,
-    ProvisionedWorkspace, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
-    RunnerClaimedAttemptReplacement, RunnerCredentialGrantLineage, RunnerDomainError,
-    RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
+    ProvisionedWorkspace, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
+    RunnerCatalog, RunnerClaimedAttemptReplacement, RunnerCredentialGrantLineage,
+    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
     RunnerEnrollmentState, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
     RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
     RunnerLeaseState, RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector,
@@ -310,6 +310,11 @@ impl RunnerProtocolStore {
         enrollment: &RunnerEnrollment,
         advertisement: signalbox_domain::RunnerAdvertisement,
     ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
+        if advertisement.repositories().count() > RunnerAdvertisement::MAX_REPOSITORIES {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::TooManyAdvertisedRepositories,
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let enrollment_id = enrollment.enrollment();
         let locked = sqlx::query(RUNNER_ENROLLMENT)

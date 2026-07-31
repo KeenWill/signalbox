@@ -149,9 +149,19 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_wire_registration_complete();
 
+DO $migration$
+BEGIN
+    IF EXISTS (SELECT 1 FROM runner_session_placement_record) THEN
+        RAISE EXCEPTION
+            'runner wire contract requires empty legacy placement history'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$migration$;
+
 ALTER TABLE runner_session_placement_record
     ADD COLUMN requested_sandbox_profile text NOT NULL
-        DEFAULT 'workspace_restricted',
+        DEFAULT 'ambient',
     ADD COLUMN permission_override_count numeric(20, 0) NOT NULL DEFAULT 0,
     ADD COLUMN workspace_manifest_id uuid,
     ADD COLUMN workspace_clone_url_digest text,
@@ -218,10 +228,12 @@ ALTER TABLE runner_session_placement_record
             workspace_branch_name IS NULL
             OR (
                 octet_length(workspace_branch_name) BETWEEN 1 AND 255
-                AND workspace_branch_name !~ '[[:cntrl:] ~^:?*\\[\\]\\\\]'
-                AND workspace_branch_name !~ '(^-|^/|/$|//|\\.\\.|@\\{|\\.$)'
-                AND workspace_branch_name !~ '(^|/)\\.'
-                AND workspace_branch_name !~ '\\.lock(?:/|$)'
+                AND workspace_branch_name !~ '[[:cntrl:] ~^:?*]'
+                AND position('[' IN workspace_branch_name) = 0
+                AND position(chr(92) IN workspace_branch_name) = 0
+                AND workspace_branch_name !~ '(^-|^/|/$|//|\.\.|@\{|\.$)'
+                AND workspace_branch_name !~ '(^|/)\.'
+                AND workspace_branch_name !~ '\.lock(?:/|$)'
                 AND workspace_branch_name <> '@'
             )
         ),

@@ -33,7 +33,7 @@ use signalbox_domain::{
     WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use signalbox_persistence::{
-    local_test_connection_options, migrate,
+    MIGRATOR, local_test_connection_options, migrate,
     runner_protocol::{
         RunnerProtocolCorruption, RunnerProtocolStore, RunnerProtocolStoreError,
         StoredValidatedRunnerRegistration,
@@ -66,6 +66,9 @@ const RETRY_ATTEMPT: u128 = 0x9601;
 const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
+const PRE_RUNNER_WIRE_MIGRATION: i64 = 202607310102;
+const LEGACY_PLACEMENT_REFUSAL: &str =
+    "runner wire contract requires empty legacy placement history";
 
 #[derive(Clone, Copy)]
 struct PhysicalAttemptFacts {
@@ -100,7 +103,7 @@ const SECOND_LATER_LEASE_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemp
     turn: 0x9803,
 };
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
@@ -117,6 +120,11 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .max_connections(8)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
+    Ok((container, pool))
+}
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let (container, pool) = unmigrated_postgres().await?;
     migrate(&pool).await?;
     migrate(&pool).await?;
     Ok((container, pool))
@@ -850,7 +858,7 @@ async fn replace_approval_with_owner_command(
     sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
         .execute(&mut *transaction)
         .await?;
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE tool_approval_decision
             SET decision_source = 'owner_command',
                 owner_command_id = $2
@@ -860,6 +868,7 @@ async fn replace_approval_with_owner_command(
     .bind(command)
     .execute(&mut *transaction)
     .await?;
+    assert_eq!(updated.rows_affected(), 1);
     sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
         .execute(&mut *transaction)
         .await?;
@@ -1141,6 +1150,32 @@ fn assert_check_violation(error: sqlx::Error) {
     );
 }
 
+async fn rejected_workspace_branch(pool: &PgPool, session: SessionId, branch: &str) -> sqlx::Error {
+    let pinned_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+            AND event_kind = 'pinned'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(pool)
+    .await
+    .expect("the pinned placement count is queryable");
+    assert_eq!(pinned_count, 1);
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET workspace_recovery_kind = 'branch',
+                workspace_branch_name = $2
+          WHERE session_id = $1
+            AND event_kind = 'pinned'",
+    )
+    .bind(session.into_uuid())
+    .bind(branch)
+    .execute(pool)
+    .await
+    .expect_err("the malformed workspace recovery branch must be schema-rejected")
+}
+
 #[track_caller]
 fn assert_foreign_key_violation(error: sqlx::Error) {
     assert_eq!(
@@ -1206,6 +1241,47 @@ async fn stored_check_violation(pool: &PgPool) -> RunnerProtocolStoreError {
         .await
         .expect_err("an enrollment inserted as already revoked violates the guard"),
     )
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn runner_wire_migration_rejects_legacy_placement_history() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR.run_to(PRE_RUNNER_WIRE_MIGRATION, &pool).await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, state_kind, pinned_tool_count)
+         VALUES ($1, 1, 1, 'created', 'identity', $2, 'runner_default',
+                 'none', 'unpinned', 0)",
+    )
+    .bind(uuid(SESSION))
+    .bind(uuid(RUNNER))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let refusal = migrate(&pool)
+        .await
+        .expect_err("legacy placement history must fail before wire facts are invented");
+    let applied_version: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(
+        refusal.to_string().contains(LEGACY_PLACEMENT_REFUSAL),
+        "migration refusal must name the unsupported legacy history"
+    );
+    assert_eq!(applied_version, Some(PRE_RUNNER_WIRE_MIGRATION));
+    drop(pool);
+    Ok(())
 }
 
 #[tokio::test]
@@ -1325,6 +1401,44 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
         )
         .expect_err("durable revocation closes the exact caller-held enrollment fence");
     assert_eq!(revoked, RunnerDomainError::EnrollmentRevoked);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_store_rejects_oversized_repository_inventory_before_write()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let repositories = (0..=RunnerAdvertisement::MAX_REPOSITORIES).map(|index| {
+        RunnerRepositoryEntry::new(
+            WorkspaceRepositoryKey::try_new(format!("repository_{index}"))
+                .expect("the generated repository key is valid"),
+            None,
+        )
+    });
+    let oversized = RunnerAdvertisement::new([class()], [], [], [], [], repositories);
+    let error = store
+        .register(&expected_enrollment, oversized)
+        .await
+        .expect_err("the persistence boundary rejects the oversized inventory");
+    let RunnerProtocolStoreError::Domain(actual) = error else {
+        panic!("the oversized inventory must fail at the domain boundary");
+    };
+    let durable_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_registration
+          WHERE enrollment_id = $1",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(actual, RunnerDomainError::TooManyAdvertisedRepositories);
+    assert_eq!(durable_count, 0);
     drop(pool);
     Ok(())
 }
@@ -1848,17 +1962,43 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
     )
     .execute(&pool)
     .await?;
-    let invalid_branch = sqlx::query(
+    let closing_bracket = sqlx::query(
         "UPDATE runner_session_placement_record
             SET workspace_recovery_kind = 'branch',
-                workspace_branch_name = '@'
+                workspace_branch_name = 'topic]ok'
           WHERE session_id = $1
             AND event_kind = 'pinned'",
     )
     .bind(pin.placement.session().into_uuid())
     .execute(&pool)
-    .await
-    .expect_err("a single-at branch recovery name is schema-rejected");
+    .await?;
+    assert_eq!(closing_bracket.rows_affected(), 1);
+    let single_at_branch = rejected_workspace_branch(&pool, pin.placement.session(), "@").await;
+    let double_dot_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "main..x").await;
+    let reflog_branch = rejected_workspace_branch(&pool, pin.placement.session(), "bad@{x").await;
+    let trailing_dot_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "feature.").await;
+    let hidden_component_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "topic/.hidden").await;
+    let lock_suffix_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "topic.lock").await;
+    let bracket_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "topic[bad").await;
+    let backslash_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), r"topic\bad").await;
+    let control_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "topic\nbad").await;
+    let pinned_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+            AND event_kind = 'pinned'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pinned_count, 1);
     let absolute_path = sqlx::query(
         "UPDATE runner_session_placement_record
             SET workspace_relative_path = '/absolute'
@@ -1876,7 +2016,15 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
     .execute(&pool)
     .await?;
 
-    assert_check_violation(invalid_branch);
+    assert_check_violation(single_at_branch);
+    assert_check_violation(double_dot_branch);
+    assert_check_violation(reflog_branch);
+    assert_check_violation(trailing_dot_branch);
+    assert_check_violation(hidden_component_branch);
+    assert_check_violation(lock_suffix_branch);
+    assert_check_violation(bracket_branch);
+    assert_check_violation(backslash_branch);
+    assert_check_violation(control_branch);
     assert_check_violation(absolute_path);
     drop(pool);
     Ok(())
@@ -4121,6 +4269,15 @@ async fn s32_inv045_profile_free_tombstone_uses_predecessor_approval_policy()
             offer_request(),
         )
         .expect("the restricted profiled placement pins automatically");
+    let inspect_tool = tool("inspect");
+    let expected_approval = pin
+        .grant
+        .as_ref()
+        .expect("the profiled placement carries a grant")
+        .approvals()
+        .find(|(name, _)| *name == &inspect_tool)
+        .map(|(_, approval)| approval)
+        .expect("the predecessor grant records inspect approval");
     store.store_pin(&pin, &first_registration).await?;
     let lost = pin
         .placement
@@ -4163,7 +4320,15 @@ async fn s32_inv045_profile_free_tombstone_uses_predecessor_approval_policy()
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
         .await?
         .expect("the differently-policied profile-free replacement is loadable");
+    let actual_approval = loaded
+        .grant()
+        .expect("the loaded placement retains its tombstone")
+        .approvals()
+        .find(|(name, _)| *name == &inspect_tool)
+        .map(|(_, approval)| approval)
+        .expect("the loaded tombstone records inspect approval");
 
+    assert_eq!(actual_approval, expected_approval);
     assert_eq!(loaded.grant(), Some(&tombstone));
     drop(pool);
     Ok(())

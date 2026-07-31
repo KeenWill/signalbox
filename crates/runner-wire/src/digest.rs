@@ -25,7 +25,7 @@ pub const MAX_TOOLS: usize = 256;
 /// Maximum advertised credential profiles.
 pub const MAX_PROFILES: usize = 64;
 /// Maximum advertised repository entries.
-pub const MAX_REPOSITORIES: usize = 64;
+pub const MAX_REPOSITORIES: usize = signalbox_domain::RunnerAdvertisement::MAX_REPOSITORIES;
 /// Maximum facts retained in one leak page.
 pub const MAX_LEAK_PAGE_FACTS: usize = 64;
 
