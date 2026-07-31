@@ -25,6 +25,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
     "net",
     "rt-multi-thread",
+    "signal",
     "time",
 ] }
 toml = "1.1.3"

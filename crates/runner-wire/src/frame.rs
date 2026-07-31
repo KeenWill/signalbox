@@ -667,6 +667,8 @@ pub enum AvailableCorrelation {
     Enrollment(CanonicalUuid),
     /// Registration revision.
     Registration(PositiveU64),
+    /// Connection epoch named by one lifecycle frame.
+    ConnectionEpoch(PositiveU64),
     /// Complete lease correlation.
     Lease(LeaseCorrelation),
     /// Complete provision correlation.
@@ -687,6 +689,7 @@ impl AvailableCorrelation {
             Self::None
             | Self::Enrollment(_)
             | Self::Registration(_)
+            | Self::ConnectionEpoch(_)
             | Self::Lease(_)
             | Self::Release(_)
             | Self::LeakPage(_) => Ok(()),
@@ -795,6 +798,7 @@ payload!(Enrolled {
     runner_id: CanonicalUuid,
     authentication_id: CanonicalUuid,
     registration_revision: PositiveU64,
+    connection_epoch: PositiveU64,
     advertisement_digest: Digest
 });
 payload!(Resume {
@@ -809,6 +813,7 @@ payload!(Resume {
 });
 payload!(Resumed {
     registration_revision: PositiveU64,
+    connection_epoch: PositiveU64,
     directives: ReconnectDirectives
 });
 payload!(ReplacementPending {
@@ -817,6 +822,7 @@ payload!(ReplacementPending {
     runner_id: CanonicalUuid,
     authentication_id: CanonicalUuid,
     registration_revision: PositiveU64,
+    connection_epoch: PositiveU64,
     advertisement_digest: Digest
 });
 payload!(Advertise {

@@ -75,6 +75,129 @@ impl RunnerRegistrationRevision {
     }
 }
 
+/// Hub-issued positive identity of one physical runner connection.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RunnerConnectionEpoch(NonZeroU64);
+
+impl RunnerConnectionEpoch {
+    /// Admits one nonzero epoch value.
+    pub const fn try_from_u64(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    /// Returns the positive integer carried by this epoch.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    fn checked_next(self) -> Option<Self> {
+        self.get().checked_add(1).and_then(Self::try_from_u64)
+    }
+}
+
+/// Durable health state of the current physical runner connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerConnectionState {
+    /// The current epoch has live admitted transport.
+    Connected,
+    /// One heartbeat interval elapsed without the outstanding acknowledgement.
+    Suspect,
+    /// An epoch-targeted clean shutdown was durably observed.
+    Shutdown,
+    /// Transport or heartbeat evidence durably proved the connection dead.
+    Lost,
+}
+
+/// Typed evidence for the latest durable connection transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerConnectionCause {
+    /// A fresh physical connection received this epoch.
+    Established,
+    /// A suspect connection supplied its exact outstanding acknowledgement.
+    HeartbeatRecovered,
+    /// The first heartbeat interval elapsed without acknowledgement.
+    HeartbeatMissed,
+    /// The hub ordered an epoch-targeted shutdown.
+    DaemonShutdown,
+    /// The runner ordered an epoch-targeted shutdown.
+    RunnerShutdown,
+    /// Three heartbeat intervals elapsed without acknowledgement.
+    HeartbeatTimeout,
+    /// The local transport closed without a shutdown order.
+    TransportClosed,
+    /// A malformed or inadmissible frame closed the physical connection.
+    ProtocolFailure,
+}
+
+/// One canonical durable connection lifecycle head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerConnectionSnapshot {
+    epoch: RunnerConnectionEpoch,
+    event_ordinal: NonZeroU64,
+    state: RunnerConnectionState,
+    cause: RunnerConnectionCause,
+}
+
+impl RunnerConnectionSnapshot {
+    /// Returns the physical connection epoch.
+    pub const fn epoch(self) -> RunnerConnectionEpoch {
+        self.epoch
+    }
+
+    /// Returns the positive ordinal within this epoch's append-only event stream.
+    pub const fn event_ordinal(self) -> u64 {
+        self.event_ordinal.get()
+    }
+
+    /// Returns the latest durable lifecycle state.
+    pub const fn state(self) -> RunnerConnectionState {
+        self.state
+    }
+
+    /// Returns the typed evidence that produced the latest state.
+    pub const fn cause(self) -> RunnerConnectionCause {
+        self.cause
+    }
+}
+
+/// Requested durable transition within one exact connection epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerConnectionTransition {
+    /// Checks that an epoch remains current without appending an event.
+    Observe,
+    /// Restores a suspect epoch after its acknowledgement arrives.
+    HeartbeatRecovered,
+    /// Records the first missed heartbeat interval.
+    HeartbeatMissed,
+    /// Records hub-initiated clean shutdown.
+    DaemonShutdown,
+    /// Records runner-initiated clean shutdown.
+    RunnerShutdown,
+    /// Records terminal heartbeat loss.
+    HeartbeatTimeout,
+    /// Records terminal transport loss.
+    TransportClosed,
+    /// Records terminal protocol failure.
+    ProtocolFailure,
+}
+
+/// Whether a lifecycle transition named the current or a stale epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerConnectionTransitionOutcome {
+    /// The named epoch remains current and carries this lifecycle head.
+    Current(RunnerConnectionSnapshot),
+    /// A newer physical connection owns lifecycle authority.
+    Stale {
+        /// Epoch named by the refused transition.
+        observed: RunnerConnectionEpoch,
+        /// Epoch that currently owns lifecycle authority.
+        current: RunnerConnectionEpoch,
+    },
+}
+
 /// One canonical validated registration plus its durable adapter revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredValidatedRunnerRegistration {
@@ -360,6 +483,181 @@ impl RunnerProtocolStore {
             pool,
             catalog: Arc::new(catalog),
         }
+    }
+
+    /// Allocates and durably records the next connection epoch for an enrollment.
+    pub async fn open_connection(
+        &self,
+        enrollment: RunnerEnrollmentId,
+    ) -> Result<RunnerConnectionSnapshot, RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let state: Option<String> = sqlx::query_scalar(
+            "SELECT state_kind
+               FROM runner_enrollment
+              WHERE enrollment_id = $1
+              FOR UPDATE",
+        )
+        .bind(enrollment.into_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        match state.as_deref() {
+            None => return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into()),
+            Some("active") => {}
+            Some("revoked") => {
+                transaction.rollback().await?;
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::EnrollmentRevoked,
+                ));
+            }
+            Some(_) => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        }
+        let prior = load_connection_head_in(transaction.as_mut(), enrollment).await?;
+        let epoch = match prior {
+            Some(prior) => prior
+                .epoch()
+                .checked_next()
+                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
+            None => RunnerConnectionEpoch::try_from_u64(1)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+        };
+        sqlx::query(
+            "INSERT INTO runner_connection_event
+                (enrollment_id, connection_epoch, event_ordinal,
+                 state_kind, cause_kind)
+             VALUES ($1, $2, 1, 'connected', 'established')",
+        )
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(epoch.get()))
+        .execute(&mut *transaction)
+        .await?;
+        commit_mutation(transaction).await?;
+        Ok(RunnerConnectionSnapshot {
+            epoch,
+            event_ordinal: NonZeroU64::MIN,
+            state: RunnerConnectionState::Connected,
+            cause: RunnerConnectionCause::Established,
+        })
+    }
+
+    /// Appends one lifecycle transition only when the caller names the current epoch.
+    pub async fn transition_connection(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+        transition: RunnerConnectionTransition,
+    ) -> Result<RunnerConnectionTransitionOutcome, RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        let current = load_connection_head_in(transaction.as_mut(), enrollment)
+            .await?
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        if epoch != current.epoch() {
+            transaction.rollback().await?;
+            return Ok(RunnerConnectionTransitionOutcome::Stale {
+                observed: epoch,
+                current: current.epoch(),
+            });
+        }
+        if matches!(
+            current.state(),
+            RunnerConnectionState::Shutdown | RunnerConnectionState::Lost
+        ) || transition == RunnerConnectionTransition::Observe
+            || matches!(
+                (current.state(), transition),
+                (
+                    RunnerConnectionState::Connected,
+                    RunnerConnectionTransition::HeartbeatRecovered
+                ) | (
+                    RunnerConnectionState::Suspect,
+                    RunnerConnectionTransition::HeartbeatMissed
+                )
+            )
+        {
+            transaction.rollback().await?;
+            return Ok(RunnerConnectionTransitionOutcome::Current(current));
+        }
+        let event_ordinal = NonZeroU64::new(
+            current
+                .event_ordinal()
+                .checked_add(1)
+                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
+        )
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let (state, cause, state_kind, cause_kind) = connection_transition_values(transition)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        sqlx::query(
+            "INSERT INTO runner_connection_event
+                (enrollment_id, connection_epoch, event_ordinal,
+                 state_kind, cause_kind)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(epoch.get()))
+        .bind(Decimal::from(event_ordinal.get()))
+        .bind(state_kind)
+        .bind(cause_kind)
+        .execute(&mut *transaction)
+        .await?;
+        commit_mutation(transaction).await?;
+        Ok(RunnerConnectionTransitionOutcome::Current(
+            RunnerConnectionSnapshot {
+                epoch,
+                event_ordinal,
+                state,
+                cause,
+            },
+        ))
+    }
+
+    /// Loads the latest durable health state for one enrollment.
+    pub async fn load_connection(
+        &self,
+        enrollment: RunnerEnrollmentId,
+    ) -> Result<Option<RunnerConnectionSnapshot>, RunnerProtocolStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let snapshot = load_connection_head_in(transaction.as_mut(), enrollment).await?;
+        transaction.commit().await?;
+        Ok(snapshot)
+    }
+
+    /// Marks every prior-process nonterminal connection lost before admission opens.
+    pub async fn mark_orphaned_connections_lost(&self) -> Result<u64, RunnerProtocolStoreError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT ON (enrollment_id)
+                    enrollment_id, connection_epoch, state_kind
+               FROM runner_connection_event
+              ORDER BY enrollment_id, connection_epoch DESC, event_ordinal DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut transitioned = 0_u64;
+        for row in rows {
+            let state: String = row.decode_column("state_kind")?;
+            if state != "connected" && state != "suspect" {
+                continue;
+            }
+            let enrollment = runner_enrollment_id(row.decode_column("enrollment_id")?);
+            let epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+                row.decode_column("connection_epoch")?,
+            )?)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+            self.transition_connection(
+                enrollment,
+                epoch,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await?;
+            transitioned = transitioned
+                .checked_add(1)
+                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+        }
+        Ok(transitioned)
     }
 
     /// Atomically creates one pristine enrollment and first registration, or
@@ -1677,6 +1975,112 @@ impl RunnerProtocolStore {
 struct StoredEnrollmentRequestFacts {
     identities: IssuedRunnerEnrollmentIdentities,
     registration_revision: RunnerRegistrationRevision,
+}
+
+fn connection_transition_values(
+    transition: RunnerConnectionTransition,
+) -> Option<(
+    RunnerConnectionState,
+    RunnerConnectionCause,
+    &'static str,
+    &'static str,
+)> {
+    match transition {
+        RunnerConnectionTransition::Observe => None,
+        RunnerConnectionTransition::HeartbeatRecovered => Some((
+            RunnerConnectionState::Connected,
+            RunnerConnectionCause::HeartbeatRecovered,
+            "connected",
+            "heartbeat_recovered",
+        )),
+        RunnerConnectionTransition::HeartbeatMissed => Some((
+            RunnerConnectionState::Suspect,
+            RunnerConnectionCause::HeartbeatMissed,
+            "suspect",
+            "heartbeat_missed",
+        )),
+        RunnerConnectionTransition::DaemonShutdown => Some((
+            RunnerConnectionState::Shutdown,
+            RunnerConnectionCause::DaemonShutdown,
+            "shutdown",
+            "daemon_shutdown",
+        )),
+        RunnerConnectionTransition::RunnerShutdown => Some((
+            RunnerConnectionState::Shutdown,
+            RunnerConnectionCause::RunnerShutdown,
+            "shutdown",
+            "runner_shutdown",
+        )),
+        RunnerConnectionTransition::HeartbeatTimeout => Some((
+            RunnerConnectionState::Lost,
+            RunnerConnectionCause::HeartbeatTimeout,
+            "lost",
+            "heartbeat_timeout",
+        )),
+        RunnerConnectionTransition::TransportClosed => Some((
+            RunnerConnectionState::Lost,
+            RunnerConnectionCause::TransportClosed,
+            "lost",
+            "transport_closed",
+        )),
+        RunnerConnectionTransition::ProtocolFailure => Some((
+            RunnerConnectionState::Lost,
+            RunnerConnectionCause::ProtocolFailure,
+            "lost",
+            "protocol_failure",
+        )),
+    }
+}
+
+async fn load_connection_head_in(
+    connection: &mut PgConnection,
+    enrollment: RunnerEnrollmentId,
+) -> Result<Option<RunnerConnectionSnapshot>, RunnerProtocolStoreError> {
+    let row = sqlx::query(
+        "SELECT connection_epoch, event_ordinal, state_kind, cause_kind
+           FROM runner_connection_event
+          WHERE enrollment_id = $1
+          ORDER BY connection_epoch DESC, event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    row.map(|row| {
+        let epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+            row.decode_column("connection_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let event_ordinal = NonZeroU64::new(decode_u64(row.decode_column("event_ordinal")?)?)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let state_kind: String = row.decode_column("state_kind")?;
+        let cause_kind: String = row.decode_column("cause_kind")?;
+        let state = match state_kind.as_str() {
+            "connected" => RunnerConnectionState::Connected,
+            "suspect" => RunnerConnectionState::Suspect,
+            "shutdown" => RunnerConnectionState::Shutdown,
+            "lost" => RunnerConnectionState::Lost,
+            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        };
+        let cause = match cause_kind.as_str() {
+            "established" => RunnerConnectionCause::Established,
+            "heartbeat_recovered" => RunnerConnectionCause::HeartbeatRecovered,
+            "heartbeat_missed" => RunnerConnectionCause::HeartbeatMissed,
+            "daemon_shutdown" => RunnerConnectionCause::DaemonShutdown,
+            "runner_shutdown" => RunnerConnectionCause::RunnerShutdown,
+            "heartbeat_timeout" => RunnerConnectionCause::HeartbeatTimeout,
+            "transport_closed" => RunnerConnectionCause::TransportClosed,
+            "protocol_failure" => RunnerConnectionCause::ProtocolFailure,
+            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        };
+        Ok(RunnerConnectionSnapshot {
+            epoch,
+            event_ordinal,
+            state,
+            cause,
+        })
+    })
+    .transpose()
 }
 
 async fn load_enrollment_request_facts(

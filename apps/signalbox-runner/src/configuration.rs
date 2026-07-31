@@ -612,6 +612,7 @@ mod tests {
 
     use super::*;
 
+    const CHECKED_IN_EXAMPLE: &str = include_str!("../../../config/signalbox-runner.example.toml");
     const EMPTY_CONFIGURATION: &str = r#"
 version = 1
 daemon_socket_path = "/run/user/1000/signalbox-runner.sock"
@@ -857,5 +858,11 @@ credentials = {{}}
         .expect_err("two configuration sources must fail closed");
 
         assert_eq!(error, ArgumentError::ConflictingSources);
+    }
+
+    #[test]
+    fn checked_in_example_parses_as_registration_only_configuration() {
+        RunnerConfiguration::parse(CHECKED_IN_EXAMPLE)
+            .expect("the checked-in runner example is structurally valid");
     }
 }

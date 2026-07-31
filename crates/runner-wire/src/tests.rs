@@ -794,6 +794,7 @@ fn resumed_frame_rejects_invalid_complete_provision_correlation() {
     correlation.repository = None;
     let invalid = Message::Resumed(Box::new(Resumed {
         registration_revision: positive(7),
+        connection_epoch: positive(8),
         directives: ReconnectDirectives {
             workspace_operation: Some(Directive {
                 correlation: OperationCorrelation::Provision(correlation),
@@ -810,6 +811,7 @@ fn resumed_frame_rejects_invalid_complete_provision_correlation() {
 fn resumed_frame_rejects_lease_offer_workspace_correlation() {
     let invalid = Message::Resumed(Box::new(Resumed {
         registration_revision: positive(7),
+        connection_epoch: positive(8),
         directives: ReconnectDirectives {
             workspace_operation: Some(Directive {
                 correlation: OperationCorrelation::LeaseOffer(lease_correlation()),

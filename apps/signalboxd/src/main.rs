@@ -39,6 +39,10 @@ use signalbox_persistence::{
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
+use signalboxd::runner_protocol_runtime::{
+    PostgresRunnerRegistrationService, RunnerProtocolRuntime, RunnerProtocolRuntimeError,
+    RunnerRegistrationFailureCause,
+};
 use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, CODE_HOST_CREDENTIAL_REFERENCE, ContextGuardedTurnPass,
     DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
@@ -66,6 +70,7 @@ const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
+const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +155,7 @@ struct HubConfiguration {
     anthropic_api_key_file: PathBuf,
     github_token_file: PathBuf,
     process_socket_path: PathBuf,
+    runner_socket_path: PathBuf,
 }
 
 impl HubConfiguration {
@@ -161,6 +167,7 @@ impl HubConfiguration {
             env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
             env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
             env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
+            env::var_os(RUNNER_SOCKET_PATH_ENVIRONMENT),
         )
     }
 
@@ -171,6 +178,7 @@ impl HubConfiguration {
         anthropic_api_key_file: Option<OsString>,
         github_token_file: Option<OsString>,
         process_socket_path: Option<OsString>,
+        runner_socket_path: Option<OsString>,
     ) -> Result<Self, HubConfigurationError> {
         let database_url = database_url
             .ok_or_else(|| {
@@ -205,6 +213,7 @@ impl HubConfiguration {
         let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
         let process_socket_path =
             required_path(PROCESS_SOCKET_PATH_ENVIRONMENT, process_socket_path)?;
+        let runner_socket_path = required_path(RUNNER_SOCKET_PATH_ENVIRONMENT, runner_socket_path)?;
 
         Ok(Self {
             database_url,
@@ -213,6 +222,7 @@ impl HubConfiguration {
             anthropic_api_key_file,
             github_token_file,
             process_socket_path,
+            runner_socket_path,
         })
     }
 
@@ -238,6 +248,10 @@ impl HubConfiguration {
 
     fn process_socket_path(&self) -> &Path {
         &self.process_socket_path
+    }
+
+    fn runner_socket_path(&self) -> &Path {
+        &self.runner_socket_path
     }
 }
 
@@ -365,7 +379,7 @@ enum RuntimeStopCause {
     SignalListenerFailed,
     ExecutionFailed,
     GuardLost,
-    ProcessRuntimeFailed,
+    RuntimeFailed,
     RuntimeDefect,
 }
 
@@ -379,6 +393,7 @@ enum RuntimeDrainOutcome {
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     Process(Result<(), ProcessRuntimeError>),
+    Runner(Result<(), RunnerProtocolRuntimeError>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -408,7 +423,7 @@ const fn combine_runtime_stop_cause(
         }
         (RuntimeStopCause::SignalListenerFailed, _) => RuntimeStopCause::SignalListenerFailed,
         (RuntimeStopCause::ExecutionFailed, _) => RuntimeStopCause::ExecutionFailed,
-        (_, RuntimeTaskCompletion::Failed) => RuntimeStopCause::ProcessRuntimeFailed,
+        (_, RuntimeTaskCompletion::Failed) => RuntimeStopCause::RuntimeFailed,
         (cause, RuntimeTaskCompletion::Clean) => cause,
     }
 }
@@ -417,6 +432,7 @@ const fn combine_runtime_stop_cause(
 enum RuntimeTaskDefect {
     SchedulerCompletedBeforeShutdown,
     ProcessCompletedBeforeShutdown,
+    RunnerCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -428,6 +444,7 @@ impl RuntimeTaskDefect {
         match self {
             Self::SchedulerCompletedBeforeShutdown => "scheduler_completed_before_shutdown",
             Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
+            Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
             Self::TaskJoinFailed => "runtime_task_join_failed",
@@ -582,6 +599,44 @@ fn report_process_runtime_failure(error: &ProcessRuntimeError) {
     );
 }
 
+fn runner_runtime_failure_class(error: &RunnerProtocolRuntimeError) -> OperatorFailureClass {
+    match error {
+        RunnerProtocolRuntimeError::Accept(_)
+        | RunnerProtocolRuntimeError::Read(_)
+        | RunnerProtocolRuntimeError::Write(_)
+        | RunnerProtocolRuntimeError::Closed => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
+        RunnerProtocolRuntimeError::Lifecycle(error) => match error.cause() {
+            RunnerRegistrationFailureCause::Database => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            RunnerRegistrationFailureCause::CommitAmbiguous => {
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                }
+            }
+            RunnerRegistrationFailureCause::PeerInput
+            | RunnerRegistrationFailureCause::EnrollmentAuthority
+            | RunnerRegistrationFailureCause::Policy
+            | RunnerRegistrationFailureCause::Corruption => OperatorFailureClass::CallerOrHubBug,
+        },
+        RunnerProtocolRuntimeError::Decode(_)
+        | RunnerProtocolRuntimeError::Encode(_)
+        | RunnerProtocolRuntimeError::HeartbeatSequenceExhausted
+        | RunnerProtocolRuntimeError::ConnectionTask(_) => OperatorFailureClass::CallerOrHubBug,
+    }
+}
+
+fn report_runner_runtime_failure(error: &RunnerProtocolRuntimeError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?runner_runtime_failure_class(error),
+        cause = %error,
+        "runner protocol runtime failed"
+    );
+}
+
 /// Records an unexpected top-level task state using closed evidence only.
 ///
 /// The cause names the task-control condition without formatting `JoinError`,
@@ -608,9 +663,14 @@ fn joined_task_defect(error: &JoinError) -> RuntimeTaskDefect {
 fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> RuntimeTaskCompletion {
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
-        | Ok(RuntimeTaskExit::Process(Ok(()))) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::Process(Ok(())))
+        | Ok(RuntimeTaskExit::Runner(Ok(()))) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
+            RuntimeTaskCompletion::Failed
+        }
+        Ok(RuntimeTaskExit::Runner(Err(error))) => {
+            report_runner_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
         }
         Err(error) => {
@@ -667,10 +727,10 @@ const fn completed_runtime_outcome(
         (RuntimeStopCause::ExecutionFailed, RuntimeDrainOutcome::GraceWindowExpired) => {
             ShutdownOutcome::ExecutionFailedAfterGraceWindow
         }
-        (RuntimeStopCause::ProcessRuntimeFailed, RuntimeDrainOutcome::Complete) => {
+        (RuntimeStopCause::RuntimeFailed, RuntimeDrainOutcome::Complete) => {
             ShutdownOutcome::RuntimeFailed
         }
-        (RuntimeStopCause::ProcessRuntimeFailed, RuntimeDrainOutcome::GraceWindowExpired) => {
+        (RuntimeStopCause::RuntimeFailed, RuntimeDrainOutcome::GraceWindowExpired) => {
             ShutdownOutcome::RuntimeFailedAfterGraceWindow
         }
         (RuntimeStopCause::RuntimeDefect, RuntimeDrainOutcome::Complete) => {
@@ -898,6 +958,40 @@ async fn run_hub(
         return Err(error);
     }
 
+    let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
+        Ok(service) => service,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("runner_catalog_construction_failed"),
+            );
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
+    if runner_service
+        .mark_orphaned_connections_lost()
+        .await
+        .is_err()
+    {
+        let failure = erase_startup_cause(
+            RuntimePhase::StartupScan,
+            SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
+        );
+        let _ = database.close().await;
+        return Err(failure);
+    }
+    let runner_listener = match LocalProcessListener::bind(configuration.runner_socket_path()) {
+        Ok(listener) => listener,
+        Err(error) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::SocketBinding,
+                SanitizedStartupCause::Socket(&error),
+            );
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
     let listener = match LocalProcessListener::bind(configuration.process_socket_path()) {
         Ok(listener) => listener,
         Err(error) => {
@@ -913,6 +1007,7 @@ async fn run_hub(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
 
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
@@ -969,6 +1064,7 @@ async fn run_hub(
     let mut scheduler = SchedulerLoop::new(work_source, pass);
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
+    let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
@@ -981,6 +1077,9 @@ async fn run_hub(
     });
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Process(process_runtime.run(process_shutdown_receiver).await)
+    });
+    runtime_tasks.spawn(async move {
+        RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
     });
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
@@ -1001,11 +1100,21 @@ async fn run_hub(
                 match completed {
                     Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
                         report_process_runtime_failure(&error);
-                        RuntimeStopCause::ProcessRuntimeFailed
+                        RuntimeStopCause::RuntimeFailed
                     }
                     Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::Runner(Err(error)))) => {
+                        report_runner_runtime_failure(&error);
+                        RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::Runner(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
@@ -1034,6 +1143,7 @@ async fn run_hub(
         } else {
             let _ = scheduler_shutdown.send(());
             let _ = process_shutdown.send(true);
+            let _ = runner_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
@@ -1352,14 +1462,14 @@ mod tests {
         AnthropicConstructionError, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
         HubConfiguration, HubConfigurationError, HubRuntimeError,
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
-        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RequiredSettingFailure,
-        RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
-        RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, database_close_failure_outcome,
-        drain_runtime_tasks, erase_startup_cause, migrate_scan_then_schedule, operator_filter,
-        process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
-        should_close_pool,
+        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
+        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
+        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
+        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
+        anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
+        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
+        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
+        report_database_close_failure, run_scheduler_until_shutdown, should_close_pool,
     };
 
     #[derive(Clone, Default)]
@@ -1576,6 +1686,7 @@ mod tests {
                 Some(OsString::from("key")),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
+                Some(OsString::from("/tmp/signalbox-runner.sock")),
             )
             .err(),
             Some(HubConfigurationError::new(
@@ -1591,6 +1702,7 @@ mod tests {
                 Some(OsString::from("key")),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
+                Some(OsString::from("/tmp/signalbox-runner.sock")),
             )
             .err(),
             Some(HubConfigurationError::new(
@@ -1606,6 +1718,7 @@ mod tests {
                 Some(OsString::from("key")),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
+                Some(OsString::from("/tmp/signalbox-runner.sock")),
             )
             .err(),
             Some(HubConfigurationError::new(
@@ -1621,6 +1734,7 @@ mod tests {
                 Some(OsString::from("key")),
                 None,
                 Some(OsString::from("/tmp/signalbox.sock")),
+                Some(OsString::from("/tmp/signalbox-runner.sock")),
             )
             .err(),
             Some(HubConfigurationError::new(
@@ -1636,10 +1750,27 @@ mod tests {
                 Some(OsString::from("key")),
                 Some(OsString::from("github-token")),
                 None,
+                Some(OsString::from("/tmp/signalbox-runner.sock")),
             )
             .err(),
             Some(HubConfigurationError::new(
                 PROCESS_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ))
+        );
+        assert_eq!(
+            HubConfiguration::from_values(
+                Some(OsString::from("postgres://secret")),
+                Some(OsString::from("models.toml")),
+                Some(OsString::from("templates.toml")),
+                Some(OsString::from("key")),
+                Some(OsString::from("github-token")),
+                Some(OsString::from("/tmp/signalbox.sock")),
+                None,
+            )
+            .err(),
+            Some(HubConfigurationError::new(
+                RUNNER_SOCKET_PATH_ENVIRONMENT,
                 RequiredSettingFailure::Missing,
             ))
         );
@@ -1651,6 +1782,7 @@ mod tests {
             Some(OsString::from("key")),
             Some(OsString::from("github-token")),
             Some(OsString::from("/tmp/signalbox.sock")),
+            Some(OsString::from("/tmp/signalbox-runner.sock")),
         )
         .expect("nonempty deployment values are accepted before I/O");
         assert_eq!(configuration.database_url(), "postgres://secret");
@@ -1673,6 +1805,10 @@ mod tests {
         assert_eq!(
             configuration.process_socket_path(),
             std::path::Path::new("/tmp/signalbox.sock")
+        );
+        assert_eq!(
+            configuration.runner_socket_path(),
+            std::path::Path::new("/tmp/signalbox-runner.sock")
         );
     }
 
@@ -1979,11 +2115,11 @@ mod tests {
         );
         assert_eq!(
             combine_runtime_stop_cause(RuntimeStopCause::Requested, RuntimeTaskCompletion::Failed),
-            RuntimeStopCause::ProcessRuntimeFailed
+            RuntimeStopCause::RuntimeFailed
         );
         assert_eq!(
             combine_runtime_stop_cause(
-                RuntimeStopCause::ProcessRuntimeFailed,
+                RuntimeStopCause::RuntimeFailed,
                 RuntimeTaskCompletion::Defect
             ),
             RuntimeStopCause::RuntimeDefect
@@ -2041,7 +2177,7 @@ mod tests {
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);
-        assert_eq!(cause, RuntimeStopCause::ProcessRuntimeFailed);
+        assert_eq!(cause, RuntimeStopCause::RuntimeFailed);
         assert_eq!(
             completed_runtime_outcome(cause, drain),
             ShutdownOutcome::RuntimeFailedAfterGraceWindow
@@ -2063,7 +2199,7 @@ mod tests {
         );
         assert_eq!(
             completed_runtime_outcome(
-                RuntimeStopCause::ProcessRuntimeFailed,
+                RuntimeStopCause::RuntimeFailed,
                 RuntimeDrainOutcome::GraceWindowExpired
             ),
             ShutdownOutcome::RuntimeFailedAfterGraceWindow

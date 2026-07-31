@@ -26,13 +26,14 @@ templates, and orchestration template digests are verified through PR #349
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`).
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
-tag. The runner configuration and credential paragraphs are the foundation
-proposal at the bottom of their implementing stack and become verified only with
-those child pull requests.
+tag. The runner configuration parser, filesystem admission, exact availability
+advertisement, and checked-in example are verified against ref
+`agent/runner-daemon`. Runner credential use during provisioning or execution
+remains committed unimplemented functionality as labeled below.
 
 ## Process configuration
 
-`signalboxd` reads exactly seven required deployment values from the process
+`signalboxd` reads exactly eight required deployment values from the process
 environment at startup and also consults `HOME`:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
@@ -347,25 +348,24 @@ The shipped example contains exactly one credential entry:
 `credentials.github-runner`, whose `file` names a fine-grained repository-scoped
 PAT file and whose `injection_env` is `GH_TOKEN`. The parser and resolver are
 otherwise name-generic: adding another credential shape is a configuration
-entry, not a code branch. The runner advertises the exact configured credential
-names, and each configured repository key paired with the optional profile name
-its own entry carries, as availability; the daemon records no
-credential-specific effect or approval policy, and the daemon may grant only a
-name the current registration advertised. Reserved model-provider profile and
-environment names are rejected. Because arbitrary secret bytes have no
-self-describing type, file contents cannot be classified as a provider key; the
-runner has no model-provider config field or daemon path that supplies one.
+entry, not a runner code branch. The runner advertises the exact configured
+credential names, and each configured repository key paired with the optional
+profile name its own entry carries, as availability. The registration-only
+daemon catalog admits exactly `github-runner` with an empty approval policy;
+another otherwise-valid configured profile is therefore rejected by daemon
+registration until an owner-approved daemon policy declares it. Reserved
+model-provider profile and environment names are rejected. Because arbitrary
+secret bytes have no self-describing type, file contents cannot be classified as
+a provider key; the runner has no model-provider config field or daemon path
+that supplies one.
 
 Startup opens or creates `runner_root` as an effective-user-owned real `0700`
-directory without following its final component, retains its device/inode
-identity and dirfd, takes the exclusive lock through that root, checks socket
-and bubblewrap prerequisites, and loads only non-secret structure. It never
-reads a credential file at startup and never logs configuration paths,
-repository URLs, or values. Each lease admission checks that a granted name
-exists, and each dispatch rereads and validates its file as specified under
-[runner credential lifecycle](#runner-credential-lifecycle). The enrollment
-request identity and daemon-issued receipt are runtime state below the root, not
-operator-authored configuration.
+directory without following its final component, retains its identity, takes the
+exclusive lock through that root, checks socket and bubblewrap prerequisites,
+and loads only non-secret structure. It never reads a credential file at startup
+and never logs configuration paths, repository URLs, or values. The enrollment
+request identity and daemon-issued receipt are atomically fsynced runtime state
+below the root, not operator-authored configuration.
 
 ## The static model, alias, and web-fetch catalog
 
@@ -663,6 +663,12 @@ Runner credential profiles are non-secret checked names granted by the daemon
 and resolved only by `signalbox-runner`. The daemon, client, database,
 transcript, workspace manifest, and runner wire never receive a runner
 credential path or value (INV-035, INV-045).
+
+**Committed unimplemented functionality.** No present runner surface admits a
+lease, provisions a workspace, reads a credential file for execution, or injects
+credential bytes. The remaining paragraphs in this section constrain that future
+execution surface; they do not describe behavior available from the
+registration-only daemon.
 
 A session may hold no credential at all, and no boundary infers one. When the
 placement selected no profile the daemon issues no grant, the lease carries no

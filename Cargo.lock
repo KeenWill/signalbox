@@ -3180,6 +3180,7 @@ dependencies = [
  "signalbox-model-runtime-anthropic",
  "signalbox-persistence",
  "signalbox-process-protocol",
+ "signalbox-runner-wire",
  "signalbox-tools-basic",
  "signalbox-tools-code-host",
  "sqlx",

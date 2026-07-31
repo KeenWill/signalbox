@@ -11,8 +11,8 @@ use rustix::process::geteuid;
 use signalbox_runner_wire::{
     Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest, Enroll,
     Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message, PositiveU64,
-    ReconnectInventory, Registered, RejectionCode, Resume, ShutdownReason, ValueError,
-    advertisement_digest, decode_line, encode_line,
+    ReconnectInventory, Registered, Rejected, RejectionCode, Resume, Shutdown, ShutdownReason,
+    ValueError, advertisement_digest, decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -260,6 +260,7 @@ pub enum EnrollmentOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionEnd {
     DaemonShutdown { connection_epoch: PositiveU64 },
+    RunnerShutdown { connection_epoch: PositiveU64 },
 }
 
 /// Closed local recovery gap; no wire recovery facts are fabricated.
@@ -288,36 +289,6 @@ impl fmt::Display for RecoveryUnavailable {
 }
 
 impl Error for RecoveryUnavailable {}
-
-/// Evidence that the runner cannot construct an epoch-correlated shutdown yet.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ShutdownUnavailable {
-    runner_id: CanonicalUuid,
-    registration_revision: PositiveU64,
-}
-
-impl ShutdownUnavailable {
-    pub const fn runner_id(self) -> CanonicalUuid {
-        self.runner_id
-    }
-
-    pub const fn registration_revision(self) -> PositiveU64 {
-        self.registration_revision
-    }
-}
-
-impl fmt::Display for ShutdownUnavailable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "runner {} at registration {} has no daemon-issued connection epoch",
-            self.runner_id,
-            self.registration_revision.get()
-        )
-    }
-}
-
-impl Error for ShutdownUnavailable {}
 
 /// Closed peer or local lifecycle violation with exact evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -521,6 +492,7 @@ pub struct RunnerConnection<S> {
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
     outcome: EnrollmentOutcome,
+    connection_epoch: PositiveU64,
     heartbeat: Option<HeartbeatExchange>,
 }
 
@@ -543,7 +515,7 @@ where
         let digest = advertisement_digest(advertisement)
             .map_err(RunnerConnectionError::InvalidLocalFrame)?;
         let mut io = BufReader::new(stream);
-        let (receipt, outcome) = match state.state().clone() {
+        let (receipt, outcome, connection_epoch) = match state.state().clone() {
             RunnerState::Pristine { request_id } => {
                 send_message(
                     &mut io,
@@ -555,9 +527,10 @@ where
                 )
                 .await?;
                 let message = receive_message(&mut io).await?;
-                let (receipt, outcome) = accept_enrollment(message, request_id, digest)?;
+                let (receipt, outcome, connection_epoch) =
+                    accept_enrollment(message, request_id, digest)?;
                 state.record_receipt(receipt.clone())?;
-                (receipt, outcome)
+                (receipt, outcome, connection_epoch)
             }
             RunnerState::Enrolled { receipt } => {
                 let inventory = ReconnectInventory::default();
@@ -607,7 +580,11 @@ where
                     ));
                 }
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
-                (receipt, EnrollmentOutcome::Resumed)
+                (
+                    receipt,
+                    EnrollmentOutcome::Resumed,
+                    resumed.connection_epoch,
+                )
             }
         };
         Ok(Self {
@@ -615,6 +592,7 @@ where
             receipt,
             advertisement: advertisement.clone(),
             outcome,
+            connection_epoch,
             heartbeat: None,
         })
     }
@@ -634,6 +612,11 @@ where
         &self.advertisement
     }
 
+    /// Returns the hub-issued epoch of this physical connection.
+    pub const fn connection_epoch(&self) -> PositiveU64 {
+        self.connection_epoch
+    }
+
     /// Reports the recovery design gap without constructing wire recovery facts.
     pub const fn recovery_unavailable(&self) -> RecoveryUnavailable {
         RecoveryUnavailable {
@@ -641,12 +624,19 @@ where
         }
     }
 
-    /// Returns typed missing evidence instead of fabricating a shutdown epoch.
-    pub const fn runner_shutdown_unavailable(&self) -> ShutdownUnavailable {
-        ShutdownUnavailable {
-            runner_id: self.receipt.runner_id(),
-            registration_revision: self.receipt.registration_revision(),
-        }
+    /// Sends one shutdown order naming this exact physical connection epoch.
+    pub async fn shutdown(&mut self) -> Result<ConnectionEnd, RunnerConnectionError> {
+        send_message(
+            &mut self.io,
+            Message::Shutdown(Shutdown {
+                connection_epoch: self.connection_epoch,
+                reason: ShutdownReason::RunnerShutdown,
+            }),
+        )
+        .await?;
+        Ok(ConnectionEnd::RunnerShutdown {
+            connection_epoch: self.connection_epoch,
+        })
     }
 
     /// Replaces all six inventories and persists only an exact `registered` reply.
@@ -712,10 +702,27 @@ where
                 send_message(&mut self.io, Message::HeartbeatAck(acknowledgement)).await?;
                 Ok(None)
             }
-            Message::Shutdown(shutdown) if shutdown.reason == ShutdownReason::DaemonShutdown => {
+            Message::Shutdown(shutdown)
+                if shutdown.reason == ShutdownReason::DaemonShutdown
+                    && shutdown.connection_epoch == self.connection_epoch =>
+            {
                 Ok(Some(ConnectionEnd::DaemonShutdown {
                     connection_epoch: shutdown.connection_epoch,
                 }))
+            }
+            Message::Shutdown(shutdown) if shutdown.reason == ShutdownReason::DaemonShutdown => {
+                send_message(
+                    &mut self.io,
+                    Message::Rejected(Rejected {
+                        offending_kind: MessageKind::Shutdown.to_string(),
+                        available_correlation: AvailableCorrelation::ConnectionEpoch(
+                            shutdown.connection_epoch,
+                        ),
+                        code: RejectionCode::StaleConnection,
+                    }),
+                )
+                .await?;
+                Ok(None)
             }
             Message::Shutdown(_) => Err(RunnerConnectionError::Violation(
                 ProtocolViolation::InvalidShutdownReason,
@@ -840,7 +847,7 @@ fn accept_enrollment(
     message: Message,
     request_id: CanonicalUuid,
     expected_digest: Digest,
-) -> Result<(EnrollmentReceipt, EnrollmentOutcome), RunnerConnectionError> {
+) -> Result<(EnrollmentReceipt, EnrollmentOutcome, PositiveU64), RunnerConnectionError> {
     match message {
         Message::Enrolled(enrolled) => {
             if enrolled.request_id != request_id {
@@ -861,6 +868,7 @@ fn accept_enrollment(
                     EnrollmentAuthority::Active,
                 ),
                 EnrollmentOutcome::Enrolled,
+                enrolled.connection_epoch,
             ))
         }
         Message::ReplacementPending(pending) => {
@@ -882,6 +890,7 @@ fn accept_enrollment(
                     EnrollmentAuthority::ReplacementPending,
                 ),
                 EnrollmentOutcome::ReplacementPending,
+                pending.connection_epoch,
             ))
         }
         Message::Rejected(rejected) => Err(rejected_error(rejected)),
@@ -1088,6 +1097,7 @@ mod tests {
                     runner_id: identity(ARBITRARY_RUNNER_UUID),
                     authentication_id: identity(ARBITRARY_AUTHENTICATION_UUID),
                     registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
                     advertisement_digest: advertisement_digest.clone(),
                 }),
             )
@@ -1139,6 +1149,7 @@ mod tests {
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
                     registration_revision: positive(NEXT_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
                     directives: ReconnectDirectives::default(),
                 })),
             )
@@ -1190,6 +1201,7 @@ mod tests {
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
                     registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
                     directives: ReconnectDirectives::default(),
                 })),
             )
@@ -1257,6 +1269,7 @@ mod tests {
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
                     registration_revision: receipt.registration_revision(),
+                    connection_epoch: positive(CONNECTION_EPOCH),
                     directives: ReconnectDirectives::default(),
                 })),
             )
@@ -1331,6 +1344,7 @@ mod tests {
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
                     registration_revision: receipt.registration_revision(),
+                    connection_epoch: positive(CONNECTION_EPOCH),
                     directives: ReconnectDirectives::default(),
                 })),
             )
@@ -1380,6 +1394,7 @@ mod tests {
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
                     registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
                     directives: ReconnectDirectives::default(),
                 })),
             )
@@ -1399,6 +1414,83 @@ mod tests {
             outcome,
             Some(ConnectionEnd::DaemonShutdown {
                 connection_epoch: positive(CONNECTION_EPOCH),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_daemon_shutdown_is_refused_before_current_shutdown_applies() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_root(&parent);
+        let receipt = issued_receipt(state.state().request_id());
+        state
+            .record_receipt(receipt)
+            .expect("the issued receipt is journaled");
+        let advertisement = empty_advertisement();
+        let stale_epoch = positive(CONNECTION_EPOCH + 1);
+        let current_epoch = positive(CONNECTION_EPOCH);
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before shutdown");
+            let refused = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the stale shutdown is refused");
+            let applied = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the current shutdown is accepted");
+            (refused, applied)
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: current_epoch,
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Shutdown(Shutdown {
+                    connection_epoch: stale_epoch,
+                    reason: ShutdownReason::DaemonShutdown,
+                }),
+            )
+            .await;
+            let rejected = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Shutdown(Shutdown {
+                    connection_epoch: current_epoch,
+                    reason: ShutdownReason::DaemonShutdown,
+                }),
+            )
+            .await;
+            rejected
+        };
+        let ((refused, applied), rejected) = tokio::join!(runner, hub);
+
+        assert_eq!(refused, None);
+        assert_eq!(
+            rejected,
+            Message::Rejected(Rejected {
+                offending_kind: MessageKind::Shutdown.to_string(),
+                available_correlation: AvailableCorrelation::ConnectionEpoch(stale_epoch),
+                code: RejectionCode::StaleConnection,
+            })
+        );
+        assert_eq!(
+            applied,
+            Some(ConnectionEnd::DaemonShutdown {
+                connection_epoch: current_epoch,
             })
         );
     }

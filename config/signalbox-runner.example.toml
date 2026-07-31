@@ -1,0 +1,25 @@
+# Signalbox registration-only runner configuration, version 1.
+#
+# Replace paths with absolute paths owned by the runner's effective user. The
+# runner reads credential structure at startup but does not read secret bytes
+# until a later execution-capable milestone admits a credentialed dispatch.
+version = 1
+daemon_socket_path = "/run/user/1000/signalbox-runner.sock"
+runner_root = "/var/lib/signalbox-runner"
+bubblewrap_path = "/usr/bin/bwrap"
+read_only_paths = ["/usr"]
+allowed_network_hosts = ["github.com"]
+git_author_name = "Signalbox Runner"
+git_author_email = "runner@example.invalid"
+
+# This exact profile name is admitted by signalboxd's registration-only
+# catalog. Its policy authorizes no tool while runner execution is absent.
+[credentials.github-runner]
+file = "/run/secrets/signalbox-github-token"
+injection_env = "GH_TOKEN"
+
+# Repository availability is advertised as one exact key/profile pair; neither
+# the credential path nor its value crosses the runner wire.
+[repositories.signalbox]
+clone_url = "https://github.com/KeenWill/signalbox.git"
+credential_profile = "github-runner"
