@@ -16,7 +16,7 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 `web_fetch` egress policy and complete bounded file-patch lookup through PR #330
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
-`9fff687e6e7ffb21aa9b57d727a8ad732a50d57a`. The runner executable stack rooted
+`470b0ec27a153c6a7c6b48a0bf09bf799d0e1ab9`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. This page
 owns logical tool requests, approval policy and decisions, physical tool
 attempts, result admission, intra-turn continuation, crash classification, the
@@ -1001,23 +1001,26 @@ The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
 rustls with a TLS 1.2 floor; sends the fixed GitHub REST version `2026-03-10`;
 applies a 30-second whole-exchange timeout; and retains at most 512 KiB from an
-ordinary JSON response. The exact-revision contents lookup admits at most 8 MiB
-of JSON ingress before projecting the shared result bound. Both repository tools
-pin the contents request with the required exact commit `ref`; a file read pins
-its second request to the immutable blob identity returned by that lookup rather
-than re-reading a moving reference. A contents 404 triggers one probe of the
-exact Git commit identity: a recognized commit becomes `path_not_found`; an
-unrecognized commit or an empty-repository conflict triggers a third
-repository-visibility request. A visible repository then becomes
-`revision_not_found`, while an inaccessible or missing repository and any other
-host rejection or physical request failure remain failed execution rather than
-absence. Both requests in a file read or path-absence classification, and all
-three requests in a revision-absence classification, share one aggregate
-30-second transaction deadline. The authenticated job-log endpoint is the sole
-redirect-shaped exchange: after exactly one 302 response, the adapter validates
-its bounded HTTPS location, resolves and pins a wholly public destination set,
-and performs one credential-free download with redirect following still
-disabled. Credential delivery and redaction are owned by
+ordinary JSON response. The exact-revision contents lookup admits at most
+254,205,952 bytes of JSON ingress. That bound covers the 1,000-entry observation
+ceiling plus one framing allowance, budgeting each entry for ten worst-case
+JSON-expanded maximum paths and 8 KiB of fixed material, before projecting the
+shared result bound. Both repository tools pin the contents request with the
+required exact commit `ref`; a file read pins its second request to the
+immutable blob identity returned by that lookup rather than re-reading a moving
+reference. A contents 404 triggers one probe of the exact Git commit identity: a
+recognized commit becomes `path_not_found`; an unrecognized commit or an
+empty-repository conflict triggers a third repository-visibility request. A
+visible repository then becomes `revision_not_found`, while an inaccessible or
+missing repository and any other host rejection or physical request failure
+remain failed execution rather than absence. Both requests in a file read or
+path-absence classification, and all three requests in a revision-absence
+classification, share one aggregate 30-second transaction deadline. The
+authenticated job-log endpoint is the sole redirect-shaped exchange: after
+exactly one 302 response, the adapter validates its bounded HTTPS location,
+resolves and pins a wholly public destination set, and performs one
+credential-free download with redirect following still disabled. Credential
+delivery and redaction are owned by
 [configuration-and-credentials](configuration-and-credentials.md).
 
 A missing or unusable credential and a definitive client rejection produce only
