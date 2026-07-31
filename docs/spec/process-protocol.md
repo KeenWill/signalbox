@@ -1,10 +1,11 @@
 # Process protocol
 
-Verified against the implementing change in PR #323 (`agent/protocol-collapse`)
-and the closed provider-failure/native transcript projections in PR #330
-(`agent/audit-verified-fixes`). This page is the normative boundary between a
-local client process and `signalboxd`; domain values, PostgreSQL records, and
-wire messages remain distinct representations.
+Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
+the closed provider-failure/native transcript projections in PR #330
+(`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
+surface in PR #349 (`agent/review-orchestrator-wiring`). This page is the
+normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -225,26 +226,115 @@ The review-workflow requests have these shapes. Every `*_id` is a canonical UUID
 string, ordinal and count values are canonical decimal strings, and every
 nullable member is required with either its value or JSON `null`.
 
-| Type                                | Additional required members                                                                                                | Meaning                                                                  |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `create_review_target`              | `command_id`, `target_id`, `provider`, `repository`, `subject`, `head_revision`, `base_revision`, `stack_parent_target_id` | Register one immutable external target snapshot.                         |
-| `start_review_run`                  | `command_id`, `target_id`, `run_id`, `pass_id`, `workflow`, `session_id`, `accepted_input_id`                              | Admit one run and its sole session-backed pass.                          |
-| `activate_review_pass`              | `command_id`, `run_id`, `pass_id`, `turn_id`                                                                               | Bind the queued run and pass to their canonical active turn.             |
-| `record_review_findings`            | `command_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `findings`                                             | Atomically succeed a read-only pass with its complete finding inventory. |
-| `record_review_finding_disposition` | `command_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `finding_id`, `event_ordinal`, `disposition`           | Atomically conclude a judgment pass and append its finding event.        |
-| `reserve_review_external_link`      | `command_id`, `external_link_id`, `finding_id`, `provider`, `object_kind`                                                  | Reserve one provider object identity before an external write.           |
-| `attach_review_external_link`       | `command_id`, `external_link_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `external_object`, `event_ordinal` | Atomically bind an external object and its exact publication result.     |
-| `read_review_target`                | `target_id`                                                                                                                | Read one immutable target snapshot.                                      |
-| `read_review_run`                   | `run_id`                                                                                                                   | Read one run and its optional admitted pass.                             |
-| `read_review_finding`               | `finding_id`                                                                                                               | Read one complete finding aggregate.                                     |
-| `list_review_findings`              | `run_id`                                                                                                                   | List one run's findings in finding-identity order.                       |
+| Type                                 | Additional required members                                                                                                | Meaning                                                                  |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `create_review_target`               | `command_id`, `target_id`, `provider`, `repository`, `subject`, `head_revision`, `base_revision`, `stack_parent_target_id` | Register one immutable external target snapshot.                         |
+| `start_review_run`                   | `command_id`, `target_id`, `run_id`, `pass_id`, `workflow`, `session_id`, `accepted_input_id`                              | Admit one run and its sole session-backed pass.                          |
+| `activate_review_pass`               | `command_id`, `run_id`, `pass_id`, `turn_id`                                                                               | Bind the queued run and pass to their canonical active turn.             |
+| `complete_review_pass`               | `command_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `outcome`                                              | Conclude a pass carrying no other typed result.                          |
+| `record_review_findings`             | `command_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `findings`                                             | Atomically succeed a read-only pass with its complete finding inventory. |
+| `record_review_finding_event`        | `command_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `finding_id`, `event_ordinal`, `event`                 | Atomically conclude a result-bearing pass and append its finding event.  |
+| `reserve_review_external_link`       | `command_id`, `external_link_id`, `finding_id`, `provider`, `object_kind`                                                  | Reserve one provider object identity before an external write.           |
+| `attach_review_external_link`        | `command_id`, `external_link_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `external_object`, `event_ordinal` | Atomically bind an external object and its exact publication result.     |
+| `start_review_orchestration`         | `command_id`, `attempt_id`, `target_id`, `concern_set_version`, four stage template names, `concerns`                      | Freeze one client-driven concern fan-out attempt.                        |
+| `record_review_import_outcome`       | `command_id`, `attempt_id`, `pass_id`, `external_link_id`, `context_digest`, `outcome`                                     | Seal imported-context evidence or its terminal incomplete outcome.       |
+| `record_review_concern_outcome`      | `command_id`, `attempt_id`, `concern`, `pass_id`, `outcome`                                                                | Seal one frozen concern member.                                          |
+| `record_review_judgment_plan`        | `command_id`, `attempt_id`, `analysis_pass_id`, `members`                                                                  | Seal the complete judgment plan over a complete fan-out.                 |
+| `record_review_judgment_effect`      | `command_id`, `attempt_id`, `finding_id`, `event_pass_id`, `outcome`                                                       | Seal one planned finding-event application.                              |
+| `record_review_repair_outcomes`      | `command_id`, `attempt_id`, `outcomes`                                                                                     | Seal the exact repair-member inventory.                                  |
+| `record_review_publication_outcomes` | `command_id`, `attempt_id`, `outcomes`                                                                                     | Seal the exact publication-member inventory.                             |
+| `read_review_orchestration`          | `attempt_id`                                                                                                               | Read one complete orchestration attempt.                                 |
+| `read_review_target`                 | `target_id`                                                                                                                | Read one immutable target snapshot.                                      |
+| `read_review_run`                    | `run_id`                                                                                                                   | Read one run and its optional admitted pass.                             |
+| `read_review_finding`                | `finding_id`                                                                                                               | Read one complete finding aggregate.                                     |
+| `list_review_findings`               | `run_id`                                                                                                                   | List one run's findings in finding-identity order.                       |
 
-Target subjects, workflows, pass and finding state, finding content,
-disposition, and external-link vocabularies are the distinct wire
-representations of the [review-workflow domain](review-workflows.md). The daemon
-constructs domain values before mutation and rejects an incompatible target
-shape, workflow/pass pair, session/input/turn binding, terminal frontier,
-finding inventory, event, or attachment without normalizing it.
+`complete_review_pass.outcome` is exactly `succeeded`, `failed`, `blocked`, or
+`cancelled`. Success requires non-null `turn_id` and `output_frontier_id`.
+Failure and blockage require a non-null turn and a null frontier. Cancellation
+always requires a null frontier and admits either a non-null admitted turn or
+null when cancellation preceded activation. Every other correlation is
+malformed. Its receipt carries the exact matching terminal pass state; queued or
+running is malformed in `review_pass_completed`.
+
+A finding `event` is exactly one of `accepted {}`, `rejected { reason }`,
+`duplicate { canonical_finding_id }`, `superseded { successor_finding_id }`,
+`stale {}`, `fixed {}`, or `blocked_with_reason { reason, external_link_id }`.
+The blocked link member is required and nullable. `output_frontier_id` is itself
+required and nullable: `blocked_with_reason` requires JSON null because its pass
+is blocked, while every other finding event requires the successful output
+frontier. Reasons are nonempty exact text, reject U+0000, and carry at most
+65,536 UTF-8 bytes. Duplicate and superseded references cannot name the finding
+receiving the event. `posted` is deliberately absent from this request:
+publication remains the reservation-then-attachment operation, whose successful
+attachment appends the posted event.
+
+An orchestration start carries one through 32 ordered `{ key, template_name }`
+concern objects. Keys and template names are nonempty, each inventory is unique
+by key and by name, keys carry at most 1,024 UTF-8 bytes without U+0000, and
+template names use the existing 128-byte lowercase ASCII template-name grammar.
+The daemon resolves and copy-binds every supplied name; the durable projection
+reports canonical lowercase 64-hex template digests rather than treating names
+as mutable authority. `concern_set_version` is a checked review key. Context and
+template digests are exactly 64 lowercase hexadecimal characters; uppercase,
+shortened, or prefixed spellings are malformed.
+
+Import and concern outcomes use the closed `succeeded`, `failed`, `blocked`, and
+`cancelled` vocabulary. Successful import requires non-null pass and context
+digest; its external link may be null. Failed or blocked import requires a
+non-null pass and null link and context. Cancelled import admits a null pass but
+also requires null link and context. A concern outcome requires a non-null pass
+unless cancelled. Judgment dispositions are exactly `accepted {}`,
+`rejected { reason }`, `duplicate { canonical_finding_id }`,
+`superseded { successor_finding_id }`, or `stale {}`. A judgment plan carries at
+most 1,024 members and cannot repeat a finding identity. Judgment-effect outcome
+is `applied`, `failed`, `blocked`, or `cancelled`; exactly `applied` requires a
+non-null `event_pass_id`. Repair outcome is `fixed`, `failed`, `blocked`, or
+`cancelled`; exactly `fixed` requires a non-null event pass. Publication outcome
+is `published`, `failed`, `blocked`, or `cancelled`; exactly `published`
+requires a non-null external link. Repair and publication arrays each carry at
+most 1,024 members and cannot repeat a finding identity. Unknown outcome tokens,
+tagged members, array members, and any contradictory nullable evidence are
+malformed before application construction.
+
+The orchestration read snapshot is
+`{ attempt_id, target_id, state, concern_set_version, stage_template_digests, concerns, counts }`.
+State is exactly `awaiting_import`, `import_incomplete`, `awaiting_concerns`,
+`fanout_incomplete`, `awaiting_judgment`, `awaiting_judgment_effects`,
+`judgment_incomplete`, `awaiting_repair`, `repair_incomplete`,
+`awaiting_publication`, `publication_incomplete`, or `complete`. Each frozen
+concern carries `{ key, template_digest, status, pass_id }`; status is
+`pending`, `succeeded`, `failed`, `blocked`, `cancelled`, or `superseded`.
+Pending requires a null pass; success, failure, blockage, and supersession
+require a non-null pass; cancellation admits either. The required counts are
+`finding_count`, `judgment_member_count`, `judgment_effect_applied_count`,
+`repair_fixed_count`, and `publication_published_count`. Each is at most 1,024;
+judgment members cannot exceed findings, and applied, fixed, or published counts
+cannot exceed judgment members. The snapshot repeats the same nonempty unique
+one-through-32 concern inventory and checked concern-set key. Before import
+every concern is pending. Awaiting concerns requires a pending member; fan-out
+incomplete requires a complete inventory with at least one non-success; every
+state from awaiting judgment onward requires every concern to have succeeded.
+Judgment-effect states require strictly fewer applied effects than plan members,
+while repair and later states require equality. Counts belonging to a later
+barrier must remain zero until that barrier can exist. Any state, status, or
+count combination violating those relations is an impossible server projection
+and is malformed. Snapshot construction consumes two units from the shared
+pool-capacity budget, leaving two connections reserved for non-snapshot work; a
+pool with fewer than four configured connections cannot start the process
+listener. The database-global snapshot admission loser rolls back its
+transaction before an exponential retry wait that begins at 10 ms and is capped
+at 100 ms. Admission is bounded to five seconds, after which the read reports
+unavailable; daemon shutdown cancels the admission wait and releases its
+capacity.
+
+Target subjects, workflows, pass and finding state, finding content, events, and
+external-link vocabularies are the distinct wire representations of the
+[review-workflow domain](review-workflows.md). The daemon constructs domain and
+application values before mutation and rejects an incompatible target shape,
+workflow/pass pair, session/input/turn binding, terminal frontier, finding
+inventory, cross-run reference, orchestration barrier, event, or attachment
+without normalizing it.
 
 A selection object is exactly one of:
 
@@ -322,23 +412,39 @@ recovery. The expected defaults version is likewise part of a replacement's
 canonical payload; exact recovery preserves it together with the complete model
 selection and dangerous-tool auto-approval posture.
 
-Review mutations use the same owner-global command namespace. Equality is the
-closed operation kind plus SHA-256 of the validated semantic request object;
-frame version and request identity are excluded. Before hashing, the daemon
-canonicalizes a complete `record_review_findings` request into finding-identity
-order, so array order does not distinguish the same semantic inventory. The
-typed append-only receipt stores the complete stable success response. A
-recorded receipt is inspected before mutable aggregate-state preconditions, so
-an equal retry returns that response even after the operation changed the
-aggregate state. Each aggregate effect uses its owning store transaction. Fresh
+Review mutations, including every orchestration start and stage seal, use the
+same owner-global command namespace. The terminal prints a generated identity
+before request I/O; an exact retry supplies `--command-id` and the same scalar
+and file content. Equality is the closed operation kind plus SHA-256 of the
+validated semantic request object; frame version and request identity are
+excluded. Before hashing, the daemon canonicalizes a complete
+`record_review_findings` request into finding-identity order, so array order
+does not distinguish the same semantic inventory. Before an orchestration
+effect, the adapter commits an immutable typed intent binding command identity,
+semantic digest, attempt, and closed operation kind. The effect and an
+append-only marker naming its exact command commit atomically. A concern marker
+also binds the immutable claim sequence it created; later replacement of a
+failed claim cannot redirect replay to the successor. They are followed, while
+the daemon still holds exclusive review-mutation admission, by an append-only
+recovery result containing the operation-derived stage and progress. The typed
+owner-global receipt then atomically replaces the intent. The intent, recovery,
+and receipt constraints keep operation kind, stage, and constituent progress
+coherent. If the process stops after the effect but before recovery, the intent
+preserves exact-retry identity and the effect marker proves that this command
+caused the operation-specific durable effect; the retry must also authenticate
+that equal effect independently of the aggregate current stage, reconstruct
+progress for the original operation stage without later facts, and finish the
+recovery and receipt. A fresh command at the later stage remains rejected. If
+receipt commit is lost, an equal retry materializes it from the recovery result
+and returns that original operation-stage response rather than later aggregate
+state. A recorded receipt is inspected before mutable aggregate-state
+preconditions. A semantically equal start similarly preserves
+`review_orchestration_started`; a different frozen attempt fails closed. Fresh
 run admission creates its run and sole pass in one transaction; recovery also
 recognizes and completes a matching run-only intermediate committed by the
-earlier multi-transaction implementation. This atomicity is the run-admission
-contract. If an effect commits before the receipt and the process exits, an
-equal retry recognizes the exact complete effect, records the missing receipt,
-and returns the stable result. Reusing the command identity for a different
-digest, operation kind, aggregate payload, complete inventory, event, or
-attachment fails closed. This representation is the durable review-command
+earlier multi-transaction implementation. Reusing a command identity for a
+different digest, operation kind, aggregate payload, complete inventory, event,
+or attachment fails closed. This representation is the durable review-command
 contract.
 
 The daemon admits one review mutation at a time and retains that admission
@@ -574,18 +680,37 @@ Review mutations return exactly one stable acknowledgement:
 - `review_target_created { target_id }`;
 - `review_run_started { run_id, pass_id }`;
 - `review_pass_activated { run_id, pass_id }`;
+- `review_pass_completed { run_id, pass_id, state }`;
 - `review_findings_recorded { run_id, pass_id, finding_count }`;
-- `review_finding_disposition_recorded { finding_id, status }`;
-- `review_external_link_reserved { external_link_id }`; or
-- `review_external_link_attached { external_link_id, external_object }`.
+- `review_finding_event_recorded { finding_id, status }`;
+- `review_external_link_reserved { external_link_id }`;
+- `review_external_link_attached { external_link_id, external_object }`;
+- `review_orchestration_started { attempt_id }`; or
+- `review_orchestration_advanced { attempt_id, state }`.
+
+The complete-pass receipt accepts only the terminal pass states `succeeded`,
+`failed`, `blocked`, and `cancelled`. Generic `succeeded` completion refuses a
+read-only-review pass; `record_review_findings` is its only success admission,
+including for an empty inventory. Finding-event status is the exact state
+derived from the submitted event. Every orchestration acknowledgement must name
+the same attempt and a state compatible with the submitted facts and earlier
+attempt members. A successful concern may close `fanout_incomplete` when an
+earlier concern did not succeed, but an incomplete concern submission cannot
+reach judgment. An incomplete judgment effect is `judgment_incomplete`, any
+blocked repair is `repair_incomplete`, and publication is `complete` exactly
+when every submitted member is published. The terminal refuses any contradictory
+acknowledgement.
 
 Single-aggregate reads return `review_target { target }`,
-`review_run { run, pass }`, or `review_finding { finding }`; an absent identity
-returns `not_found`. Target snapshots carry the immutable subject and revisions.
-Run snapshots carry frozen workflow, policy values, lifecycle, and optional pass
-identity; the nullable `pass` carries its exact session/input/origin-turn,
-lifecycle, optional turn, and optional successful frontier. Finding snapshots
-carry immutable content, derived status, and event count.
+`review_run { run, pass }`, `review_finding { finding }`, or
+`review_orchestration { snapshot }`; an absent identity returns `not_found`.
+Target snapshots carry the immutable subject and revisions. Run snapshots carry
+frozen workflow, policy values, lifecycle, and optional pass identity; the
+nullable `pass` carries its exact session/input/origin-turn, lifecycle, optional
+turn, and optional successful frontier. Finding snapshots carry immutable
+content, derived status, and event count. The orchestration snapshot carries the
+complete frozen template and concern inventory plus its current barrier state
+and progress counts as specified above.
 
 A successful `list_review_findings` response is
 `review_findings_start { run_id }`, zero or more
@@ -1549,15 +1674,61 @@ The `review` command adds these headless workflow verbs:
 - `create-target <target> --provider <key> --repository <key> --change-request <decimal> --head-revision <revision> --base-revision <revision>`;
 - `start-run <target> <run> <pass> --workflow <kind> --session-id <session> --accepted-input-id <input>`;
 - `activate-pass <run> <pass> --turn-id <turn>`;
-- `record-finding <run> <pass> --turn-id <turn> --output-frontier-id <frontier> --finding-id <finding> --file-path <path> --title <text> --body <text> --severity <severity> --confidence <basis-points> --category <key>`;
+- `complete-pass <run> <pass> --outcome <succeeded|failed|blocked|cancelled> [--turn-id <turn>] [--output-frontier-id <frontier>]`;
+- `record-finding <run> <pass> --turn-id <turn> --output-frontier-id <frontier> --finding-id <finding> --file-path <path> --title <text> --body <text> --severity <severity> --is-real-confidence <basis-points> --severity-label-confidence <basis-points> --category <key>`;
+- `record-findings <run> <pass> --turn-id <turn> --output-frontier-id <frontier> --findings-file <path>`;
+- `record-finding-event <run> <pass> --turn-id <turn> [--output-frontier-id <frontier>] --finding-id <finding> --event-ordinal <decimal> --event <accepted|rejected|duplicate|superseded|stale|fixed|blocked-with-reason>`;
+- `start-orchestration <attempt> <target> --concern-set-version <key> --import-template-name <name> --judgment-template-name <name> --repair-template-name <name> --publication-template-name <name> --concerns-file <path>`;
+- `record-import-outcome <attempt> --outcome <succeeded|failed|blocked|cancelled> [--pass-id <pass>] [--external-link-id <link>] [--context-digest <digest>]`;
+- `record-concern-outcome <attempt> <concern> --outcome <succeeded|failed|blocked|cancelled> [--pass-id <pass>]`;
+- `record-judgment-plan <attempt> <analysis-pass> --members-file <path>`;
+- `record-judgment-effect <attempt> <finding> --outcome <applied|failed|blocked|cancelled> [--event-pass-id <pass>]`;
+- `record-repair-outcomes <attempt> --outcomes-file <path>`;
+- `record-publication-outcomes <attempt> --outcomes-file <path>`;
+- `reserve-external-link <finding> <link> --provider <key> --object-kind <review|review-thread|review-comment|change-request-comment>`;
+- `attach-external-link <link> <run> <pass> --turn-id <turn> --output-frontier-id <frontier> --external-object <opaque-key> --event-ordinal <decimal>`;
+- `read-orchestration <attempt>`;
 - `list-findings <run>`;
 - `read-target <target>`;
 - `read-run <run>`; and
 - `read-finding <finding>`.
 
-Each review mutation also accepts `--command-id <uuid>`. Target creation accepts
-an optional `--stack-parent-target-id`; finding recording accepts an optional
-paired line range, diff side, and recommended fix.
+Every review mutation accepts `--command-id <uuid>`. Target creation accepts an
+optional `--stack-parent-target-id`; finding recording accepts an optional
+paired line range, diff side, and recommended fix. Finding-event variants use
+ordinary closed flags: rejected requires only `--reason`, duplicate and
+superseded require only `--referenced-finding-id`, and blocked-with-reason
+requires `--reason` and optionally `--external-link-id`. Accepted, stale, and
+fixed admit none of those variant fields. Blocked-with-reason forbids
+`--output-frontier-id`; every other event requires it. The terminal rejects
+variant fields or pass/frontier/link/digest evidence that contradicts the
+selected closed outcome before socket I/O. External-link reservation precedes
+the provider write; attachment follows a successful provider write and carries
+the exact producing pass, turn, frontier, opaque provider object, and finding
+event ordinal.
+
+Only bounded inventories use JSON files. Their exact top-level wrappers are
+`{"findings":[...]}` for `--findings-file`, `{"concerns":[...]}` for
+`--concerns-file`, `{"members":[...]}` for `--members-file`, and
+`{"outcomes":[...]}` for either outcomes file. The findings inventory may be
+empty and seals the read-only pass exactly once; `record-finding` remains the
+one-finding convenience form. Every wrapper and nested protocol object denies
+unknown members; canonical UUID, decimal, digest, tag, nullable-member,
+uniqueness, and outcome-correlation rules remain those of the wire request. The
+terminal reads at most three quarters of the 8 MiB frame cap plus one byte and
+refuses a file reaching that extra byte before printing a command identity. The
+reserved quarter covers the request envelope and re-encoding overhead; exact
+frame encoding remains authoritative. Ordinary request validation then enforces
+the 32-concern and 1,024-member bounds before connecting. Exact ambiguous retry
+therefore needs the same file bytes semantically decoded to the same closed
+inventory, as well as the same scalar arguments and printed command identity.
+
+Orchestration reads validate the selected attempt and the protocol-level frozen
+inventory correlations before output. The first line reports attempt, target,
+state, concern count, and all five progress counts; subsequent lines report the
+concern-set key, four frozen stage-template digests, then every concern's key,
+template digest, status, and optional pass. Process-derived keys remain
+terminal-safely escaped.
 
 Runner creation accepts either an exact runner or a capability class, never
 both. Beyond the selector every placement flag is independent: `--repository`,
@@ -1711,18 +1882,25 @@ control case, which reconnects for a fresh snapshot.
 
 Review mutations print a generated command identity before socket I/O and an
 ambiguous diagnostic directs the operator to repeat the same verb, identifiers,
-and content with that identity. Review reads validate selected identities and a
-run response's pass presence, pass identity, run ancestry, and target ancestry
-before writing output; finding lists additionally validate their start marker,
-strict identity order, maximum 32-item inventory, terminal count, and end marker
-before success. `record-finding` rejects a zero or greater-than-32-bit line
-number, a line end before its start, and confidence above 10,000 basis points as
-a usage error before socket I/O. Every process-derived review text field follows
-the same terminal-safe escaping and `--raw-output` opt-in below. Target output
-distinguishes an absent base revision from every present value, run output
-carries its complete frozen policy, and finding output carries every immutable
-content field, location, severity, confidence, category, optional-repair
-presence, ancestry identity, status, and event count.
+scalar options, and JSON inventory with that identity. An invalid or oversized
+JSON file fails before identity generation. Mutation receipts must echo the
+selected run/pass, finding/status, or attempt/state relation exactly; a
+well-formed but incoherent receipt is a protocol failure. Review reads validate
+selected identities and a run response's pass presence, pass identity, run
+ancestry, and target ancestry before writing output; finding lists additionally
+validate their start marker, strict identity order, maximum 32-item inventory,
+terminal count, and end marker before success. `record-finding` rejects a zero
+or greater-than-32-bit line number, a line end before its start, and either
+confidence above 10,000 basis points as a usage error before socket I/O.
+`record-finding-event` likewise rejects zero or greater-than-32-bit event
+ordinals and every event/frontier or variant-field contradiction locally. Every
+process-derived review text field follows the same terminal-safe escaping and
+`--raw-output` opt-in below. Target output distinguishes an absent base revision
+from every present value, run output carries its complete frozen policy, finding
+output carries every immutable content field, location, severity, confidence,
+category, optional-repair presence, ancestry identity, status, and event count,
+and orchestration output carries the complete frozen concern inventory and
+progress projection.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation.

@@ -5401,6 +5401,7 @@ pub enum ReviewOrchestrationOutcome {
 pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
     Store(StoreError),
     InvalidImportEvidence(ReviewImportEvidenceFailure),
+    InvalidConcernEvidence(ReviewFanoutBarrierFailure),
     Runner(RunnerError),
     ConcernTaskTerminated,
     DurableConflict,
@@ -5445,6 +5446,7 @@ pub enum ReviewWorkflowOperation {
     CreateTarget(ReviewTarget),
     StartRun { run: ReviewRun, pass: ReviewPass },
     ActivatePass { run: ReviewRun, pass: ReviewPass },
+    CompletePass { run: ReviewRun, pass: ReviewPass },
     RecordFindings {
         pass: ReviewPassEvidence,
         findings: Vec<ReviewFinding>,
@@ -5468,16 +5470,32 @@ pub enum ReviewWorkflowOperationKind {
     CreateTarget,
     StartRun,
     ActivatePass,
+    CompletePass,
     RecordFindings,
     RecordFindingEvent,
     ReserveExternalLink,
     AttachExternalLink,
 }
 
+pub enum ReviewPassCompletionStatus {
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+impl ReviewPassCompletionStatus {
+    pub const fn from_state(state: &ReviewPassState) -> Option<Self>;
+}
+
 pub enum ReviewWorkflowCommandResult {
     TargetCreated { target: ReviewTargetId },
     RunStarted { run: ReviewRunId, pass: ReviewPassId },
     PassActivated { run: ReviewRunId, pass: ReviewPassId },
+    PassCompleted {
+        run: ReviewRunId,
+        pass: ReviewPassId,
+        status: ReviewPassCompletionStatus,
+    },
     FindingsRecorded {
         run: ReviewRunId,
         pass: ReviewPassId,
@@ -7524,7 +7542,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
-| application: review_workflow                       | 8 (incl. 2 traits)   |
+| application: review_workflow                       | 9 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)   |
@@ -7532,4 +7550,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **192**              |
+| **signalbox-application total**                    | **193**              |

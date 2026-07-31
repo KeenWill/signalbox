@@ -2869,6 +2869,8 @@ dependencies = [
  "clap",
  "expect-test",
  "rustix",
+ "serde",
+ "serde_json",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
