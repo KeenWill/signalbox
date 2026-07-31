@@ -1491,7 +1491,7 @@ impl GitHubApiTransport {
                 pagination_extent = FilePaginationExtent::Truncated;
             }
         }
-        let truncated = files_incomplete(files.len(), initial.changed_files, pagination_extent)
+        let truncated = files_incomplete(files.len(), initial.changed_files, pagination_extent)?
             || matches!(patch_extent, FilePatchExtent::Truncated);
         let current_value = self
             .pull_request_value(&arguments, credential, policy, remaining_timeout(deadline)?)
@@ -1535,12 +1535,7 @@ impl GitHubApiTransport {
         let value = self
             .success_json(response, StatusCode::OK, credential)
             .await?;
-        if value.get("errors").is_some() {
-            return Err(GitHubTransportFailure::Rejected {
-                status: 200,
-                detail: sanitized_value_detail(&value, credential),
-            });
-        }
+        validate_graphql_errors(&value)?;
         normalize_threads(&value).map(GitHubResult::review_threads)
     }
 
@@ -1831,8 +1826,18 @@ fn normalize_patch(
     }
 }
 
-fn files_incomplete(received: usize, expected: usize, extent: FilePaginationExtent) -> bool {
-    matches!(extent, FilePaginationExtent::Truncated) || received < expected
+fn files_incomplete(
+    received: usize,
+    expected: usize,
+    extent: FilePaginationExtent,
+) -> Result<bool, GitHubTransportFailure> {
+    let pagination_incomplete = match extent {
+        FilePaginationExtent::Complete => false,
+        FilePaginationExtent::Truncated => true,
+    };
+    (received <= expected)
+        .then_some(pagination_incomplete || received < expected)
+        .ok_or_else(|| invalid_response(None))
 }
 
 struct DiffSnapshot {
@@ -1927,6 +1932,18 @@ fn normalize_files(value: &serde_json::Value) -> Result<NormalizedFiles, GitHubT
         files,
         patch_extent,
     })
+}
+
+fn validate_graphql_errors(value: &serde_json::Value) -> Result<(), GitHubTransportFailure> {
+    let object = required_object(value)?;
+    let Some(errors) = object.get("errors") else {
+        return Ok(());
+    };
+    if required_array(errors)?.is_empty() {
+        Ok(())
+    } else {
+        Err(GitHubTransportFailure::DispatchUnknown)
+    }
 }
 
 fn normalize_threads(
@@ -2074,15 +2091,6 @@ fn checked_url(value: String) -> Result<String, GitHubTransportFailure> {
     valid.then_some(value).ok_or_else(|| invalid_response(None))
 }
 
-fn sanitized_value_detail(
-    value: &serde_json::Value,
-    credential: &CredentialValue,
-) -> Option<SanitizedGitHubError> {
-    let bytes = serde_json::to_vec(value).ok()?;
-    let scrubber = CredentialScrubber::try_new(credential)?;
-    sanitize_error_body(&bytes, ResponseExtent::Complete, &scrubber)
-}
-
 fn required_object(
     value: &serde_json::Value,
 ) -> Result<&serde_json::Map<String, serde_json::Value>, GitHubTransportFailure> {
@@ -2204,6 +2212,7 @@ mod tests {
     const THREAD_OUTDATED: bool = false;
     const COMMENTS_TRUNCATED: bool = false;
     const REVIEW_COMMENT_BODY: &str = "Please cover this edge.";
+    const GRAPHQL_ERROR_MESSAGE: &str = "synthetic GraphQL failure";
     const ERROR_BODY_PREFIX: &str = "safe ";
     const PUBLISHED_REVIEW_STATE: &str = "APPROVED";
     const MISMATCHED_PUBLISHED_REVIEW_STATE: &str = "COMMENTED";
@@ -2577,16 +2586,30 @@ mod tests {
 
     #[test]
     fn github_file_ceiling_is_reported_as_incomplete() {
-        assert!(files_incomplete(
-            GITHUB_FILE_CEILING,
-            FILES_BEYOND_CEILING,
-            FilePaginationExtent::Complete,
-        ));
-        assert!(!files_incomplete(
-            CHANGED_FILES,
-            CHANGED_FILES,
-            FilePaginationExtent::Complete
-        ));
+        assert!(
+            files_incomplete(
+                GITHUB_FILE_CEILING,
+                FILES_BEYOND_CEILING,
+                FilePaginationExtent::Complete,
+            )
+            .expect("bounded inventory is classified")
+        );
+        assert!(
+            !files_incomplete(CHANGED_FILES, CHANGED_FILES, FilePaginationExtent::Complete,)
+                .expect("matching inventory is classified")
+        );
+    }
+
+    #[test]
+    fn github_file_inventory_larger_than_snapshot_is_rejected() {
+        assert_eq!(
+            files_incomplete(
+                CHANGED_FILES_AFTER_SNAPSHOT,
+                CHANGED_FILES,
+                FilePaginationExtent::Complete,
+            ),
+            Err(invalid_response(None))
+        );
     }
 
     #[test]
@@ -2644,6 +2667,26 @@ mod tests {
             remaining_timeout(Instant::now()),
             Err(GitHubTransportFailure::DispatchUnknown),
         );
+    }
+
+    #[test]
+    fn graphql_nonempty_errors_are_dispatch_unknown() {
+        let mut response = threads_response();
+        response["errors"] = serde_json::json!([{"message": GRAPHQL_ERROR_MESSAGE}]);
+
+        assert_eq!(
+            validate_graphql_errors(&response),
+            Err(GitHubTransportFailure::DispatchUnknown)
+        );
+    }
+
+    #[test]
+    fn graphql_empty_errors_allow_normalization() {
+        let mut response = threads_response();
+        response["errors"] = serde_json::json!([]);
+
+        validate_graphql_errors(&response).expect("empty GraphQL errors are non-errors");
+        normalize_threads(&response).expect("data remains available");
     }
 
     #[test]
