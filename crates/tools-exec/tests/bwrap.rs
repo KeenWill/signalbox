@@ -12,8 +12,9 @@ async fn real_bwrap_profile_hides_ambient_home_directory() -> Result<(), Box<dyn
 }
 
 async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var_os("CI").is_none()
-        && std::env::var_os("SIGNALBOX_RUN_BWRAP_INTEGRATION").is_none()
+    if !procfs_children_available()
+        || std::env::var_os("CI").is_none()
+            && std::env::var_os("SIGNALBOX_RUN_BWRAP_INTEGRATION").is_none()
     {
         return Ok(());
     }
@@ -33,6 +34,23 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
     assert_eq!(result.confinement, ExecutionConfinement::FilesystemConfined);
     assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
     Ok(())
+}
+
+fn procfs_children_available() -> bool {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{}/task", std::process::id())) else {
+        return false;
+    };
+    let mut observed_task = false;
+    for task in tasks {
+        let Ok(task) = task else {
+            return false;
+        };
+        if std::fs::read_to_string(task.path().join("children")).is_err() {
+            return false;
+        }
+        observed_task = true;
+    }
+    observed_task
 }
 
 #[test]

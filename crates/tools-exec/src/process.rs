@@ -35,8 +35,8 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 300;
 const MAX_PROGRAM_CHARACTERS: usize = 4096;
 const MAX_PROGRAM_BYTES: usize = MAX_PROGRAM_CHARACTERS * 4;
-const MAX_ARGUMENTS: usize = 128;
-const MAX_ARGUMENT_CHARACTERS: usize = 4096;
+const MAX_ARGUMENTS: usize = 16;
+const MAX_ARGUMENT_CHARACTERS: usize = 1024;
 const MAX_ARGUMENT_BYTES: usize = MAX_ARGUMENT_CHARACTERS * 4;
 const MAX_TOTAL_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_WORKING_DIRECTORY_CHARACTERS: usize = 4096;
@@ -484,6 +484,23 @@ pub struct TokioProcessRunner {
     _supervisor: Arc<rustix::fd::OwnedFd>,
 }
 
+#[cfg(target_os = "linux")]
+fn inherited_descriptor_above_standard_streams(
+    descriptor: rustix::fd::OwnedFd,
+) -> Result<rustix::fd::OwnedFd, rustix::io::Errno> {
+    if rustix::fd::AsRawFd::as_raw_fd(&descriptor) >= 3 {
+        return Ok(descriptor);
+    }
+    let mut lower_descriptors = vec![descriptor];
+    loop {
+        let duplicate = rustix::io::dup(&lower_descriptors[0])?;
+        if rustix::fd::AsRawFd::as_raw_fd(&duplicate) >= 3 {
+            return Ok(duplicate);
+        }
+        lower_descriptors.push(duplicate);
+    }
+}
+
 impl TokioProcessRunner {
     /// Pins the separately packaged Linux supervisor executable.
     pub fn try_new(
@@ -513,6 +530,13 @@ impl TokioProcessRunner {
                 path: supplied.to_owned(),
                 source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
             })?;
+            let supervisor =
+                inherited_descriptor_above_standard_streams(supervisor).map_err(|source| {
+                    ExecToolConstructionError::SupervisorProgram {
+                        path: supplied.to_owned(),
+                        source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                    }
+                })?;
             let metadata = rustix::fs::fstat(&supervisor).map_err(|source| {
                 ExecToolConstructionError::SupervisorProgram {
                     path: supplied.to_owned(),
@@ -718,6 +742,13 @@ impl WorkspaceIdentity {
             path: path.to_owned(),
             source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
         })?;
+        let directory =
+            inherited_descriptor_above_standard_streams(directory).map_err(|source| {
+                ExecToolConstructionError::WorkspaceRoot {
+                    path: path.to_owned(),
+                    source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                }
+            })?;
         let pinned_metadata = rustix::fs::fstat(&directory).map_err(|source| {
             ExecToolConstructionError::WorkspaceRoot {
                 path: path.to_owned(),
@@ -1538,12 +1569,17 @@ mod tests {
     }
 
     #[test]
-    fn argument_schema_publishes_the_per_item_character_limit() -> Result<(), Box<dyn Error>> {
+    fn argument_schema_publishes_item_and_aggregate_safe_count_limits() -> Result<(), Box<dyn Error>>
+    {
         let schema = serde_json::to_value(schemars::schema_for!(ExecArguments))?;
 
         assert_eq!(
             schema.pointer("/properties/arguments/items/maxLength"),
             Some(&serde_json::json!(MAX_ARGUMENT_CHARACTERS))
+        );
+        assert_eq!(
+            schema.pointer("/properties/arguments/maxItems"),
+            Some(&serde_json::json!(MAX_ARGUMENTS))
         );
         Ok(())
     }
@@ -1630,6 +1666,43 @@ mod tests {
         assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
         assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_tree_unsupported_remains_typed_without_terminal_text()
+    -> Result<(), Box<dyn Error>> {
+        let expected_outcome = ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::ProcessTreeUnsupported,
+        };
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            ProcessRunResult {
+                outcome: expected_outcome,
+                stdout: ProcessOutput {
+                    bytes: Vec::new(),
+                    completeness: CaptureCompleteness::Complete,
+                },
+                stderr: ProcessOutput {
+                    bytes: Vec::new(),
+                    completeness: CaptureCompleteness::Complete,
+                },
+            },
+        );
+        let mut command_runner =
+            UnsandboxedCommandRunner::try_new(runner, std::env::current_dir()?)?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.outcome, expected_outcome);
+        assert_eq!(result.stdout.text, String::new());
+        assert_eq!(result.stderr.text, String::new());
         Ok(())
     }
 

@@ -237,7 +237,7 @@ mod linux {
     struct ProcessTreeGuard {
         root: u32,
         supervisor: u32,
-        descendants: Arc<Mutex<BTreeMap<u32, rustix::fd::OwnedFd>>>,
+        descendants: Arc<Mutex<BTreeMap<u32, TrackedProcess>>>,
         stop: Arc<AtomicBool>,
         watcher: Option<JoinHandle<()>>,
         process_tree_supported: Arc<AtomicBool>,
@@ -248,6 +248,11 @@ mod linux {
         Complete,
         ProcessTreeUnsupported,
         Failed,
+    }
+
+    struct TrackedProcess {
+        pidfd: rustix::fd::OwnedFd,
+        start_time: u64,
     }
 
     impl ProcessTreeGuard {
@@ -343,8 +348,11 @@ mod linux {
                 .descendants
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            for pidfd in descendants.values() {
-                let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+            for process in descendants.values() {
+                let _ = rustix::process::pidfd_send_signal(
+                    &process.pidfd,
+                    rustix::process::Signal::KILL,
+                );
             }
         }
 
@@ -380,14 +388,11 @@ mod linux {
     fn observe_descendants(
         root: u32,
         supervisor: u32,
-        descendants: &Arc<Mutex<BTreeMap<u32, rustix::fd::OwnedFd>>>,
+        descendants: &Arc<Mutex<BTreeMap<u32, TrackedProcess>>>,
     ) -> Result<bool, ()> {
-        let mut known = descendants
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>();
+        let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut changed = retire_exited_or_reused(&mut tracked)?;
+        let mut known = tracked.keys().copied().collect::<BTreeSet<_>>();
         known.insert(root);
         loop {
             let before = known.len();
@@ -397,11 +402,44 @@ mod linux {
                 .chain(std::iter::once(supervisor))
                 .collect::<Vec<_>>();
             for parent in parents {
-                match process_children(parent) {
-                    Ok(children) => known.extend(children),
-                    Err(ProcessChildrenError::Gone) if parent != supervisor => {}
+                let expected_start_time = tracked.get(&parent).map(|process| process.start_time);
+                if expected_start_time.is_some()
+                    && process_start_time(parent)? != expected_start_time
+                {
+                    tracked.remove(&parent);
+                    known.remove(&parent);
+                    changed = true;
+                    continue;
+                }
+                let children = match process_children(parent) {
+                    Ok(children) => children,
+                    Err(ProcessChildrenError::Gone) if parent != supervisor => {
+                        if tracked.remove(&parent).is_some() {
+                            known.remove(&parent);
+                            changed = true;
+                        }
+                        continue;
+                    }
                     Err(ProcessChildrenError::Gone | ProcessChildrenError::Unsupported) => {
                         return Err(());
+                    }
+                };
+                if expected_start_time.is_some()
+                    && process_start_time(parent)? != expected_start_time
+                {
+                    tracked.remove(&parent);
+                    known.remove(&parent);
+                    changed = true;
+                    continue;
+                }
+                for raw_pid in children {
+                    if raw_pid == root || known.contains(&raw_pid) {
+                        continue;
+                    }
+                    if let Some(process) = pin_process(raw_pid)? {
+                        tracked.insert(raw_pid, process);
+                        known.insert(raw_pid);
+                        changed = true;
                     }
                 }
             }
@@ -409,24 +447,72 @@ mod linux {
                 break;
             }
         }
-        known.remove(&root);
-        let mut changed = false;
-        let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
-        for raw_pid in known {
-            if tracked.contains_key(&raw_pid) {
-                continue;
-            }
-            let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) else {
-                continue;
-            };
-            if let Ok(pidfd) =
-                rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
-            {
-                tracked.insert(raw_pid, pidfd);
-                changed = true;
+        Ok(changed)
+    }
+
+    fn retire_exited_or_reused(tracked: &mut BTreeMap<u32, TrackedProcess>) -> Result<bool, ()> {
+        let mut retired = Vec::new();
+        for (raw_pid, process) in tracked.iter() {
+            let identity_changed = process_start_time(*raw_pid)? != Some(process.start_time);
+            if identity_changed || pidfd_has_exited(&process.pidfd)? {
+                retired.push(*raw_pid);
             }
         }
+        let changed = !retired.is_empty();
+        for raw_pid in retired {
+            tracked.remove(&raw_pid);
+        }
         Ok(changed)
+    }
+
+    fn pin_process(raw_pid: u32) -> Result<Option<TrackedProcess>, ()> {
+        let Some(start_time) = process_start_time(raw_pid)? else {
+            return Ok(None);
+        };
+        let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) else {
+            return Ok(None);
+        };
+        let pidfd = match rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
+            Ok(pidfd) => pidfd,
+            Err(rustix::io::Errno::SRCH) => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        if process_start_time(raw_pid)? != Some(start_time) {
+            return Ok(None);
+        }
+        Ok(Some(TrackedProcess { pidfd, start_time }))
+    }
+
+    fn pidfd_has_exited(pidfd: &rustix::fd::OwnedFd) -> Result<bool, ()> {
+        let mut descriptors = [rustix::event::PollFd::new(
+            pidfd,
+            rustix::event::PollFlags::IN,
+        )];
+        rustix::event::poll(
+            &mut descriptors,
+            Some(&rustix::time::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }),
+        )
+        .map_err(|_| ())?;
+        Ok(!descriptors[0].revents().is_empty())
+    }
+
+    fn process_start_time(pid: u32) -> Result<Option<u64>, ()> {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        let command_end = stat.rfind(')').ok_or(())?;
+        let start_time = stat[command_end + 1..]
+            .split_whitespace()
+            .nth(19)
+            .ok_or(())?
+            .parse::<u64>()
+            .map_err(|_| ())?;
+        Ok(Some(start_time))
     }
 
     #[derive(Clone, Copy)]
@@ -489,6 +575,42 @@ mod linux {
                 Err(rustix::io::Errno::CHILD) => return,
                 Err(_) => return,
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const CHILD_FIXTURE_NAME: &str = "linux::tests::child_fixture";
+
+        #[test]
+        fn exited_pidfd_is_retired_before_another_ancestry_pass()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let mut child = Command::new(std::env::current_exe()?)
+                .args(["--ignored", "--exact", CHILD_FIXTURE_NAME])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            let raw_pid = child.id();
+            let process = pin_process(raw_pid)
+                .map_err(|()| std::io::Error::other("pin process"))?
+                .ok_or_else(|| std::io::Error::other("child process disappeared"))?;
+            let mut tracked = BTreeMap::from([(raw_pid, process)]);
+            child.wait()?;
+
+            let changed = retire_exited_or_reused(&mut tracked)
+                .map_err(|()| std::io::Error::other("retire process"))?;
+
+            assert!(changed);
+            assert!(tracked.is_empty());
+            Ok(())
+        }
+
+        #[test]
+        #[ignore = "subprocess fixture for pidfd retirement"]
+        fn child_fixture() {
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 }
