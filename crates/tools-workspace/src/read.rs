@@ -40,7 +40,8 @@ const DEFAULT_READ_MAX_BYTES: usize = 64 * 1024;
 const MAX_READ_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 100;
 const MAX_RESULTS: usize = 256;
-const MAX_PATTERN_BYTES: usize = 4096;
+const MAX_PATTERN_CHARACTERS: usize = 4096;
+const MAX_PATTERN_BYTES: usize = MAX_PATTERN_CHARACTERS * 4;
 const MAX_SEARCH_FILE_BYTES: usize = 1024 * 1024;
 const MAX_SEARCH_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SEARCH_LINE_BYTES: usize = 1024;
@@ -67,7 +68,7 @@ fn default_path() -> String {
 #[serde(deny_unknown_fields)]
 pub struct ReadFileArguments {
     /// Relative file path inside the injected root.
-    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_BYTES))]
+    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_CHARACTERS))]
     pub path: String,
     /// Maximum UTF-8 content bytes retained, from 1 through 262144.
     #[serde(default = "default_read_max_bytes")]
@@ -90,7 +91,7 @@ impl ToolContract for ReadFileContract {
 pub struct ListDirectoryArguments {
     /// Relative directory path inside the injected root.
     #[serde(default = "default_path")]
-    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_BYTES))]
+    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_CHARACTERS))]
     pub path: String,
     /// Maximum entries returned, from 1 through 256.
     #[serde(default = "default_max_results")]
@@ -112,11 +113,11 @@ impl ToolContract for ListDirectoryContract {
 #[serde(deny_unknown_fields)]
 pub struct GlobFilesArguments {
     /// Glob pattern relative to `path`; parent traversal is forbidden.
-    #[schemars(length(min = 1, max = MAX_PATTERN_BYTES))]
+    #[schemars(length(min = 1, max = MAX_PATTERN_CHARACTERS))]
     pub pattern: String,
     /// Relative directory from which the glob is evaluated.
     #[serde(default = "default_path")]
-    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_BYTES))]
+    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_CHARACTERS))]
     pub path: String,
     /// Maximum matches returned, from 1 through 256.
     #[serde(default = "default_max_results")]
@@ -138,15 +139,15 @@ impl ToolContract for GlobFilesContract {
 #[serde(deny_unknown_fields)]
 pub struct SearchFilesArguments {
     /// Rust regular expression matched independently against each UTF-8 line.
-    #[schemars(length(min = 1, max = MAX_PATTERN_BYTES))]
+    #[schemars(length(min = 1, max = MAX_PATTERN_CHARACTERS))]
     pub pattern: String,
     /// Relative directory or file to search.
     #[serde(default = "default_path")]
-    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_BYTES))]
+    #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_CHARACTERS))]
     pub path: String,
     /// Optional glob restricting relative file paths.
     #[serde(default)]
-    #[schemars(length(min = 1, max = MAX_PATTERN_BYTES))]
+    #[schemars(length(min = 1, max = MAX_PATTERN_CHARACTERS))]
     pub glob: Option<String>,
     /// Maximum line matches returned, from 1 through 256.
     #[serde(default = "default_max_results")]
@@ -396,7 +397,7 @@ fn decode_arguments(
             let decoded: SearchFilesArguments = serde_json::from_str(arguments.as_str())
                 .map_err(|_| InvalidReadArguments::Shape)?;
             check_max_results(decoded.max_results)?;
-            if decoded.pattern.is_empty() || decoded.pattern.len() > MAX_PATTERN_BYTES {
+            if decoded.pattern.is_empty() || text_exceeds_pattern_bound(&decoded.pattern) {
                 return Err(InvalidReadArguments::Shape);
             }
             let pattern = Regex::new(&decoded.pattern).map_err(|_| InvalidReadArguments::Shape)?;
@@ -427,7 +428,7 @@ fn check_max_results(max_results: usize) -> Result<(), InvalidReadArguments> {
 }
 
 fn checked_glob(value: &str) -> Result<Pattern, InvalidReadArguments> {
-    if value.is_empty() || value.len() > MAX_PATTERN_BYTES {
+    if value.is_empty() || text_exceeds_pattern_bound(value) {
         return Err(InvalidReadArguments::Shape);
     }
     validate_relative_path(value).map_err(InvalidReadArguments::Path)?;
@@ -437,6 +438,10 @@ fn checked_glob(value: &str) -> Result<Pattern, InvalidReadArguments> {
 fn checked_path(path: &str) -> Result<PathBuf, InvalidReadArguments> {
     validate_relative_path(path).map_err(InvalidReadArguments::Path)?;
     Ok(PathBuf::from(path))
+}
+
+fn text_exceeds_pattern_bound(value: &str) -> bool {
+    value.chars().count() > MAX_PATTERN_CHARACTERS || value.len() > MAX_PATTERN_BYTES
 }
 
 /// Daemon-local executor for the four bounded workspace read tools.
@@ -611,7 +616,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
     ) -> Result<ListDirectoryResult, ReadFailure> {
         let read = self
             .filesystem
-            .read_directory(&self.root, path, max_results)
+            .read_directory(&self.root, path, max_results, MAX_WALK_ENTRIES)
             .map_err(map_resolve_failure)?;
         let entries = read.entries;
         let truncated = read.truncated;
@@ -737,10 +742,18 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
                     continue;
                 }
             };
-            if read.truncated || (retained.len() as u64) < read.total_bytes {
+            let evidence_truncated = read.truncated || (retained.len() as u64) < read.total_bytes;
+            if evidence_truncated {
                 result.truncated = true;
             }
-            self.collect_matches(&entry.path, retained, pattern, max_results, &mut result)?;
+            let complete_lines = complete_search_lines(retained, evidence_truncated);
+            self.collect_matches(
+                &entry.path,
+                complete_lines,
+                pattern,
+                max_results,
+                &mut result,
+            )?;
             if result.matches.len() > max_results {
                 result.matches.truncate(max_results);
                 result.truncated = true;
@@ -787,11 +800,18 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
         let mut pending = vec![start.to_owned()];
         let mut entries = Vec::new();
         let mut visited = 0_usize;
+        let mut inspected = 0_usize;
         while let Some(directory) = pending.pop() {
-            let remaining = MAX_WALK_ENTRIES.saturating_sub(visited);
+            let remaining_entries = MAX_WALK_ENTRIES.saturating_sub(visited);
+            let remaining_inspections = MAX_WALK_ENTRIES.saturating_sub(inspected);
             let read = self
                 .filesystem
-                .read_directory(&self.root, &directory, remaining)
+                .read_directory(
+                    &self.root,
+                    &directory,
+                    remaining_entries,
+                    remaining_inspections,
+                )
                 .map_err(map_resolve_failure)?;
             let directory_truncated = read.truncated;
             let mut children = read.entries;
@@ -803,6 +823,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
                 }
                 entries.push(child);
             }
+            inspected = inspected.saturating_add(read.inspected_entries);
             if directory_truncated {
                 return Ok(WalkResult {
                     entries,
@@ -826,6 +847,15 @@ fn utf8_prefix(bytes: &[u8], max_bytes: usize) -> Option<&str> {
             Err(_) => return None,
         }
     }
+}
+
+fn complete_search_lines(content: &str, evidence_truncated: bool) -> &str {
+    if !evidence_truncated || content.ends_with('\n') {
+        return content;
+    }
+    content
+        .rfind('\n')
+        .map_or("", |last_newline| &content[..=last_newline])
 }
 
 fn bounded_match_window(value: &str, match_start: usize, max_bytes: usize) -> (&str, usize, bool) {
@@ -1087,9 +1117,11 @@ mod tests {
 
     #[test]
     fn search_files_returns_bounded_line_evidence() {
+        const FILE_PATH: &str = "one.rs";
+
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
         fs::write(
-            workspace.path().join("one.rs"),
+            workspace.path().join(FILE_PATH),
             "fn first() {}\nfn second() {}\n",
         )
         .expect("fixture file writes");
@@ -1109,7 +1141,7 @@ mod tests {
         };
 
         assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].path, "one.rs");
+        assert_eq!(result.matches[0].path, FILE_PATH);
         assert_eq!(result.matches[0].line, 1);
         assert_eq!(result.matches[0].column, 1);
         assert_eq!(result.matches[0].text, "fn first() {}");

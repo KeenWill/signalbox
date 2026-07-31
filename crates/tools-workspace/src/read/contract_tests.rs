@@ -21,12 +21,12 @@ fn fixture_executor(
 }
 
 #[test]
-fn read_file_schema_carries_path_and_byte_bounds() {
+fn read_file_schema_carries_path_character_and_content_byte_bounds() {
     let schema = rendered_contract_schema::<ReadFileContract>();
 
     assert_eq!(
         schema["properties"]["path"]["maxLength"],
-        json!(crate::path::MAX_WORKSPACE_PATH_BYTES)
+        json!(crate::path::MAX_WORKSPACE_PATH_CHARACTERS)
     );
     assert_eq!(schema["properties"]["path"]["minLength"], json!(1));
     assert_eq!(
@@ -42,11 +42,11 @@ fn glob_files_schema_carries_pattern_path_and_result_bounds() {
 
     assert_eq!(
         schema["properties"]["pattern"]["maxLength"],
-        json!(MAX_PATTERN_BYTES)
+        json!(MAX_PATTERN_CHARACTERS)
     );
     assert_eq!(
         schema["properties"]["path"]["maxLength"],
-        json!(crate::path::MAX_WORKSPACE_PATH_BYTES)
+        json!(crate::path::MAX_WORKSPACE_PATH_CHARACTERS)
     );
     assert_eq!(
         schema["properties"]["max_results"]["maximum"],
@@ -54,6 +54,28 @@ fn glob_files_schema_carries_pattern_path_and_result_bounds() {
     );
 }
 
+#[test]
+fn unicode_character_bounds_match_schema_and_runtime_validation() {
+    const CHARACTER: &str = "é";
+    const CHARACTER_COUNT: usize = 3_000;
+
+    let path = CHARACTER.repeat(CHARACTER_COUNT);
+    let pattern = CHARACTER.repeat(CHARACTER_COUNT);
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    let executor = fixture_executor(&workspace);
+
+    assert!(path.len() > crate::path::MAX_WORKSPACE_PATH_CHARACTERS);
+    assert!(pattern.len() > MAX_PATTERN_CHARACTERS);
+
+    let encoded = json!({"path": path, "pattern": pattern}).to_string();
+    let _operation = decode_operation(
+        ReadToolKind::SearchFiles,
+        &arguments(encoded),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("schema-admitted Unicode bounds validate at runtime");
+}
 #[test]
 fn read_file_at_exact_byte_cap_reports_complete() {
     const FILE_PATH: &str = "note.txt";
@@ -264,6 +286,37 @@ fn directory_search_stops_at_aggregate_byte_budget() {
     assert!(result.truncated);
 }
 
+#[test]
+fn truncated_search_ignores_an_incomplete_final_line() {
+    const FILE_PATH: &str = "long.txt";
+    const NEEDLE: &str = "needle";
+    const CONTINUATION: &str = "-continues";
+
+    let retained_prefix = format!(
+        "{}{NEEDLE}",
+        "x".repeat(MAX_SEARCH_FILE_BYTES - NEEDLE.len())
+    );
+    let content = format!("{retained_prefix}{CONTINUATION}\n");
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(FILE_PATH), content).expect("fixture file writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::SearchFiles,
+        &arguments(format!(r#"{{"path":"{FILE_PATH}","pattern":"{NEEDLE}$"}}"#)),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("search arguments are valid");
+    let ReadResult::SearchFiles(result) = executor
+        .execute_operation(operation)
+        .expect("bounded search succeeds")
+    else {
+        panic!("search_files returns search matches")
+    };
+
+    assert!(result.matches.is_empty());
+    assert!(result.truncated);
+}
 #[test]
 fn long_line_window_contains_late_match_start() {
     const PREFIX_BYTES: usize = MAX_SEARCH_LINE_BYTES + 1;

@@ -13,8 +13,10 @@ use std::{
 
 use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat};
 
-/// Maximum accepted UTF-8 byte length of one model-supplied workspace path.
-pub const MAX_WORKSPACE_PATH_BYTES: usize = 4096;
+/// Maximum accepted Unicode scalar-value count of one model-supplied path.
+pub const MAX_WORKSPACE_PATH_CHARACTERS: usize = 4096;
+/// Maximum accepted UTF-8 byte length implied by the character bound.
+pub const MAX_WORKSPACE_PATH_BYTES: usize = MAX_WORKSPACE_PATH_CHARACTERS * 4;
 
 /// Why a model-supplied path was rejected before filesystem access.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,8 +25,8 @@ pub enum WorkspacePathRejection {
     Absolute,
     /// The supplied path contained a parent-directory component.
     ParentTraversal,
-    /// The supplied path contained a NUL, exceeded the path byte bound, or had
-    /// a component not representable by the relative-path contract.
+    /// The supplied path contained a NUL, exceeded its bounded shape, or had a
+    /// component not representable by the relative-path contract.
     Invalid,
     /// A symbolic link occurred in the supplied path.
     Symlink,
@@ -134,7 +136,7 @@ impl WorkspaceRoot {
 
     pub(crate) fn relative_name(&self, path: &Path) -> Option<String> {
         let normalized = normalize_relative_path(path);
-        Some(normalized.to_string_lossy().replace('\\', "/"))
+        normalized.to_str().map(str::to_owned)
     }
 }
 
@@ -157,10 +159,21 @@ fn normalize_relative_path(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn validate_relative_path(supplied: &str) -> Result<(), WorkspacePathRejection> {
-    if supplied.is_empty() || supplied.len() > MAX_WORKSPACE_PATH_BYTES || supplied.contains('\0') {
+    if supplied.is_empty()
+        || supplied.chars().count() > MAX_WORKSPACE_PATH_CHARACTERS
+        || supplied.len() > MAX_WORKSPACE_PATH_BYTES
+        || supplied.contains('\0')
+    {
         return Err(WorkspacePathRejection::Invalid);
     }
     let path = Path::new(supplied);
+    validate_resolved_path(path)
+}
+
+fn validate_resolved_path(path: &Path) -> Result<(), WorkspacePathRejection> {
+    if path.as_os_str().is_empty() || path.as_os_str().as_bytes().contains(&0) {
+        return Err(WorkspacePathRejection::Invalid);
+    }
     if path.is_absolute() {
         return Err(WorkspacePathRejection::Absolute);
     }
@@ -251,6 +264,8 @@ pub enum WorkspaceEntryKind {
 pub struct WorkspaceDirectoryRead {
     /// Lexically smallest retained entries.
     pub entries: Vec<WorkspaceDirectoryEntry>,
+    /// Number of non-dot entries inspected through no-follow metadata.
+    pub inspected_entries: usize,
     /// Whether additional entries were observed but omitted.
     pub truncated: bool,
 }
@@ -283,6 +298,7 @@ pub trait WorkspaceFileSystem: Clone + Send + Sync + 'static {
         root: &WorkspaceRoot,
         path: &Path,
         max_entries: usize,
+        max_inspections: usize,
     ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError>;
     /// Reads a bounded prefix plus four lookahead bytes from a regular file.
     fn read_file_prefix(
@@ -317,16 +333,22 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         root: &WorkspaceRoot,
         path: &Path,
         max_entries: usize,
+        max_inspections: usize,
     ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError> {
         let descriptor = open_relative(root, path, OFlags::RDONLY | OFlags::DIRECTORY)?;
         let mut directory = Dir::new(descriptor).map_err(|source| resolve_io(path, source))?;
         let mut retained = BinaryHeap::with_capacity(max_entries);
-        let mut observed = 0_usize;
+        let mut inspected = 0_usize;
+        let mut inspection_truncated = false;
         while let Some(entry) = directory.read() {
             let entry = entry.map_err(|source| resolve_io(path, source))?;
             let name_bytes = entry.file_name().to_bytes();
             if name_bytes == b"." || name_bytes == b".." {
                 continue;
+            }
+            if inspected == max_inspections {
+                inspection_truncated = true;
+                break;
             }
             let name = OsStr::from_bytes(name_bytes);
             let entry_path = if path == Path::new(".") {
@@ -337,7 +359,7 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
             let descriptor = directory.fd().map_err(|source| resolve_io(path, source))?;
             let status = statat(descriptor, name, AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(|source| resolve_io(&entry_path, source))?;
-            observed = observed.saturating_add(1);
+            inspected = inspected.saturating_add(1);
             let candidate = WorkspaceDirectoryEntry {
                 path: entry_path,
                 kind: entry_kind(FileType::from_raw_mode(status.st_mode)),
@@ -354,7 +376,8 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         }
         Ok(WorkspaceDirectoryRead {
             entries: retained.into_sorted_vec(),
-            truncated: observed > max_entries,
+            inspected_entries: inspected,
+            truncated: inspection_truncated || inspected > max_entries,
         })
     }
 
@@ -404,10 +427,7 @@ fn open_relative(
     path: &Path,
     final_flags: OFlags,
 ) -> Result<OwnedFd, WorkspaceResolveError> {
-    validate_relative_path(path.to_str().ok_or(WorkspaceResolveError::Rejected(
-        WorkspacePathRejection::Invalid,
-    ))?)
-    .map_err(WorkspaceResolveError::Rejected)?;
+    validate_resolved_path(path).map_err(WorkspaceResolveError::Rejected)?;
     let mut current = None;
     let mut components = path
         .components()
@@ -505,6 +525,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generated_nested_path_is_exempt_from_the_request_size_limit() {
+        const COMPONENT_CHARACTERS: usize = 200;
+        const COMPONENT_COUNT: usize = 22;
+
+        let component = "x".repeat(COMPONENT_CHARACTERS);
+        let generated =
+            std::iter::repeat_n(component.as_str(), COMPONENT_COUNT).collect::<PathBuf>();
+        let supplied = generated.to_str().expect("generated path is UTF-8");
+
+        assert!(supplied.chars().count() > MAX_WORKSPACE_PATH_CHARACTERS);
+        assert_eq!(
+            validate_relative_path(supplied),
+            Err(WorkspacePathRejection::Invalid)
+        );
+        assert_eq!(validate_resolved_path(&generated), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_name_preserves_backslash_and_rejects_non_utf8() {
+        const BACKSLASH_NAME: &str = "a\\b";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root =
+            WorkspaceRoot::try_new(&filesystem, workspace.path()).expect("fixture root is valid");
+        let non_utf8 = Path::new(OsStr::from_bytes(b"\xff"));
+
+        assert_eq!(
+            root.relative_name(Path::new(BACKSLASH_NAME)),
+            Some(String::from(BACKSLASH_NAME))
+        );
+        assert_eq!(root.relative_name(non_utf8), None);
+    }
+
+    #[test]
+    fn directory_read_reports_exact_inspection_budget_as_complete() {
+        const FILE_PATH: &str = "only.txt";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        std::fs::write(workspace.path().join(FILE_PATH), "fixture").expect("fixture file writes");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root =
+            WorkspaceRoot::try_new(&filesystem, workspace.path()).expect("fixture root is valid");
+
+        let read = filesystem
+            .read_directory(&root, Path::new("."), 1, 1)
+            .expect("bounded directory read succeeds");
+
+        assert_eq!(read.inspected_entries, 1);
+        assert_eq!(read.entries.len(), 1);
+        assert_eq!(read.entries[0].path, PathBuf::from(FILE_PATH));
+        assert!(!read.truncated);
+    }
+
+    #[test]
+    fn directory_read_stops_after_inspection_budget_and_reports_omission() {
+        const FIRST_PATH: &str = "first.txt";
+        const SECOND_PATH: &str = "second.txt";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        std::fs::write(workspace.path().join(FIRST_PATH), "first").expect("first fixture writes");
+        std::fs::write(workspace.path().join(SECOND_PATH), "second")
+            .expect("second fixture writes");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root =
+            WorkspaceRoot::try_new(&filesystem, workspace.path()).expect("fixture root is valid");
+
+        let read = filesystem
+            .read_directory(&root, Path::new("."), 2, 1)
+            .expect("bounded directory read succeeds");
+
+        assert_eq!(read.inspected_entries, 1);
+        assert_eq!(read.entries.len(), 1);
+        assert!(read.truncated);
+    }
     #[cfg(unix)]
     #[test]
     fn final_symlink_has_typed_rejection() {
