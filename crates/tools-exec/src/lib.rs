@@ -19,10 +19,11 @@
 //! execute untrusted code. Shell sessions and PTYs are likewise outside this
 //! crate's contract.
 //!
-//! The real-bubblewrap containment check is an ignored integration test so
-//! unsupported hosts remain explicit at collection time. Run it with
-//! `cargo test -p signalbox-tools-exec --test bwrap -- --ignored` on a host
-//! where `/usr/bin/bwrap` can create the configured namespaces.
+//! The real-bubblewrap containment check is mandatory in CI. Unsupported local
+//! hosts skip it unless `SIGNALBOX_RUN_BWRAP_INTEGRATION=1` requests the same
+//! fail-closed check explicitly:
+//! `SIGNALBOX_RUN_BWRAP_INTEGRATION=1 cargo test -p signalbox-tools-exec
+//! --test bwrap`.
 
 mod process;
 mod supervisor_protocol;

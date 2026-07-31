@@ -67,7 +67,10 @@ pub struct ExecArguments {
     pub program: String,
     /// Direct executable arguments, each passed as one exact argv element.
     #[serde(default)]
-    #[schemars(length(max = MAX_ARGUMENTS))]
+    #[schemars(
+        length(max = MAX_ARGUMENTS),
+        inner(length(max = MAX_ARGUMENT_CHARACTERS))
+    )]
     pub arguments: Vec<String>,
     /// Workspace-relative directory in which the process starts.
     #[serde(default = "default_working_directory")]
@@ -738,7 +741,7 @@ fn bwrap_request(
         arguments: bwrap_arguments,
         working_directory: root.to_owned(),
         timeout,
-        capture_bytes,
+        capture_bytes: capture_bytes.saturating_add(SANDBOX_DISPATCH_MARKER.len()),
         environment: BTreeMap::from([
             (OsString::from("LANG"), OsString::from("C.UTF-8")),
             (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
@@ -1380,6 +1383,17 @@ mod tests {
     }
 
     #[test]
+    fn argument_schema_publishes_the_per_item_character_limit() -> Result<(), Box<dyn Error>> {
+        let schema = serde_json::to_value(schemars::schema_for!(ExecArguments))?;
+
+        assert_eq!(
+            schema.pointer("/properties/arguments/items/maxLength"),
+            Some(&serde_json::json!(MAX_ARGUMENT_CHARACTERS))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn validator_rejects_parent_working_directory_before_execution() -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let tool = SandboxedExecTool::try_new(
@@ -1478,6 +1492,10 @@ mod tests {
 
         assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
         assert_eq!(probe.program, OsString::from(BWRAP_PROGRAM));
+        assert_eq!(
+            request.capture_bytes,
+            EXEC_CAPTURE_BYTES + SANDBOX_DISPATCH_MARKER.len()
+        );
         assert!(
             probe
                 .arguments

@@ -6,9 +6,17 @@ use signalbox_tools_exec::{
 };
 
 #[tokio::test]
-#[ignore = "requires a host with usable /usr/bin/bwrap; run this ignored test explicitly"]
 async fn real_bwrap_profile_hides_ambient_home_directory() -> Result<(), Box<dyn std::error::Error>>
 {
+    run_real_bwrap_profile_when_required().await
+}
+
+async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("CI").is_none()
+        && std::env::var_os("SIGNALBOX_RUN_BWRAP_INTEGRATION").is_none()
+    {
+        return Ok(());
+    }
     let root = std::env::current_dir()?;
     let mut runner = SandboxedCommandRunner::try_new(TokioProcessRunner, root)?;
     let arguments = ExecArguments {
