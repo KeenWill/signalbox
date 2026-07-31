@@ -20,6 +20,7 @@ members = [
     "crates/tool-schema-derive",
     "crates/tools-basic",
     "crates/tools-code-host",
+    "crates/tools-workspace",
 ]
 resolver = "3"
 

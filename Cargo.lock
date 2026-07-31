@@ -3114,6 +3114,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-tools-workspace"
+version = "0.0.0"
+dependencies = [
+ "glob",
+ "regex",
+ "rustix",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-tool-contract",
+ "tempfile",
+]
+
+[[package]]
 name = "signalboxd"
 version = "0.0.0"
 dependencies = [
