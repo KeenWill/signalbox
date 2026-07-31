@@ -661,7 +661,30 @@ impl WebSearchTransport for ReqwestWebSearchTransport {
             decode_provider_response(provider, &body)
         }
         .await;
-        outcome.map_err(|failure| credential_safe_transport_failure(failure, credential))
+        credential_safe_transport_outcome(outcome, credential)
+    }
+}
+
+fn credential_safe_transport_outcome(
+    outcome: Result<WebSearchResponse, WebSearchTransportFailure>,
+    credential: &CredentialValue,
+) -> Result<WebSearchResponse, WebSearchTransportFailure> {
+    match outcome {
+        Ok(response) => {
+            let credential_text =
+                std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+            if credential_text.is_empty() || format!("{response:?}").contains(credential_text) {
+                Err(WebSearchTransportFailure::CredentialDiagnosticCollision(
+                    WebSearchCredentialDiagnostic {
+                        rendered: safe_collision_diagnostic(credential_text),
+                        failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                    },
+                ))
+            } else {
+                Ok(response)
+            }
+        }
+        Err(failure) => Err(credential_safe_transport_failure(failure, credential)),
     }
 }
 
@@ -1886,6 +1909,32 @@ mod tests {
         assert!(!format!("{failure:?}").contains(&status_collision_key));
         assert!(!failure.to_string().contains(&status_collision_key));
         assert!(failure.source().is_some());
+    }
+
+    /// INV-035: a successful response whose fixed Debug rendering collides
+    /// with the request credential is replaced before leaving the transport.
+    #[test]
+    fn web_search_transport_rejects_success_diagnostic_credential_collision() {
+        const RESPONSE_DIAGNOSTIC_COLLISION_KEY: &str = "Complete";
+        let credential =
+            CredentialValue::new(RESPONSE_DIAGNOSTIC_COLLISION_KEY.as_bytes().to_vec());
+        let outcome =
+            credential_safe_transport_outcome(Ok(response_with_result_count(1)), &credential);
+
+        assert!(!format!("{outcome:?}").contains(RESPONSE_DIAGNOSTIC_COLLISION_KEY));
+
+        let failure = outcome.expect_err("colliding success diagnostic fails closed");
+
+        assert!(!format!("{failure:?}").contains(RESPONSE_DIAGNOSTIC_COLLISION_KEY));
+        assert!(
+            !failure
+                .to_string()
+                .contains(RESPONSE_DIAGNOSTIC_COLLISION_KEY)
+        );
+        assert!(matches!(
+            failure,
+            WebSearchTransportFailure::CredentialDiagnosticCollision(_)
+        ));
     }
 
     /// INV-035: a credential colliding with fixed provider-rejection prose is
