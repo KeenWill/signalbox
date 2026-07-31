@@ -331,6 +331,70 @@ impl<Generator, Converter, Store> ImportConversationService<Generator, Converter
     }
 }
 
+fn validate_converted<ConverterError, StoreError>(
+    candidate: ImportedConversationId,
+    declared: ImportedConversationFormat,
+    issued_entries: &[ImportedTranscriptEntryId],
+    converted: &ImportedConversation,
+) -> Result<(), ImportConversationError<ConverterError, StoreError>> {
+    if converted.id() != candidate {
+        return Err(ImportConversationError::ConverterIdentityMismatch {
+            supplied: candidate,
+            converted: converted.id(),
+        });
+    }
+    if converted.format() != declared {
+        return Err(ImportConversationError::ConverterFormatMismatch {
+            declared,
+            converted: converted.format(),
+        });
+    }
+    if converted
+        .entries()
+        .iter()
+        .map(|entry| entry.identity())
+        .ne(issued_entries.iter().copied())
+    {
+        return Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch);
+    }
+    Ok(())
+}
+
+async fn store_validated<ConverterError, Store>(
+    store: &mut Store,
+    candidate: ImportedConversationId,
+    converted: ImportedConversation,
+) -> Result<ImportConversationOutcome, ImportConversationError<ConverterError, Store::Error>>
+where
+    Store: ImportedConversationStore,
+{
+    let expected_digest = converted.source_digest();
+    let stored = store
+        .resolve_or_insert(converted)
+        .await
+        .map_err(ImportConversationError::Store)?;
+    if stored.source_digest() != expected_digest {
+        return Err(ImportConversationError::StoreSourceDigestMismatch {
+            expected: expected_digest,
+            actual: stored.source_digest(),
+        });
+    }
+    match stored {
+        ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
+            if conversation != candidate {
+                return Err(ImportConversationError::StoreInsertedIdentityMismatch {
+                    expected: candidate,
+                    actual: conversation,
+                });
+            }
+            Ok(ImportConversationOutcome::Inserted { conversation })
+        }
+        ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
+            Ok(ImportConversationOutcome::AlreadyImported { conversation })
+        }
+    }
+}
+
 impl<Generator, Converter, Store> ImportConversationService<Generator, Converter, Store>
 where
     Generator: ImportedConversationIdGenerator,
@@ -362,51 +426,13 @@ where
                 entry
             })
             .map_err(ImportConversationError::Conversion)?;
-        if converted.id() != candidate {
-            return Err(ImportConversationError::ConverterIdentityMismatch {
-                supplied: candidate,
-                converted: converted.id(),
-            });
-        }
-        if converted.format() != declared {
-            return Err(ImportConversationError::ConverterFormatMismatch {
-                declared,
-                converted: converted.format(),
-            });
-        }
-        if converted
-            .entries()
-            .iter()
-            .map(|entry| entry.identity())
-            .ne(issued_entries.iter().copied())
-        {
-            return Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch);
-        }
-        let expected_digest = converted.source_digest();
-        let stored = store
-            .resolve_or_insert(converted)
-            .await
-            .map_err(ImportConversationError::Store)?;
-        if stored.source_digest() != expected_digest {
-            return Err(ImportConversationError::StoreSourceDigestMismatch {
-                expected: expected_digest,
-                actual: stored.source_digest(),
-            });
-        }
-        match stored {
-            ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
-                if conversation != candidate {
-                    return Err(ImportConversationError::StoreInsertedIdentityMismatch {
-                        expected: candidate,
-                        actual: conversation,
-                    });
-                }
-                Ok(ImportConversationOutcome::Inserted { conversation })
-            }
-            ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
-                Ok(ImportConversationOutcome::AlreadyImported { conversation })
-            }
-        }
+        validate_converted::<Converter::Error, Store::Error>(
+            candidate,
+            declared,
+            &issued_entries,
+            &converted,
+        )?;
+        store_validated::<Converter::Error, _>(store, candidate, converted).await
     }
 }
 
@@ -451,57 +477,19 @@ where
                 return Ok(ImportConversationReport::NoValidRecords { skipped_records });
             }
         };
-        if converted.id() != candidate {
-            return Err(ImportConversationError::ConverterIdentityMismatch {
-                supplied: candidate,
-                converted: converted.id(),
-            });
-        }
-        if converted.format() != declared {
-            return Err(ImportConversationError::ConverterFormatMismatch {
-                declared,
-                converted: converted.format(),
-            });
-        }
-        if converted
-            .entries()
-            .iter()
-            .map(|entry| entry.identity())
-            .ne(issued_entries.iter().copied())
-        {
-            return Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch);
-        }
+        validate_converted::<Converter::Error, Store::Error>(
+            candidate,
+            declared,
+            &issued_entries,
+            &converted,
+        )?;
         if !skipped_records.is_empty() {
             return Ok(ImportConversationReport::Converted {
                 conversation: converted,
                 skipped_records,
             });
         }
-        let expected_digest = converted.source_digest();
-        let stored = store
-            .resolve_or_insert(converted)
-            .await
-            .map_err(ImportConversationError::Store)?;
-        if stored.source_digest() != expected_digest {
-            return Err(ImportConversationError::StoreSourceDigestMismatch {
-                expected: expected_digest,
-                actual: stored.source_digest(),
-            });
-        }
-        let outcome = match stored {
-            ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
-                if conversation != candidate {
-                    return Err(ImportConversationError::StoreInsertedIdentityMismatch {
-                        expected: candidate,
-                        actual: conversation,
-                    });
-                }
-                ImportConversationOutcome::Inserted { conversation }
-            }
-            ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
-                ImportConversationOutcome::AlreadyImported { conversation }
-            }
-        };
+        let outcome = store_validated::<Converter::Error, _>(store, candidate, converted).await?;
         Ok(ImportConversationReport::Imported {
             outcome,
             skipped_records,
