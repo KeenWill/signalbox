@@ -5,7 +5,12 @@ NATIVE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOSITORY_ROOT="$(cd "$NATIVE_ROOT/../.." && pwd)"
 
 if ! command -v initdb >/dev/null 2>&1; then
-	if command -v devenv >/dev/null 2>&1; then
+	POSTGRES_INITDB="$REPOSITORY_ROOT/.devenv/profile/bin/initdb"
+	if [[ -x "$POSTGRES_INITDB" ]]; then
+		POSTGRES_BIN="$(dirname "$POSTGRES_INITDB")"
+		PATH="$POSTGRES_BIN:$PATH"
+		export PATH
+	elif command -v devenv >/dev/null 2>&1; then
 		POSTGRES_INITDB="$(
 			devenv shell -- bash -lc 'command -v initdb' || true
 		)"
@@ -61,7 +66,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
-POSTGRES_PORT="$(
+choose_postgres_port() {
 	python3 - <<'PY'
 import socket
 
@@ -69,7 +74,9 @@ with socket.socket() as listener:
     listener.bind(("127.0.0.1", 0))
     print(listener.getsockname()[1])
 PY
-)"
+}
+
+POSTGRES_PORT=""
 POSTGRES_DATA="$TEMPORARY_ROOT/postgres"
 TLS_ROOT_CERTIFICATE="$TEMPORARY_ROOT/postgres-root.crt"
 TLS_ROOT_KEY="$TEMPORARY_ROOT/postgres-root.key"
@@ -116,30 +123,51 @@ initdb \
 	--encoding=UTF8 \
 	--no-locale \
 	>"$POSTGRES_LOG" 2>&1
-postgres \
-	-D "$POSTGRES_DATA" \
-	-h 127.0.0.1 \
-	-p "$POSTGRES_PORT" \
-	-c ssl=on \
-	-c "ssl_cert_file=$TLS_SERVER_CERTIFICATE" \
-	-c "ssl_key_file=$TLS_SERVER_KEY" \
-	>>"$POSTGRES_LOG" 2>&1 &
-POSTGRES_PID=$!
 
-for _ in {1..100}; do
-	if pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
-		break
-	fi
-	if ! kill -0 "$POSTGRES_PID" 2>/dev/null; then
-		echo "Temporary PostgreSQL exited before becoming ready." >&2
-		exit 1
-	fi
-	sleep 0.1
-done
-if ! pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
-	echo "Temporary PostgreSQL did not become ready." >&2
-	exit 1
-fi
+start_postgres() {
+	local attempt
+	local ready
+
+	for attempt in {1..5}; do
+		POSTGRES_PORT="$(choose_postgres_port)"
+		postgres \
+			-D "$POSTGRES_DATA" \
+			-h 127.0.0.1 \
+			-p "$POSTGRES_PORT" \
+			-c ssl=on \
+			-c "ssl_cert_file=$TLS_SERVER_CERTIFICATE" \
+			-c "ssl_key_file=$TLS_SERVER_KEY" \
+			>>"$POSTGRES_LOG" 2>&1 &
+		POSTGRES_PID=$!
+		ready=0
+
+		for _ in {1..100}; do
+			if ! kill -0 "$POSTGRES_PID" 2>/dev/null; then
+				break
+			fi
+			if pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" >/dev/null 2>&1; then
+				ready=1
+				break
+			fi
+			sleep 0.1
+		done
+		if ((ready == 1)); then
+			return 0
+		fi
+
+		if kill -0 "$POSTGRES_PID" 2>/dev/null; then
+			kill -TERM "$POSTGRES_PID" 2>/dev/null || true
+		fi
+		wait "$POSTGRES_PID" 2>/dev/null || true
+		POSTGRES_PID=""
+		echo "Temporary PostgreSQL startup attempt $attempt failed." >&2
+	done
+
+	echo "Temporary PostgreSQL did not become ready after five startup attempts." >&2
+	return 1
+}
+
+start_postgres
 createdb -h 127.0.0.1 -p "$POSTGRES_PORT" signalbox_native_real
 
 MODEL_CONFIGURATION="$TEMPORARY_ROOT/models.toml"
