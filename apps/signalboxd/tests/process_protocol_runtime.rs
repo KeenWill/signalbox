@@ -6464,6 +6464,7 @@ async fn prove_orchestration_plan_rejection(
 fn assert_complete_review_snapshot(
     snapshot: &ReviewOrchestrationSnapshot,
     attempt: CanonicalUuid,
+    expected_counts: ReviewOrchestrationCounts,
     target: CanonicalUuid,
     concerns: &[ReviewConcernEvidence],
 ) {
@@ -6471,7 +6472,7 @@ fn assert_complete_review_snapshot(
     assert_eq!(snapshot.target_id, target);
     assert_eq!(snapshot.state, ReviewOrchestrationState::Complete);
     assert_eq!(snapshot.concern_set_version, REVIEW_CONCERN_SET_VERSION);
-    assert_eq!(snapshot.concerns.len(), 5);
+    assert_eq!(snapshot.concerns.len(), concerns.len());
     assert_eq!(snapshot.concerns[0].key, concerns[0].key);
     assert_eq!(
         snapshot.concerns[0].status,
@@ -6502,21 +6503,13 @@ fn assert_complete_review_snapshot(
         ReviewOrchestrationConcernStatus::Succeeded
     );
     assert_eq!(snapshot.concerns[4].pass_id, Some(concerns[4].pass));
-    assert_eq!(
-        snapshot.counts,
-        ReviewOrchestrationCounts {
-            finding_count: CanonicalU64::new(3),
-            judgment_member_count: CanonicalU64::new(3),
-            judgment_effect_applied_count: CanonicalU64::new(3),
-            repair_fixed_count: CanonicalU64::new(1),
-            publication_published_count: CanonicalU64::new(1),
-        }
-    );
+    assert_eq!(snapshot.counts, expected_counts);
 }
 
 async fn read_complete_review_snapshot(
     driver: &mut ReviewRuntimeDriver,
     attempt: CanonicalUuid,
+    expected_counts: ReviewOrchestrationCounts,
     concerns: &[ReviewConcernEvidence],
 ) -> Result<(), Box<dyn Error>> {
     let request_id = driver.request_id();
@@ -6531,7 +6524,13 @@ async fn read_complete_review_snapshot(
         .await?;
     match response_within(&mut driver.connection).await?.message() {
         ServerMessage::ReviewOrchestration { snapshot } => {
-            assert_complete_review_snapshot(snapshot, attempt, driver.target, concerns);
+            assert_complete_review_snapshot(
+                snapshot,
+                attempt,
+                expected_counts,
+                driver.target,
+                concerns,
+            );
             Ok(())
         }
         message => Err(io::Error::other(format!(
@@ -6549,6 +6548,13 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         accepted_and_fixed: review_identity(0xb001),
         duplicate: review_identity(0xb002),
         accepted_and_published: review_identity(0xb003),
+    };
+    let expected_counts = ReviewOrchestrationCounts {
+        finding_count: CanonicalU64::new(3),
+        judgment_member_count: CanonicalU64::new(3),
+        judgment_effect_applied_count: CanonicalU64::new(3),
+        repair_fixed_count: CanonicalU64::new(1),
+        publication_published_count: CanonicalU64::new(1),
     };
     let mut driver = ReviewRuntimeDriver::connect(&runtime, target).await?;
     driver.create_target().await?;
@@ -6867,7 +6873,7 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
             },
         )
         .await?;
-    read_complete_review_snapshot(&mut driver, attempt, &concerns).await?;
+    read_complete_review_snapshot(&mut driver, attempt, expected_counts, &concerns).await?;
 
     drop(driver);
     runtime.stop().await
