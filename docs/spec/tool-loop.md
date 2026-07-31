@@ -16,7 +16,7 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 `web_fetch` egress policy and complete bounded file-patch lookup through PR #330
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
-`9a9240254d3741579391ffcdd68e7793ec5ef451`. The runner executable stack rooted
+`9fff687e6e7ffb21aa9b57d727a8ad732a50d57a`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. This page
 owns logical tool requests, approval policy and decisions, physical tool
 attempts, result admission, intra-turn continuation, crash classification, the
