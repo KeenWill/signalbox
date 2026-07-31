@@ -3047,6 +3047,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-runner-wire"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "signalbox-domain",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-tool-contract"
 version = "0.0.0"
 dependencies = [

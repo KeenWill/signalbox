@@ -10,27 +10,30 @@ use std::{error::Error, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    ApprovedToolRequest, ContextFrontierId, CredentialProfileGrant,
+    ApprovedToolRequest, CanonicalCloneUrlDigest, ContextFrontierId, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
-    CredentialToolApproval, DangerousToolAutoApproval, EndedToolAttempt, ModelCallId,
+    CredentialToolApproval, DecideToolRequest, DurableCommandId, EndedToolAttempt, ModelCallId,
     NormalizedToolArguments, ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput,
     RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
     RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerSelector,
-    RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
     SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceManifestId, WorkspaceRecovery,
+    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use signalbox_persistence::{
-    local_test_connection_options, migrate,
+    MIGRATOR, local_test_connection_options, migrate,
     runner_protocol::{
         RunnerProtocolCorruption, RunnerProtocolStore, RunnerProtocolStoreError,
         StoredValidatedRunnerRegistration,
@@ -63,6 +66,9 @@ const RETRY_ATTEMPT: u128 = 0x9601;
 const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
+const PRE_RUNNER_WIRE_MIGRATION: i64 = 202607310102;
+const LEGACY_PLACEMENT_REFUSAL: &str =
+    "runner wire contract requires empty legacy placement history";
 
 #[derive(Clone, Copy)]
 struct PhysicalAttemptFacts {
@@ -97,7 +103,7 @@ const SECOND_LATER_LEASE_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemp
     turn: 0x9803,
 };
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
@@ -114,6 +120,11 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .max_connections(8)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
+    Ok((container, pool))
+}
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let (container, pool) = unmigrated_postgres().await?;
     migrate(&pool).await?;
     migrate(&pool).await?;
     Ok((container, pool))
@@ -140,6 +151,40 @@ fn profile() -> CredentialProfileName {
 fn replacement_profile() -> CredentialProfileName {
     CredentialProfileName::try_new("operator".to_owned())
         .expect("the replacement profile name is valid")
+}
+
+fn sandbox_profiles() -> [RunnerSandboxProfile; 2] {
+    [
+        RunnerSandboxProfile::Ambient,
+        RunnerSandboxProfile::WorkspaceRestricted,
+    ]
+}
+
+fn no_permission_overrides() -> RunnerToolPermissionOverrides {
+    RunnerToolPermissionOverrides::try_new([])
+        .expect("the empty permission override fixture is valid")
+}
+
+fn permission_overrides(permission: RunnerToolPermissionOverride) -> RunnerToolPermissionOverrides {
+    RunnerToolPermissionOverrides::try_new([(tool("inspect"), permission)])
+        .expect("the exact permission override fixture is valid")
+}
+
+fn daemon_fallback_permission_overrides() -> RunnerToolPermissionOverrides {
+    RunnerToolPermissionOverrides::try_new([(
+        tool("daemon_fallback"),
+        RunnerToolPermissionOverride::Confirm,
+    )])
+    .expect("the omitted combined-tool override fixture is valid")
+}
+
+fn repository_key() -> WorkspaceRepositoryKey {
+    WorkspaceRepositoryKey::try_new("signalbox".to_owned())
+        .expect("the fixture repository key is valid")
+}
+
+fn repository_entry() -> RunnerRepositoryEntry {
+    RunnerRepositoryEntry::new(repository_key(), None)
 }
 
 fn model_definition() -> RunnerToolModelDefinition {
@@ -169,7 +214,7 @@ fn approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest {
         .expect("the fixture approval matches its request")
 }
 
-fn blanket_approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest {
+fn confirmed_approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest {
     let request = ToolRequestReconstitutionInput::new(
         ToolRequestId::from_uuid(uuid(facts.request)),
         SessionId::from_uuid(uuid(SESSION)),
@@ -181,61 +226,27 @@ fn blanket_approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest 
             .expect("the fixture arguments are canonical"),
     )
     .into_request();
-    let approval = ToolApprovalResolutionReconstitutionInput::session_blanket(
+    let command = DecideToolRequest::try_new(
+        DurableCommandId::from_uuid(uuid(facts.request + (RELATED_IDENTITY_OFFSET * 4))),
         request.id(),
-        DangerousToolAutoApproval::ApproveAll,
+        ToolApprovalDecision::Approve,
     )
-    .reconstitute()
-    .expect("the fixture blanket approves");
-    ApprovedToolRequest::try_from_resolution(request, approval)
-        .expect("the fixture approval matches its request")
+    .expect("the fixture command identity is valid");
+    let prepared = command
+        .prepare_applied(&request)
+        .expect("the fixture request and owner decision correlate");
+    let signalbox_domain::DecideToolRequestResult::Applied(applied) = prepared.result() else {
+        panic!("the approving fixture owner decision applies")
+    };
+    ApprovedToolRequest::try_from_resolution(request, applied.resolution().clone())
+        .expect("the fixture owner approval matches its request")
 }
 
-fn blanket_authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
-    let approved = blanket_approved_request(facts);
-    let attempt_id = ToolAttemptId::from_uuid(uuid(facts.attempt));
-    let attempt = ToolAttemptReconstitutionInput::new(
-        attempt_id,
-        ToolRequestId::from_uuid(uuid(facts.request)),
-        SessionId::from_uuid(uuid(SESSION)),
-        TurnId::from_uuid(uuid(facts.turn)),
-        TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
-        ToolEffectClass::EffectFree,
-        ToolDispatchGeneration::first(),
-        ToolAttemptReconstitutionState::InFlight,
-    )
-    .reconstitute()
-    .expect("the fixture in-flight attempt reconstitutes");
-    let batch = ToolBatchReconstitutionInput::new(
-        SessionId::from_uuid(uuid(SESSION)),
-        TurnId::from_uuid(uuid(facts.turn)),
-        ModelCallId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 2))),
-        ResolvedContextFrontierReconstitutionInput::new(
-            SessionId::from_uuid(uuid(SESSION)),
-            ContextFrontierId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 3))),
-            Vec::new(),
-        )
-        .reconstitute()
-        .expect("the empty fixture frontier is valid"),
-        vec![approved.request().clone()],
-        vec![approved.approval().clone()],
-        vec![attempt],
-        ToolBatchPhaseReconstitutionInput::Executing {
-            turn_attempt: TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
-        },
-    )
-    .reconstitute()
-    .expect("the fixture batch is complete");
-    batch
-        .resume_runner_attempt(attempt_id)
-        .expect("the batch restores canonical runner authority")
-}
-
-fn authorized_with_effect(
+fn authorization_from_approved(
+    approved: ApprovedToolRequest,
     facts: PhysicalAttemptFacts,
     effect: ToolEffectClass,
 ) -> RunnerToolAttemptAuthorization {
-    let approved = approved_request(facts);
     let attempt_id = ToolAttemptId::from_uuid(uuid(facts.attempt));
     let attempt = ToolAttemptReconstitutionInput::new(
         attempt_id,
@@ -272,6 +283,20 @@ fn authorized_with_effect(
     batch
         .resume_runner_attempt(attempt_id)
         .expect("the batch restores canonical runner authority")
+}
+
+fn authorized_with_effect(
+    facts: PhysicalAttemptFacts,
+    effect: ToolEffectClass,
+) -> RunnerToolAttemptAuthorization {
+    authorization_from_approved(approved_request(facts), facts, effect)
+}
+
+fn confirmed_authorized_with_effect(
+    facts: PhysicalAttemptFacts,
+    effect: ToolEffectClass,
+) -> RunnerToolAttemptAuthorization {
+    authorization_from_approved(confirmed_approved_request(facts), facts, effect)
 }
 
 fn claimed_batch_with_effect(facts: PhysicalAttemptFacts, effect: ToolEffectClass) -> ToolBatch {
@@ -429,6 +454,8 @@ fn duplicate_grant(
         },
         grant.session(),
         registration,
+        RunnerSandboxProfile::Ambient,
+        &no_permission_overrides(),
     )
     .expect("the fixture grant facts reconstitute")
 }
@@ -470,6 +497,15 @@ fn catalog() -> RunnerCatalog {
             selector: RunnerSelector::CapabilityClass(class()),
         },
     );
+    let daemon_fallback = RunnerToolDeclaration::new(
+        tool("daemon_fallback"),
+        model_definition(),
+        ToolPermissionDefault::Confirm,
+        RunnerToolEffectClass::Pure,
+        ToolAdmissibleLoci::DaemonOrRunner {
+            selector: RunnerSelector::CapabilityClass(class()),
+        },
+    );
     let policy = CredentialProfilePolicy::try_new(
         profile(),
         [
@@ -488,9 +524,10 @@ fn catalog() -> RunnerCatalog {
     .expect("the replacement profile references declared tools");
     RunnerCatalog::try_new(
         [class()],
-        [inspect, catalog_only],
+        [inspect, catalog_only, daemon_fallback],
         [policy, replacement_policy],
         [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
     )
     .expect("the fixture catalog is internally consistent")
 }
@@ -520,6 +557,7 @@ fn confirm_catalog() -> RunnerCatalog {
         [inspect],
         [policy, replacement_policy],
         [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
     )
     .expect("the confirm fixture catalog is internally consistent")
 }
@@ -549,6 +587,7 @@ fn idempotent_catalog() -> RunnerCatalog {
         [inspect],
         [policy, replacement_policy],
         [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
     )
     .expect("the idempotent fixture catalog is internally consistent")
 }
@@ -559,6 +598,8 @@ fn advertisement() -> RunnerAdvertisement {
         [tool("inspect")],
         [profile(), replacement_profile()],
         [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+        [repository_entry()],
     )
 }
 
@@ -568,6 +609,8 @@ fn narrowed_advertisement() -> RunnerAdvertisement {
         [],
         [profile(), replacement_profile()],
         [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+        [repository_entry()],
     )
 }
 
@@ -577,6 +620,8 @@ fn profileless_advertisement() -> RunnerAdvertisement {
         [tool("inspect")],
         [],
         [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+        [repository_entry()],
     )
 }
 
@@ -586,6 +631,8 @@ fn workspaceless_advertisement() -> RunnerAdvertisement {
         [tool("inspect")],
         [profile(), replacement_profile()],
         [],
+        sandbox_profiles(),
+        [repository_entry()],
     )
 }
 
@@ -595,6 +642,8 @@ fn expanded_advertisement() -> RunnerAdvertisement {
         [tool("inspect"), tool("catalog_only")],
         [profile(), replacement_profile()],
         [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+        [repository_entry()],
     )
 }
 
@@ -624,6 +673,8 @@ async fn stored_pin_fixture(
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -795,6 +846,52 @@ async fn insert_physical_attempt(
     Ok(())
 }
 
+async fn replace_approval_with_owner_command(
+    pool: &PgPool,
+    facts: PhysicalAttemptFacts,
+) -> Result<(), sqlx::Error> {
+    let command = uuid(facts.request + (RELATED_IDENTITY_OFFSET * 4));
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2,
+                 'approve', NULL, 'applied', NULL, NULL)",
+    )
+    .bind(command)
+    .bind(uuid(facts.request))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    let updated = sqlx::query(
+        "UPDATE tool_approval_decision
+            SET decision_source = 'owner_command',
+                owner_command_id = $2
+          WHERE request_id = $1",
+    )
+    .bind(uuid(facts.request))
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await
+}
+
 async fn insert_external_physical_attempt(
     pool: &PgPool,
     facts: PhysicalAttemptFacts,
@@ -911,9 +1008,10 @@ async fn clone_registration_without_advancing_head(
         "INSERT INTO runner_registration
             (enrollment_id, registration_revision, runner_id,
              authentication_reference_id, class_count, tool_count,
-             profile_count, workspace_count)
+             profile_count, workspace_count, repository_count, sandbox_count)
          SELECT enrollment_id, 2, runner_id, authentication_reference_id,
-                class_count, tool_count, profile_count, workspace_count
+                class_count, tool_count, profile_count, workspace_count,
+                repository_count, sandbox_count
            FROM runner_registration
           WHERE enrollment_id = $1 AND registration_revision = 1",
     )
@@ -969,6 +1067,24 @@ async fn clone_registration_without_advancing_head(
     .bind(enrollment.into_uuid())
     .execute(&mut **transaction)
     .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_sandbox
+         SELECT enrollment_id, 2, sandbox_profile
+           FROM runner_registration_sandbox
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_repository
+         SELECT enrollment_id, 2, repository_key, credential_profile_name
+           FROM runner_registration_repository
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
@@ -982,11 +1098,17 @@ async fn append_runner_lost_without_advancing_head(
              selector_kind, selector_runner_id, selector_capability_class,
              directory_selection_kind, requested_working_directory,
              requested_credential_profile_name, workspace_requirement_kind,
-             requested_repository_key, state_kind, pinned_runner_id,
+             requested_repository_key, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_runner_id,
              pinned_working_directory, pinned_credential_profile_name,
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
-             workspace_working_directory, credential_grant_runner_id,
+             workspace_working_directory, workspace_manifest_id,
+             workspace_placement_revision,
+             workspace_clone_url_digest, workspace_credential_profile_name,
+             workspace_sandbox_profile, workspace_relative_path,
+             workspace_recovery_kind, workspace_branch_name, workspace_revision,
+             credential_grant_runner_id,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision)
          SELECT session_id, event_ordinal + 1, placement_revision,
@@ -995,11 +1117,17 @@ async fn append_runner_lost_without_advancing_head(
                 requested_working_directory,
                 requested_credential_profile_name,
                 workspace_requirement_kind, requested_repository_key,
+                requested_sandbox_profile, permission_override_count,
                 'runner_lost', pinned_runner_id,
                 pinned_working_directory, pinned_credential_profile_name,
                 registration_enrollment_id, registration_revision,
                 pinned_tool_count, workspace_repository_key,
-                workspace_working_directory, credential_grant_runner_id,
+                workspace_working_directory, workspace_manifest_id,
+                workspace_placement_revision,
+                workspace_clone_url_digest, workspace_credential_profile_name,
+                workspace_sandbox_profile, workspace_relative_path,
+                workspace_recovery_kind, workspace_branch_name, workspace_revision,
+                credential_grant_runner_id,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision
            FROM runner_session_placement_record
@@ -1012,6 +1140,15 @@ async fn append_runner_lost_without_advancing_head(
         "INSERT INTO runner_session_placement_tool
          SELECT session_id, event_ordinal + 1, tool_name, runner_required
            FROM runner_session_placement_tool
+          WHERE session_id = $1 AND event_ordinal = 2",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_permission_override
+         SELECT session_id, event_ordinal + 1, tool_name, permission_kind
+           FROM runner_session_placement_permission_override
           WHERE session_id = $1 AND event_ordinal = 2",
     )
     .bind(session.into_uuid())
@@ -1030,6 +1167,32 @@ fn assert_check_violation(error: sqlx::Error) {
             .as_deref(),
         Some("23514")
     );
+}
+
+async fn rejected_workspace_branch(pool: &PgPool, session: SessionId, branch: &str) -> sqlx::Error {
+    let pinned_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+            AND event_kind = 'pinned'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(pool)
+    .await
+    .expect("the pinned placement count is queryable");
+    assert_eq!(pinned_count, 1);
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET workspace_recovery_kind = 'branch',
+                workspace_branch_name = $2
+          WHERE session_id = $1
+            AND event_kind = 'pinned'",
+    )
+    .bind(session.into_uuid())
+    .bind(branch)
+    .execute(pool)
+    .await
+    .expect_err("the malformed workspace recovery branch must be schema-rejected")
 }
 
 #[track_caller]
@@ -1097,6 +1260,47 @@ async fn stored_check_violation(pool: &PgPool) -> RunnerProtocolStoreError {
         .await
         .expect_err("an enrollment inserted as already revoked violates the guard"),
     )
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn runner_wire_migration_rejects_legacy_placement_history() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR.run_to(PRE_RUNNER_WIRE_MIGRATION, &pool).await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, state_kind, pinned_tool_count)
+         VALUES ($1, 1, 1, 'created', 'identity', $2, 'runner_default',
+                 'none', 'unpinned', 0)",
+    )
+    .bind(uuid(SESSION))
+    .bind(uuid(RUNNER))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let refusal = migrate(&pool)
+        .await
+        .expect_err("legacy placement history must fail before wire facts are invented");
+    let applied_version: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(
+        refusal.to_string().contains(LEGACY_PLACEMENT_REFUSAL),
+        "migration refusal must name the unsupported legacy history"
+    );
+    assert_eq!(applied_version, Some(PRE_RUNNER_WIRE_MIGRATION));
+    drop(pool);
+    Ok(())
 }
 
 #[tokio::test]
@@ -1169,6 +1373,8 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     let _loaded_pin = loaded_placement
@@ -1198,6 +1404,8 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     let revoked = revoked_placement
@@ -1212,6 +1420,44 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
         )
         .expect_err("durable revocation closes the exact caller-held enrollment fence");
     assert_eq!(revoked, RunnerDomainError::EnrollmentRevoked);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_store_rejects_oversized_repository_inventory_before_write()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let repositories = (0..=RunnerAdvertisement::MAX_REPOSITORIES).map(|index| {
+        RunnerRepositoryEntry::new(
+            WorkspaceRepositoryKey::try_new(format!("repository_{index}"))
+                .expect("the generated repository key is valid"),
+            None,
+        )
+    });
+    let oversized = RunnerAdvertisement::new([class()], [], [], [], [], repositories);
+    let error = store
+        .register(&expected_enrollment, oversized)
+        .await
+        .expect_err("the persistence boundary rejects the oversized inventory");
+    let RunnerProtocolStoreError::Domain(actual) = error else {
+        panic!("the oversized inventory must fail at the domain boundary");
+    };
+    let durable_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_registration
+          WHERE enrollment_id = $1",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(actual, RunnerDomainError::TooManyAdvertisedRepositories);
+    assert_eq!(durable_count, 0);
     drop(pool);
     Ok(())
 }
@@ -1245,6 +1491,8 @@ async fn s30_inv042_failed_registration_write_preserves_prior_authority()
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     let _retained = placement
@@ -1359,6 +1607,8 @@ async fn s30_inv042_historical_registration_load_remains_stale() -> Result<(), B
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     let rejected = placement
@@ -1543,6 +1793,8 @@ async fn s31_inv042_current_registration_preserves_complete_placement() -> Resul
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -1603,6 +1855,8 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -1666,6 +1920,8 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
             workspace: WorkspaceRequirement::RepositoryWorktree {
                 repository: repository.clone(),
             },
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -1676,9 +1932,26 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
             directory.clone(),
             Some(ProvisionedWorkspace {
                 session: SessionId::from_uuid(uuid(SESSION)),
+                placement_revision: RunnerGeneration::one(),
                 runner: expected_enrollment.runner(),
-                repository,
+                repository: Some(repository),
+                canonical_clone_url_digest: Some(
+                    CanonicalCloneUrlDigest::try_new("b".repeat(64))
+                        .expect("the fixture clone URL digest is canonical"),
+                ),
+                credential_profile: None,
+                sandbox: RunnerSandboxProfile::Ambient,
                 working_directory: directory,
+                relative_path: WorkspaceRelativePath::try_new(format!(
+                    "sessions/{}/1/repo",
+                    uuid(SESSION)
+                ))
+                .expect("the fixture workspace path is relative"),
+                manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x80)),
+                recovery: Some(WorkspaceRecovery::Commit {
+                    revision: WorkspaceRevision::try_new("c".repeat(40))
+                        .expect("the fixture recovery revision is canonical"),
+                }),
             }),
             authorized(INITIAL_PHYSICAL_ATTEMPT),
             offer_request(),
@@ -1705,6 +1978,76 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
         .expect_err("current registration must retain the worktree capability");
 
     assert_eq!(workspace_stale, RunnerDomainError::RegistrationChanged);
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let closing_bracket = sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET workspace_recovery_kind = 'branch',
+                workspace_branch_name = 'topic]ok'
+          WHERE session_id = $1
+            AND event_kind = 'pinned'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(closing_bracket.rows_affected(), 1);
+    let single_at_branch = rejected_workspace_branch(&pool, pin.placement.session(), "@").await;
+    let double_dot_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "main..x").await;
+    let reflog_branch = rejected_workspace_branch(&pool, pin.placement.session(), "bad@{x").await;
+    let trailing_dot_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "feature.").await;
+    let hidden_component_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "topic/.hidden").await;
+    let lock_suffix_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "topic.lock").await;
+    let bracket_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "topic[bad").await;
+    let backslash_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), r"topic\bad").await;
+    let control_branch =
+        rejected_workspace_branch(&pool, pin.placement.session(), "topic\nbad").await;
+    let pinned_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+            AND event_kind = 'pinned'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pinned_count, 1);
+    let absolute_path = sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET workspace_relative_path = '/absolute'
+          WHERE session_id = $1
+            AND event_kind = 'pinned'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("an absolute workspace manifest path is schema-rejected");
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         ENABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(single_at_branch);
+    assert_check_violation(double_dot_branch);
+    assert_check_violation(reflog_branch);
+    assert_check_violation(trailing_dot_branch);
+    assert_check_violation(hidden_component_branch);
+    assert_check_violation(lock_suffix_branch);
+    assert_check_violation(bracket_branch);
+    assert_check_violation(backslash_branch);
+    assert_check_violation(control_branch);
+    assert_check_violation(absolute_path);
     drop(pool);
     Ok(())
 }
@@ -1844,6 +2187,14 @@ async fn s30_inv042_registration_inventories_reject_truncate() -> Result<(), Box
         .execute(&pool)
         .await
         .expect_err("the registration workspace inventory cannot be truncated");
+    let sandboxes = sqlx::query("TRUNCATE runner_registration_sandbox CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the registration sandbox inventory cannot be truncated");
+    let repositories = sqlx::query("TRUNCATE runner_registration_repository CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the registration repository inventory cannot be truncated");
 
     assert_check_violation(registration);
     assert_check_violation(classes);
@@ -1851,6 +2202,8 @@ async fn s30_inv042_registration_inventories_reject_truncate() -> Result<(), Box
     assert_check_violation(profiles);
     assert_check_violation(approvals);
     assert_check_violation(workspaces);
+    assert_check_violation(sandboxes);
+    assert_check_violation(repositories);
     drop(pool);
     Ok(())
 }
@@ -2282,6 +2635,82 @@ async fn s32_inv045_profile_replacement_survives_equivalent_reregistration()
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_combined_tool_override_survives_omitted_runner_availability()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: daemon_fallback_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("daemon policy admits the override while inspect dispatches");
+    store.store_pin(&pin, &registration).await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the omitted combined-tool override is durable");
+
+    assert_eq!(loaded.placement(), &pin.placement);
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_permission_override
+         DISABLE TRIGGER runner_session_placement_permission_override_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_permission_override
+            SET tool_name = $2
+          WHERE session_id = $1
+            AND tool_name = $3",
+    )
+    .bind(uuid(SESSION))
+    .bind(tool("future").as_str())
+    .bind(tool("daemon_fallback").as_str())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_permission_override
+         ENABLE TRIGGER runner_session_placement_permission_override_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupt = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await
+        .expect_err("an override outside daemon catalog authority fails on load");
+
+    assert_store_domain_error(corrupt, RunnerDomainError::ToolUndeclared(tool("future")));
+    drop(pool);
+    Ok(())
+}
+
 /// S31 / INV-035 / INV-045: a session-policy tool/profile pair admits a lease
 /// only with confirmed approval provenance; policy-auto provenance is
 /// rejected even for a direct lease-row insert.
@@ -2305,6 +2734,8 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(replacement_profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: permission_overrides(RunnerToolPermissionOverride::Confirm),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -2315,7 +2746,7 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
             RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
                 .expect("the fixture working directory is valid"),
             None,
-            blanket_authorized(INITIAL_PHYSICAL_ATTEMPT),
+            confirmed_authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
             offer_request(),
         )
         .expect("the session-policy profile pins the placement");
@@ -2351,6 +2782,11 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
     sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
+    let blanket = store
+        .store_pin(&pin, &registration)
+        .await
+        .expect_err("a session blanket cannot authorize runner dispatch");
+    replace_approval_with_owner_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     store.store_pin(&pin, &registration).await?;
     let admitted: Decimal = sqlx::query_scalar(
         "SELECT generation
@@ -2362,6 +2798,7 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
     .await?;
 
     assert_store_check_violation(unconfirmed);
+    assert_store_check_violation(blanket);
     assert_eq!(admitted, Decimal::from(1u64));
     drop(pool);
     Ok(())
@@ -2390,6 +2827,8 @@ async fn s31_inv035_inv045_profileless_confirm_lease_requires_confirmed_provenan
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: None,
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: permission_overrides(RunnerToolPermissionOverride::Confirm),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -2400,7 +2839,7 @@ async fn s31_inv035_inv045_profileless_confirm_lease_requires_confirmed_provenan
             RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
                 .expect("the fixture working directory is valid"),
             None,
-            blanket_authorized(INITIAL_PHYSICAL_ATTEMPT),
+            confirmed_authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
             offer_request(),
         )
         .expect("the profileless placement pins its runner");
@@ -2436,6 +2875,11 @@ async fn s31_inv035_inv045_profileless_confirm_lease_requires_confirmed_provenan
     sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
+    let blanket = store
+        .store_pin(&pin, &registration)
+        .await
+        .expect_err("a session blanket cannot authorize runner dispatch");
+    replace_approval_with_owner_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     store.store_pin(&pin, &registration).await?;
     let admitted: Decimal = sqlx::query_scalar(
         "SELECT generation
@@ -2447,6 +2891,7 @@ async fn s31_inv035_inv045_profileless_confirm_lease_requires_confirmed_provenan
     .await?;
 
     assert_store_check_violation(unconfirmed);
+    assert_store_check_violation(blanket);
     assert_eq!(admitted, Decimal::from(1u64));
     drop(pool);
     Ok(())
@@ -2719,6 +3164,8 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: None,
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -2743,10 +3190,16 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
              requested_working_directory,
              requested_credential_profile_name,
              workspace_requirement_kind, requested_repository_key,
+             requested_sandbox_profile, permission_override_count,
              state_kind, pinned_runner_id, pinned_working_directory,
              pinned_credential_profile_name, registration_enrollment_id,
              registration_revision, pinned_tool_count,
              workspace_repository_key, workspace_working_directory,
+             workspace_manifest_id, workspace_placement_revision,
+             workspace_clone_url_digest,
+             workspace_credential_profile_name, workspace_sandbox_profile,
+             workspace_relative_path, workspace_recovery_kind,
+             workspace_branch_name, workspace_revision,
              credential_grant_runner_id,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision)
@@ -2756,6 +3209,7 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
                 requested_working_directory,
                 requested_credential_profile_name,
                 workspace_requirement_kind, requested_repository_key,
+                requested_sandbox_profile, permission_override_count,
                 'pinned', $2, $3,
                 NULL, $4, $5,
                 (
@@ -2765,7 +3219,15 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
                        AND registration_revision = $5
                        AND tool_name = $6
                 ),
-                NULL, NULL, NULL, NULL, NULL
+                workspace_repository_key, workspace_working_directory,
+                workspace_manifest_id, workspace_placement_revision,
+                workspace_clone_url_digest,
+                workspace_credential_profile_name, workspace_sandbox_profile,
+                workspace_relative_path, workspace_recovery_kind,
+                workspace_branch_name, workspace_revision,
+                credential_grant_runner_id,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision
            FROM runner_session_placement_record
           WHERE session_id = $1 AND event_ordinal = 1",
     )
@@ -2950,6 +3412,8 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         working_directory: WorkingDirectorySelection::RunnerDefault,
         credential_profile: Some(profile()),
         workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: no_permission_overrides(),
     };
     let placement = SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request);
     store.store_placement(&placement, None, None).await?;
@@ -2998,6 +3462,8 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: None,
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     let profileless_pin = profileless_placement
@@ -3134,6 +3600,8 @@ async fn s32_inv045_pin_grant_requires_complete_registration_inventory()
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -3609,6 +4077,107 @@ async fn s32_inv045_grant_audit_rejects_truncate() -> Result<(), Box<dyn Error>>
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s32_inv044_profile_replacement_preserves_workspace_origin_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let working_directory = RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+        .expect("the fixture working directory is valid");
+    let workspace_placement_revision = RunnerGeneration::one();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            working_directory.clone(),
+            Some(ProvisionedWorkspace {
+                session: SessionId::from_uuid(uuid(SESSION)),
+                placement_revision: workspace_placement_revision,
+                runner: expected_enrollment.runner(),
+                repository: None,
+                canonical_clone_url_digest: None,
+                credential_profile: None,
+                sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+                working_directory,
+                relative_path: WorkspaceRelativePath::try_new(format!(
+                    "sessions/{}/1/work",
+                    uuid(SESSION)
+                ))
+                .expect("the private-root path is relative"),
+                manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x81)),
+                recovery: None,
+            }),
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the restricted placement provisions its private root");
+    store.store_pin(&pin, &registration).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the profiled placement carries a grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("profile replacement retains the provisioned private root");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the retained workspace origin revision is loadable");
+    let revisions: (Decimal, Decimal) = sqlx::query_as(
+        "SELECT placement_revision, workspace_placement_revision
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+          ORDER BY event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(uuid(SESSION))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(loaded.placement(), &replacement.placement);
+    assert_eq!(
+        revisions,
+        (
+            Decimal::from(replacement.placement.revision().get()),
+            Decimal::from(workspace_placement_revision.get()),
+        ),
+    );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
@@ -3719,10 +4288,16 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
              requested_working_directory,
              requested_credential_profile_name,
              workspace_requirement_kind, requested_repository_key,
+             requested_sandbox_profile, permission_override_count,
              state_kind, pinned_runner_id, pinned_working_directory,
              pinned_credential_profile_name, registration_enrollment_id,
              registration_revision, pinned_tool_count,
              workspace_repository_key, workspace_working_directory,
+             workspace_manifest_id, workspace_placement_revision,
+             workspace_clone_url_digest,
+             workspace_credential_profile_name, workspace_sandbox_profile,
+             workspace_relative_path, workspace_recovery_kind,
+             workspace_branch_name, workspace_revision,
              credential_grant_runner_id,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision)
@@ -3733,10 +4308,16 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
                 requested_working_directory,
                 $2,
                 workspace_requirement_kind, requested_repository_key,
+                requested_sandbox_profile, permission_override_count,
                 state_kind, pinned_runner_id, pinned_working_directory,
                 $2, registration_enrollment_id,
                 registration_revision, pinned_tool_count,
                 workspace_repository_key, workspace_working_directory,
+                workspace_manifest_id, workspace_placement_revision,
+                workspace_clone_url_digest,
+                workspace_credential_profile_name, workspace_sandbox_profile,
+                workspace_relative_path, workspace_recovery_kind,
+                workspace_branch_name, workspace_revision,
                 credential_grant_runner_id,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision + 1
@@ -3784,6 +4365,8 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
         working_directory: WorkingDirectorySelection::RunnerDefault,
         credential_profile: Some(profile()),
         workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: no_permission_overrides(),
     };
     let placement =
         SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request.clone());
@@ -3839,6 +4422,188 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
     Ok(())
 }
 
+/// S32 / INV-045: a profile-free tombstone retains the predecessor placement's
+/// approval policy even when the successor placement selects a different one.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv045_profile_free_tombstone_uses_predecessor_approval_policy()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), idempotent_catalog());
+    let first_enrollment = enrollment();
+    store.insert_enrollment(&first_enrollment).await?;
+    let first_registration = store.register(&first_enrollment, advertisement()).await?;
+    let first_directory = RunnerWorkingDirectory::try_new("/workspace/first".to_owned())
+        .expect("the first runner directory is valid");
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &first_enrollment,
+            first_registration.registration(),
+            first_directory.clone(),
+            Some(ProvisionedWorkspace {
+                session: SessionId::from_uuid(uuid(SESSION)),
+                placement_revision: RunnerGeneration::one(),
+                runner: first_enrollment.runner(),
+                repository: None,
+                canonical_clone_url_digest: None,
+                credential_profile: None,
+                sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+                working_directory: first_directory,
+                relative_path: WorkspaceRelativePath::try_new(format!(
+                    "sessions/{}/1/work",
+                    uuid(SESSION)
+                ))
+                .expect("the private-root path is relative"),
+                manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x80)),
+                recovery: None,
+            }),
+            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::ExternalEffect),
+            offer_request(),
+        )
+        .expect("the restricted profiled placement pins automatically");
+    let inspect_tool = tool("inspect");
+    let expected_approval = pin
+        .grant
+        .as_ref()
+        .expect("the profiled placement carries a grant")
+        .approvals()
+        .find(|(name, _)| *name == &inspect_tool)
+        .map(|(_, approval)| approval)
+        .expect("the predecessor grant records inspect approval");
+    store.store_pin(&pin, &first_registration).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the first runner may be marked lost");
+    store
+        .store_placement(&lost, Some(&first_registration), pin.grant.as_ref())
+        .await?;
+    let second_enrollment = replacement_enrollment();
+    store.insert_enrollment(&second_enrollment).await?;
+    let second_registration = store.register(&second_enrollment, advertisement()).await?;
+    let profile_free = lost
+        .replace_lost_runner(
+            SessionRunnerPlacementRequest {
+                selector: RunnerSelector::CapabilityClass(class()),
+                working_directory: WorkingDirectorySelection::RunnerDefault,
+                credential_profile: None,
+                workspace: WorkspaceRequirement::None,
+                sandbox: RunnerSandboxProfile::Ambient,
+                permission_overrides: no_permission_overrides(),
+            },
+            second_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/second".to_owned())
+                .expect("the second runner directory is valid"),
+            None,
+            pin.grant,
+        )
+        .expect("the profile-free replacement changes placement approval policy");
+    let tombstone = profile_free
+        .grant
+        .expect("the profile-free replacement carries its terminal grant tombstone");
+    store
+        .store_placement(
+            &profile_free.placement,
+            Some(&second_registration),
+            Some(&tombstone),
+        )
+        .await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the differently-policied profile-free replacement is loadable");
+    let actual_approval = loaded
+        .grant()
+        .expect("the loaded placement retains its tombstone")
+        .approvals()
+        .find(|(name, _)| *name == &inspect_tool)
+        .map(|(_, approval)| approval)
+        .expect("the loaded tombstone records inspect approval");
+
+    assert_eq!(actual_approval, expected_approval);
+    assert_eq!(loaded.grant(), Some(&tombstone));
+    let profile_free_lost = profile_free
+        .placement
+        .mark_runner_lost()
+        .expect("the profile-free runner may be marked lost");
+    store
+        .store_placement(
+            &profile_free_lost,
+            Some(&second_registration),
+            Some(&tombstone),
+        )
+        .await?;
+    let reloaded_lost = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the carried tombstone keeps its originating approval policy");
+
+    assert_eq!(reloaded_lost.placement(), &profile_free_lost);
+    assert_eq!(reloaded_lost.grant(), Some(&tombstone));
+    let later_enrollment = RunnerEnrollment::new(
+        RunnerEnrollmentId::from_uuid(uuid(LATER_ENROLLMENT)),
+        RunnerId::from_uuid(uuid(LATER_RUNNER)),
+        RunnerAuthenticationId::from_uuid(uuid(LATER_AUTHENTICATION)),
+        [class()],
+    );
+    store.insert_enrollment(&later_enrollment).await?;
+    let later_registration = store.register(&later_enrollment, advertisement()).await?;
+    let second_profile_free = profile_free_lost
+        .replace_lost_runner(
+            SessionRunnerPlacementRequest {
+                selector: RunnerSelector::CapabilityClass(class()),
+                working_directory: WorkingDirectorySelection::RunnerDefault,
+                credential_profile: None,
+                workspace: WorkspaceRequirement::None,
+                sandbox: RunnerSandboxProfile::Ambient,
+                permission_overrides: no_permission_overrides(),
+            },
+            later_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/later".to_owned())
+                .expect("the later runner directory is valid"),
+            None,
+            Some(tombstone),
+        )
+        .expect("a second profile-free replacement carries the original approvals");
+    let successor_tombstone = second_profile_free
+        .grant
+        .as_ref()
+        .expect("the second profile-free replacement advances the tombstone");
+    store
+        .store_placement(
+            &second_profile_free.placement,
+            Some(&later_registration),
+            Some(successor_tombstone),
+        )
+        .await?;
+    let reloaded_successor = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the successor tombstone remains loadable from active policy");
+
+    assert_eq!(
+        reloaded_successor.placement(),
+        &second_profile_free.placement
+    );
+    assert_eq!(reloaded_successor.grant(), Some(successor_tombstone));
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result<(), Box<dyn Error>>
@@ -3855,6 +4620,8 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
         working_directory: WorkingDirectorySelection::RunnerDefault,
         credential_profile: Some(profile()),
         workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: no_permission_overrides(),
     };
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -3890,6 +4657,8 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
                 working_directory: WorkingDirectorySelection::RunnerDefault,
                 credential_profile: None,
                 workspace: WorkspaceRequirement::None,
+                sandbox: RunnerSandboxProfile::Ambient,
+                permission_overrides: no_permission_overrides(),
             },
             second_registration.registration(),
             RunnerWorkingDirectory::try_new("/workspace/second".to_owned())
@@ -4062,6 +4831,8 @@ async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<
                 repository: WorkspaceRepositoryKey::try_new("signalbox".to_owned())
                     .expect("the repository key is valid"),
             },
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -4250,6 +5021,8 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: permission_overrides(RunnerToolPermissionOverride::Auto),
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -4331,6 +5104,8 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         working_directory: WorkingDirectorySelection::RunnerDefault,
         credential_profile: Some(profile()),
         workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: no_permission_overrides(),
     };
     let placement = SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request);
     store.store_placement(&placement, None, None).await?;
@@ -4679,6 +5454,8 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
         working_directory: WorkingDirectorySelection::RunnerDefault,
         credential_profile: Some(profile()),
         workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: no_permission_overrides(),
     };
     let placement = SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request);
     store.store_placement(&placement, None, None).await?;
