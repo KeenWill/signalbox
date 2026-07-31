@@ -286,6 +286,8 @@ pub struct WorkspaceFileBytes {
     pub total_bytes: u64,
     /// Whether the bounded read observed bytes beyond the requested prefix.
     pub truncated: bool,
+    /// Raw permission and special mode bits from the opened regular file.
+    pub mode: u32,
 }
 
 /// Injectable descriptor-relative filesystem operations needed by the tools.
@@ -442,6 +444,7 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
             bytes,
             total_bytes,
             truncated,
+            mode: status.st_mode,
         })
     }
 }

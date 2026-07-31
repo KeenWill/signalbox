@@ -13,7 +13,6 @@ pub const MAX_PATCH_OPERATIONS: usize = 64;
 /// Maximum update hunks accepted across one patch.
 pub const MAX_PATCH_HUNKS: usize = 256;
 
-const MAX_PATCH_PATH_BYTES: usize = 4096;
 const BEGIN_PATCH: &str = "*** Begin Patch";
 const END_PATCH: &str = "*** End Patch";
 const ADD_FILE: &str = "*** Add File: ";
@@ -572,7 +571,10 @@ fn is_directive(line: &str) -> bool {
 }
 
 fn normalize_path(supplied: &str) -> Result<String, PatchPathRejection> {
-    if supplied.is_empty() || supplied.len() > MAX_PATCH_PATH_BYTES || supplied.contains('\0') {
+    if supplied.is_empty()
+        || supplied.len() > crate::path::MAX_WORKSPACE_PATH_BYTES
+        || supplied.contains('\0')
+    {
         return Err(PatchPathRejection::Invalid);
     }
     let path = Path::new(supplied);
@@ -921,7 +923,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_and_applies_add_update_delete_operations() {
+    fn applies_add_update_delete_operations() {
         let patch = parse_patch(
             "*** Begin Patch\n\
              *** Add File: new.txt\n\

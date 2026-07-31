@@ -25,9 +25,9 @@ use signalbox_tool_contract::{
 };
 
 use crate::{
-    LocalWorkspaceFileSystem, PatchApplyError, PlannedPatchOperation, WorkspaceFileSystem,
-    WorkspacePatch, WorkspacePathRejection, WorkspaceResolveError, WorkspaceRoot, parse_patch,
-    plan_patch,
+    LocalWorkspaceFileSystem, PatchApplyError, PatchParseError, PatchParseErrorKind,
+    PlannedPatchOperation, WorkspaceFileSystem, WorkspacePatch, WorkspacePathRejection,
+    WorkspaceResolveError, WorkspaceRoot, parse_patch, plan_patch,
 };
 
 pub const WRITE_FILE_NAME: &str = "write_file";
@@ -99,7 +99,10 @@ impl ToolContract for EditFileContract {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyPatchArguments {
-    /// Structured add/update/delete patch bounded to one MiB.
+    /// Codex-style patch: start with `*** Begin Patch`; use `*** Add File: path`
+    /// followed by `+` lines, `*** Update File: path` with `@@` hunks and
+    /// space/`-`/`+` lines, or `*** Delete File: path`; finish with
+    /// `*** End Patch`. Empty adds and no-final-newline edits are unsupported.
     #[schemars(length(min = 1, max = crate::MAX_PATCH_BYTES))]
     pub patch: String,
 }
@@ -109,8 +112,12 @@ struct ApplyPatchContract;
 impl ToolContract for ApplyPatchContract {
     type Arguments = ApplyPatchArguments;
     const NAME: &'static str = APPLY_PATCH_NAME;
-    const DESCRIPTION: &'static str =
-        "Atomically applies one structured add/update/delete patch inside the workspace root.";
+    const DESCRIPTION: &'static str = concat!(
+        "Atomically applies a Codex-style patch: `*** Begin Patch`; ",
+        "`*** Add File: path` plus `+` lines, `*** Update File: path` plus `@@` hunks whose ",
+        "lines start with space, `-`, or `+`, or `*** Delete File: path`; then ",
+        "`*** End Patch`. Empty adds and no-final-newline edits are unsupported."
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,12 +173,15 @@ pub struct WorkspaceFileSnapshot {
     pub path: WorkspaceMutationPath,
     /// Complete UTF-8 content, or `None` when the path did not exist.
     pub content: Option<String>,
+    /// Raw mode bits captured for an existing regular file.
+    pub mode: Option<u32>,
 }
 
 /// A complete precondition snapshot for all paths touched by one operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceMutationSnapshot {
     files: BTreeMap<WorkspaceMutationPath, Option<String>>,
+    modes: BTreeMap<WorkspaceMutationPath, Option<u32>>,
 }
 
 impl WorkspaceMutationSnapshot {
@@ -180,9 +190,11 @@ impl WorkspaceMutationSnapshot {
         files: impl IntoIterator<Item = WorkspaceFileSnapshot>,
     ) -> Result<Self, WorkspaceMutationSnapshotError> {
         let mut collected = BTreeMap::new();
+        let mut modes = BTreeMap::new();
         for file in files {
             match collected.entry(file.path) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
+                    modes.insert(entry.key().clone(), file.mode);
                     entry.insert(file.content);
                 }
                 std::collections::btree_map::Entry::Occupied(entry) => {
@@ -193,12 +205,20 @@ impl WorkspaceMutationSnapshot {
                 }
             }
         }
-        Ok(Self { files: collected })
+        Ok(Self {
+            files: collected,
+            modes,
+        })
     }
 
     /// Returns captured content for one requested path.
     pub fn content(&self, path: &WorkspaceMutationPath) -> Option<&Option<String>> {
         self.files.get(path)
+    }
+
+    /// Returns captured raw mode bits for one requested path.
+    pub fn mode(&self, path: &WorkspaceMutationPath) -> Option<&Option<u32>> {
+        self.modes.get(path)
     }
 
     /// Iterates captured files in lexical path order.
@@ -208,6 +228,7 @@ impl WorkspaceMutationSnapshot {
             .map(|(path, content)| WorkspaceFileSnapshot {
                 path: path.clone(),
                 content: content.clone(),
+                mode: self.modes.get(path).copied().flatten(),
             })
     }
 }
@@ -293,8 +314,10 @@ pub enum WorkspaceMutationCommitError {
         /// Typed rejection evidence.
         reason: WorkspacePathRejection,
     },
-    /// The filesystem could not apply the whole batch atomically.
+    /// The filesystem failed before any target effect was observed.
     Filesystem,
+    /// A post-effect failure made the final workspace state unknowable.
+    Ambiguous,
 }
 
 impl fmt::Display for WorkspaceMutationCommitError {
@@ -309,6 +332,7 @@ impl fmt::Display for WorkspaceMutationCommitError {
                 )
             }
             Self::Filesystem => formatter.write_str("atomic workspace commit failed"),
+            Self::Ambiguous => formatter.write_str("atomic workspace commit outcome is ambiguous"),
         }
     }
 }
@@ -337,6 +361,8 @@ pub trait WorkspaceMutationFileSystem: Clone + Send + Sync + 'static {
     ) -> Result<WorkspaceMutationSnapshot, WorkspaceMutationSnapshotError>;
 
     /// Atomically commits a prevalidated batch against its captured values.
+    /// A known failure must leave every target unchanged; an adapter that
+    /// cannot prove rollback must return `WorkspaceMutationCommitError::Ambiguous`.
     fn commit_atomically(
         &self,
         root: &Self::Root,
@@ -451,8 +477,47 @@ impl ToolArgumentValidator for WorkspaceMutationArgumentValidator {
     ) -> Result<(), ToolExecutionErrorDetail> {
         decode_operation(self.kind, arguments)
             .map(|_| ())
-            .map_err(|_| self.detail.clone())
+            .map_err(|error| error.tool_detail().unwrap_or_else(|| self.detail.clone()))
     }
+}
+
+#[derive(Debug)]
+enum InvalidMutationArguments {
+    Shape,
+    Path(WorkspacePathRejection),
+    Patch(PatchParseError),
+}
+
+impl InvalidMutationArguments {
+    fn tool_detail(&self) -> Option<ToolExecutionErrorDetail> {
+        let detail = match self {
+            Self::Shape => return None,
+            Self::Path(reason) => format!("workspace mutation path rejected: {reason}"),
+            Self::Patch(error) => patch_parse_detail(error),
+        };
+        ToolExecutionErrorDetail::try_new(detail).ok()
+    }
+}
+
+fn patch_parse_detail(error: &PatchParseError) -> String {
+    let operation = error
+        .location
+        .operation
+        .map_or_else(String::new, |value| format!(", operation {value}"));
+    let hunk = error
+        .location
+        .hunk
+        .map_or_else(String::new, |value| format!(", hunk {value}"));
+    let reason = match &error.kind {
+        PatchParseErrorKind::PathRejected { reason, .. } => {
+            format!("path rejected: {reason:?}")
+        }
+        kind => format!("{kind:?}"),
+    };
+    format!(
+        "patch parse failed at line {}{operation}{hunk}: {reason}",
+        error.location.line
+    )
 }
 
 enum MutationOperation {
@@ -472,30 +537,32 @@ enum MutationOperation {
 fn decode_operation(
     kind: MutationToolKind,
     arguments: &NormalizedToolArguments,
-) -> Result<MutationOperation, ()> {
+) -> Result<MutationOperation, InvalidMutationArguments> {
     match kind {
         MutationToolKind::WriteFile => {
-            let decoded: WriteFileArguments =
-                serde_json::from_str(arguments.as_str()).map_err(drop)?;
+            let decoded: WriteFileArguments = serde_json::from_str(arguments.as_str())
+                .map_err(|_| InvalidMutationArguments::Shape)?;
             if decoded.content.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES {
-                return Err(());
+                return Err(InvalidMutationArguments::Shape);
             }
-            let path = WorkspaceMutationPath::try_new(decoded.path).map_err(drop)?;
+            let path = WorkspaceMutationPath::try_new(decoded.path)
+                .map_err(InvalidMutationArguments::Path)?;
             Ok(MutationOperation::Write {
                 path,
                 content: decoded.content,
             })
         }
         MutationToolKind::EditFile => {
-            let decoded: EditFileArguments =
-                serde_json::from_str(arguments.as_str()).map_err(drop)?;
+            let decoded: EditFileArguments = serde_json::from_str(arguments.as_str())
+                .map_err(|_| InvalidMutationArguments::Shape)?;
             if decoded.old_string.is_empty()
                 || decoded.old_string.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES
                 || decoded.new_string.len() > MAX_WORKSPACE_MUTATION_FILE_BYTES
             {
-                return Err(());
+                return Err(InvalidMutationArguments::Shape);
             }
-            let path = WorkspaceMutationPath::try_new(decoded.path).map_err(drop)?;
+            let path = WorkspaceMutationPath::try_new(decoded.path)
+                .map_err(InvalidMutationArguments::Path)?;
             Ok(MutationOperation::Edit {
                 path,
                 old_string: decoded.old_string,
@@ -504,16 +571,14 @@ fn decode_operation(
             })
         }
         MutationToolKind::ApplyPatch => {
-            let decoded: ApplyPatchArguments =
-                serde_json::from_str(arguments.as_str()).map_err(drop)?;
+            let decoded: ApplyPatchArguments = serde_json::from_str(arguments.as_str())
+                .map_err(|_| InvalidMutationArguments::Shape)?;
             parse_patch(&decoded.patch)
                 .map(MutationOperation::ApplyPatch)
-                .map_err(drop)
+                .map_err(InvalidMutationArguments::Patch)
         }
     }
 }
-
-fn drop<T>(_value: T) {}
 
 /// Executor for the three approved workspace mutation tools.
 pub struct WorkspaceMutationExecutor<FileSystem: WorkspaceMutationFileSystem> {
@@ -563,7 +628,7 @@ impl<FileSystem: WorkspaceMutationFileSystem> ToolExecutor
         let kind = kind_for_name(invocation.request().name().as_str())
             .ok_or(WorkspaceMutationExecutorError::ArgumentValidationDrift)?;
         let operation = decode_operation(kind, invocation.request().arguments())
-            .map_err(|()| WorkspaceMutationExecutorError::ArgumentValidationDrift)?;
+            .map_err(|_| WorkspaceMutationExecutorError::ArgumentValidationDrift)?;
         let evidence = match self.execute_operation(operation) {
             Ok(result) => ToolExecutorEvidence::CompletedText(
                 serde_json::to_string(&result)
@@ -584,6 +649,7 @@ impl<FileSystem: WorkspaceMutationFileSystem> ToolExecutor
             Err(MutationFailure::Commit) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.commit_failed_detail.clone()),
             },
+            Err(MutationFailure::Ambiguous) => ToolExecutorEvidence::Ambiguous,
         };
         Ok(invocation.bind(evidence))
     }
@@ -623,6 +689,7 @@ enum MutationFailure {
     EditMatch,
     Patch(String),
     Commit,
+    Ambiguous,
 }
 
 impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationExecutor<FileSystem> {
@@ -664,7 +731,12 @@ impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationExecutor<FileSyst
     ) -> Result<(), MutationFailure> {
         self.filesystem
             .commit_atomically(&self.root, snapshot, mutations)
-            .map_err(|_| MutationFailure::Commit)
+            .map_err(|error| match error {
+                WorkspaceMutationCommitError::Ambiguous => MutationFailure::Ambiguous,
+                WorkspaceMutationCommitError::Conflict
+                | WorkspaceMutationCommitError::PathRejected { .. }
+                | WorkspaceMutationCommitError::Filesystem => MutationFailure::Commit,
+            })
     }
 
     fn write_file(
@@ -784,10 +856,21 @@ fn patch_apply_failure(error: PatchApplyError) -> MutationFailure {
         || String::from("file operation"),
         |hunk| format!("hunk {hunk}"),
     );
+    let path = bounded_detail_path(&error.path);
     MutationFailure::Patch(format!(
-        "patch operation {}, {hunk} failed: {:?}",
+        "patch operation {}, path {path:?}, {hunk} failed: {:?}",
         error.operation, error.kind
     ))
+}
+
+fn bounded_detail_path(path: &str) -> &str {
+    const MAX_DETAIL_PATH_BYTES: usize = 1024;
+
+    let mut end = path.len().min(MAX_DETAIL_PATH_BYTES);
+    while !path.is_char_boundary(end) {
+        end -= 1;
+    }
+    &path[..end]
 }
 
 /// Successful `write_file` result.
@@ -861,20 +944,42 @@ impl WorkspaceMutationFileSystem for LocalWorkspaceFileSystem {
             match stage_mutation(root, expected, mutation) {
                 Ok(file) => staged.push(file),
                 Err(error) => {
-                    cleanup_staged(&mut staged);
-                    return Err(error);
+                    return match cleanup_staged(&mut staged) {
+                        Ok(()) => Err(error),
+                        Err(()) => Err(WorkspaceMutationCommitError::Ambiguous),
+                    };
                 }
             }
         }
 
         for index in 0..staged.len() {
+            if let Err(error) = verify_precondition(self, root, expected, &staged[index].path) {
+                return Err(rollback_result(&mut staged, error));
+            }
             if let Err(error) = install_staged(&mut staged[index]) {
-                rollback_staged(&mut staged);
-                return Err(error);
+                return Err(rollback_result(&mut staged, error));
             }
         }
-        cleanup_backups(&mut staged);
+        cleanup_backups(&mut staged).map_err(|()| WorkspaceMutationCommitError::Ambiguous)
+    }
+}
+
+fn verify_precondition(
+    filesystem: &LocalWorkspaceFileSystem,
+    root: &WorkspaceRoot,
+    expected: &WorkspaceMutationSnapshot,
+    path: &WorkspaceMutationPath,
+) -> Result<(), WorkspaceMutationCommitError> {
+    let current = local_file_snapshot(filesystem, root, path, MAX_WORKSPACE_MUTATION_FILE_BYTES)
+        .map_err(snapshot_commit_error)?;
+    let expected_file = expected
+        .files()
+        .find(|file| file.path == *path)
+        .ok_or(WorkspaceMutationCommitError::Filesystem)?;
+    if current == expected_file {
         Ok(())
+    } else {
+        Err(WorkspaceMutationCommitError::Conflict)
     }
 }
 
@@ -893,6 +998,7 @@ fn local_file_snapshot(
             .map(|content| WorkspaceFileSnapshot {
                 path: path.clone(),
                 content: Some(content),
+                mode: Some(read.mode),
             })
             .map_err(|_| WorkspaceMutationSnapshotError {
                 path: Some(path.clone()),
@@ -908,6 +1014,7 @@ fn local_file_snapshot(
             Ok(WorkspaceFileSnapshot {
                 path: path.clone(),
                 content: None,
+                mode: None,
             })
         }
         Err(WorkspaceResolveError::Io { source, .. })
@@ -959,7 +1066,8 @@ fn stage_mutation(
     let (stage, writes_target) = match mutation {
         WorkspaceFileMutation::Write { content, .. } => {
             let name = transaction_name("stage");
-            write_staged_file(&parent, &name, content, &path)?;
+            let mode = expected.mode(&path).copied().flatten().unwrap_or(0o600);
+            write_staged_file(&parent, &name, content, mode, &path)?;
             (Some(name), true)
         }
         WorkspaceFileMutation::Delete { .. } => (None, false),
@@ -1017,19 +1125,27 @@ fn write_staged_file(
     parent: &OwnedFd,
     name: &OsStr,
     content: &str,
+    mode: u32,
     path: &WorkspaceMutationPath,
 ) -> Result<(), WorkspaceMutationCommitError> {
     let descriptor = openat(
         parent,
         name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::RUSR | Mode::WUSR,
+        Mode::from_bits_retain(mode),
     )
     .map_err(|error| commit_errno(path, error))?;
     let mut file = File::from(descriptor);
-    file.write_all(content.as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(|_| WorkspaceMutationCommitError::Filesystem)
+    let result = file
+        .write_all(content.as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if result.is_ok() {
+        return Ok(());
+    }
+    unlinkat(parent, name, AtFlags::empty())
+        .map_err(|_| WorkspaceMutationCommitError::Ambiguous)?;
+    Err(WorkspaceMutationCommitError::Filesystem)
 }
 
 fn install_staged(staged: &mut StagedMutation) -> Result<(), WorkspaceMutationCommitError> {
@@ -1059,36 +1175,51 @@ fn install_staged(staged: &mut StagedMutation) -> Result<(), WorkspaceMutationCo
     Ok(())
 }
 
-fn rollback_staged(staged: &mut [StagedMutation]) {
-    for file in staged.iter_mut().rev() {
-        if file.target_installed && file.writes_target {
-            let _ = unlinkat(&file.parent, &file.target, AtFlags::empty());
-        }
-        if file.backup_created
-            && let Some(backup) = &file.backup
-        {
-            let _ = renameat(&file.parent, backup, &file.parent, &file.target);
-        }
-        if let Some(stage) = file.stage.take() {
-            let _ = unlinkat(&file.parent, stage, AtFlags::empty());
-        }
+fn rollback_result(
+    staged: &mut [StagedMutation],
+    known_error: WorkspaceMutationCommitError,
+) -> WorkspaceMutationCommitError {
+    match rollback_staged(staged) {
+        Ok(()) => known_error,
+        Err(()) => WorkspaceMutationCommitError::Ambiguous,
     }
 }
 
-fn cleanup_staged(staged: &mut [StagedMutation]) {
+fn rollback_staged(staged: &mut [StagedMutation]) -> Result<(), ()> {
+    let mut failed = false;
+    for file in staged.iter_mut().rev() {
+        if file.backup_created {
+            if let Some(backup) = &file.backup {
+                failed |= renameat(&file.parent, backup, &file.parent, &file.target).is_err();
+            }
+        } else if file.target_installed && file.writes_target {
+            failed |= unlinkat(&file.parent, &file.target, AtFlags::empty()).is_err();
+        }
+        if let Some(stage) = file.stage.take() {
+            failed |= unlinkat(&file.parent, stage, AtFlags::empty()).is_err();
+        }
+    }
+    if failed { Err(()) } else { Ok(()) }
+}
+
+fn cleanup_staged(staged: &mut [StagedMutation]) -> Result<(), ()> {
+    let mut failed = false;
     for file in staged {
         if let Some(stage) = file.stage.take() {
-            let _ = unlinkat(&file.parent, stage, AtFlags::empty());
+            failed |= unlinkat(&file.parent, stage, AtFlags::empty()).is_err();
         }
     }
+    if failed { Err(()) } else { Ok(()) }
 }
 
-fn cleanup_backups(staged: &mut [StagedMutation]) {
+fn cleanup_backups(staged: &mut [StagedMutation]) -> Result<(), ()> {
+    let mut failed = false;
     for file in staged {
         if let Some(backup) = file.backup.take() {
-            let _ = unlinkat(&file.parent, backup, AtFlags::empty());
+            failed |= unlinkat(&file.parent, backup, AtFlags::empty()).is_err();
         }
     }
+    if failed { Err(()) } else { Ok(()) }
 }
 
 fn commit_errno(
@@ -1113,6 +1244,9 @@ fn transaction_name(role: &str) -> OsString {
         NEXT_TRANSACTION_FILE.fetch_add(1, Ordering::Relaxed)
     ))
 }
+
+#[cfg(test)]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1183,9 +1317,11 @@ mod tests {
                             kind: WorkspaceMutationSnapshotErrorKind::TooLarge,
                         });
                     }
+                    let mode = content.as_ref().map(|_| 0o600);
                     Ok(WorkspaceFileSnapshot {
                         path: path.clone(),
                         content,
+                        mode,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1328,6 +1464,125 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_edit_preserves_executable_mode() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        const PATH: &str = "script.sh";
+        const ORIGINAL_MODE: u32 = 0o751;
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(ORIGINAL_MODE)
+            .open(workspace.path().join(PATH))
+            .expect("script fixture creates");
+        std::fs::write(workspace.path().join(PATH), "old\n").expect("script fixture writes");
+        let executor = local_executor(&workspace);
+
+        executor
+            .edit_file(
+                WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid"),
+                "old",
+                "new",
+                false,
+            )
+            .expect("local edit succeeds");
+        let mode = std::fs::metadata(workspace.path().join(PATH))
+            .expect("edited metadata reads")
+            .permissions()
+            .mode()
+            & 0o7777;
+
+        assert_eq!(mode, ORIGINAL_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_snapshot_rejects_intermediate_escaping_symlink() {
+        use std::os::unix::fs::symlink;
+
+        const ESCAPE_PATH: &str = "escape/new.txt";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let outside = tempfile::tempdir().expect("outside fixture constructs");
+        symlink(outside.path(), workspace.path().join("escape"))
+            .expect("escaping directory symlink fixture constructs");
+        let executor = local_executor(&workspace);
+        let path = WorkspaceMutationPath::try_new(ESCAPE_PATH).expect("fixture path is valid");
+
+        let error = executor
+            .filesystem
+            .snapshot(
+                &executor.root,
+                std::slice::from_ref(&path),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES,
+            )
+            .expect_err("intermediate escaping symlink rejects");
+
+        assert_eq!(error.path, Some(path));
+        assert_eq!(
+            error.kind,
+            WorkspaceMutationSnapshotErrorKind::PathRejected(WorkspacePathRejection::Symlink)
+        );
+        assert!(!outside.path().join("new.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_commit_rejects_target_swapped_to_escaping_symlink() {
+        use std::os::unix::fs::symlink;
+
+        const PATH: &str = "file.txt";
+        const ORIGINAL: &str = "original\n";
+        const OUTSIDE: &str = "outside\n";
+
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let outside = tempfile::tempdir().expect("outside fixture constructs");
+        let workspace_path = workspace.path().join(PATH);
+        let outside_path = outside.path().join(PATH);
+        std::fs::write(&workspace_path, ORIGINAL).expect("workspace fixture writes");
+        std::fs::write(&outside_path, OUTSIDE).expect("outside fixture writes");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root = WorkspaceMutationFileSystem::open_root(&filesystem, workspace.path())
+            .expect("fixture root opens");
+        let path = WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid");
+        let expected = filesystem
+            .snapshot(
+                &root,
+                std::slice::from_ref(&path),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES,
+            )
+            .expect("initial snapshot succeeds");
+        std::fs::remove_file(&workspace_path).expect("workspace target removes");
+        symlink(&outside_path, &workspace_path).expect("replacement symlink constructs");
+
+        let error = filesystem
+            .commit_atomically(
+                &root,
+                &expected,
+                &[WorkspaceFileMutation::Write {
+                    path: path.clone(),
+                    content: String::from("replacement\n"),
+                }],
+            )
+            .expect_err("swapped target rejects");
+
+        assert_eq!(
+            error,
+            WorkspaceMutationCommitError::PathRejected {
+                path,
+                reason: WorkspacePathRejection::Symlink,
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside_path).expect("outside target reads"),
+            OUTSIDE
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn local_snapshot_rejects_escaping_symlink() {
         use std::os::unix::fs::symlink;
 
@@ -1359,20 +1614,46 @@ mod tests {
     }
 
     #[test]
-    fn mutation_definitions_require_confirmation_and_external_effects() {
+    fn mutation_definitions_require_confirmation() {
         let tools = WorkspaceMutationTools::try_new(FakeFileSystem::default(), "/injected")
             .expect("fixture tools construct");
         let (catalog, _executor) = tools.into_parts();
         let definitions = catalog.definitions();
 
         assert_eq!(definitions.len(), WORKSPACE_MUTATION_TOOL_NAMES.len());
-        assert!(definitions.iter().all(|definition| {
-            definition.permission_default() == ToolPermissionDefault::Confirm
-        }));
-        assert!(
-            definitions
-                .iter()
-                .all(|definition| { definition.effect_class() == ToolEffectClass::ExternalEffect })
+        assert_eq!(
+            definitions[0].permission_default(),
+            ToolPermissionDefault::Confirm
+        );
+        assert_eq!(
+            definitions[1].permission_default(),
+            ToolPermissionDefault::Confirm
+        );
+        assert_eq!(
+            definitions[2].permission_default(),
+            ToolPermissionDefault::Confirm
+        );
+    }
+
+    #[test]
+    fn mutation_definitions_report_external_effects() {
+        let tools = WorkspaceMutationTools::try_new(FakeFileSystem::default(), "/injected")
+            .expect("fixture tools construct");
+        let (catalog, _executor) = tools.into_parts();
+        let definitions = catalog.definitions();
+
+        assert_eq!(definitions.len(), WORKSPACE_MUTATION_TOOL_NAMES.len());
+        assert_eq!(
+            definitions[0].effect_class(),
+            ToolEffectClass::ExternalEffect
+        );
+        assert_eq!(
+            definitions[1].effect_class(),
+            ToolEffectClass::ExternalEffect
+        );
+        assert_eq!(
+            definitions[2].effect_class(),
+            ToolEffectClass::ExternalEffect
         );
     }
 
@@ -1399,6 +1680,29 @@ mod tests {
     }
 
     #[test]
+    fn write_file_overwrites_complete_content() {
+        const PATH: &str = "existing.txt";
+        const ORIGINAL: &str = "old\n";
+        const REPLACEMENT: &str = "replacement\n";
+
+        let filesystem = FakeFileSystem::with_files([(PATH, ORIGINAL)]);
+        let executor = executor(filesystem.clone());
+        let result = executor
+            .write_file(
+                WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid"),
+                String::from(REPLACEMENT),
+            )
+            .expect("overwrite succeeds");
+
+        assert_eq!(
+            filesystem.files().get(PATH).map(String::as_str),
+            Some(REPLACEMENT)
+        );
+        assert!(!result.created);
+        assert_eq!(result.bytes_written, REPLACEMENT.len());
+    }
+
+    #[test]
     fn edit_file_requires_unique_match_by_default() {
         const PATH: &str = "file.txt";
         const CONTENT: &str = "same same";
@@ -1411,6 +1715,73 @@ mod tests {
             "same",
             "new",
             false,
+        );
+
+        assert_eq!(result, Err(MutationFailure::EditMatch));
+        assert_eq!(filesystem.files(), original);
+    }
+
+    #[test]
+    fn edit_file_rejects_missing_match_by_default() {
+        const PATH: &str = "file.txt";
+        const CONTENT: &str = "present";
+
+        let filesystem = FakeFileSystem::with_files([(PATH, CONTENT)]);
+        let executor = executor(filesystem.clone());
+        let original = filesystem.files();
+        let result = executor.edit_file(
+            WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid"),
+            "missing",
+            "new",
+            false,
+        );
+
+        assert_eq!(result, Err(MutationFailure::EditMatch));
+        assert_eq!(filesystem.files(), original);
+    }
+
+    #[test]
+    fn edit_file_replaces_one_unique_match_by_default() {
+        const PATH: &str = "file.txt";
+        const EXPECTED: &str = "before new after";
+
+        let filesystem = FakeFileSystem::with_files([(PATH, "before old after")]);
+        let executor = executor(filesystem.clone());
+        let result = executor
+            .edit_file(
+                WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid"),
+                "old",
+                "new",
+                false,
+            )
+            .expect("unique replacement succeeds");
+
+        assert_eq!(result.replacements, 1);
+        assert_eq!(
+            filesystem.files().get(PATH).map(String::as_str),
+            Some(EXPECTED)
+        );
+    }
+
+    #[test]
+    fn edit_file_rejects_output_over_byte_cap() {
+        const PATH: &str = "file.txt";
+
+        let content = "a".repeat(MAX_WORKSPACE_MUTATION_FILE_BYTES);
+        let filesystem = FakeFileSystem::with_files([(PATH, "placeholder")]);
+        filesystem
+            .state
+            .lock()
+            .expect("fake lock is available")
+            .files
+            .insert(String::from(PATH), content);
+        let executor = executor(filesystem.clone());
+        let original = filesystem.files();
+        let result = executor.edit_file(
+            WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid"),
+            "a",
+            "aa",
+            true,
         );
 
         assert_eq!(result, Err(MutationFailure::EditMatch));
@@ -1465,10 +1836,11 @@ mod tests {
 
         let result = executor.apply_patch(&patch);
 
-        assert!(matches!(
-            result,
-            Err(MutationFailure::Patch(detail)) if detail.contains("hunk 1")
-        ));
+        let Err(MutationFailure::Patch(detail)) = result else {
+            panic!("context failure returns patch detail")
+        };
+        assert!(detail.contains("hunk 1"));
+        assert!(detail.contains(SECOND_PATH));
         assert_eq!(filesystem.files(), original);
     }
 
