@@ -598,12 +598,23 @@ fn build_provider_request(
     credential: &CredentialValue,
 ) -> Result<reqwest::Request, WebSearchTransportFailure> {
     let endpoint = request.provider.endpoint();
+    let credential_text = std::str::from_utf8(credential.expose_bytes())
+        .map_err(|_| WebSearchTransportFailure::InvalidCredential)?;
+    if credential_text.is_empty() {
+        return Err(WebSearchTransportFailure::InvalidCredential);
+    }
+    if request.query().contains(credential_text) {
+        return Err(WebSearchTransportFailure::RequestFailed);
+    }
     let mut url = Url::parse(endpoint.url).map_err(|_| WebSearchTransportFailure::RequestFailed)?;
     url.query_pairs_mut()
         .append_pair("q", request.query())
         .append_pair("count", BRAVE_RESULT_COUNT_QUERY)
         .append_pair("result_filter", "web")
         .append_pair("text_decorations", "false");
+    if url.as_str().contains(credential_text) {
+        return Err(WebSearchTransportFailure::RequestFailed);
+    }
     let mut credential_header = HeaderValue::from_bytes(credential.expose_bytes())
         .map_err(|_| WebSearchTransportFailure::InvalidCredential)?;
     credential_header.set_sensitive(true);
@@ -886,12 +897,20 @@ fn success_evidence(
         .results
         .into_iter()
         .take(MAX_RETURNED_RESULTS)
-        .map(|result| RenderedSearchResult {
-            title: scrubber.redact_text(&result.title),
-            url: scrubber.redact_text(&result.url),
-            snippet: scrubber.redact_text(&result.snippet),
+        .map(|result| {
+            let sanitized = WebSearchResult::try_new(WebSearchResultFields {
+                title: scrubber.redact_text(&result.title),
+                url: scrubber.redact_text(&result.url),
+                snippet: scrubber.redact_text(&result.snippet),
+            })
+            .ok_or(WebSearchExecutorError::EvidenceEncoding)?;
+            Ok(RenderedSearchResult {
+                title: sanitized.title,
+                url: sanitized.url,
+                snippet: sanitized.snippet,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, WebSearchExecutorError>>()?;
     let content = serde_json::to_string(&serde_json::json!({
         "results": results,
         "truncated": truncated,
@@ -1027,6 +1046,7 @@ mod tests {
     const FIXTURE_RESULT_TITLE: &str = "Synthetic result";
     const FIXTURE_RESULT_URL: &str = "https://example.com/result";
     const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
+    const URL_SCHEME_COLLISION_KEY: &str = "https";
     const PROVIDER_REJECTION_STATUS: u16 = 429;
 
     struct CountingCredentials {
@@ -1089,16 +1109,22 @@ mod tests {
             .expect("fixture credential is usable")
     }
 
-    fn brave_request() -> reqwest::Request {
+    fn build_brave_request(
+        query: &str,
+        credential: &str,
+    ) -> Result<reqwest::Request, WebSearchTransportFailure> {
         let transport = ReqwestWebSearchTransport::try_new(DEFAULT_EXCHANGE_TIMEOUT)
             .expect("fixture client builds");
         let request = WebSearchRequest {
             provider: WebSearchProvider::Brave,
-            query: String::from(FIXTURE_QUERY),
+            query: String::from(query),
         };
-        let credential = CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec());
+        let credential = CredentialValue::new(credential.as_bytes().to_vec());
         build_provider_request(&transport.client, &request, &credential)
-            .expect("fixture request builds")
+    }
+
+    fn brave_request() -> reqwest::Request {
+        build_brave_request(FIXTURE_QUERY, SYNTHETIC_KEY).expect("fixture request builds")
     }
 
     /// The provider read is auto-approved but remains crash-relevant because
@@ -1308,6 +1334,50 @@ mod tests {
         assert!(!content.contains(SYNTHETIC_KEY));
     }
 
+    /// INV-035: credential scrubbing cannot turn a checked result title into
+    /// an empty title in completed evidence.
+    #[test]
+    fn web_search_rejects_result_with_title_invalidated_by_credential_scrubbing() {
+        const TITLE_COLLISION_KEY: &str = "synthetic-title-key";
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(TITLE_COLLISION_KEY),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("reflected fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            TITLE_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: credential scrubbing cannot turn a checked result URL into an
+    /// invalid URL in completed evidence.
+    #[test]
+    fn web_search_rejects_result_with_url_invalidated_by_credential_scrubbing() {
+        let response = WebSearchResponse::new(
+            vec![result(FIXTURE_RESULT_TITLE)],
+            WebSearchPageCompleteness::Complete,
+        )
+        .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_SCHEME_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// INV-035: credential removal cannot reproduce a key that overlaps the
     /// ordinary redaction sentinel.
     #[test]
@@ -1450,6 +1520,26 @@ mod tests {
         assert!(!built.url().as_str().contains(SYNTHETIC_KEY));
         assert!(header.is_sensitive());
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
+    /// INV-035: a query containing the resolved API key fails before a request
+    /// URL can leave the builder or be dispatched.
+    #[test]
+    fn brave_request_rejects_query_credential_collision() {
+        assert!(matches!(
+            build_brave_request(SYNTHETIC_KEY, SYNTHETIC_KEY),
+            Err(WebSearchTransportFailure::RequestFailed)
+        ));
+    }
+
+    /// INV-035: a key matching fixed provider URL text fails before the URL
+    /// can be dispatched or recorded.
+    #[test]
+    fn brave_request_rejects_fixed_url_credential_collision() {
+        assert!(matches!(
+            build_brave_request(FIXTURE_QUERY, URL_SCHEME_COLLISION_KEY),
+            Err(WebSearchTransportFailure::RequestFailed)
+        ));
     }
 
     /// INV-035: provider response and error diagnostics never render
