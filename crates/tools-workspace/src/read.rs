@@ -611,7 +611,7 @@ fn encode_read_result(result: ReadResult) -> Result<String, WorkspaceReadExecuto
         return Ok(encoded);
     }
     let mut lower = 0_usize;
-    let mut upper = result.evidence_units();
+    let mut upper = result.evidence_units().saturating_sub(1);
     while lower < upper {
         let candidate_units = lower + (upper - lower).div_ceil(2);
         let candidate = result.truncated_to(candidate_units);
