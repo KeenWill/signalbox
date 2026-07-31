@@ -113,7 +113,13 @@ pub(crate) async fn execute_review_orchestration_request(
         Ok(_) | Err(ReviewOrchestrationServiceError::Runner(RunnerError::AwaitingInput)) => {}
         Err(error) => return Err(map_service_error(error)),
     }
-    let stage = submission_stage(&store, &prepared.attempt, &prepared.submission).await?;
+    let stage = submission_stage(
+        &store,
+        &prepared.attempt,
+        &prepared.submission,
+        map_post_effect_store_error,
+    )
+    .await?;
     let progress = store
         .load_progress(prepared.attempt.id())
         .await
@@ -564,7 +570,7 @@ async fn recorded_submission_is_current(
     current: ReviewOrchestrationCurrentStage,
     submission: &ClientSubmission,
 ) -> Result<bool, ReviewOrchestrationRuntimeError> {
-    let recorded = submission_stage(store, attempt, submission).await?;
+    let recorded = submission_stage(store, attempt, submission, map_store_error).await?;
     Ok(recorded_stage_is_current(current, recorded))
 }
 
@@ -579,6 +585,7 @@ async fn submission_stage(
     store: &PostgresReviewOrchestrationStore,
     attempt: &ReviewOrchestrationAttempt,
     submission: &ClientSubmission,
+    map_error: fn(ReviewOrchestrationStoreError) -> ReviewOrchestrationRuntimeError,
 ) -> Result<ReviewOrchestrationStage, ReviewOrchestrationRuntimeError> {
     match submission {
         ClientSubmission::AwaitingImport => Ok(ReviewOrchestrationStage::Started),
@@ -592,7 +599,7 @@ async fn submission_stage(
             let claims = store
                 .load_concern_claims(attempt.id())
                 .await
-                .map_err(map_post_effect_store_error)?;
+                .map_err(map_error)?;
             if claims.len() < attempt.concerns().len() {
                 return Ok(ReviewOrchestrationStage::AwaitingConcerns);
             }
@@ -620,7 +627,7 @@ async fn submission_stage(
             let plan = store
                 .load_judgment_plan(attempt.id())
                 .await
-                .map_err(map_post_effect_store_error)?
+                .map_err(map_error)?
                 .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
             let ordinal = plan
                 .members()
@@ -1561,7 +1568,7 @@ mod tests {
     use super::{
         ReviewOrchestrationCurrentStage, ReviewOrchestrationRuntimeError,
         ReviewOrchestrationServiceError, ReviewOrchestrationStage, ReviewOrchestrationStoreError,
-        RunnerError, map_service_error, recorded_stage_is_current,
+        RunnerError, map_service_error, map_store_error, recorded_stage_is_current,
     };
 
     #[test]
@@ -1585,6 +1592,18 @@ mod tests {
         assert_eq!(
             map_service_error(error),
             ReviewOrchestrationRuntimeError::Rejected,
+        );
+    }
+
+    #[test]
+    fn pre_effect_stage_read_failure_is_not_commit_ambiguous() {
+        let error = ReviewOrchestrationStoreError::Database(sqlx::Error::PoolTimedOut);
+
+        assert_eq!(
+            map_store_error(error),
+            ReviewOrchestrationRuntimeError::Unavailable {
+                commit_ambiguous: false,
+            },
         );
     }
 

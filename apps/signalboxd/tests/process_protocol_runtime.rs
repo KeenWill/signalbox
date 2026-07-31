@@ -6562,6 +6562,12 @@ fn transitive_cycle_members(findings: ReviewFindingFixtures) -> Vec<ReviewJudgme
     ]
 }
 
+#[derive(Clone, Copy)]
+enum PlanRejectionFanout {
+    Complete,
+    FirstConcernOnly,
+}
+
 async fn prove_orchestration_plan_rejection(
     driver: &mut ReviewRuntimeDriver,
     attempt: CanonicalUuid,
@@ -6569,20 +6575,23 @@ async fn prove_orchestration_plan_rejection(
     concerns: &[ReviewConcernEvidence],
     analysis_pass: CanonicalUuid,
     members: Vec<ReviewJudgmentPlanMember>,
-    complete_fanout: bool,
+    fanout: PlanRejectionFanout,
 ) -> Result<(), Box<dyn Error>> {
     driver.start_attempt(attempt).await?;
     driver.record_import(attempt, import_pass).await?;
-    if complete_fanout {
-        driver.record_complete_concerns(attempt, concerns).await?;
-    } else {
-        driver
-            .record_concern(
-                attempt,
-                &concerns[0],
-                ReviewOrchestrationState::AwaitingConcerns,
-            )
-            .await?;
+    match fanout {
+        PlanRejectionFanout::Complete => {
+            driver.record_complete_concerns(attempt, concerns).await?;
+        }
+        PlanRejectionFanout::FirstConcernOnly => {
+            driver
+                .record_concern(
+                    attempt,
+                    &concerns[0],
+                    ReviewOrchestrationState::AwaitingConcerns,
+                )
+                .await?;
+        }
     }
     driver
         .request_invalid(ClientRequest::RecordReviewJudgmentPlan {
@@ -6821,7 +6830,7 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         &concerns,
         analysis.pass,
         complete_judgment_members(findings),
-        false,
+        PlanRejectionFanout::FirstConcernOnly,
     )
     .await?;
     prove_orchestration_plan_rejection(
@@ -6831,7 +6840,7 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         &concerns,
         analysis.pass,
         direct_cycle_members(findings),
-        true,
+        PlanRejectionFanout::Complete,
     )
     .await?;
     prove_orchestration_plan_rejection(
@@ -6841,7 +6850,7 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         &concerns,
         analysis.pass,
         transitive_cycle_members(findings),
-        true,
+        PlanRejectionFanout::Complete,
     )
     .await?;
 
