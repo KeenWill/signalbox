@@ -10,7 +10,7 @@ is verified through PR #343 (`agent/review-orchestrator`). The current
 implementation also provides the closed concern library, relational
 orchestration attempt and command-receipt store, client-fed daemon adapter, and
 process and terminal surfaces described below, verified against commit
-`4ace4b4d`. This page owns review targets, workflow runs, session-backed passes,
+`763df266`. This page owns review targets, workflow runs, session-backed passes,
 findings, external links, their relational store, and application orchestration.
 Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
@@ -761,22 +761,24 @@ the receipt; an equal retry recognizes the exact complete effect, records a
 missing receipt, and returns the stable result. Once recorded, the receipt is
 inspected before mutable aggregate-state validation and carries every fact
 needed to return the original response, so a later aggregate state cannot turn
-an equal retry into a rejection. A fresh start command for an attempt that
-already exists is rejected instead of relabeling its durable stage as newly
-started. Distinct reuse fails closed. This representation is the durable
-review-command contract.
+an equal retry into a rejection. When a receipt is absent after the immutable
+attempt committed, only a semantically equal start can reconstruct the original
+`Started` answer; a different frozen attempt conflicts. Distinct
+command-identity reuse with a recorded receipt fails closed. This representation
+is the durable review-command contract.
 
 The terminal client exposes target creation, run admission and activation,
 single-finding read-only completion, finding listing, target, run, and finding
-reads, and every orchestration operation above. It accepts complete concern,
-judgment-plan, repair-outcome, and publication-outcome inventories through
-strict local JSON files and renders the durable orchestration stage, ordered
-concern statuses, template digests, and progress counts. A run read reconstructs
-the run and its optional recorded pass from one repeatable-read snapshot, so the
-response cannot combine lifecycle projections from different commits. Mutation
-commands print their generated command identity before socket I/O so an
-ambiguous attempt can be retried exactly. Process-derived text uses the
-terminal-safe rendering contract owned by the process protocol.
+reads, both external-publication reservation and attachment, and every
+orchestration operation above. It accepts complete concern, judgment-plan,
+repair-outcome, and publication-outcome inventories through strict local JSON
+files and renders the durable orchestration stage, ordered concern statuses,
+template digests, and progress counts. A run read reconstructs the run and its
+optional recorded pass from one repeatable-read snapshot, so the response cannot
+combine lifecycle projections from different commits. Mutation commands print
+their generated command identity before socket I/O so an ambiguous attempt can
+be retried exactly. Process-derived text uses the terminal-safe rendering
+contract owned by the process protocol.
 
 ## Open edges
 

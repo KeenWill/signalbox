@@ -3,7 +3,7 @@
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface at commit `4ace4b4d`. This page is the normative boundary between a
+surface at commit `763df266`. This page is the normative boundary between a
 local client process and `signalboxd`; domain values, PostgreSQL records, and
 wire messages remain distinct representations.
 
@@ -413,19 +413,19 @@ excluded. Before hashing, the daemon canonicalizes a complete
 does not distinguish the same semantic inventory. The typed append-only receipt
 stores the complete stable success response. A recorded receipt is inspected
 before mutable aggregate-state preconditions, so an equal retry returns that
-response even after the operation changed the aggregate state. A fresh start
-command identity for an attempt that already exists is `invalid_request`; only
-the original command identity can replay its recorded
-`review_orchestration_started` receipt. Each aggregate effect uses its owning
-store transaction. Fresh run admission creates its run and sole pass in one
-transaction; recovery also recognizes and completes a matching run-only
-intermediate committed by the earlier multi-transaction implementation. This
-atomicity is the run-admission contract. If an effect commits before the receipt
-and the process exits, an equal retry recognizes the exact complete effect,
-records the missing receipt, and returns the stable result. Reusing the command
-identity for a different digest, operation kind, aggregate payload, complete
-inventory, event, or attachment fails closed. This representation is the durable
-review-command contract.
+response even after the operation changed the aggregate state. A recorded start
+receipt admits only its original command identity. If the immutable attempt
+committed but that receipt did not, a semantically equal start reconstructs
+`review_orchestration_started`; a different frozen attempt fails closed. Each
+aggregate effect uses its owning store transaction. Fresh run admission creates
+its run and sole pass in one transaction; recovery also recognizes and completes
+a matching run-only intermediate committed by the earlier multi-transaction
+implementation. This atomicity is the run-admission contract. If an effect
+commits before the receipt and the process exits, an equal retry recognizes the
+exact complete effect, records the missing receipt, and returns the stable
+result. Reusing the command identity for a different digest, operation kind,
+aggregate payload, complete inventory, event, or attachment fails closed. This
+representation is the durable review-command contract.
 
 The daemon admits one review mutation at a time and retains that admission
 through claim inspection, aggregate effect recovery, and receipt recording. A
@@ -1660,6 +1660,8 @@ The `review` command adds these headless workflow verbs:
 - `record-judgment-effect <attempt> <finding> --outcome <applied|failed|blocked|cancelled> [--event-pass-id <pass>]`;
 - `record-repair-outcomes <attempt> --outcomes-file <path>`;
 - `record-publication-outcomes <attempt> --outcomes-file <path>`;
+- `reserve-external-link <finding> <link> --provider <key> --object-kind <review|review-thread|review-comment|change-request-comment>`;
+- `attach-external-link <link> <run> <pass> --turn-id <turn> --output-frontier-id <frontier> --external-object <opaque-key> --event-ordinal <decimal>`;
 - `read-orchestration <attempt>`;
 - `list-findings <run>`;
 - `read-target <target>`;
@@ -1675,7 +1677,10 @@ requires `--reason` and optionally `--external-link-id`. Accepted, stale, and
 fixed admit none of those variant fields. Blocked-with-reason forbids
 `--output-frontier-id`; every other event requires it. The terminal rejects
 variant fields or pass/frontier/link/digest evidence that contradicts the
-selected closed outcome before socket I/O.
+selected closed outcome before socket I/O. External-link reservation precedes
+the provider write; attachment follows a successful provider write and carries
+the exact producing pass, turn, frontier, opaque provider object, and finding
+event ordinal.
 
 Only bounded inventories use JSON files. Their exact top-level wrappers are
 `{"findings":[...]}` for `--findings-file`, `{"concerns":[...]}` for
