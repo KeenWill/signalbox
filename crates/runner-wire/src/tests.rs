@@ -666,6 +666,24 @@ fn reconnect_directives_reject_mismatched_correlation() {
 }
 
 #[test]
+fn resumed_frame_rejects_invalid_complete_provision_correlation() {
+    let mut correlation = provision_correlation();
+    correlation.repository = None;
+    let invalid = Message::Resumed(Box::new(Resumed {
+        registration_revision: positive(7),
+        directives: ReconnectDirectives {
+            workspace_operation: Some(Directive {
+                correlation: OperationCorrelation::Provision(correlation),
+                action: DirectiveAction::Resend,
+            }),
+            ..ReconnectDirectives::default()
+        },
+    }));
+
+    assert!(Frame::try_new(invalid).is_err());
+}
+
+#[test]
 fn failure_detail_rejects_payload_string_over_message_bound() {
     let payload = json!({"message": "x".repeat(MAX_FAILURE_MESSAGE_BYTES + 1)});
 

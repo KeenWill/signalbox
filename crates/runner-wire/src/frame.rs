@@ -553,8 +553,19 @@ pub struct ReconnectDirectives {
 }
 
 impl ReconnectDirectives {
+    fn validate(&self) -> Result<(), ValueError> {
+        if let Some(directive) = &self.workspace_operation {
+            directive.correlation.validate()?;
+        }
+        if let Some(directive) = &self.operation_failure {
+            directive.correlation.validate()?;
+        }
+        Ok(())
+    }
+
     /// Checks exact inventory presence and repeats every inventoried correlation.
     pub fn validate_against(&self, inventory: &ReconnectInventory) -> Result<(), ValueError> {
+        self.validate()?;
         inventory.validate()?;
         let workspace_correlation = inventory
             .workspace_operation
@@ -938,6 +949,7 @@ impl Message {
                 validate_advertisement(value.digest_version, &value.advertisement)?;
                 value.inventory.validate()
             }
+            Self::Resumed(value) => value.directives.validate(),
             Self::Advertise(value) => value.advertisement.validate(),
             Self::HeartbeatAck(value) => {
                 if let Some(phase) = &value.workspace_phase {
@@ -978,7 +990,6 @@ impl Message {
             Self::OperationFailed(value) => value.failure.validate(),
             Self::OperationFailureRecorded(value) => value.correlation.validate(),
             Self::Enrolled(_)
-            | Self::Resumed(_)
             | Self::ReplacementPending(_)
             | Self::Registered(_)
             | Self::Heartbeat(_)
