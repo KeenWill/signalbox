@@ -33,8 +33,8 @@ remains committed unimplemented functionality as labeled below.
 
 ## Process configuration
 
-`signalboxd` reads exactly eight required deployment values from the process
-environment at startup and also consults `HOME`:
+`signalboxd` reads six required deployment values and one optional override from
+the process environment at startup and also consults `HOME`:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -55,9 +55,10 @@ environment at startup and also consults `HOME`:
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
   [process protocol](process-protocol.md), which owns its binding and trust
   semantics.
-- `SIGNALBOX_RUNNER_SOCKET_PATH` — distinct local Unix-socket path for the
-  runner wire. It uses the same private-node discipline but has an independent
-  lock, identity, vocabulary, and listener.
+- `SIGNALBOX_RUNNER_SOCKET_PATH` — optional distinct local Unix-socket path for
+  the runner wire. When absent, signalboxd replaces the process socket's
+  extension with `.runner.sock`. An explicit value uses the same private-node
+  discipline but has an independent lock, identity, vocabulary, and listener.
 
 `DATABASE_URL` is the whole database configuration channel. The SQLx driver
 would otherwise seed anything the URL omits from the ambient libpq-style `PG*`

@@ -213,7 +213,10 @@ impl HubConfiguration {
         let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
         let process_socket_path =
             required_path(PROCESS_SOCKET_PATH_ENVIRONMENT, process_socket_path)?;
-        let runner_socket_path = required_path(RUNNER_SOCKET_PATH_ENVIRONMENT, runner_socket_path)?;
+        let runner_socket_path = match runner_socket_path {
+            Some(value) => required_path(RUNNER_SOCKET_PATH_ENVIRONMENT, Some(value))?,
+            None => process_socket_path.with_extension("runner.sock"),
+        };
 
         Ok(Self {
             database_url,
@@ -1758,6 +1761,20 @@ mod tests {
                 RequiredSettingFailure::Missing,
             ))
         );
+        let defaulted_runner_socket = HubConfiguration::from_values(
+            Some(OsString::from("postgres://secret")),
+            Some(OsString::from("models.toml")),
+            Some(OsString::from("templates.toml")),
+            Some(OsString::from("key")),
+            Some(OsString::from("github-token")),
+            Some(OsString::from("/tmp/signalbox.sock")),
+            None,
+        )
+        .expect("an omitted runner socket uses the process-socket sibling");
+        assert_eq!(
+            defaulted_runner_socket.runner_socket_path(),
+            std::path::Path::new("/tmp/signalbox.runner.sock")
+        );
         assert_eq!(
             HubConfiguration::from_values(
                 Some(OsString::from("postgres://secret")),
@@ -1766,12 +1783,12 @@ mod tests {
                 Some(OsString::from("key")),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
-                None,
+                Some(OsString::from("")),
             )
             .err(),
             Some(HubConfigurationError::new(
                 RUNNER_SOCKET_PATH_ENVIRONMENT,
-                RequiredSettingFailure::Missing,
+                RequiredSettingFailure::Empty,
             ))
         );
 
