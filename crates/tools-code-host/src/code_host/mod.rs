@@ -1005,7 +1005,7 @@ mod tests {
                       "description": "Exact repository-relative changed path.",
                       "maxLength": 4096,
                       "minLength": 1,
-                      "pattern": "^[^/\\u0000][^\\u0000]*$",
+                      "pattern": "^(?:\\.|[^/\\u0000]+(?:/[^/\\u0000]+)*)$",
                       "type": "string"
                     },
                     "repository": {
@@ -1038,7 +1038,7 @@ mod tests {
                       "description": "Exact repository-relative directory path; `.` lists the repository root.",
                       "maxLength": 4096,
                       "minLength": 1,
-                      "pattern": "^[^/\\u0000][^\\u0000]*$",
+                      "pattern": "^(?:\\.|[^/\\u0000]+(?:/[^/\\u0000]+)*)$",
                       "type": "string"
                     },
                     "repository": {
@@ -1114,7 +1114,7 @@ mod tests {
                       "description": "Exact repository-relative path; `.` addresses the repository root.",
                       "maxLength": 4096,
                       "minLength": 1,
-                      "pattern": "^[^/\\u0000][^\\u0000]*$",
+                      "pattern": "^(?:\\.|[^/\\u0000]+(?:/[^/\\u0000]+)*)$",
                       "type": "string"
                     },
                     "repository": {
@@ -1595,6 +1595,57 @@ mod tests {
             &catalog(),
             repository_list_directory::NAME,
             r#"{"path":"src","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// The documented bare-dot spelling selects the repository root.
+    #[test]
+    fn repository_list_directory_typed_decode_accepts_bare_dot_root() {
+        assert_valid(
+            &catalog(),
+            repository_list_directory::NAME,
+            r#"{"path":".","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// A trailing separator cannot turn an existing directory into false
+    /// absence evidence after GitHub canonicalizes its response path.
+    #[test]
+    fn repository_list_directory_typed_decode_rejects_trailing_separator() {
+        assert_invalid(
+            &catalog(),
+            repository_list_directory::NAME,
+            r#"{"path":"src/","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// Empty interior components are not canonical repository path identities.
+    #[test]
+    fn repository_read_file_typed_decode_rejects_empty_path_component() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":"src//lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// Dot components are not admitted as aliases for canonical paths.
+    #[test]
+    fn repository_read_file_typed_decode_rejects_dot_path_component() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":"./src/lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// Parent components cannot select an alias whose echoed host path differs.
+    #[test]
+    fn repository_read_file_typed_decode_rejects_parent_path_component() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":"src/../lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
         );
     }
 

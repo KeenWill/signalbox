@@ -298,7 +298,10 @@ impl CodeHostFilePath {
         (!value.is_empty()
             && value.len() <= MAX_FILE_PATH_BYTES
             && !value.contains('\0')
-            && !value.starts_with('/'))
+            && (value == "."
+                || value.split('/').all(|component| {
+                    !component.is_empty() && component != "." && component != ".."
+                })))
         .then_some(Self(value))
         .ok_or(InvalidCodeHostArguments)
     }
@@ -327,7 +330,7 @@ impl JsonSchema for CodeHostFilePath {
             "type": "string",
             "minLength": 1,
             "maxLength": MAX_FILE_PATH_BYTES,
-            "pattern": r"^[^/\u0000][^\u0000]*$",
+            "pattern": r"^(?:\.|[^/\u0000]+(?:/[^/\u0000]+)*)$",
         })
     }
 

@@ -970,10 +970,12 @@ The declarations and compact result objects are:
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
-opaque node ids and GraphQL cursors are at most 512 bytes. A returned node id,
-head revision, or stack or inventory continuation is admitted by the same
-predicate its argument counterpart uses, so those identities and continuations
-can be passed back as arguments. Convergence-state cursors identify a diagnostic
+opaque node ids and GraphQL cursors are at most 512 bytes. Paths use canonical
+repository-relative spelling: no empty, dot, or parent component is admitted,
+with bare `.` reserved for the repository root. A returned node id, head
+revision, or stack or inventory continuation is admitted by the same predicate
+its argument counterpart uses, so those identities and continuations can be
+passed back as arguments. Convergence-state cursors identify a diagnostic
 truncation boundary; that tool and the gate remain indeterminate rather than
 performing an unbounded continuation scan. Every returned URL is one absolute
 credential-free HTTPS location. Typed construction rejects aggregate convergence
