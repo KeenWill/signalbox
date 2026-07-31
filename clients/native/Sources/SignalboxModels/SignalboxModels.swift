@@ -1,5 +1,7 @@
 import Foundation
 
+/// Open legacy enums preserve an unrecognized spelling so decoding newer data
+/// never silently maps a permission to a more permissive local policy.
 public enum SignalboxToolPermission: Equatable, Sendable, Codable {
     case auto
     case confirm

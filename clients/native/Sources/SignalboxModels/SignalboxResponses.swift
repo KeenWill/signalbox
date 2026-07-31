@@ -63,6 +63,9 @@ public struct SignalboxMonitorSessionDetail: Codable, Equatable, Sendable {
     }
 }
 
+/// The retired presentation stream remains forward-readable for fixtures:
+/// unknown frames retain their payload, and malformed known frames retain a
+/// diagnostic rather than being discarded as transport noise.
 public enum SignalboxServerMessage: Codable, Equatable, Sendable {
     case streamHello(SignalboxStreamHello)
     case eventAppended(SignalboxStreamEventMutation)
