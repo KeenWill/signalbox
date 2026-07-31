@@ -130,6 +130,8 @@ pub enum RunnerConnectionCause {
     TransportClosed,
     /// A malformed or inadmissible frame closed the physical connection.
     ProtocolFailure,
+    /// Enrollment revocation terminalized a still-live physical connection.
+    EnrollmentRevoked,
 }
 
 /// One canonical durable connection lifecycle head.
@@ -551,6 +553,18 @@ impl RunnerProtocolStore {
         epoch: RunnerConnectionEpoch,
         transition: RunnerConnectionTransition,
     ) -> Result<RunnerConnectionTransitionOutcome, RunnerProtocolStoreError> {
+        let (outcome, _) = self
+            .transition_connection_with_effect(enrollment, epoch, transition)
+            .await?;
+        Ok(outcome)
+    }
+
+    async fn transition_connection_with_effect(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+        transition: RunnerConnectionTransition,
+    ) -> Result<(RunnerConnectionTransitionOutcome, bool), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         let locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(enrollment.into_uuid())
@@ -564,10 +578,13 @@ impl RunnerProtocolStore {
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
         if epoch != current.epoch() {
             transaction.rollback().await?;
-            return Ok(RunnerConnectionTransitionOutcome::Stale {
-                observed: epoch,
-                current: current.epoch(),
-            });
+            return Ok((
+                RunnerConnectionTransitionOutcome::Stale {
+                    observed: epoch,
+                    current: current.epoch(),
+                },
+                false,
+            ));
         }
         if matches!(
             current.state(),
@@ -585,7 +602,7 @@ impl RunnerProtocolStore {
             )
         {
             transaction.rollback().await?;
-            return Ok(RunnerConnectionTransitionOutcome::Current(current));
+            return Ok((RunnerConnectionTransitionOutcome::Current(current), false));
         }
         let event_ordinal = NonZeroU64::new(
             current
@@ -610,13 +627,14 @@ impl RunnerProtocolStore {
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
-        Ok(RunnerConnectionTransitionOutcome::Current(
-            RunnerConnectionSnapshot {
+        Ok((
+            RunnerConnectionTransitionOutcome::Current(RunnerConnectionSnapshot {
                 epoch,
                 event_ordinal,
                 state,
                 cause,
-            },
+            }),
+            true,
         ))
     }
 
@@ -652,15 +670,18 @@ impl RunnerProtocolStore {
                 row.decode_column("connection_epoch")?,
             )?)
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
-            self.transition_connection(
-                enrollment,
-                epoch,
-                RunnerConnectionTransition::TransportClosed,
-            )
-            .await?;
-            transitioned = transitioned
-                .checked_add(1)
-                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+            let (_, applied) = self
+                .transition_connection_with_effect(
+                    enrollment,
+                    epoch,
+                    RunnerConnectionTransition::TransportClosed,
+                )
+                .await?;
+            if applied {
+                transitioned = transitioned
+                    .checked_add(1)
+                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+            }
         }
         Ok(transitioned)
     }
@@ -974,6 +995,7 @@ impl RunnerProtocolStore {
                 RunnerDomainError::CorrelationMismatch,
             ));
         }
+        terminalize_connection_for_revocation(&mut transaction, enrollment_id).await?;
         let runner = enrollment.runner();
         let authentication = enrollment.authentication();
         let classes: Vec<_> = enrollment.allowed_classes().cloned().collect();
@@ -2076,6 +2098,7 @@ async fn load_connection_head_in(
             "heartbeat_timeout" => RunnerConnectionCause::HeartbeatTimeout,
             "transport_closed" => RunnerConnectionCause::TransportClosed,
             "protocol_failure" => RunnerConnectionCause::ProtocolFailure,
+            "enrollment_revoked" => RunnerConnectionCause::EnrollmentRevoked,
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         };
         Ok(RunnerConnectionSnapshot {
@@ -2086,6 +2109,37 @@ async fn load_connection_head_in(
         })
     })
     .transpose()
+}
+
+async fn terminalize_connection_for_revocation(
+    transaction: &mut Transaction<'_, Postgres>,
+    enrollment: RunnerEnrollmentId,
+) -> Result<(), RunnerProtocolStoreError> {
+    let Some(current) = load_connection_head_in(transaction.as_mut(), enrollment).await? else {
+        return Ok(());
+    };
+    if matches!(
+        current.state(),
+        RunnerConnectionState::Shutdown | RunnerConnectionState::Lost
+    ) {
+        return Ok(());
+    }
+    let event_ordinal = current
+        .event_ordinal()
+        .checked_add(1)
+        .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, $2, $3, 'lost', 'enrollment_revoked')",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(current.epoch().get()))
+    .bind(Decimal::from(event_ordinal))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn load_enrollment_request_facts(

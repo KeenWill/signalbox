@@ -140,10 +140,8 @@ impl SocketConnectError {
                     | io::ErrorKind::TimedOut
             ),
             Self::ReinspectSocket(error) => error.kind() == io::ErrorKind::NotFound,
-            Self::InvalidSocketIdentity
-            | Self::InspectPeer(_)
-            | Self::PeerOwnerMismatch { .. }
-            | Self::SocketIdentityChanged => false,
+            Self::InvalidSocketIdentity | Self::SocketIdentityChanged => true,
+            Self::InspectPeer(_) | Self::PeerOwnerMismatch { .. } => false,
         }
     }
 }
@@ -482,7 +480,16 @@ impl From<RunnerStateError> for RunnerConnectionError {
 impl RunnerConnectionError {
     /// Reports whether transport loss can be repaired by exact receipt resume.
     pub const fn is_reconnectable(&self) -> bool {
-        matches!(self, Self::PeerClosed | Self::Read(_) | Self::Write(_))
+        matches!(
+            self,
+            Self::PeerClosed
+                | Self::Read(_)
+                | Self::Write(_)
+                | Self::PeerRejected {
+                    code: RejectionCode::Unavailable | RejectionCode::ShuttingDown,
+                    ..
+                }
+        )
     }
 }
 
@@ -1230,13 +1237,68 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn recovery_seam_names_the_unborn_head_gap() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_root(&parent);
+        let receipt = issued_receipt(state.state().request_id());
+        state
+            .record_receipt(receipt)
+            .expect("the issued receipt is journaled");
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+        };
+        let (connection, ()) = tokio::join!(runner, hub);
+        let connection = connection.expect("the production connection is established");
+
+        assert_eq!(
+            connection.recovery_unavailable().gap(),
+            RecoveryGap::UnbornHeadNotRepresentable
+        );
+    }
+
     #[test]
-    fn recovery_seam_names_the_unborn_head_gap() {
-        let unavailable = RecoveryUnavailable {
-            gap: RecoveryGap::UnbornHeadNotRepresentable,
+    fn transient_connection_failures_are_reconnectable() {
+        let unavailable = RunnerConnectionError::PeerRejected {
+            code: RejectionCode::Unavailable,
+            offending_kind: String::from("enroll"),
+            available_correlation: Box::new(AvailableCorrelation::None),
+        };
+        let shutting_down = RunnerConnectionError::PeerRejected {
+            code: RejectionCode::ShuttingDown,
+            offending_kind: String::from("resume"),
+            available_correlation: Box::new(AvailableCorrelation::None),
         };
 
-        assert_eq!(unavailable.gap(), RecoveryGap::UnbornHeadNotRepresentable);
+        assert!(SocketConnectError::InvalidSocketIdentity.is_reconnectable());
+        assert!(SocketConnectError::SocketIdentityChanged.is_reconnectable());
+        assert!(unavailable.is_reconnectable());
+        assert!(shutting_down.is_reconnectable());
+    }
+
+    #[test]
+    fn policy_rejection_is_not_reconnectable() {
+        let rejected = RunnerConnectionError::PeerRejected {
+            code: RejectionCode::PolicyRejected,
+            offending_kind: String::from("enroll"),
+            available_correlation: Box::new(AvailableCorrelation::None),
+        };
+
+        assert!(!rejected.is_reconnectable());
     }
 
     #[tokio::test]

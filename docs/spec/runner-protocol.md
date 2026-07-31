@@ -110,6 +110,14 @@ mode, and path identity before sending enrollment. The local effective user is
 the version-one trust boundary; the opaque authentication-reference identity is
 correlated with the stored enrollment but is not treated as a secret.
 
+The daemon admits at most 64 concurrent runner connection tasks and allows ten
+seconds for the first complete frame; at the task limit it pauses acceptance,
+and an incomplete handshake expires closed. A malformed initial or established
+frame receives `malformed_frame`, while an unsupported envelope version receives
+`unsupported_version`; both use unavailable correlation and then close. An
+orderly shutdown drains admitted tasks; every runtime exit applies identity-safe
+listener-path cleanup.
+
 Runner-wire version one is newline-delimited UTF-8 JSON with a required
 `version` and closed tagged message vocabulary. Each complete line, including
 its newline, is at most 8 MiB. Unknown versions, message kinds, fields, enum
@@ -463,7 +471,7 @@ exact active or pending connection registration revision. Lease messages
 additionally carry lease id, lease-lineage generation, runner, tool name,
 session, turn, tool request, physical tool attempt, issuing turn attempt, and
 tool dispatch generation. An acknowledgement for another revision or correlation
-is stale evidence and cannot advance either side (INV-021, INV-043).
+is stale evidence and cannot advance either side (INV-042, INV-021, INV-043).
 
 The hub durably assigns a new positive connection epoch before each `enrolled`
 or `resumed` acknowledgement. Every post-handshake lifecycle transition names
@@ -487,6 +495,21 @@ startup, every prior-process connection left `connected` or `suspect` is marked
 `lost` before the runner listener binds. The append-only event stream retains
 the epoch, within-epoch ordinal, closed state, and typed cause, so a dead runner
 does not remain observable as healthy after disconnect or restart.
+
+Enrollment revocation terminalizes a still-`connected` or `suspect` epoch as
+`lost` with cause `enrollment_revoked` in the same transaction before the
+enrollment becomes revoked. A terminal connection remains unchanged. Startup
+reconciliation therefore never needs to append a lifecycle event to an already
+revoked enrollment.
+
+The runner retries socket absence, refusal, reset, timeout, transient socket
+identity replacement, `unavailable`, and `shutting_down` without weakening any
+identity check. It reports the failed stage and uses exponential delays from one
+second through a 30-second cap, resetting after a completed enroll or resume.
+Policy, correlation, revocation, and other permanent rejections remain fatal. On
+a local termination signal, the runner gives its epoch-qualified shutdown write
+five seconds; expiry exits with typed failure and leaves the hub to record
+transport or heartbeat loss rather than presenting the runner as healthy.
 
 **Committed unimplemented functionality.** No present runner sends a nonempty
 reconnect inventory. Future execution support repeats resume and advertisement,

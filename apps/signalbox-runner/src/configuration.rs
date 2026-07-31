@@ -242,6 +242,14 @@ impl RunnerConfiguration {
         for credential in self.credentials.values_mut() {
             credential.file = canonicalize_without_final(&credential.file)
                 .map_err(|_| RunnerConfigurationError::InvalidCredentials)?;
+            match fs::symlink_metadata(&credential.file) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(RunnerConfigurationError::InvalidCredentials);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(RunnerConfigurationError::InvalidCredentials),
+            }
             if !credential_files.insert(credential.file.clone())
                 || credential.file.starts_with(&self.runner_root)
                 || self.runner_root.starts_with(&credential.file)
@@ -364,8 +372,12 @@ fn validate_network_hosts(hosts: &[AllowedNetworkHost]) -> Result<(), RunnerConf
 fn validate_git_author(name: &str, email: &str) -> Result<(), RunnerConfigurationError> {
     if name.is_empty()
         || email.is_empty()
-        || name.contains('\0')
-        || email.contains('\0')
+        || name.chars().any(char::is_control)
+        || email.chars().any(char::is_control)
+        || name.contains('<')
+        || name.contains('>')
+        || email.contains('<')
+        || email.contains('>')
         || name.trim() != name
         || email.trim() != email
     {
@@ -537,7 +549,7 @@ pub enum RunnerConfigurationError {
     InvalidReadOnlyPaths,
     /// The closed network-host inventory contained a duplicate.
     InvalidNetworkHosts,
-    /// Git author text was empty, padded, or contained NUL.
+    /// Git author text was empty, padded, or contained a control or delimiter character.
     InvalidGitAuthor,
     /// A credential profile name, file, or injection environment was invalid.
     InvalidCredentials,
@@ -814,16 +826,17 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
     #[test]
     fn configuration_read_returns_the_canonical_read_only_path() {
         let parent = TempDir::new().expect("a temporary configuration root exists");
-        let canonical_read_only = parent.path().join("toolchain");
+        let root = fs::canonicalize(parent.path()).expect("the temporary root canonicalizes");
+        let canonical_read_only = root.join("toolchain");
         fs::create_dir(&canonical_read_only).expect("the read-only fixture path exists");
-        let read_only_alias = parent.path().join("toolchain-alias");
+        let read_only_alias = root.join("toolchain-alias");
         symlink(&canonical_read_only, &read_only_alias)
             .expect("the read-only fixture alias exists");
-        let bubblewrap = parent.path().join("bwrap");
+        let bubblewrap = root.join("bwrap");
         fs::write(&bubblewrap, b"fixture").expect("the bubblewrap fixture exists");
         fs::set_permissions(&bubblewrap, fs::Permissions::from_mode(0o700))
             .expect("the bubblewrap fixture is executable");
-        let configuration_path = parent.path().join("runner.toml");
+        let configuration_path = root.join("runner.toml");
         let document = format!(
             r#"version = 1
 daemon_socket_path = "{}"
@@ -836,8 +849,8 @@ git_author_email = "runner@example.invalid"
 repositories = {{}}
 credentials = {{}}
 "#,
-            parent.path().join("runner.sock").display(),
-            parent.path().join("runner-state").display(),
+            root.join("runner.sock").display(),
+            root.join("runner-state").display(),
             bubblewrap.display(),
             read_only_alias.display(),
         );
@@ -847,6 +860,102 @@ credentials = {{}}
             .expect("the filesystem-backed runner configuration is valid");
 
         assert_eq!(configuration.read_only_paths(), [canonical_read_only]);
+    }
+
+    #[test]
+    fn configuration_read_rejects_a_nonexecutable_bubblewrap() {
+        let parent = TempDir::new().expect("a temporary configuration root exists");
+        let root = fs::canonicalize(parent.path()).expect("the temporary root canonicalizes");
+        let read_only = root.join("toolchain");
+        fs::create_dir(&read_only).expect("the read-only fixture path exists");
+        let bubblewrap = root.join("bwrap");
+        fs::write(&bubblewrap, b"fixture").expect("the bubblewrap fixture exists");
+        fs::set_permissions(&bubblewrap, fs::Permissions::from_mode(0o600))
+            .expect("the bubblewrap fixture is not executable");
+        let configuration_path = root.join("runner.toml");
+        let document = format!(
+            r#"version = 1
+daemon_socket_path = "{}"
+runner_root = "{}"
+bubblewrap_path = "{}"
+read_only_paths = ["{}"]
+allowed_network_hosts = []
+git_author_name = "Signalbox Runner"
+git_author_email = "runner@example.invalid"
+repositories = {{}}
+credentials = {{}}
+"#,
+            root.join("runner.sock").display(),
+            root.join("runner-state").display(),
+            bubblewrap.display(),
+            read_only.display(),
+        );
+        fs::write(&configuration_path, document).expect("the runner configuration exists");
+
+        let error = RunnerConfiguration::read(&configuration_path)
+            .expect_err("a nonexecutable bubblewrap path fails closed");
+
+        assert_eq!(error.to_string(), "runner bubblewrap path is invalid");
+    }
+
+    #[test]
+    fn configuration_read_rejects_a_symlinked_credential_file() {
+        let parent = TempDir::new().expect("a temporary configuration root exists");
+        let root = fs::canonicalize(parent.path()).expect("the temporary root canonicalizes");
+        let read_only = root.join("toolchain");
+        fs::create_dir(&read_only).expect("the read-only fixture path exists");
+        let runner_root = root.join("runner-state");
+        fs::create_dir(&runner_root).expect("the runner root fixture exists");
+        let protected = runner_root.join("credential");
+        fs::write(&protected, b"fixture").expect("the protected credential fixture exists");
+        let credential_alias = root.join("credential-alias");
+        symlink(&protected, &credential_alias).expect("the credential alias exists");
+        let bubblewrap = root.join("bwrap");
+        fs::write(&bubblewrap, b"fixture").expect("the bubblewrap fixture exists");
+        fs::set_permissions(&bubblewrap, fs::Permissions::from_mode(0o700))
+            .expect("the bubblewrap fixture is executable");
+        let configuration_path = root.join("runner.toml");
+        let document = format!(
+            r#"version = 1
+daemon_socket_path = "{}"
+runner_root = "{}"
+bubblewrap_path = "{}"
+read_only_paths = ["{}"]
+allowed_network_hosts = []
+git_author_name = "Signalbox Runner"
+git_author_email = "runner@example.invalid"
+repositories = {{}}
+
+[credentials.github-runner]
+file = "{}"
+injection_env = "GH_TOKEN"
+"#,
+            root.join("runner.sock").display(),
+            runner_root.display(),
+            bubblewrap.display(),
+            read_only.display(),
+            credential_alias.display(),
+        );
+        fs::write(&configuration_path, document).expect("the runner configuration exists");
+
+        let error = RunnerConfiguration::read(&configuration_path)
+            .expect_err("a symlinked credential path fails closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner credential configuration is invalid"
+        );
+    }
+
+    #[test]
+    fn git_author_rejects_control_and_delimiter_characters() {
+        let control = validate_git_author("Signalbox\nRunner", "runner@example.invalid")
+            .expect_err("a control character fails closed");
+        let delimiter = validate_git_author("Signalbox Runner", "runner<example.invalid")
+            .expect_err("an identity delimiter fails closed");
+
+        assert_eq!(control.to_string(), "runner Git author is invalid");
+        assert_eq!(delimiter.to_string(), "runner Git author is invalid");
     }
 
     #[test]

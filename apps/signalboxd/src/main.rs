@@ -605,29 +605,35 @@ fn report_process_runtime_failure(error: &ProcessRuntimeError) {
 fn runner_runtime_failure_class(error: &RunnerProtocolRuntimeError) -> OperatorFailureClass {
     match error {
         RunnerProtocolRuntimeError::Accept(_)
+        | RunnerProtocolRuntimeError::Cleanup(_)
         | RunnerProtocolRuntimeError::Read(_)
         | RunnerProtocolRuntimeError::Write(_)
         | RunnerProtocolRuntimeError::Closed => OperatorFailureClass::Infrastructure {
             commit_ambiguous: false,
         },
-        RunnerProtocolRuntimeError::Lifecycle(error) => match error.cause() {
-            RunnerRegistrationFailureCause::Database => OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false,
-            },
-            RunnerRegistrationFailureCause::CommitAmbiguous => {
-                OperatorFailureClass::Infrastructure {
-                    commit_ambiguous: true,
-                }
-            }
-            RunnerRegistrationFailureCause::PeerInput
-            | RunnerRegistrationFailureCause::EnrollmentAuthority
-            | RunnerRegistrationFailureCause::Policy
-            | RunnerRegistrationFailureCause::Corruption => OperatorFailureClass::CallerOrHubBug,
-        },
+        RunnerProtocolRuntimeError::Lifecycle(error) => {
+            runner_lifecycle_failure_class(error.cause())
+        }
         RunnerProtocolRuntimeError::Decode(_)
         | RunnerProtocolRuntimeError::Encode(_)
+        | RunnerProtocolRuntimeError::HandshakeTimeout
         | RunnerProtocolRuntimeError::HeartbeatSequenceExhausted
         | RunnerProtocolRuntimeError::ConnectionTask(_) => OperatorFailureClass::CallerOrHubBug,
+    }
+}
+
+fn runner_lifecycle_failure_class(cause: RunnerRegistrationFailureCause) -> OperatorFailureClass {
+    match cause {
+        RunnerRegistrationFailureCause::Database => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
+        RunnerRegistrationFailureCause::CommitAmbiguous => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: true,
+        },
+        RunnerRegistrationFailureCause::Corruption => OperatorFailureClass::FailClosedCorruption,
+        RunnerRegistrationFailureCause::PeerInput
+        | RunnerRegistrationFailureCause::EnrollmentAuthority
+        | RunnerRegistrationFailureCause::Policy => OperatorFailureClass::CallerOrHubBug,
     }
 }
 
@@ -1002,6 +1008,7 @@ async fn run_hub(
                 RuntimePhase::SocketBinding,
                 SanitizedStartupCause::Socket(&error),
             );
+            let _ = runner_listener.cleanup();
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1472,8 +1479,10 @@ mod tests {
         anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
         database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
         migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
-        report_database_close_failure, run_scheduler_until_shutdown, should_close_pool,
+        report_database_close_failure, run_scheduler_until_shutdown,
+        runner_lifecycle_failure_class, should_close_pool,
     };
+    use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
     #[derive(Clone, Default)]
     struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
@@ -1558,6 +1567,14 @@ mod tests {
         assert_eq!(
             process_runtime_failure_class(&ProcessRuntimeError::UnexpectedDispatcherRetry),
             OperatorFailureClass::CallerOrHubBug,
+        );
+    }
+
+    #[test]
+    fn runner_runtime_failure_class_reports_durable_corruption() {
+        assert_eq!(
+            runner_lifecycle_failure_class(RunnerRegistrationFailureCause::Corruption),
+            OperatorFailureClass::FailClosedCorruption,
         );
     }
 

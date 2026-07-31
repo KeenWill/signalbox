@@ -102,7 +102,7 @@ paths, or URLs. The typed configuration error does not survive to the log:
 `run_hub` collapses every catalog-parse and adapter-construction variant (and
 likewise connection and migration errors) into a generic `Infrastructure` class
 carrying only its phase, so an operator cannot distinguish an unreadable catalog
-from an unknown field, bad version, or invalid limit (see Open edges). The five
+from an unknown field, bad version, or invalid limit (see Open edges). The six
 deployment paths are accepted without I/O at environment parsing time; both
 catalogs and every template prompt file are read during startup. Neither
 credential file is read at startup (see credential lifecycle below).
@@ -363,8 +363,12 @@ that supplies one.
 Startup opens or creates `runner_root` as an effective-user-owned real `0700`
 directory without following its final component, retains its identity, takes the
 exclusive lock through that root, checks socket and bubblewrap prerequisites,
-and loads only non-secret structure. It never reads a credential file at startup
-and never logs configuration paths, repository URLs, or values. The enrollment
+and loads only non-secret structure. The bubblewrap path must resolve to an
+executable regular file. Git author fields reject empty or padded text, control
+characters, and angle-bracket delimiters. An existing credential path whose
+final component is a symlink fails startup before containment checks; a missing
+credential path remains admissible. Startup never reads credential bytes and
+never logs configuration paths, repository URLs, or values. The enrollment
 request identity and daemon-issued receipt are atomically fsynced runtime state
 below the root, not operator-authored configuration.
 

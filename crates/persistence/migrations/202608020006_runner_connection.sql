@@ -72,7 +72,8 @@ CREATE TABLE runner_connection_event (
                 AND cause_kind IN (
                     'heartbeat_timeout',
                     'transport_closed',
-                    'protocol_failure'
+                    'protocol_failure',
+                    'enrollment_revoked'
                 ))
         )
 );

@@ -306,7 +306,7 @@ fn decoder_rejects_noncanonical_uuid() {
 }
 
 #[test]
-fn unsupported_digest_version_reaches_protocol_admission() {
+fn unsupported_digest_version_passes_structural_validation() {
     let request = Enroll {
         request_id: uuid(ARBITRARY_UUID_A),
         digest_version: DIGEST_VERSION + 1,

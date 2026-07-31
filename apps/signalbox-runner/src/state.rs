@@ -462,8 +462,11 @@ impl RunnerStateRoot {
         let receipt = self
             .state
             .receipt()
-            .ok_or(RunnerStateError::InvalidTransition)?
-            .with_registration(registration_revision, advertisement_digest);
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        if registration_revision < receipt.registration_revision() {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        let receipt = receipt.with_registration(registration_revision, advertisement_digest);
         let next = RunnerState::Enrolled {
             receipt: receipt.clone(),
         };
@@ -553,13 +556,14 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
         let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
         return Err(error);
     }
-    renameat(directory, temporary_name.as_str(), directory, STATE_FILE).map_err(|error| {
-        RunnerStateError::Io {
+    if let Err(error) = renameat(directory, temporary_name.as_str(), directory, STATE_FILE) {
+        let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
+        return Err(RunnerStateError::Io {
             operation: StateOperation::Rename,
             resource: StateResource::StateDocument,
             source: rustix_error(error),
-        }
-    })?;
+        });
+    }
     directory
         .sync_all()
         .map_err(|source| RunnerStateError::CommitAmbiguous { source })
@@ -652,5 +656,88 @@ mod tests {
             .expect_err("a second process-lifetime root owner must fail closed");
 
         assert_eq!(error.to_string(), "runner state root is already locked");
+    }
+
+    #[test]
+    fn state_document_with_open_permissions_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let first = RunnerStateRoot::open(&path).expect("the private root opens");
+        drop(first);
+        fs::set_permissions(
+            path.join(STATE_FILE),
+            fs::Permissions::from_mode(Mode::RUSR.bits() | Mode::WUSR.bits() | Mode::RGRP.bits()),
+        )
+        .expect("the fixture state permissions change");
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("a state document visible to the group fails closed");
+
+        assert!(matches!(error, RunnerStateError::InvalidStateIdentity));
+    }
+
+    #[test]
+    fn oversized_state_document_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let first = RunnerStateRoot::open(&path).expect("the private root opens");
+        drop(first);
+        fs::write(
+            path.join(STATE_FILE),
+            vec![b'x'; (MAX_STATE_BYTES + 1) as usize],
+        )
+        .expect("the oversized state fixture is written");
+
+        let error =
+            RunnerStateRoot::open(&path).expect_err("an oversized state document fails closed");
+
+        assert!(matches!(error, RunnerStateError::StateTooLarge));
+    }
+
+    #[test]
+    fn malformed_state_document_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let first = RunnerStateRoot::open(&path).expect("the private root opens");
+        drop(first);
+        fs::write(path.join(STATE_FILE), b"{").expect("the malformed state fixture is written");
+
+        let error =
+            RunnerStateRoot::open(&path).expect_err("a malformed state document fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptState));
+    }
+
+    #[test]
+    fn durable_registration_rejects_a_revision_regression() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut state = RunnerStateRoot::open(&path).expect("the private root opens");
+        let issued = receipt(state.state().request_id());
+        let stale_revision = issued.registration_revision();
+        state
+            .record_receipt(issued)
+            .expect("the issued receipt is recorded");
+        let next_revision = PositiveU64::try_new(stale_revision.get() + 1)
+            .expect("the successor fixture revision is positive");
+        let digest = advertisement_digest(&empty_advertisement())
+            .expect("the explicit empty advertisement has a digest");
+        state
+            .record_registration(next_revision, digest.clone())
+            .expect("the successor registration is recorded");
+
+        let error = state
+            .record_registration(stale_revision, digest)
+            .expect_err("the durable receipt cannot regress");
+
+        assert!(matches!(error, RunnerStateError::InvalidTransition));
+        assert_eq!(
+            state
+                .state()
+                .receipt()
+                .expect("the durable receipt remains present")
+                .registration_revision(),
+            next_revision
+        );
     }
 }

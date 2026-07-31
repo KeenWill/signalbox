@@ -1,4 +1,4 @@
-use std::{env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
+use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
 
 use signalbox_runner::{
     ArgumentError, RunnerConfiguration, RunnerConfigurationError, RunnerConfigurationPath,
@@ -7,7 +7,9 @@ use signalbox_runner::{
 };
 
 const CONFIGURATION_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_CONFIG_FILE";
-const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAXIMUM_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const SHUTDOWN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -44,6 +46,7 @@ async fn run(
         .map_err(RunnerDaemonError::Signal)?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .map_err(RunnerDaemonError::Signal)?;
+    let mut backoff = ReconnectBackoff::new();
     loop {
         let stream = match tokio::select! {
             connected = connect_verified(configuration.daemon_socket_path()) => connected,
@@ -52,7 +55,11 @@ async fn run(
         } {
             Ok(stream) => stream,
             Err(error) if error.is_reconnectable() => {
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                let delay = backoff.next_delay();
+                report_reconnect(ReconnectStage::Socket, &error, delay);
+                if wait_for_retry(delay, &mut terminate, &mut interrupt).await {
+                    return Ok(());
+                }
                 continue;
             }
             Err(error) => return Err(RunnerDaemonError::Socket(error)),
@@ -68,23 +75,100 @@ async fn run(
         } {
             Ok(connection) => connection,
             Err(error) if error.is_reconnectable() => {
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                let delay = backoff.next_delay();
+                report_reconnect(ReconnectStage::Establishment, &error, delay);
+                if wait_for_retry(delay, &mut terminate, &mut interrupt).await {
+                    return Ok(());
+                }
                 continue;
             }
             Err(error) => return Err(RunnerDaemonError::Connection(error)),
         };
+        backoff.reset();
         let served = tokio::select! {
             served = connection.serve(&mut state) => served,
-            _ = terminate.recv() => return connection.shutdown().await.map(|_| ()).map_err(RunnerDaemonError::Connection),
-            _ = interrupt.recv() => return connection.shutdown().await.map(|_| ()).map_err(RunnerDaemonError::Connection),
+            _ = terminate.recv() => return shutdown_with_timeout(&mut connection).await,
+            _ = interrupt.recv() => return shutdown_with_timeout(&mut connection).await,
         };
         match served {
             Ok(_) => return Ok(()),
             Err(error) if error.is_reconnectable() => {
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                let delay = backoff.next_delay();
+                report_reconnect(ReconnectStage::Serving, &error, delay);
+                if wait_for_retry(delay, &mut terminate, &mut interrupt).await {
+                    return Ok(());
+                }
             }
             Err(error) => return Err(RunnerDaemonError::Connection(error)),
         }
+    }
+}
+
+async fn shutdown_with_timeout(
+    connection: &mut RunnerConnection<tokio::net::UnixStream>,
+) -> Result<(), RunnerDaemonError> {
+    match tokio::time::timeout(SHUTDOWN_WRITE_TIMEOUT, connection.shutdown()).await {
+        Ok(result) => result.map(|_| ()).map_err(RunnerDaemonError::Connection),
+        Err(_) => Err(RunnerDaemonError::ShutdownTimeout),
+    }
+}
+
+async fn wait_for_retry(
+    delay: Duration,
+    terminate: &mut tokio::signal::unix::Signal,
+    interrupt: &mut tokio::signal::unix::Signal,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => false,
+        _ = terminate.recv() => true,
+        _ = interrupt.recv() => true,
+    }
+}
+
+fn report_reconnect(stage: ReconnectStage, error: &dyn Error, delay: Duration) {
+    eprintln!(
+        "signalbox-runner: {stage} failed; retrying in {} seconds: {error}",
+        delay.as_secs()
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReconnectStage {
+    Socket,
+    Establishment,
+    Serving,
+}
+
+impl fmt::Display for ReconnectStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Socket => "socket connection",
+            Self::Establishment => "protocol establishment",
+            Self::Serving => "established connection",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReconnectBackoff {
+    delay: Duration,
+}
+
+impl ReconnectBackoff {
+    const fn new() -> Self {
+        Self {
+            delay: INITIAL_RECONNECT_DELAY,
+        }
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let current = self.delay;
+        self.delay = cmp::min(self.delay.saturating_mul(2), MAXIMUM_RECONNECT_DELAY);
+        current
+    }
+
+    fn reset(&mut self) {
+        self.delay = INITIAL_RECONNECT_DELAY;
     }
 }
 
@@ -96,6 +180,7 @@ enum RunnerDaemonError {
     Socket(SocketConnectError),
     Connection(RunnerConnectionError),
     Signal(io::Error),
+    ShutdownTimeout,
 }
 
 impl fmt::Display for RunnerDaemonError {
@@ -107,19 +192,41 @@ impl fmt::Display for RunnerDaemonError {
             Self::Socket(_) => "runner socket is unavailable",
             Self::Connection(_) => "runner connection failed",
             Self::Signal(_) => "runner signal listener failed",
+            Self::ShutdownTimeout => "runner shutdown write timed out",
         })
     }
 }
 
 impl Error for RunnerDaemonError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(match self {
-            Self::Argument(error) => error,
-            Self::Configuration(error) => error,
-            Self::State(error) => error,
-            Self::Socket(error) => error,
-            Self::Connection(error) => error,
-            Self::Signal(error) => error,
-        })
+        match self {
+            Self::Argument(error) => Some(error),
+            Self::Configuration(error) => Some(error),
+            Self::State(error) => Some(error),
+            Self::Socket(error) => Some(error),
+            Self::Connection(error) => Some(error),
+            Self::Signal(error) => Some(error),
+            Self::ShutdownTimeout => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_backoff_caps_and_resets() {
+        let mut backoff = ReconnectBackoff::new();
+
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(8));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(16));
+        assert_eq!(backoff.next_delay(), MAXIMUM_RECONNECT_DELAY);
+        assert_eq!(backoff.next_delay(), MAXIMUM_RECONNECT_DELAY);
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), INITIAL_RECONNECT_DELAY);
     }
 }
