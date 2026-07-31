@@ -93,7 +93,7 @@ pub use telemetry::{
     OTLP_MAX_QUEUED_SPANS, OTLP_PROTOCOL_ENVIRONMENT, OTLP_SAMPLING_RATIO_ENVIRONMENT,
     OTLP_SERVICE_NAME_ENVIRONMENT, OtlpRuntime, PROMETHEUS_BIND_ENVIRONMENT, PrometheusServer,
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryConfigurationFailure,
-    TelemetryExportLayer, TelemetryMetrics,
+    TelemetryExportFilter, TelemetryExportLayer, TelemetryMetrics,
 };
 
 /// Per-activation model execution constructed by the hub composition root.

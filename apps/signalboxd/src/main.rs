@@ -47,7 +47,7 @@ use signalboxd::{
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
     SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportLayer, TelemetryMetrics,
+    TelemetryExportFilter, TelemetryMetrics,
 };
 use tracing_subscriber::prelude::*;
 
@@ -1174,7 +1174,9 @@ fn install_tracing_subscriber(
             return Err(error);
         }
     };
-    let otlp_layer: Option<TelemetryExportLayer> = otlp_runtime.as_ref().map(OtlpRuntime::layer);
+    let otlp_layer = otlp_runtime
+        .as_ref()
+        .map(|runtime| runtime.layer().with_filter(TelemetryExportFilter));
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()

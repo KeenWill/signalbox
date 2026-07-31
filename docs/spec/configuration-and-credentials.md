@@ -138,19 +138,20 @@ surface is:
   bytes, with a host and without user information, query, or fragment. For
   `http/protobuf`, the exporter appends `/v1/traces`; for gRPC it uses the
   configured authority. HTTPS authenticates the collector against the platform
-  trust roots. The HTTP client ignores ambient proxy configuration; the stated
-  endpoint is its only route. Its absence disables OTLP and causes all other
-  OTLP settings to be ignored.
+  trust roots. The HTTP client ignores ambient proxy configuration and refuses
+  redirects; the derived traces endpoint is its only route. Its absence disables
+  OTLP and causes all other OTLP settings to be ignored.
 - `SIGNALBOX_OTLP_PROTOCOL` — optional exact `grpc` or `http/protobuf`; omission
   selects `grpc`.
 - `SIGNALBOX_OTLP_HEADERS_FILE` — optional path to a file read once at startup.
   Each line is one `name=value` collector transport header. The file is at most
   16 KiB and 16 headers; names are at most 64 ASCII alphanumeric, hyphen, dot,
   or underscore bytes and are case-normalized, values are 1 through 1,024
-  printable ASCII bytes, and duplicate or malformed names fail startup. Header
-  values are sent only as OTLP transport metadata. They never become a span,
-  event, resource attribute, metric, or log field, and errors never render the
-  path or contents.
+  printable ASCII bytes, and duplicate or malformed names fail startup. Names
+  ending in `-bin` are binary gRPC metadata and remain ordinary HTTP header
+  names under `http/protobuf`. Header values are sent only as OTLP transport
+  metadata. They never become a span, event, resource attribute, metric, or log
+  field, and errors never render the path or contents.
 - `SIGNALBOX_OTLP_SAMPLING_RATIO` — optional finite number from `0` through `1`
   inclusive; omission selects `1`. Sampling is parent-based with the configured
   trace-id ratio.
@@ -223,10 +224,11 @@ The complete OTLP record inventory is:
   timestamps, internal span kind, and unset status are protocol structure, not
   application values. Source location, thread fields, target, level, tracked
   busy/idle time, links, and arbitrary error conversion are disabled. The fixed
-  instrumentation scope name is `signalboxd`; it has no version or schema URL.
-  The export layer registers interest only in candidate Signalbox schemas at
-  `DEBUG` or above, so dependency trace callsites remain disabled and do not
-  evaluate their fields.
+  instrumentation scope name is `signalboxd`; it has no version or schema URL. A
+  per-layer export filter registers interest only in candidate Signalbox schemas
+  at `DEBUG` or above, so dependency trace callsites remain disabled and do not
+  evaluate their fields while non-exported records remain available to the local
+  compact tracing layer.
 - The sole resource attribute is `service.name`, admitted by the checked
   `SIGNALBOX_OTLP_SERVICE_NAME` grammar above and never derived from a
   credential, request, provider response, model content, or tool material. The

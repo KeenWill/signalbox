@@ -41,7 +41,9 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap};
+use tonic::metadata::{
+    AsciiMetadataKey, AsciiMetadataValue, BinaryMetadataKey, BinaryMetadataValue, MetadataMap,
+};
 use tonic::transport::ClientTlsConfig;
 use tracing::{
     Event, Level, Metadata, Subscriber,
@@ -49,7 +51,12 @@ use tracing::{
     span::{Attributes, Id},
     subscriber::Interest,
 };
-use tracing_subscriber::{Layer, filter::LevelFilter, layer::Context, registry::LookupSpan};
+use tracing_subscriber::{
+    Layer,
+    filter::LevelFilter,
+    layer::{Context, Filter},
+    registry::LookupSpan,
+};
 use url::Url;
 
 /// Presence of this setting enables OTLP span export.
@@ -186,8 +193,6 @@ enum OtlpProtocol {
 }
 
 struct OtlpHeader {
-    grpc_name: AsciiMetadataKey,
-    grpc_value: AsciiMetadataValue,
     name: String,
     value: String,
 }
@@ -434,12 +439,6 @@ fn parse_headers(content: &str) -> Result<Vec<OtlpHeader>, TelemetryConfiguratio
             .split_once('=')
             .ok_or_else(|| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
         let normalized = name.to_ascii_lowercase();
-        let grpc_name = normalized
-            .parse::<AsciiMetadataKey>()
-            .map_err(|_| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
-        let grpc_value = value
-            .parse::<AsciiMetadataValue>()
-            .map_err(|_| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
         if !valid_header_name(name) || !valid_header_value(value) {
             return Err(header_error(TelemetryConfigurationFailure::InvalidHeader));
         }
@@ -449,8 +448,6 @@ fn parse_headers(content: &str) -> Result<Vec<OtlpHeader>, TelemetryConfiguratio
         headers.push(OtlpHeader {
             name: normalized,
             value: value.to_owned(),
-            grpc_name,
-            grpc_value,
         });
     }
     Ok(headers)
@@ -555,6 +552,7 @@ fn build_http_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
     let client = reqwest::blocking::Client::builder()
         .timeout(OTLP_EXPORT_TIMEOUT)
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| ())?;
     SpanExporter::builder()
@@ -579,17 +577,27 @@ fn build_grpc_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
         builder
     };
     builder
-        .with_metadata(grpc_metadata(&configuration.headers))
+        .with_metadata(grpc_metadata(&configuration.headers)?)
         .build()
         .map_err(|_| ())
 }
 
-fn grpc_metadata(headers: &[OtlpHeader]) -> MetadataMap {
+fn grpc_metadata(headers: &[OtlpHeader]) -> Result<MetadataMap, ()> {
     let mut metadata = MetadataMap::new();
     for header in headers {
-        metadata.insert(header.grpc_name.clone(), header.grpc_value.clone());
+        if header.name.ends_with("-bin") {
+            let name = header.name.parse::<BinaryMetadataKey>().map_err(|_| ())?;
+            let mut value = BinaryMetadataValue::from_bytes(header.value.as_bytes());
+            value.set_sensitive(true);
+            metadata.insert_bin(name, value);
+        } else {
+            let name = header.name.parse::<AsciiMetadataKey>().map_err(|_| ())?;
+            let mut value = header.value.parse::<AsciiMetadataValue>().map_err(|_| ())?;
+            value.set_sensitive(true);
+            metadata.insert(name, value);
+        }
     }
-    metadata
+    Ok(metadata)
 }
 
 #[derive(Debug)]
@@ -647,11 +655,16 @@ fn exporter_callsite(metadata: &Metadata<'_>) -> bool {
         && (admitted_span_fields(metadata).is_some() || candidate_event(metadata))
 }
 
-impl<S> Layer<S> for TelemetryExportLayer
-where
-    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
-{
-    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
+/// Keeps export admission local to the OTLP layer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TelemetryExportFilter;
+
+impl<S> Filter<S> for TelemetryExportFilter {
+    fn enabled(&self, metadata: &Metadata<'_>, _context: &Context<'_, S>) -> bool {
+        exporter_callsite(metadata)
+    }
+
+    fn callsite_enabled(&self, metadata: &'static Metadata<'static>) -> Interest {
         if exporter_callsite(metadata) {
             Interest::always()
         } else {
@@ -659,14 +672,15 @@ where
         }
     }
 
-    fn enabled(&self, metadata: &Metadata<'_>, _context: Context<'_, S>) -> bool {
-        exporter_callsite(metadata)
-    }
-
     fn max_level_hint(&self) -> Option<LevelFilter> {
         Some(LevelFilter::DEBUG)
     }
+}
 
+impl<S> Layer<S> for TelemetryExportLayer
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
     fn on_new_span(&self, attributes: &Attributes<'_>, id: &Id, context: Context<'_, S>) {
         let metadata = attributes.metadata();
         let Some(expected) = admitted_span_fields(metadata) else {
@@ -1202,7 +1216,13 @@ fn http_response(status: &str, content_type: &str, body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, fmt, net::SocketAddr};
+    use std::{
+        ffi::OsString,
+        fmt,
+        io::Write,
+        net::SocketAddr,
+        sync::{Arc, Mutex},
+    };
 
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::{
@@ -1213,8 +1233,9 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::{
-        IsolatedSpanExporter, ModelMetricDisposition, SdkSpanExporter, TelemetryConfiguration,
-        TelemetryEnvironment, TelemetryExportLayer, TelemetryMetrics, TurnMetricOutcome,
+        IsolatedSpanExporter, ModelMetricDisposition, OtlpConfiguration, SdkSpanExporter,
+        TelemetryConfiguration, TelemetryEnvironment, TelemetryExportFilter, TelemetryExportLayer,
+        TelemetryMetrics, TurnMetricOutcome, build_http_exporter, grpc_metadata, parse_headers,
         serve_prometheus,
     };
 
@@ -1233,13 +1254,46 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct CapturedLog {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl CapturedLog {
+        fn writer(&self) -> CapturedLogWriter {
+            CapturedLogWriter(Arc::clone(&self.bytes))
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.bytes.lock().expect("captured log locks").clone())
+                .expect("captured log is UTF-8")
+        }
+    }
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured log locks")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn capture_spans(emit: impl FnOnce()) -> Vec<SpanData> {
         let exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
         let layer = TelemetryExportLayer::new(provider.tracer("signalboxd-test"));
-        let subscriber = tracing_subscriber::registry().with(layer);
+        let subscriber =
+            tracing_subscriber::registry().with(layer.with_filter(TelemetryExportFilter));
         tracing::subscriber::with_default(subscriber, emit);
         provider.force_flush().expect("test exporter flushes");
         exporter
@@ -1351,7 +1405,8 @@ mod tests {
     fn export_layer_rejects_dependency_trace_before_field_evaluation() {
         let provider = SdkTracerProvider::builder().build();
         let layer = TelemetryExportLayer::new(provider.tracer("signalboxd-test"));
-        let subscriber = tracing_subscriber::registry().with(layer);
+        let subscriber =
+            tracing_subscriber::registry().with(layer.with_filter(TelemetryExportFilter));
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::trace!(
@@ -1360,6 +1415,36 @@ mod tests {
                 "dependency query trace"
             );
         });
+    }
+
+    #[test]
+    fn export_filter_preserves_an_ordinary_local_operator_log() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let layer = TelemetryExportLayer::new(provider.tracer("signalboxd-test"));
+        let captured = CapturedLog::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(move || writer.writer()),
+            )
+            .with(layer.with_filter(TelemetryExportFilter));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "signalboxd", "ordinary local operator message");
+        });
+        provider.force_flush().expect("test exporter flushes");
+        let spans = exporter
+            .get_finished_spans()
+            .expect("test exporter retains finished spans");
+
+        assert!(captured.text().contains("ordinary local operator message"));
+        assert!(spans.is_empty());
     }
 
     #[test]
@@ -1510,6 +1595,23 @@ mod tests {
             .expect("endpoint enables exporter");
 
         runtime.shutdown();
+    }
+
+    #[test]
+    fn binary_suffix_header_constructs_for_both_otlp_protocols() {
+        let headers = parse_headers("trace-bin=synthetic-binary-metadata")
+            .expect("documented binary-suffix header is admitted");
+        let configuration = OtlpConfiguration {
+            endpoint: "http://127.0.0.1:4318".to_owned(),
+            uses_tls: false,
+            protocol: super::OtlpProtocol::HttpProtobuf,
+            headers,
+            sampling_ratio: 1.0,
+            service_name: "signalboxd".to_owned(),
+        };
+
+        assert!(build_http_exporter(&configuration).is_ok());
+        assert!(grpc_metadata(&configuration.headers).is_ok());
     }
 
     #[test]
