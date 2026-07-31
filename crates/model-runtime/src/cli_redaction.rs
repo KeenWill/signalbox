@@ -52,7 +52,7 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
 ];
 const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
 const SPACE_SEPARATED_CREDENTIAL_FLAGS: &[&str] = &["--password", "--api-key", "--passphrase"];
-const CURL_USER_FLAGS: &[&str] = &["-u", "--user"];
+const CURL_USER_FLAGS: &[&str] = &["-u", "--user", "-U", "--proxy-user"];
 /// PEM armor opening a block, and the label substring that makes the block a
 /// private key of any type (`PRIVATE KEY`, `RSA PRIVATE KEY`, `OPENSSH PRIVATE
 /// KEY`, `ENCRYPTED PRIVATE KEY`). Such a block is an unambiguous credential on
@@ -136,9 +136,9 @@ const CREDENTIAL_INDICATORS: &[&str] = &[
     "sk-",
     "eyJ",
     "://",
-    "-u ",
-    "-u\t",
+    "-u",
     "--user",
+    "--proxy-user",
     // Space-separated labels a diagnostic prints (`API key: …`): the JSON key
     // policy normalizes across punctuation, so the plaintext spellings must be
     // recognized here too or the fast path releases them unscanned.
@@ -601,21 +601,11 @@ fn redact_curl_userinfo_password(text: &str, flag: &str) -> String {
     let mut output = String::with_capacity(text.len());
     while let Some(index) = remaining.find(flag) {
         let after_flag = index + flag.len();
-        let boundary_before = index == 0
-            || remaining[..index]
-                .chars()
-                .next_back()
-                .is_some_and(char::is_whitespace);
-        let whitespace = remaining[after_flag..]
-            .bytes()
-            .take_while(|byte| matches!(byte, b' ' | b'\t'))
-            .count();
-        if !boundary_before || whitespace == 0 {
+        let Some(argument_start) = curl_userinfo_argument_start(remaining, index, flag) else {
             output.push_str(&remaining[..after_flag]);
             remaining = &remaining[after_flag..];
             continue;
-        }
-        let argument_start = after_flag + whitespace;
+        };
         let opening_quote = remaining[argument_start..]
             .chars()
             .next()
@@ -641,6 +631,33 @@ fn redact_curl_userinfo_password(text: &str, flag: &str) -> String {
     }
     output.push_str(remaining);
     output
+}
+
+/// Returns the start of a curl user-info argument in command text. Curl's
+/// short forms accept an immediately attached argument (`-uVALUE`), while its
+/// long forms accept either a separate argument or `=VALUE`.
+fn curl_userinfo_argument_start(text: &str, flag_start: usize, flag: &str) -> Option<usize> {
+    let boundary_before = flag_start == 0
+        || text[..flag_start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace);
+    if !boundary_before {
+        return None;
+    }
+    let after_flag = flag_start + flag.len();
+    let whitespace = text[after_flag..]
+        .bytes()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    if whitespace > 0 {
+        return Some(after_flag + whitespace);
+    }
+    match text.as_bytes().get(after_flag) {
+        Some(b'=') if flag.starts_with("--") => Some(after_flag + 1),
+        Some(_) if flag.len() == 2 => Some(after_flag),
+        _ => None,
+    }
 }
 
 /// Rewrites `\uXXXX` escape sequences (including surrogate pairs) to the
@@ -737,35 +754,57 @@ fn redact_json_credential_values(text: &str) -> String {
 }
 
 fn next_json_credential_value(text: &str) -> Option<(usize, usize)> {
-    let mut offset = 0;
-    while let Some(relative_start) = text[offset..].find('"') {
-        let key_start = offset + relative_start;
-        if !json_key_can_start_at(text, key_start) {
-            offset = key_start + 1;
-            continue;
-        }
-        let key_end = quoted_value_end(text, key_start + 1, '"');
-        if key_end == text.len() {
-            return None;
-        }
-        let encoded_key = &text[key_start..=key_end];
-        let Ok(key) = serde_json::from_str::<String>(encoded_key) else {
-            offset = key_end + 1;
-            continue;
-        };
-        let whitespace_end = key_end
-            + 1
-            + text[key_end + 1..]
-                .chars()
-                .take_while(|character| character.is_whitespace())
-                .map(char::len_utf8)
-                .sum::<usize>();
-        if text.as_bytes().get(whitespace_end) == Some(&b':') && credential_key(&key) {
-            return Some((key_start, whitespace_end + 1));
-        }
-        offset = key_end + 1;
+    JsonCredentialMembers::new(text).next()
+}
+
+/// One structural scan shared by the JSON value redactor and the raw
+/// identifier scanner's ownership map. Keeping quote decoding, key policy,
+/// whitespace, and colon recognition here makes their decisions identical by
+/// construction.
+struct JsonCredentialMembers<'a> {
+    text: &'a str,
+    offset: usize,
+}
+
+impl<'a> JsonCredentialMembers<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { text, offset: 0 }
     }
-    None
+}
+
+impl Iterator for JsonCredentialMembers<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(relative_start) = self.text[self.offset..].find('"') {
+            let key_start = self.offset + relative_start;
+            if !json_key_can_start_at(self.text, key_start) {
+                self.offset = key_start + 1;
+                continue;
+            }
+            let key_end = quoted_value_end(self.text, key_start + 1, '"');
+            if key_end == self.text.len() {
+                self.offset = self.text.len();
+                return None;
+            }
+            self.offset = key_end + 1;
+            let encoded_key = &self.text[key_start..=key_end];
+            let Ok(key) = serde_json::from_str::<String>(encoded_key) else {
+                continue;
+            };
+            let whitespace_end = key_end
+                + 1
+                + self.text[key_end + 1..]
+                    .chars()
+                    .take_while(|character| character.is_whitespace())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            if self.text.as_bytes().get(whitespace_end) == Some(&b':') && credential_key(&key) {
+                return Some((key_start, whitespace_end + 1));
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -805,35 +844,9 @@ impl JsonCredentialKeyClaims {
         #[cfg(test)]
         JSON_CLAIM_SCAN_BYTES.set(JSON_CLAIM_SCAN_BYTES.get().saturating_add(text.len()));
 
-        let mut claimed_offsets = Vec::new();
-        let mut offset = 0;
-        while let Some(relative_start) = text[offset..].find('"') {
-            let key_start = offset + relative_start;
-            if !json_key_can_start_at(text, key_start) {
-                offset = key_start + 1;
-                continue;
-            }
-            let key_end = quoted_value_end(text, key_start + 1, '"');
-            if key_end == text.len() {
-                break;
-            }
-            let encoded_key = &text[key_start..=key_end];
-            let Ok(key) = serde_json::from_str::<String>(encoded_key) else {
-                offset = key_end + 1;
-                continue;
-            };
-            let whitespace_end = key_end
-                + 1
-                + text[key_end + 1..]
-                    .chars()
-                    .take_while(|character| character.is_whitespace())
-                    .map(char::len_utf8)
-                    .sum::<usize>();
-            if text.as_bytes().get(whitespace_end) == Some(&b':') && credential_key(&key) {
-                claimed_offsets.push(key_start);
-            }
-            offset = key_end + 1;
-        }
+        let claimed_offsets = JsonCredentialMembers::new(text)
+            .map(|(key_start, _value_start)| key_start)
+            .collect();
 
         Self { claimed_offsets }
     }
@@ -1935,7 +1948,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if unsafe_stream_suffix_start(&joined).is_some_and(|start| start < context_length) {
             let live = trailing_credential_context(&joined);
             if live.len() > MAX_PENDING_STREAM_BYTES {
-                self.suppressing = true;
+                self.suppress_remaining();
                 return String::new();
             }
             return live.to_string();
@@ -2013,6 +2026,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     }
 
     fn flush_boundary(&mut self) {
+        if self.suppressing {
+            self.pending = None;
+            return;
+        }
         if let Some(pending) = self.pending.take() {
             // A live lookbehind chain (emitted thread id, dropped provider
             // text) ties the held text to bytes outside the stream; the
@@ -2126,6 +2143,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// invoke `finish` before later deltas, so a flush cannot assume no later
     /// provider bytes will arrive.
     pub fn finish(&mut self) {
+        if self.suppressing {
+            self.pending = None;
+            return;
+        }
         if let Some(pending) = self.pending.take() {
             let inherited_rescan_bytes = self
                 .context_rescan_bytes
@@ -2406,6 +2427,14 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                     unsafe_fragments,
                     pending.text[unsafe_start..].to_string(),
                 ));
+            }
+            (false, None) if dirty => {
+                // The joined held text completed a credential and left no
+                // live suffix. Releasing its fragments independently would
+                // expose a value whose credential meaning exists only in the
+                // joined form, so fail closed absorbingly.
+                self.emit_redacted(pending.fragments);
+                self.suppress_remaining();
             }
             (false, None) => self.emit_original(pending.fragments),
         }
@@ -2823,11 +2852,7 @@ fn curl_userinfo_candidate(text: &str) -> bool {
     curl_userinfo_unsafe_start(text) == Some(0)
         || (redact_curl_userinfo_passwords(text) != text
             && CURL_USER_FLAGS.iter().any(|flag| {
-                text.starts_with(flag)
-                    && text
-                        .as_bytes()
-                        .get(flag.len())
-                        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+                text.starts_with(flag) && curl_userinfo_argument_start(text, 0, flag).is_some()
             }))
 }
 
@@ -2848,19 +2873,14 @@ fn curl_userinfo_unsafe_start(text: &str) -> Option<usize> {
                     .chars()
                     .next_back()
                     .is_some_and(char::is_whitespace);
-            let whitespace = text[after_flag..]
-                .bytes()
-                .take_while(|byte| matches!(byte, b' ' | b'\t'))
-                .count();
             if boundary_before && after_flag == text.len() {
                 earliest = Some(earliest.map_or(start, |current| current.min(start)));
                 break;
             }
-            if !boundary_before || whitespace == 0 {
+            let Some(argument_start) = curl_userinfo_argument_start(text, start, flag) else {
                 offset = after_flag;
                 continue;
-            }
-            let argument_start = after_flag + whitespace;
+            };
             let opening_quote = text[argument_start..]
                 .chars()
                 .next()
@@ -3405,12 +3425,14 @@ mod tests {
     use crate::{Observation, ObservationFact, ObservationSink, TokenUsage};
 
     use super::{
+        CREDENTIAL_INDICATORS, CURL_USER_FLAGS, LINE_CREDENTIAL_MARKERS, LINE_CREDENTIAL_NAMES,
         MAX_PENDING_RESCAN_BYTES, MAX_PENDING_STREAM_BYTES, PendingRescanWork, REDACTED,
-        REDACTED_JSON_OBJECT, RedactingSink, decode_unicode_escapes,
+        REDACTED_JSON_OBJECT, RedactingSink, SPACE_SEPARATED_CREDENTIAL_FLAGS, TOKEN_PREFIXES,
+        VALUE_CREDENTIAL_MARKERS, VALUE_CREDENTIAL_NAMES, decode_unicode_escapes,
         identifier_assignment_candidate, identifier_assignment_unsafe_start, json_claim_scan_bytes,
         redact_identifier_assignment, redact_json, redact_text, reset_json_claim_scan_bytes,
-        stream_candidate_starts_at_zero, trailing_credential_context, unsafe_stream_suffix_start,
-        unterminated_json_key_start,
+        stream_candidate_starts_at_zero, text_might_contain_credential,
+        trailing_credential_context, unsafe_stream_suffix_start, unterminated_json_key_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -3439,6 +3461,16 @@ mod tests {
             r#"{{{}"safe":"tail"}}"#,
             member.repeat(REPEATED_QUOTED_CREDENTIAL_MEMBERS)
         )
+    }
+
+    fn assert_fast_path_covers(keys: impl IntoIterator<Item = &'static str>) {
+        for key in keys {
+            assert!(
+                text_might_contain_credential(key),
+                "{key:?} is invisible to the credential-redaction fast path; indicators: \
+                 {CREDENTIAL_INDICATORS:?}"
+            );
+        }
     }
 
     fn observation_text(observation: Observation<u8>) -> String {
@@ -4225,11 +4257,44 @@ mod tests {
     /// the option, user name, and destination URL.
     #[test]
     fn credential_redacts_curl_userinfo_passwords() {
-        let fixture = format!("curl -u admin:{PLANTED_SYNTHETIC_SECRET} https://api.example.test");
+        let separated =
+            format!("curl -u admin:{PLANTED_SYNTHETIC_SECRET} https://api.example.test");
+        let attached = format!("curl -uadmin:{PLANTED_SYNTHETIC_SECRET} https://api.example.test");
+        let long_attached =
+            format!("curl --user=admin:{PLANTED_SYNTHETIC_SECRET} https://api.example.test");
+        let proxy =
+            format!("curl --proxy-user admin:{PLANTED_SYNTHETIC_SECRET} https://api.example.test");
 
         assert_eq!(
-            redact_text(&fixture),
+            redact_text(&separated),
             format!("curl -u admin:{REDACTED} https://api.example.test")
+        );
+        assert_eq!(
+            redact_text(&attached),
+            format!("curl -uadmin:{REDACTED} https://api.example.test")
+        );
+        assert_eq!(
+            redact_text(&long_attached),
+            format!("curl --user=admin:{REDACTED} https://api.example.test")
+        );
+        assert_eq!(
+            redact_text(&proxy),
+            format!("curl --proxy-user admin:{REDACTED} https://api.example.test")
+        );
+    }
+
+    #[test]
+    fn every_scanner_key_is_reachable_through_the_fast_path() {
+        assert_fast_path_covers(
+            LINE_CREDENTIAL_MARKERS
+                .iter()
+                .chain(VALUE_CREDENTIAL_MARKERS)
+                .chain(TOKEN_PREFIXES)
+                .chain(SPACE_SEPARATED_CREDENTIAL_FLAGS)
+                .chain(CURL_USER_FLAGS)
+                .chain(LINE_CREDENTIAL_NAMES)
+                .chain(VALUE_CREDENTIAL_NAMES)
+                .copied(),
         );
     }
 
@@ -4333,6 +4398,25 @@ mod tests {
             "postgres://admin:",
             &format!("{PLANTED_SYNTHETIC_SECRET}@db.internal/app"),
         );
+        assert_two_delta_split_redacts(
+            "curl -uadmin:",
+            &format!("{PLANTED_SYNTHETIC_SECRET} https://api.example.test"),
+        );
+        assert_two_delta_split_redacts(
+            "curl --proxy-user=admin:",
+            &format!("{PLANTED_SYNTHETIC_SECRET} https://api.example.test"),
+        );
+    }
+
+    #[test]
+    fn credential_stream_redacts_three_fragment_reconstructions() {
+        assert_three_delta_split_redacts(
+            "```sh\nexp",
+            "ort A",
+            &format!("PI_KEY={PLANTED_SYNTHETIC_SECRET}\n```"),
+        );
+        let header = format!("GET /v1 HTTP/1.1\r\nX-Api-Key: {PLANTED_SYNTHETIC_SECRET}\r\n");
+        assert_three_delta_split_redacts(&header[..11], &header[11..21], &header[21..]);
     }
 
     /// Credential redaction: an undelimited credential suffix split inside its final family
@@ -5360,6 +5444,30 @@ safe-line"
 
         assert!(!streamed.contains(PLANTED_VALUE));
         assert!(streamed.contains(REDACTED));
+
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.seed_emitted_context("Authorization:");
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            let oversized_continuation = "x".repeat(MAX_PENDING_STREAM_BYTES + 1);
+            let terminal = sink.redact_final_envelope_text(&oversized_continuation);
+            assert_eq!(terminal, REDACTED);
+            assert!(sink.is_suppressing());
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
     }
 
     /// Credential redaction: a repeatable usage report flushes a held marker without

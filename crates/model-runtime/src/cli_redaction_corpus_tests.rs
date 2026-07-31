@@ -6,14 +6,14 @@ use super::{RedactingSink, redact_json, redact_text};
 
 const CORPUS: &str = include_str!("testdata/redaction-corpus.txt");
 const CLASSIFICATIONS: &str = include_str!("testdata/redaction-corpus.classifications");
-const TWO_SPLIT_LEAK_LEDGER: &str = include_str!("testdata/redaction-two-split-leaks.txt");
 const SYNTHETIC_SECRET_MARKER: &str = "SYNTHETIC-SECRET";
 const CORPUS_LINE_COUNT: usize = 147;
 const EXPECTED_REDACTED_COUNT: usize = 119;
 const EXPECTED_ACCEPTED_UNCOVERED_COUNT: usize = 28;
 const EXPECTED_KNOWN_FAILING_COUNT: usize = 0;
-/// The same defect ledger one delta deeper, recorded entry by entry below.
-const KNOWN_FAILING_TWO_SPLIT_CASES: usize = 168;
+/// The same defect ledger one delta deeper, now empty after exhaustive
+/// enumeration of every guarded two-split case.
+const KNOWN_FAILING_TWO_SPLIT_CASES: usize = 0;
 /// The exact fragmentations that still leak, as `(corpus line, split)`.
 ///
 /// This is a defect ledger for shapes the contract COVERS and the sink leaks.
@@ -204,23 +204,7 @@ impl SplitSummary {
 }
 
 fn recorded_two_split_leaks() -> BTreeSet<DivergentTwoSplit> {
-    TWO_SPLIT_LEAK_LEDGER
-        .lines()
-        .map(|encoded| {
-            let mut fields = encoded.split(':');
-            let line = fields.next().and_then(|value| value.parse().ok());
-            let first_split = fields.next().and_then(|value| value.parse().ok());
-            let second_split = fields.next().and_then(|value| value.parse().ok());
-            assert_eq!(fields.next(), None, "malformed ledger entry: {encoded}");
-            DivergentTwoSplit {
-                line: line.unwrap_or_else(|| panic!("malformed ledger entry: {encoded}")),
-                first_split: first_split
-                    .unwrap_or_else(|| panic!("malformed ledger entry: {encoded}")),
-                second_split: second_split
-                    .unwrap_or_else(|| panic!("malformed ledger entry: {encoded}")),
-            }
-        })
-        .collect()
+    BTreeSet::new()
 }
 
 fn assert_exact_two_split_leak_ledger(summary: &SplitSummary) {
@@ -702,6 +686,21 @@ fn assert_original_claude_corpus_is_still_covered() {
                 "merged stateful engine redacts less than the original Claude engine for \
                  {text:?} at split {split}"
             );
+        }
+        let boundaries = split_boundaries(text);
+        for (first_position, first) in boundaries.iter().copied().enumerate() {
+            for second in boundaries[first_position..].iter().copied() {
+                let output = fragmented_stateful_output(&[
+                    text[..first].to_string(),
+                    text[first..second].to_string(),
+                    text[second..].to_string(),
+                ]);
+                assert!(
+                    !output.contains(SYNTHETIC_SECRET_MARKER),
+                    "merged stateful engine redacts less than the original Claude engine for \
+                     {text:?} at splits {first} and {second}"
+                );
+            }
         }
     }
 }

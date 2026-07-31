@@ -230,6 +230,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
     if request.interrupt_grace.is_zero() {
         return invalid_process_request(request.labels, "interrupt grace must be nonzero");
     }
+    if request.exchange_timeout.is_zero() {
+        return invalid_process_request(request.labels, "exchange timeout must be nonzero");
+    }
     // Establish the usable deadline before command conversion, environment
     // access, SendCommenced, or spawn. `CliProcessRequest` is public and may
     // therefore carry a duration the runtime clock cannot represent even
@@ -293,6 +296,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
             cause: UnsentCause::CancelledBeforeSend,
         });
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return invalid_process_request(labels, "exchange deadline elapsed before spawn");
     }
 
     sink.observe(Observation {
@@ -1691,6 +1697,34 @@ mod tests {
         assert!(observed.is_empty());
     }
 
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "cygwin",
+            target_os = "horizon",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "wasi"
+        ))
+    ))]
+    #[tokio::test]
+    async fn zero_public_exchange_timeout_is_rejected_before_send_or_spawn() {
+        let mut request = direct_request(std::time::Duration::ZERO);
+        request.exchange_timeout = std::time::Duration::ZERO;
+        let mut observed = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = execute_cli_process(request, &mut observed, &mut cancellation).await;
+
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(_),
+            })
+        ));
+        assert!(observed.is_empty());
+    }
+
     #[test]
     fn stderr_is_sanitized_before_the_evidence_limit_is_applied() {
         const SYNTHETIC_CREDENTIAL_PREFIX: &str = "SYNTHETIC-SECRET-STDERR-";
@@ -1758,26 +1792,25 @@ mod tests {
     async fn stderr_reader_retains_one_extra_evidence_window_for_sanitization() {
         const EVIDENCE_LIMIT: usize = 8;
         const INPUT: &[u8] = b"abcdefghijklmnopq";
-        const RETAINED_SANITIZATION_WINDOW: &[u8] = b"abcdefghijklmnop";
 
         let output = read_bounded_output(INPUT, EVIDENCE_LIMIT)
             .await
             .expect("the in-memory reader succeeds");
 
-        assert_eq!(output.text.as_bytes(), RETAINED_SANITIZATION_WINDOW);
+        assert_eq!(output.text.as_bytes(), &INPUT[..2 * EVIDENCE_LIMIT]);
     }
 
     #[tokio::test]
     async fn stderr_classification_preserves_the_original_bounded_prefix() {
         const EVIDENCE_LIMIT: usize = 8;
         const INPUT: &[u8] = b"abcdefghijklmnopq";
-        const EXPECTED_CLASSIFICATION: &str = "abcdefgh… [truncated]";
 
         let output = read_bounded_output(INPUT, EVIDENCE_LIMIT)
             .await
             .expect("the in-memory reader succeeds");
 
-        assert_eq!(output.classification, EXPECTED_CLASSIFICATION);
+        let expected = [&INPUT[..EVIDENCE_LIMIT], TRUNCATION_SUFFIX.as_bytes()].concat();
+        assert_eq!(output.classification.as_bytes(), expected);
     }
 
     #[tokio::test]
