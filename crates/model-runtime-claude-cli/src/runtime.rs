@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use signalbox_model_runtime::{
     CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentVariable,
-    CliProcessRequest, CliTerminalTextCapture, DeliveryMode, ModelOperation, ModelRuntime,
-    ObservationSink, PreparationDefect, PreparationFailure, PreparationOutcome,
-    ProvenUnsentEvidence, TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
+    CliProcessRequest, DeliveryMode, ModelOperation, ModelRuntime, ObservationSink,
+    PreparationDefect, PreparationFailure, PreparationOutcome, ProvenUnsentEvidence,
+    TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
 };
 use tempfile::TempDir;
 
@@ -455,10 +455,6 @@ async fn execute_process<C: Clone + Send + Sync>(
         command,
         prompt: prepared.prompt,
         decoder,
-        terminal_text_capture: match prepared.delivery {
-            DeliveryMode::Buffered => CliTerminalTextCapture::TerminalOnly,
-            DeliveryMode::Streamed => CliTerminalTextCapture::StreamAndTerminal,
-        },
         exchange_timeout: prepared.exchange_timeout,
         interrupt_grace: prepared.interrupt_grace,
         event_limit: prepared.event_limit,

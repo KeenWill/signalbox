@@ -9,7 +9,8 @@ use tokio::process::{Child, Command};
 
 use crate::{
     CancellationSignal, LossCause, Observation, ObservationFact, ObservationSink,
-    ProvenUnsentEvidence, REDACTED, RedactingSink, TerminalEvidence, TransportFacts, UnsentCause,
+    ProvenUnsentEvidence, ProviderErrorKind, REDACTED, RedactingSink, TerminalEvidence,
+    TransportFacts, UnsentCause,
 };
 
 const TRUNCATION_SUFFIX: &str = "… [truncated]";
@@ -75,7 +76,7 @@ impl CliEnvironmentVariable {
 }
 
 /// How the shared redactor handles provider text for terminal reconstruction.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CliTerminalTextCapture {
     /// The provider decoder owns terminal text independently.
     Disabled,
@@ -93,8 +94,6 @@ pub struct CliProcessRequest<D> {
     pub prompt: Vec<u8>,
     /// Provider-specific event decoder.
     pub decoder: D,
-    /// Terminal text capture and forwarding policy.
-    pub terminal_text_capture: CliTerminalTextCapture,
     /// Whole-exchange deadline.
     pub exchange_timeout: Duration,
     /// Grace between interrupt and forced cleanup.
@@ -163,6 +162,8 @@ pub trait CliSession<C>: Sized {
     const LABELS: CliProcessLabels;
     /// The one correlation used for every observation in this exchange.
     fn correlation(&self) -> &C;
+    /// Terminal text capture and forwarding policy owned by this decoder.
+    fn terminal_text_capture(&self) -> CliTerminalTextCapture;
     /// Whether the decoder has observed terminal provider evidence.
     fn terminal_observed(&self) -> bool;
     /// Decodes and emits one bounded JSONL event.
@@ -183,11 +184,13 @@ pub trait CliSession<C>: Sized {
         cause: LossCause,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
-    /// Produces a provider failure after a non-successful process exit.
+    /// Collapses raw non-successful-exit material to a closed kind.
+    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind;
+    /// Produces a provider failure from sanitized material and its closed kind.
     fn provider_error_after_exit(
         self,
         message: &str,
-        classification: &str,
+        kind: ProviderErrorKind,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
 }
@@ -287,7 +290,6 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         command,
         prompt,
         decoder,
-        terminal_text_capture,
         exchange_timeout: _,
         interrupt_grace,
         event_limit,
@@ -370,7 +372,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
     let mut decoder = decoder;
     let mut redacting_sink = RedactingSink::new(sink);
-    match terminal_text_capture {
+    match decoder.terminal_text_capture() {
         CliTerminalTextCapture::Disabled => {}
         CliTerminalTextCapture::TerminalOnly => {
             redacting_sink.begin_terminal_only_text_capture();
@@ -831,8 +833,8 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             };
             // Evidence is built before the sink flushes so the failure
             // message still sees the held cross-fragment redaction state.
-            let evidence =
-                decoder.provider_error_after_exit(&message, &classification, &mut redacting_sink);
+            let kind = D::classify_provider_error_after_exit(&classification);
+            let evidence = decoder.provider_error_after_exit(&message, kind, &mut redacting_sink);
             redacting_sink.finish();
             evidence
         }
@@ -911,8 +913,16 @@ fn allowlisted_environment(
     read: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Result<Vec<(&'static str, std::ffi::OsString)>, EnvironmentRejection> {
     let mut environment = Vec::new();
+    let mut names = std::collections::BTreeSet::new();
     for variable in policy {
         let name = variable.name();
+        if !names.insert(name) {
+            return Err(EnvironmentRejection {
+                name,
+                reason: EnvironmentRejectionReason::DuplicatePolicyName,
+                labels,
+            });
+        }
         if let Some(value) = read(name) {
             match prepared_environment_value(*variable, value) {
                 Ok(prepared) => environment.push((name, prepared)),
@@ -940,6 +950,9 @@ struct EnvironmentRejection {
 
 #[derive(Debug, PartialEq, Eq)]
 enum EnvironmentRejectionReason {
+    /// One variable name appears more than once with potentially conflicting
+    /// value-handling policies.
+    DuplicatePolicyName,
     /// A proxy URL authority embeds userinfo (`scheme://user:secret@host`).
     EmbedsUserinfo,
     /// A proxy value is not UTF-8, so it cannot be verified credential-free.
@@ -954,6 +967,11 @@ impl EnvironmentRejection {
     fn diagnostic(&self) -> String {
         let name = self.name;
         match self.reason {
+            EnvironmentRejectionReason::DuplicatePolicyName => format!(
+                "child-environment policy repeats `{name}`; one name cannot carry conflicting \
+                 value-handling policies, so the {} exchange is refused before spawn",
+                self.labels.provider
+            ),
             EnvironmentRejectionReason::EmbedsUserinfo => format!(
                 "inherited `{name}` embeds URL userinfo; the {} would receive that \
                  credential verbatim and could reflect it in output the adapter can only \
@@ -1492,7 +1510,8 @@ mod tests {
         read_bounded_output, sanitized_stderr,
     };
     use crate::{
-        CancellationSignal, LossCause, REDACTED, RedactingSink, TerminalEvidence, UnsentCause,
+        CancellationSignal, LossCause, ProviderErrorKind, REDACTED, RedactingSink,
+        TerminalEvidence, UnsentCause,
     };
 
     const TEST_ENVIRONMENT: &[CliEnvironmentVariable] = &[
@@ -1523,6 +1542,10 @@ mod tests {
 
         fn correlation(&self) -> &u8 {
             &self.correlation
+        }
+
+        fn terminal_text_capture(&self) -> CliTerminalTextCapture {
+            CliTerminalTextCapture::Disabled
         }
 
         fn terminal_observed(&self) -> bool {
@@ -1561,10 +1584,14 @@ mod tests {
             unused_terminal_evidence()
         }
 
+        fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
+            ProviderErrorKind::Unrecognized
+        }
+
         fn provider_error_after_exit(
             self,
             _message: &str,
-            _classification: &str,
+            _kind: ProviderErrorKind,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()
@@ -1582,7 +1609,6 @@ mod tests {
             command: std::process::Command::new("signalbox-test-command-must-not-spawn"),
             prompt: Vec::new(),
             decoder: UnusedSession { correlation: 7 },
-            terminal_text_capture: CliTerminalTextCapture::Disabled,
             exchange_timeout,
             interrupt_grace: std::time::Duration::from_millis(1),
             event_limit: 1_024,
@@ -1896,6 +1922,25 @@ mod tests {
             accepted_value("PATH", std::ffi::OsString::from("relative:paths")),
             std::ffi::OsString::from("relative:paths")
         );
+    }
+
+    #[test]
+    fn duplicate_environment_policy_names_are_rejected_before_assembly() {
+        const DUPLICATE_POLICY: &[CliEnvironmentVariable] = &[
+            CliEnvironmentVariable::credential_home("HOME"),
+            CliEnvironmentVariable::inherited("HOME"),
+        ];
+        let repeated_name = DUPLICATE_POLICY[1].name();
+
+        let rejection = allowlisted_environment(DUPLICATE_POLICY, TEST_LABELS, |_| None)
+            .expect_err("a repeated environment-policy name must be rejected");
+
+        assert_eq!(rejection.name, repeated_name);
+        assert_eq!(
+            rejection.reason,
+            EnvironmentRejectionReason::DuplicatePolicyName
+        );
+        assert!(rejection.diagnostic().contains(repeated_name));
     }
 
     /// Assembles the environment with exactly `name=value` set and returns the

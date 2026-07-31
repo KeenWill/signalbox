@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
-    CliSession, CompletionEvidence, CompletionFinish, DeliveryMode, ExchangeFacts, FinishReason,
-    LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
-    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
-    ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence, TerminalEvidence,
-    TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    CliSession, CliTerminalTextCapture, CompletionEvidence, CompletionFinish, DeliveryMode,
+    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
+    ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
+    ProviderReportedModel, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
+    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     provider_json_has_duplicate_members, redact_json, redact_text, validate_provider_json_nesting,
 };
 
@@ -582,7 +582,7 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn provider_error_after_exit(
         mut self,
         fallback: &str,
-        classification: &str,
+        fallback_kind: ProviderErrorKind,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         // Every other terminal path reports usage before returning its evidence;
@@ -604,9 +604,7 @@ impl<C: Clone> EventDecoder<C> {
             // beside a stderr that names the cause. A structured error that does
             // determine a kind still wins: it is the provider's own statement.
             let kind = match classify_error(status, &subtype, &message) {
-                ProviderErrorKind::Unrecognized => {
-                    classify_error(None, "process_exit", classification)
-                }
+                ProviderErrorKind::Unrecognized => fallback_kind,
                 determined => determined,
             };
             let subtype = sink.redact_retained_metadata(&subtype);
@@ -626,7 +624,7 @@ impl<C: Clone> EventDecoder<C> {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: self.exchange,
                 reported_model: self.reported_model,
-                kind: classify_error(None, "process_exit", classification),
+                kind: fallback_kind,
                 native: NativeErrorFacts {
                     error_token: Some("claude_cli_exit".to_string()),
                     error_code: None,
@@ -647,11 +645,8 @@ impl<C: Clone> EventDecoder<C> {
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         if matches!(self.terminal, Some(CliTerminal::Error { .. })) {
-            self.provider_error_after_exit(
-                "Claude reported an error",
-                "Claude reported an error",
-                sink,
-            )
+            let kind = classify_error(None, "process_exit", "Claude reported an error");
+            self.provider_error_after_exit("Claude reported an error", kind, sink)
         } else {
             self.loss(cause)
         }
@@ -852,6 +847,13 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         &self.correlation
     }
 
+    fn terminal_text_capture(&self) -> CliTerminalTextCapture {
+        match self.delivery {
+            DeliveryMode::Buffered => CliTerminalTextCapture::TerminalOnly,
+            DeliveryMode::Streamed => CliTerminalTextCapture::StreamAndTerminal,
+        }
+    }
+
     fn terminal_observed(&self) -> bool {
         EventDecoder::terminal_observed(self)
     }
@@ -889,12 +891,16 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
 
+    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind {
+        classify_error(None, "process_exit", classification)
+    }
+
     fn provider_error_after_exit(
         self,
         message: &str,
-        classification: &str,
+        kind: ProviderErrorKind,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
-        EventDecoder::provider_error_after_exit(self, message, classification, sink)
+        EventDecoder::provider_error_after_exit(self, message, kind, sink)
     }
 }
