@@ -16,7 +16,7 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 `web_fetch` egress policy and complete bounded file-patch lookup through PR #330
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
-`9b030b0e3557f09de32c2b2d61676fe67afa65d8`. The runner executable stack rooted
+`2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. This page
 owns logical tool requests, approval policy and decisions, physical tool
 attempts, result admission, intra-turn continuation, crash classification, the
@@ -1020,21 +1020,21 @@ ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
 rustls with a TLS 1.2 floor; sends the fixed GitHub REST version `2026-03-10`;
 applies a 30-second whole-exchange timeout; and retains at most 512 KiB from an
 ordinary JSON response. The exact-revision contents lookup admits at most
-254,205,952 bytes of JSON ingress. That bound covers the 1,000-entry observation
-ceiling plus one framing allowance, budgeting each entry for ten worst-case
+303,407,104 bytes of JSON ingress. That bound covers the 1,000-entry observation
+ceiling plus one framing allowance, budgeting each entry for eleven worst-case
 JSON-expanded fields: nine maximum repository paths, one separately admitted 4
-KiB symlink target, and 8 KiB of fixed material, before projecting the shared
-result bound. Both repository tools implement the commit preflight, absence
-classification, request counts, and aggregate transaction deadline stated in
-their declarations above. After exact resolution, each Contents request is
-pinned to the resolved commit; a file read pins its subsequent request to the
-immutable blob identity returned by that lookup rather than re-reading a moving
-reference. The authenticated job-log endpoint is the sole redirect-shaped
-exchange: after exactly one 302 response, the adapter validates its bounded
-HTTPS location, resolves and pins a wholly public destination set, and performs
-one credential-free download with redirect following still disabled. Credential
-delivery and redaction are owned by
-[configuration-and-credentials](configuration-and-credentials.md).
+KiB symlink target, one separately admitted 8 KiB submodule URL marker, and 8
+KiB of fixed material, before projecting the shared result bound. Both
+repository tools implement the commit preflight, absence classification, request
+counts, and aggregate transaction deadline stated in their declarations above.
+After exact resolution, each Contents request is pinned to the resolved commit;
+a file read pins its subsequent request to the immutable blob identity returned
+by that lookup rather than re-reading a moving reference. The authenticated
+job-log endpoint is the sole redirect-shaped exchange: after exactly one 302
+response, the adapter validates its bounded HTTPS location, resolves and pins a
+wholly public destination set, and performs one credential-free download with
+redirect following still disabled. Credential delivery and redaction are owned
+by [configuration-and-credentials](configuration-and-credentials.md).
 
 A missing or unusable credential and a definitive client rejection produce only
 fixed known-failure detail, and the two are told apart: credential bytes that
