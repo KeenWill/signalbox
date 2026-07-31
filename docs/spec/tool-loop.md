@@ -1005,15 +1005,18 @@ of JSON ingress before projecting the shared result bound. Both repository tools
 pin the contents request with the required exact commit `ref`; a file read pins
 its second request to the immutable blob identity returned by that lookup rather
 than re-reading a moving reference. A contents 404 triggers one probe of the
-exact Git commit identity: a recognized commit becomes `path_not_found`, an
-unrecognized commit becomes `revision_not_found`, and any other host rejection
-or physical request failure remains failed execution rather than absence. Both
-requests in a file read and both requests in an absence classification share one
-aggregate 30-second transaction deadline. The authenticated job-log endpoint is
-the sole redirect-shaped exchange: after exactly one 302 response, the adapter
-validates its bounded HTTPS location, resolves and pins a wholly public
-destination set, and performs one credential-free download with redirect
-following still disabled. Credential delivery and redaction are owned by
+exact Git commit identity: a recognized commit becomes `path_not_found`; an
+unrecognized commit or an empty-repository conflict triggers a third
+repository-visibility request. A visible repository then becomes
+`revision_not_found`, while an inaccessible or missing repository and any other
+host rejection or physical request failure remain failed execution rather than
+absence. Both requests in a file read or path-absence classification, and all
+three requests in a revision-absence classification, share one aggregate
+30-second transaction deadline. The authenticated job-log endpoint is the sole
+redirect-shaped exchange: after exactly one 302 response, the adapter validates
+its bounded HTTPS location, resolves and pins a wholly public destination set,
+and performs one credential-free download with redirect following still
+disabled. Credential delivery and redaction are owned by
 [configuration-and-credentials](configuration-and-credentials.md).
 
 A missing or unusable credential and a definitive client rejection produce only

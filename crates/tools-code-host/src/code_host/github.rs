@@ -326,23 +326,12 @@ impl GitHubCodeHostTransport {
                 credential,
             )
             .await?;
-        let path = arguments.path().as_str().to_owned();
-        let revision = arguments.revision().as_str().to_owned();
         let result = match lookup {
             RepositoryPathLookup::File { blob, source_bytes } => {
                 let scan_limit_bytes = u64::try_from(MAX_REPOSITORY_FILE_SCAN_BYTES)
                     .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
-                if let Some(line_range) = arguments
-                    .line_range()
-                    .filter(|_| source_bytes > scan_limit_bytes)
-                {
-                    RepositoryReadFileResult::try_line_range_unavailable(
-                        path,
-                        revision,
-                        source_bytes,
-                        line_range.start(),
-                        line_range.end(),
-                    )
+                if arguments.line_range().is_some() && source_bytes > scan_limit_bytes {
+                    RepositoryReadFileResult::try_line_range_unavailable(&arguments, source_bytes)
                 } else {
                     let body = self
                         .repository_file_blob(
@@ -359,43 +348,37 @@ impl GitHubCodeHostTransport {
                     }
                     match body.kind {
                         RepositoryFileBodyKind::Text(selection) => {
-                            RepositoryReadFileResult::try_content(RepositoryFileContentFields {
-                                path,
-                                revision,
-                                source_bytes,
-                                requested_start_line: arguments
-                                    .line_range()
-                                    .map(RepositoryLineRange::start),
-                                requested_end_line: arguments
-                                    .line_range()
-                                    .map(RepositoryLineRange::end),
-                                start_line: selection.start_line,
-                                end_line: selection.end_line,
-                                returned_lines: selection.returned_lines,
-                                last_line_complete: selection.last_line_complete,
-                                content: selection.content,
-                                completeness: selection.completeness,
-                            })
+                            RepositoryReadFileResult::try_content(
+                                &arguments,
+                                RepositoryFileContentFields {
+                                    source_bytes,
+                                    start_line: selection.start_line,
+                                    end_line: selection.end_line,
+                                    returned_lines: selection.returned_lines,
+                                    last_line_complete: selection.last_line_complete,
+                                    content: selection.content,
+                                    completeness: selection.completeness,
+                                },
+                            )
                         }
                         RepositoryFileBodyKind::Binary => {
-                            RepositoryReadFileResult::try_binary(path, revision, source_bytes)
+                            Some(RepositoryReadFileResult::binary(&arguments, source_bytes))
                         }
                     }
                 }
             }
             RepositoryPathLookup::Directory { .. } => RepositoryReadFileResult::try_not_a_file(
-                path,
-                revision,
+                &arguments,
                 RepositoryObjectKind::Directory,
             ),
             RepositoryPathLookup::Other { kind } => {
-                RepositoryReadFileResult::try_not_a_file(path, revision, kind)
+                RepositoryReadFileResult::try_not_a_file(&arguments, kind)
             }
             RepositoryPathLookup::PathNotFound => {
-                RepositoryReadFileResult::try_path_not_found(path, revision)
+                Some(RepositoryReadFileResult::path_not_found(&arguments))
             }
             RepositoryPathLookup::RevisionNotFound => {
-                RepositoryReadFileResult::try_revision_not_found(path, revision)
+                Some(RepositoryReadFileResult::revision_not_found(&arguments))
             }
         }
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
@@ -427,29 +410,26 @@ impl GitHubCodeHostTransport {
                 credential,
             )
             .await?;
-        let path = arguments.path().as_str().to_owned();
-        let revision = arguments.revision().as_str().to_owned();
         let result = match lookup {
             RepositoryPathLookup::Directory {
                 entries,
                 completeness: source_completeness,
-            } => bounded_repository_directory_result(path, revision, entries, source_completeness),
+            } => bounded_repository_directory_result(&arguments, entries, source_completeness),
             RepositoryPathLookup::File { .. } => {
                 RepositoryListDirectoryResult::try_not_a_directory(
-                    path,
-                    revision,
+                    &arguments,
                     RepositoryObjectKind::File,
                 )
             }
             RepositoryPathLookup::Other { kind } => {
-                RepositoryListDirectoryResult::try_not_a_directory(path, revision, kind)
+                RepositoryListDirectoryResult::try_not_a_directory(&arguments, kind)
             }
             RepositoryPathLookup::PathNotFound => {
-                RepositoryListDirectoryResult::try_path_not_found(path, revision)
+                Some(RepositoryListDirectoryResult::path_not_found(&arguments))
             }
-            RepositoryPathLookup::RevisionNotFound => {
-                RepositoryListDirectoryResult::try_revision_not_found(path, revision)
-            }
+            RepositoryPathLookup::RevisionNotFound => Some(
+                RepositoryListDirectoryResult::revision_not_found(&arguments),
+            ),
         }
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::ListDirectory(result))
@@ -503,7 +483,7 @@ impl GitHubCodeHostTransport {
             .await?;
         match response.status() {
             StatusCode::OK => Ok(RepositoryPathLookup::PathNotFound),
-            StatusCode::NOT_FOUND => {
+            StatusCode::NOT_FOUND | StatusCode::CONFLICT => {
                 let url = self.repository_url(repository, &[], None)?;
                 let response = self
                     .send_authenticated(Method::GET, url, None, credential)
@@ -1628,8 +1608,7 @@ async fn bounded_json_page(
 }
 
 fn bounded_repository_directory_result(
-    path: String,
-    revision: String,
+    arguments: &super::RepositoryListDirectoryArguments,
     entries: Vec<RepositoryDirectoryEntry>,
     source_completeness: CodeHostResultCompleteness,
 ) -> Option<RepositoryListDirectoryResult> {
@@ -1647,8 +1626,7 @@ fn bounded_repository_directory_result(
     };
     loop {
         let result = RepositoryListDirectoryResult::try_entries(
-            path.clone(),
-            revision.clone(),
+            arguments,
             entries.clone(),
             observed_entries,
             completeness,
@@ -2773,6 +2751,60 @@ mod tests {
         assert_eq!(requests, missing_revision_requests("src/lib.rs"));
     }
 
+    /// An empty visible repository returns a conflict for commit lookup but
+    /// still proves that the requested revision is absent.
+    #[tokio::test]
+    async fn repository_empty_conflict_is_a_missing_revision_result() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            let revision_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "409 Conflict",
+                    body: b"{}",
+                },
+            )
+            .await;
+            let repository_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: b"{}",
+                },
+            )
+            .await;
+            [path_request, revision_request, repository_request]
+        });
+        let arguments = repository_read_arguments("src/lib.rs", None);
+        let result = transport
+            .repository_read_file(arguments.clone(), &test_credential())
+            .await
+            .expect("a revision in an empty visible repository is absent");
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({
+                "outcome": "revision_not_found",
+                "path": arguments.path().as_str(),
+                "revision": arguments.revision().as_str(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(
+            requests,
+            missing_revision_requests(arguments.path().as_str())
+        );
+    }
+
     /// GitHub deliberately shares 404 across missing and inaccessible
     /// repositories, so it cannot prove a revision absent without repository
     /// visibility.
@@ -3162,9 +3194,9 @@ mod tests {
     #[test]
     fn repository_directory_listing_respects_encoded_result_budget() {
         const OBSERVED_ENTRIES: usize = MAX_RESULT_ITEMS;
+        let arguments = repository_list_arguments("src");
         let result = bounded_repository_directory_result(
-            String::from("src"),
-            String::from(REPOSITORY_REVISION),
+            &arguments,
             repository_escaping_directory_entries(OBSERVED_ENTRIES),
             CodeHostResultCompleteness::Complete,
         )

@@ -401,6 +401,19 @@ impl CodeHostOperation {
             Self::ReviewGateCheck(_) => review_gate_check::NAME,
         }
     }
+
+    fn accepts_repository_result(&self, result: &CodeHostResult) -> bool {
+        match (self, result) {
+            (Self::ReadFile(arguments), CodeHostResult::ReadFile(result)) => {
+                result.matches(arguments)
+            }
+            (Self::ListDirectory(arguments), CodeHostResult::ListDirectory(result)) => {
+                result.matches(arguments)
+            }
+            (Self::ReadFile(_) | Self::ListDirectory(_), _) => false,
+            _ => true,
+        }
+    }
 }
 
 fn decode_operation(
@@ -626,8 +639,14 @@ where
                 detail: Some(self.credential_unavailable_detail.clone()),
             }));
         };
+        let result_operation = operation.clone();
         let result = match self.transport.execute(operation, &credential).await {
-            Ok(result) if kind.accepts_result(&result) => result,
+            Ok(result)
+                if kind.accepts_result(&result)
+                    && result_operation.accepts_repository_result(&result) =>
+            {
+                result
+            }
             Ok(_) => return Err(caller_bug()),
             Err(failure) => {
                 if let Some(class) = transport_failure_class(kind, failure) {
@@ -1856,19 +1875,24 @@ mod tests {
         let source_content = format!("before {CREDENTIAL} after\n");
         let source_bytes =
             u64::try_from(source_content.len()).expect("fixture source size fits u64");
-        let result = RepositoryReadFileResult::try_content(RepositoryFileContentFields {
-            path: String::from("src/lib.rs"),
-            revision: String::from(REVISION),
-            source_bytes,
-            requested_start_line: None,
-            requested_end_line: None,
-            start_line: Some(1),
-            end_line: Some(1),
-            returned_lines: 1,
-            last_line_complete: true,
-            content: source_content,
-            completeness: CodeHostResultCompleteness::Complete,
-        })
+        let arguments: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/lib.rs",
+            "repository": "owner/repository",
+            "revision": REVISION,
+        }))
+        .expect("fixture file arguments are admitted");
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: Some(1),
+                end_line: Some(1),
+                returned_lines: 1,
+                last_line_complete: true,
+                content: source_content,
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        )
         .expect("fixture file result is admitted");
         let mut value = CodeHostResult::ReadFile(result).into_json_value();
 
@@ -1880,6 +1904,28 @@ mod tests {
         assert_eq!(value["returned_bytes"], emitted_content.len());
         assert_eq!(value["source_bytes"], source_bytes);
         assert!(!value.to_string().contains(CREDENTIAL));
+    }
+
+    /// A custom transport cannot satisfy one exact repository operation with a
+    /// valid result constructed for another path and revision.
+    #[test]
+    fn repository_operation_rejects_another_result_identity() {
+        let requested: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/a.rs",
+            "repository": "owner/repository",
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+        }))
+        .expect("fixture requested arguments are admitted");
+        let returned: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/b.rs",
+            "repository": "owner/repository",
+            "revision": "89abcdef0123456789abcdef0123456789abcdef",
+        }))
+        .expect("fixture returned arguments are admitted");
+        let result = CodeHostResult::ReadFile(RepositoryReadFileResult::path_not_found(&returned));
+        let operation = CodeHostOperation::ReadFile(requested);
+
+        assert!(!operation.accepts_repository_result(&result));
     }
 
     /// A malformed acknowledgement after a mutation is fail-closed as
