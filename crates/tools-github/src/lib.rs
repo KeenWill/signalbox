@@ -6,6 +6,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashSet,
     error::Error,
     fmt,
     future::Future,
@@ -1050,6 +1051,10 @@ where
             truncate_diff_result(&mut result.value).map_err(|_| caller_bug())?;
             content = serde_json::to_string(&result.value).map_err(|_| caller_bug())?;
         }
+        if content.len() > MAX_RESULT_BYTES && matches!(kind, ToolKind::ReviewThreads) {
+            truncate_review_threads_result(&mut result.value).map_err(|_| caller_bug())?;
+            content = serde_json::to_string(&result.value).map_err(|_| caller_bug())?;
+        }
         if content.len() > MAX_RESULT_BYTES {
             if kind.mutates() {
                 return Err(infrastructure(CommitOutcome::Ambiguous));
@@ -1117,6 +1122,93 @@ fn truncate_diff_result(value: &mut serde_json::Value) -> Result<(), InvalidGitH
         remaining -= additional_size;
     }
     object.insert("files".to_owned(), serde_json::Value::Array(retained));
+    Ok(())
+}
+
+fn truncate_review_threads_result(
+    value: &mut serde_json::Value,
+) -> Result<(), InvalidGitHubArguments> {
+    let object = value.as_object_mut().ok_or(InvalidGitHubArguments)?;
+    let threads_were_truncated = object
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(InvalidGitHubArguments)?;
+    let threads = object.remove("threads").ok_or(InvalidGitHubArguments)?;
+    let serde_json::Value::Array(threads) = threads else {
+        return Err(InvalidGitHubArguments);
+    };
+    object.insert("threads".to_owned(), serde_json::Value::Array(Vec::new()));
+    object.insert(
+        "truncated".to_owned(),
+        serde_json::Value::Bool(threads_were_truncated),
+    );
+    let empty_size = serde_json::to_vec(&serde_json::Value::Object(object.clone()))
+        .map_err(|_| InvalidGitHubArguments)?
+        .len();
+    let mut remaining = MAX_RESULT_BYTES
+        .checked_sub(empty_size)
+        .ok_or(InvalidGitHubArguments)?;
+    let mut retained_threads = Vec::new();
+    for mut thread in threads {
+        let (comments, comments_were_truncated) = {
+            let thread_object = thread.as_object_mut().ok_or(InvalidGitHubArguments)?;
+            let comments = thread_object
+                .remove("comments")
+                .ok_or(InvalidGitHubArguments)?;
+            let serde_json::Value::Array(comments) = comments else {
+                return Err(InvalidGitHubArguments);
+            };
+            let comments_were_truncated = thread_object
+                .get("comments_truncated")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or(InvalidGitHubArguments)?;
+            thread_object.insert("comments".to_owned(), serde_json::Value::Array(Vec::new()));
+            thread_object.insert(
+                "comments_truncated".to_owned(),
+                serde_json::Value::Bool(comments_were_truncated || !comments.is_empty()),
+            );
+            (comments, comments_were_truncated)
+        };
+        let thread_separator = usize::from(!retained_threads.is_empty());
+        let thread_size = serde_json::to_vec(&thread)
+            .map_err(|_| InvalidGitHubArguments)?
+            .len();
+        if thread_separator + thread_size > remaining {
+            break;
+        }
+        remaining -= thread_separator + thread_size;
+        let total_comments = comments.len();
+        let mut retained_comments = Vec::new();
+        for comment in comments {
+            let comment_separator = usize::from(!retained_comments.is_empty());
+            let comment_size = serde_json::to_vec(&comment)
+                .map_err(|_| InvalidGitHubArguments)?
+                .len();
+            let completes_original = retained_comments.len() + 1 == total_comments;
+            let completion_cost = usize::from(completes_original && !comments_were_truncated);
+            if comment_separator + comment_size + completion_cost > remaining {
+                break;
+            }
+            remaining -= comment_separator + comment_size + completion_cost;
+            retained_comments.push(comment);
+        }
+        let retained_every_comment = retained_comments.len() == total_comments;
+        let thread_object = thread.as_object_mut().ok_or(InvalidGitHubArguments)?;
+        thread_object.insert(
+            "comments".to_owned(),
+            serde_json::Value::Array(retained_comments),
+        );
+        thread_object.insert(
+            "comments_truncated".to_owned(),
+            serde_json::Value::Bool(comments_were_truncated || !retained_every_comment),
+        );
+        retained_threads.push(thread);
+    }
+    object.insert(
+        "threads".to_owned(),
+        serde_json::Value::Array(retained_threads),
+    );
+    object.insert("truncated".to_owned(), serde_json::Value::Bool(true));
     Ok(())
 }
 
@@ -1518,6 +1610,7 @@ impl GitHubApiTransport {
                 pagination_extent = FilePaginationExtent::Truncated;
             }
         }
+        validate_unique_file_paths(&files)?;
         let truncated = files_incomplete(files.len(), initial.changed_files, pagination_extent)?
             || matches!(patch_extent, FilePatchExtent::Truncated);
         let current_value = self
@@ -1851,6 +1944,17 @@ fn normalize_patch(
         Some(patch) if patch.len() > MAX_TEXT_BYTES => Ok((None, FilePatchExtent::Truncated)),
         Some(patch) => Ok((Some(patch), FilePatchExtent::Complete)),
     }
+}
+
+fn validate_unique_file_paths(files: &[serde_json::Value]) -> Result<(), GitHubTransportFailure> {
+    let mut paths = HashSet::new();
+    for file in files {
+        let path = required_string(required_object(file)?, "path")?;
+        if !paths.insert(path) {
+            return Err(invalid_response(None));
+        }
+    }
+    Ok(())
 }
 
 fn files_incomplete(
@@ -2281,6 +2385,7 @@ mod tests {
     const SYNTHETIC_UNICODE_PREFIX: &str = "github_pat_synth";
     const DIFF_FILES_FOR_RESULT_OVERFLOW: usize = 64;
     const LAST_OVERFLOW_FILE_INDEX: usize = DIFF_FILES_FOR_RESULT_OVERFLOW - 1;
+    const COMMENTS_FOR_RESULT_OVERFLOW: usize = 16;
     const AGGREGATE_PATCH_BYTES: usize = MAX_TEXT_BYTES / 4;
     const ITEMS_BEYOND_PAGE_BOUND: usize = PAGE_SIZE + 1;
     const OPAQUE_ID_BYTES_BEYOND_BOUND: usize = MAX_OPAQUE_ID_BYTES + 1;
@@ -2553,6 +2658,19 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_normalized_file_paths_are_rejected() {
+        let mut files = normalize_files(&files_response())
+            .expect("recorded response is valid")
+            .files;
+        files.push(files[0].clone());
+
+        assert_eq!(
+            validate_unique_file_paths(&files),
+            Err(invalid_response(None))
+        );
+    }
+
+    #[test]
     fn aggregate_diff_evidence_is_truncated_to_result_bound() {
         let mut response = files_response();
         response[0]["patch"] =
@@ -2624,6 +2742,40 @@ mod tests {
         truncate_diff_result(&mut result).expect("short patch can be retained");
 
         assert_eq!(result["files"][0]["patch"], SHORT_PATCH);
+    }
+
+    #[test]
+    fn aggregate_review_thread_evidence_is_truncated_to_result_bound() {
+        let mut result = normalize_threads(&threads_response()).expect("recording normalizes");
+        let mut comment = result["threads"][0]["comments"][0].clone();
+        comment["body"] = serde_json::Value::String(PATCH_FILLER.repeat(MAX_TEXT_BYTES));
+        result["threads"][0]["comments"] =
+            serde_json::Value::Array(vec![comment; COMMENTS_FOR_RESULT_OVERFLOW]);
+
+        assert!(
+            serde_json::to_vec(&result)
+                .expect("fixture serializes")
+                .len()
+                > MAX_RESULT_BYTES
+        );
+        truncate_review_threads_result(&mut result).expect("thread result can be bounded");
+        let retained_comments = result["threads"][0]["comments"]
+            .as_array()
+            .expect("retained comments stay an array");
+
+        assert!(
+            serde_json::to_vec(&result)
+                .expect("result serializes")
+                .len()
+                <= MAX_RESULT_BYTES
+        );
+        assert_eq!(result["truncated"], serde_json::Value::Bool(true));
+        assert_eq!(
+            result["threads"][0]["comments_truncated"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(!retained_comments.is_empty());
+        assert!(retained_comments.len() < COMMENTS_FOR_RESULT_OVERFLOW);
     }
 
     #[test]
