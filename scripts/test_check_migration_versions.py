@@ -4,9 +4,11 @@
 A checker that cannot be shown to fail is the false-confidence trap this
 repository documents, so each rule gets a positive and a negative case: a
 directory with unique versions passes, a duplicated version fails naming
-both files, and an unparseable filename fails rather than escaping the
-duplicate rule. Runs the checker as a subprocess against a synthetic
-`crates/*/migrations` tree in a temporary working directory.
+both files, a zero-padded restatement of an existing version fails because
+sqlx parses both prefixes to the same integer, and an unparseable filename
+fails rather than escaping the duplicate rule. Runs the checker as a
+subprocess against a synthetic `crates/*/migrations` tree in a temporary
+working directory.
 """
 
 import subprocess
@@ -50,6 +52,14 @@ def main() -> int:
         elif "3_a.sql" not in result.stdout or "3_b.sql" not in result.stdout:
             failures.append(
                 f"duplicate report must name both files: {result.stdout}"
+            )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        build_tree(Path(tmp), ["1_a.sql", "01_b.sql"])
+        result = run_checker(Path(tmp))
+        if result.returncode == 0:
+            failures.append(
+                "zero-padded duplicate of version 1 should fail and did not"
             )
 
     with tempfile.TemporaryDirectory() as tmp:
