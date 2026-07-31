@@ -6203,23 +6203,54 @@ impl ReviewRuntimeDriver {
         .await
     }
 
+    fn start_attempt_request(
+        &self,
+        attempt: CanonicalUuid,
+    ) -> Result<ClientRequest, Box<dyn Error>> {
+        Ok(ClientRequest::StartReviewOrchestration {
+            command_id: command()?,
+            attempt_id: attempt,
+            target_id: self.target,
+            concern_set_version: String::from(REVIEW_CONCERN_SET_VERSION),
+            import_template_name: String::from(REVIEW_IMPORT_TEMPLATE),
+            judgment_template_name: String::from(REVIEW_JUDGMENT_TEMPLATE),
+            repair_template_name: String::from(REVIEW_REPAIR_TEMPLATE),
+            publication_template_name: String::from(REVIEW_PUBLICATION_TEMPLATE),
+            concerns: review_concern_inputs(),
+        })
+    }
+
     async fn start_attempt(&mut self, attempt: CanonicalUuid) -> Result<(), Box<dyn Error>> {
+        let request = self.start_attempt_request(attempt)?;
         self.request_expect(
-            ClientRequest::StartReviewOrchestration {
-                command_id: command()?,
-                attempt_id: attempt,
-                target_id: self.target,
-                concern_set_version: String::from(REVIEW_CONCERN_SET_VERSION),
-                import_template_name: String::from(REVIEW_IMPORT_TEMPLATE),
-                judgment_template_name: String::from(REVIEW_JUDGMENT_TEMPLATE),
-                repair_template_name: String::from(REVIEW_REPAIR_TEMPLATE),
-                publication_template_name: String::from(REVIEW_PUBLICATION_TEMPLATE),
-                concerns: review_concern_inputs(),
-            },
+            request,
             ServerMessage::ReviewOrchestrationStarted {
                 attempt_id: attempt,
             },
         )
+        .await
+    }
+
+    async fn reject_repeated_start(
+        &mut self,
+        attempt: CanonicalUuid,
+    ) -> Result<(), Box<dyn Error>> {
+        let request = self.start_attempt_request(attempt)?;
+        self.request_invalid(request).await
+    }
+
+    async fn reject_result_free_read_only_success(
+        &mut self,
+        fixture: ReviewPassFixture,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_invalid(ClientRequest::CompleteReviewPass {
+            command_id: command()?,
+            run_id: fixture.run,
+            pass_id: fixture.pass,
+            turn_id: Some(fixture.turn),
+            output_frontier_id: Some(fixture.frontier),
+            outcome: ReviewPassTerminalOutcome::Succeeded,
+        })
         .await
     }
 
@@ -6569,6 +6600,7 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         .await?;
     driver.complete_result_free_pass(import).await?;
     driver.record_import(attempt, import.pass).await?;
+    driver.reject_repeated_start(attempt).await?;
 
     let correctness = driver
         .create_completed_turn_pass(
@@ -6576,6 +6608,9 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
             ReviewWorkflow::ReadOnlyReview,
             0xc100,
         )
+        .await?;
+    driver
+        .reject_result_free_read_only_success(correctness)
         .await?;
     driver
         .record_findings(

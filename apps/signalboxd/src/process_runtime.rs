@@ -2136,6 +2136,11 @@ where
     if current_pass.reference().run().run() != run_id {
         return write_review_invalid(writer, version, request_id).await;
     }
+    if matches!(outcome, ReviewPassTerminalOutcome::Succeeded)
+        && current_pass.kind() == ReviewPassKind::ReadOnlyReview
+    {
+        return write_review_invalid(writer, version, request_id).await;
+    }
     let completed = match (outcome, turn_id, output_frontier_id) {
         (ReviewPassTerminalOutcome::Cancelled, None, None) => {
             complete_queued_review_pass(current_run, current_pass)

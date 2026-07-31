@@ -330,12 +330,16 @@ async fn prepare_mutation(
                 &selection,
             )
             .map_err(|_| ReviewOrchestrationRuntimeError::InvalidRequest)?;
+        let current = PostgresReviewOrchestrationStore::new(pool.clone())
+            .current_stage(attempt.id())
+            .await
+            .map_err(map_store_error)?;
         return Ok(PreparedMutation {
             command_id: DurableCommandId::from_uuid(command_id.into_uuid()),
             kind: ReviewOrchestrationCommandKind::Start,
             attempt,
             submission: ClientSubmission::AwaitingImport,
-            current: None,
+            current,
         });
     }
 
