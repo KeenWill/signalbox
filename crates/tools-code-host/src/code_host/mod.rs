@@ -406,11 +406,39 @@ impl CodeHostOperation {
         match self {
             Self::ReadFile(arguments) => match result {
                 CodeHostResult::ReadFile(result) => result.matches(arguments),
-                _ => false,
+                CodeHostResult::Summary(_)
+                | CodeHostResult::ChangedFiles(_)
+                | CodeHostResult::FilePatch(_)
+                | CodeHostResult::ListDirectory(_)
+                | CodeHostResult::ChecksStatus(_)
+                | CodeHostResult::Comment(_)
+                | CodeHostResult::ReviewThreads(_)
+                | CodeHostResult::ThreadReply(_)
+                | CodeHostResult::ThreadResolve(_)
+                | CodeHostResult::CiJobLog(_)
+                | CodeHostResult::RerunFailedJobs(_)
+                | CodeHostResult::ConvergenceState(_)
+                | CodeHostResult::StackState(_)
+                | CodeHostResult::ThreadInventory(_)
+                | CodeHostResult::ReviewGateCheck(_) => false,
             },
             Self::ListDirectory(arguments) => match result {
                 CodeHostResult::ListDirectory(result) => result.matches(arguments),
-                _ => false,
+                CodeHostResult::Summary(_)
+                | CodeHostResult::ChangedFiles(_)
+                | CodeHostResult::FilePatch(_)
+                | CodeHostResult::ReadFile(_)
+                | CodeHostResult::ChecksStatus(_)
+                | CodeHostResult::Comment(_)
+                | CodeHostResult::ReviewThreads(_)
+                | CodeHostResult::ThreadReply(_)
+                | CodeHostResult::ThreadResolve(_)
+                | CodeHostResult::CiJobLog(_)
+                | CodeHostResult::RerunFailedJobs(_)
+                | CodeHostResult::ConvergenceState(_)
+                | CodeHostResult::StackState(_)
+                | CodeHostResult::ThreadInventory(_)
+                | CodeHostResult::ReviewGateCheck(_) => false,
             },
             Self::Summary(_)
             | Self::ChangedFiles(_)

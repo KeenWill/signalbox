@@ -16,8 +16,8 @@ use signalbox_tools_basic::{
 
 use super::arguments::valid_revision;
 use super::repository_result::{
-    MAX_REPOSITORY_FILE_CONTENT_BYTES, MAX_REPOSITORY_FILE_SCAN_BYTES,
-    is_immediate_repository_child,
+    MAX_OBSERVED_DIRECTORY_ENTRIES, MAX_REPOSITORY_FILE_CONTENT_BYTES,
+    MAX_REPOSITORY_FILE_SCAN_BYTES, is_immediate_repository_child,
 };
 use super::result::{MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, absolute_https_url};
 use super::review_slog::{
@@ -47,7 +47,6 @@ const API_VERSION: &str = "2026-03-10";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_OBSERVED_DIRECTORY_ENTRIES: usize = 1_000;
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
@@ -2889,8 +2888,10 @@ mod tests {
     /// issuing a blob request.
     #[tokio::test]
     async fn repository_file_read_reports_directory_path() {
+        let arguments = repository_read_arguments("src", None);
         let (transport, listener) = repository_test_transport().await;
-        let directory = repository_directory_value("src", Vec::new()).to_string();
+        let directory =
+            repository_directory_value(arguments.path().as_str(), Vec::new()).to_string();
         let server = tokio::spawn(async move {
             serve_test_response(
                 &listener,
@@ -2902,7 +2903,7 @@ mod tests {
             .await
         });
         let result = transport
-            .repository_read_file(repository_read_arguments("src", None), &test_credential())
+            .repository_read_file(arguments.clone(), &test_credential())
             .await
             .expect("a directory path is a typed non-file result");
         let request = repository_server_result(server).await;
@@ -2912,12 +2913,12 @@ mod tests {
             serde_json::json!({
                 "object_type": "directory",
                 "outcome": "not_a_file",
-                "path": "src",
-                "revision": REPOSITORY_REVISION,
+                "path": arguments.path().as_str(),
+                "revision": arguments.revision().as_str(),
                 "truncated": false,
             })
         );
-        assert_eq!(request, contents_request("src"));
+        assert_eq!(request, contents_request(arguments.path().as_str()));
     }
 
     /// Invalid UTF-8 or NUL-bearing blob content is identified as binary and
@@ -3342,11 +3343,11 @@ mod tests {
     }
 
     fn repository_escaping_directory_entries(count: usize) -> Vec<RepositoryDirectoryEntry> {
-        let entry_name = "\u{1}".repeat(super::super::arguments::MAX_FILE_PATH_BYTES - 4);
+        let entry_name = "\u{1}".repeat(super::super::arguments::MAX_FILE_PATH_BYTES - 7);
         (0..count)
-            .map(|_| {
+            .map(|index| {
                 RepositoryDirectoryEntry::try_new(
-                    format!("src/{entry_name}"),
+                    format!("src/{entry_name}{index:03}"),
                     RepositoryObjectKind::File,
                     None,
                 )
