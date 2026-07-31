@@ -1,4 +1,5 @@
 use std::{
+    collections::BinaryHeap,
     error::Error,
     fmt,
     fs::{self, File},
@@ -181,7 +182,7 @@ impl Error for WorkspaceResolveError {
 }
 
 /// One filesystem entry returned by the injected adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct WorkspaceDirectoryEntry {
     /// Absolute path used only inside the authority boundary.
     pub path: PathBuf,
@@ -190,7 +191,7 @@ pub struct WorkspaceDirectoryEntry {
 }
 
 /// Closed filesystem-entry kind exposed in tool results.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceEntryKind {
     /// A regular file.
@@ -201,6 +202,15 @@ pub enum WorkspaceEntryKind {
     Symlink,
     /// Another filesystem entry kind.
     Other,
+}
+
+/// One bounded directory read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceDirectoryRead {
+    /// Lexically smallest retained entries.
+    pub entries: Vec<WorkspaceDirectoryEntry>,
+    /// Whether additional entries were observed but omitted.
+    pub truncated: bool,
 }
 
 /// One bounded file prefix and the size observed from the opened handle.
@@ -221,8 +231,9 @@ pub trait WorkspaceFileSystem: Clone + Send + Sync + 'static {
     fn metadata(&self, path: &Path) -> io::Result<fs::Metadata>;
     /// Reads metadata without following a final symlink.
     fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata>;
-    /// Returns one directory's immediate entries.
-    fn read_directory(&self, path: &Path) -> io::Result<Vec<WorkspaceDirectoryEntry>>;
+    /// Returns a bounded lexical prefix of one directory's immediate entries.
+    fn read_directory(&self, path: &Path, max_entries: usize)
+    -> io::Result<WorkspaceDirectoryRead>;
     /// Reads a bounded prefix plus four lookahead bytes.
     fn read_file_prefix(&self, path: &Path, max_bytes: usize) -> io::Result<WorkspaceFileBytes>;
 }
@@ -244,26 +255,44 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
         fs::symlink_metadata(path)
     }
 
-    fn read_directory(&self, path: &Path) -> io::Result<Vec<WorkspaceDirectoryEntry>> {
-        fs::read_dir(path)?
-            .map(|entry| {
-                let entry = entry?;
-                let file_type = entry.file_type()?;
-                let kind = if file_type.is_file() {
-                    WorkspaceEntryKind::File
-                } else if file_type.is_dir() {
-                    WorkspaceEntryKind::Directory
-                } else if file_type.is_symlink() {
-                    WorkspaceEntryKind::Symlink
-                } else {
-                    WorkspaceEntryKind::Other
-                };
-                Ok(WorkspaceDirectoryEntry {
-                    path: entry.path(),
-                    kind,
-                })
-            })
-            .collect()
+    fn read_directory(
+        &self,
+        path: &Path,
+        max_entries: usize,
+    ) -> io::Result<WorkspaceDirectoryRead> {
+        let mut retained = BinaryHeap::with_capacity(max_entries);
+        let mut observed = 0_usize;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let kind = if file_type.is_file() {
+                WorkspaceEntryKind::File
+            } else if file_type.is_dir() {
+                WorkspaceEntryKind::Directory
+            } else if file_type.is_symlink() {
+                WorkspaceEntryKind::Symlink
+            } else {
+                WorkspaceEntryKind::Other
+            };
+            observed = observed.saturating_add(1);
+            let candidate = WorkspaceDirectoryEntry {
+                path: entry.path(),
+                kind,
+            };
+            if retained.len() < max_entries {
+                retained.push(candidate);
+            } else if retained
+                .peek()
+                .is_some_and(|greatest| candidate < *greatest)
+            {
+                retained.pop();
+                retained.push(candidate);
+            }
+        }
+        Ok(WorkspaceDirectoryRead {
+            entries: retained.into_sorted_vec(),
+            truncated: observed > max_entries,
+        })
     }
 
     fn read_file_prefix(&self, path: &Path, max_bytes: usize) -> io::Result<WorkspaceFileBytes> {

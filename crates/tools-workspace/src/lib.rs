@@ -4,9 +4,9 @@ mod path;
 mod read;
 
 pub use path::{
-    LocalWorkspaceFileSystem, WorkspaceDirectoryEntry, WorkspaceEntryKind, WorkspaceFileBytes,
-    WorkspaceFileSystem, WorkspacePathRejection, WorkspaceResolveError, WorkspaceRoot,
-    WorkspaceRootError,
+    LocalWorkspaceFileSystem, WorkspaceDirectoryEntry, WorkspaceDirectoryRead, WorkspaceEntryKind,
+    WorkspaceFileBytes, WorkspaceFileSystem, WorkspacePathRejection, WorkspaceResolveError,
+    WorkspaceRoot, WorkspaceRootError,
 };
 pub use read::{
     GLOB_FILES_NAME, GlobFilesArguments, GlobFilesResult, GlobMatch, LIST_DIRECTORY_NAME,
