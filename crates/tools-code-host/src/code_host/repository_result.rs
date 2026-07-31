@@ -126,8 +126,14 @@ impl RepositoryReadFileResult {
         let requested_line_range = arguments.line_range();
         let requested_start_line = requested_line_range.map(RepositoryLineRange::start);
         let requested_end_line = requested_line_range.map(RepositoryLineRange::end);
+        let empty_selection_valid = match requested_start_line {
+            None | Some(1) => fields.source_bytes == 0,
+            Some(_) => true,
+        };
         let returned_range_valid = match (fields.start_line, fields.end_line) {
-            (None, None) => fields.content.is_empty() && fields.returned_lines == 0,
+            (None, None) => {
+                fields.content.is_empty() && fields.returned_lines == 0 && empty_selection_valid
+            }
             (Some(start), Some(end)) => {
                 start > 0
                     && start <= end
@@ -555,6 +561,63 @@ mod tests {
         );
 
         assert!(result.is_none());
+    }
+
+    /// A selection beginning at the first line cannot be empty when exact source
+    /// metadata proves that the blob is nonempty.
+    #[test]
+    fn ranged_content_rejects_an_empty_first_line_for_a_nonempty_blob() {
+        const SOURCE: &str = "first\n";
+        const REQUESTED_START: u32 = 1;
+        const REQUESTED_END: u32 = 4;
+        let source_bytes = u64::try_from(SOURCE.len()).expect("fixture source size fits u64");
+        let arguments = file_arguments(
+            "src/lib.rs",
+            REVISION,
+            Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
+        );
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: None,
+                end_line: None,
+                returned_lines: 0,
+                last_line_complete: true,
+                content: String::new(),
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        );
+
+        assert!(result.is_none());
+    }
+
+    /// Exact byte metadata alone cannot prove that a later requested line exists.
+    #[test]
+    fn ranged_content_accepts_an_empty_selection_beyond_the_last_line() {
+        const SOURCE: &str = "only line";
+        const REQUESTED_START: u32 = 2;
+        const REQUESTED_END: u32 = 4;
+        let source_bytes = u64::try_from(SOURCE.len()).expect("fixture source size fits u64");
+        let arguments = file_arguments(
+            "src/lib.rs",
+            REVISION,
+            Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
+        );
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: None,
+                end_line: None,
+                returned_lines: 0,
+                last_line_complete: true,
+                content: String::new(),
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        );
+
+        assert!(result.is_some());
     }
 
     /// A complete whole-file result contains every byte reported by its source
