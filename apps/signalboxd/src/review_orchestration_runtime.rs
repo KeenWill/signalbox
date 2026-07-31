@@ -1422,7 +1422,7 @@ fn map_service_error(
     match error {
         ReviewOrchestrationServiceError::Store(error) => map_post_effect_store_error(error),
         ReviewOrchestrationServiceError::DurableConflict => {
-            ReviewOrchestrationRuntimeError::ConflictingReuse
+            ReviewOrchestrationRuntimeError::Rejected
         }
         ReviewOrchestrationServiceError::InvalidImportEvidence(_)
         | ReviewOrchestrationServiceError::InvalidJudgmentPlan(_)
@@ -1442,5 +1442,24 @@ const fn internal(cause: ReviewOrchestrationInternalCause) -> ReviewOrchestratio
     ReviewOrchestrationRuntimeError::Internal {
         session_id: None,
         cause,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ReviewOrchestrationRuntimeError, ReviewOrchestrationServiceError,
+        ReviewOrchestrationStoreError, RunnerError, map_service_error,
+    };
+
+    #[test]
+    fn durable_stage_conflict_is_not_command_identity_reuse() {
+        let error: ReviewOrchestrationServiceError<ReviewOrchestrationStoreError, RunnerError> =
+            ReviewOrchestrationServiceError::DurableConflict;
+
+        assert_eq!(
+            map_service_error(error),
+            ReviewOrchestrationRuntimeError::Rejected,
+        );
     }
 }
