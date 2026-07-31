@@ -44,6 +44,7 @@ const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
     review_finding_event_head,
     review_orchestration_attempt,
     review_orchestration_command,
+    review_orchestration_command_recovery,
     review_orchestration_concern,
     review_orchestration_concern_claim,
     review_orchestration_concern_finding,
@@ -241,17 +242,23 @@ impl PostgresReviewOrchestrationStore {
         };
         let effects = self.load_applied_judgment_effects(attempt).await?;
         if effects.len() < plan.members().len() {
-            let interrupted = sqlx::query(
-                "SELECT 1 FROM review_orchestration_command
-                  WHERE attempt_id = $1 AND result_stage = 'judgment_incomplete'
-                    AND judgment_effect_count = $2
-                  LIMIT 1",
+            let interrupted: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM review_orchestration_command
+                     WHERE attempt_id = $1
+                       AND result_stage = 'judgment_incomplete'
+                       AND judgment_effect_count = $2
+                    UNION ALL
+                    SELECT 1 FROM review_orchestration_command_recovery
+                     WHERE attempt_id = $1
+                       AND result_stage = 'judgment_incomplete'
+                       AND judgment_effect_count = $2
+                )",
             )
             .bind(attempt.as_uuid())
             .bind(count_i64(effects.len())?)
-            .fetch_optional(&self.pool)
-            .await?
-            .is_some();
+            .fetch_one(&self.pool)
+            .await?;
             return Ok(Some(if interrupted {
                 ReviewOrchestrationCurrentStage::JudgmentIncomplete
             } else {
@@ -540,6 +547,11 @@ impl PostgresReviewOrchestrationStore {
                     "orchestration command claim lost its registry race",
                 )),
             };
+        }
+        let recovery = inspect_command_recovery(&mut transaction, command).await?;
+        if matches!(&recovery, CommandInspection::Conflicting) {
+            transaction.rollback().await?;
+            return Ok(ReviewOrchestrationCommandClaim::Conflicting);
         }
         if let CommandInspection::Recorded(result) = recovery {
             insert_command_receipt(&mut transaction, &command, &result).await?;
@@ -1865,8 +1877,11 @@ async fn inspect_command(
                    FROM review_orchestration_command WHERE command_id = $1",
             )
             .bind(durable_command_id_to_uuid(command.command_id))
-            .fetch_one(&mut **transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
+            let Some(row) = row else {
+                return Ok(CommandInspection::New);
+            };
             let digest: Vec<u8> = row.try_get("semantic_digest")?;
             if digest.as_slice() != command.semantic_digest
                 || ReviewOrchestrationAttemptId::from_uuid(row.try_get("attempt_id")?)

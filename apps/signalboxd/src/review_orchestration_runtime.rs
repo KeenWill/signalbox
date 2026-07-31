@@ -450,7 +450,9 @@ async fn prevalidate_submission(
     submission: &ClientSubmission,
 ) -> Result<(), ReviewOrchestrationRuntimeError> {
     let admitted = match submission {
-        ClientSubmission::AwaitingImport => true,
+        ClientSubmission::AwaitingImport => {
+            current == ReviewOrchestrationCurrentStage::AwaitingImport
+        }
         ClientSubmission::Import(outcome) => {
             current == ReviewOrchestrationCurrentStage::AwaitingImport
                 || store

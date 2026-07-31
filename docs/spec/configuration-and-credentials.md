@@ -20,7 +20,9 @@ defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were
 verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
 copy-on-create session-template catalog was verified through PR #311
-(`agent/session-templates-spec`). The static web-fetch egress allowlist is
+(`agent/session-templates-spec`); the review-library parsing, generated
+templates, and orchestration template digests are verified through PR #349
+(`agent/review-orchestrator-wiring`). The static web-fetch egress allowlist is
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`).
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by

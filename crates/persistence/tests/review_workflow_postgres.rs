@@ -8895,23 +8895,29 @@ async fn assert_orchestration_claim_waiting(
     );
 }
 
-/// Durable orchestration facts reconstruct losslessly, seal each stage, replay
-/// equally, reject conflicting immutable input, and retain fenced command
-/// response state.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
--> Result<(), Box<dyn Error>> {
+struct PreparedOrchestrationFixture {
+    workflow: ReviewWorkflowStore,
+    store: PostgresReviewOrchestrationStore,
+    attempt_id: ReviewOrchestrationAttemptId,
+    attempt: ReviewOrchestrationAttempt,
+    import: ReviewImportOutcome,
+    claim: ReviewConcernClaim,
+    plan: ReviewJudgmentPlan,
+    finding_ref: ReviewFindingRef,
+    evidence: Vec<ReviewPassEvidence>,
+}
+
+async fn prepare_orchestration_fixture(
+    pool: &PgPool,
+) -> Result<PreparedOrchestrationFixture, Box<dyn Error>> {
     const IMPORT_PASS_IDENTITY: u128 = 0x7a0;
     const ANALYSIS_PASS_IDENTITY: u128 = 0x7a1;
     const EFFECT_PASS_IDENTITY: u128 = 0x7a2;
     const FIX_PASS_IDENTITY: u128 = 0x7a3;
     const FINDING_IDENTITY: u128 = 0x7a4;
     const ATTEMPT_IDENTITY: u128 = 0x7a5;
-    const COMMAND_IDENTITY: u128 = 0x7a6;
 
-    let (_container, pool) = migrated_postgres().await?;
-    let fixture = insert_review_pass_fixture(&pool).await;
+    let fixture = insert_review_pass_fixture(pool).await;
     let import_pass = insert_fixture_pass(
         &fixture,
         IMPORT_PASS_IDENTITY,
@@ -8924,7 +8930,7 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         insert_fixture_pass(&fixture, EFFECT_PASS_IDENTITY, ReviewPassKind::Judge).await;
     let fix_pass = insert_fixture_pass(&fixture, FIX_PASS_IDENTITY, ReviewPassKind::Fix).await;
     let evidence = succeed_fixture_passes(
-        &pool,
+        pool,
         &fixture.store,
         &[
             fixture.pass,
@@ -9000,17 +9006,8 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         ReviewDurableSealOutcome::Recorded
     );
     assert_eq!(
-        store.record_attempt(attempt.clone()).await?,
-        ReviewDurableSealOutcome::EqualReplay
-    );
-    assert_eq!(store.load_attempt(attempt_id).await?, Some(attempt.clone()));
-    assert_eq!(
         store.record_import(attempt_id, import.clone()).await?,
         ReviewDurableSealOutcome::Recorded
-    );
-    assert_eq!(
-        store.record_import(attempt_id, import).await?,
-        ReviewDurableSealOutcome::EqualReplay
     );
     assert_eq!(
         store
@@ -9028,64 +9025,73 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         store.seal_judgment_plan(attempt_id, plan.clone()).await?,
         ReviewDurableSealOutcome::Recorded
     );
-    assert_eq!(
-        store.seal_judgment_plan(attempt_id, plan.clone()).await?,
-        ReviewDurableSealOutcome::EqualReplay
-    );
-    let interrupted_command = ReviewOrchestrationCommand {
-        command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY + 3)),
-        semantic_digest: [10; 32],
-        attempt: attempt_id,
+    Ok(PreparedOrchestrationFixture {
+        workflow: fixture.store,
+        store,
+        attempt_id,
+        attempt,
+        import,
+        claim,
+        plan,
+        finding_ref,
+        evidence,
+    })
+}
+
+fn orchestration_command(
+    fixture: &PreparedOrchestrationFixture,
+    identity: u128,
+    digest: [u8; 32],
+) -> ReviewOrchestrationCommand {
+    ReviewOrchestrationCommand {
+        command_id: DurableCommandId::from_uuid(uuid(identity)),
+        semantic_digest: digest,
+        attempt: fixture.attempt_id,
         kind: ReviewOrchestrationCommandKind::JudgmentEffect,
-    };
-    let interrupted_progress = store
-        .load_progress(attempt_id)
-        .await?
-        .expect("planned judgment has durable progress");
-    let interrupted_result = ReviewOrchestrationCommandResult {
-        attempt: attempt_id,
+    }
+}
+
+async fn incomplete_judgment_result(
+    fixture: &PreparedOrchestrationFixture,
+) -> Result<ReviewOrchestrationCommandResult, ReviewOrchestrationStoreError> {
+    Ok(ReviewOrchestrationCommandResult {
+        attempt: fixture.attempt_id,
         stage: ReviewOrchestrationStage::JudgmentIncomplete,
-        progress: interrupted_progress,
-    };
-    let interrupted_guard =
-        expect_new_orchestration_claim(store.begin_command(interrupted_command).await?);
-    assert_eq!(
-        interrupted_guard.record(interrupted_result.clone()).await?,
-        interrupted_result
-    );
-    assert_eq!(
-        store.current_stage(attempt_id).await?,
-        Some(ReviewOrchestrationCurrentStage::JudgmentIncomplete)
-    );
+        progress: fixture
+            .store
+            .load_progress(fixture.attempt_id)
+            .await?
+            .expect("planned judgment has durable progress"),
+    })
+}
+
+/// Complete stage seals reconstruct one coherent orchestration snapshot.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_store_reconstructs_complete_attempt() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut fixture = prepare_orchestration_fixture(&pool).await?;
     let accepted = fixture
-        .store
+        .workflow
         .append_finding_event(
-            finding_ref.finding(),
+            fixture.finding_ref.finding(),
             finding_event(
-                finding_ref,
+                fixture.finding_ref,
                 ReviewEventOrdinal::one(),
-                evidence[3].clone(),
+                fixture.evidence[3].clone(),
                 ReviewFindingEventKind::Accepted,
             ),
         )
         .await?
         .expect("accepted finding exists");
-    let resumed_claims = store.load_concern_claims(attempt_id).await?;
-    assert_eq!(resumed_claims, vec![claim.clone()]);
-    assert_eq!(
-        store
-            .seal_complete_fanout(attempt_id, resumed_claims)
-            .await?,
-        ReviewDurableSealOutcome::EqualReplay
-    );
     let fixed = fixture
-        .store
+        .workflow
         .append_finding_event(
-            finding_ref.finding(),
+            fixture.finding_ref.finding(),
             finding_event(
-                finding_ref,
+                fixture.finding_ref,
                 ReviewEventOrdinal::try_new(2).expect("two is positive"),
-                evidence[4].clone(),
+                fixture.evidence[4].clone(),
                 ReviewFindingEventKind::Fixed,
             ),
         )
@@ -9096,128 +9102,354 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         fixed.events()[1].clone(),
         ReviewTemplateDigest::new([3; 32]),
     )));
-    let applied_effect = ReviewJudgmentEffectId::new(attempt_id, finding_ref);
+    let applied_effect = ReviewJudgmentEffectId::new(fixture.attempt_id, fixture.finding_ref);
     assert_eq!(
-        store.record_applied_judgment_effect(applied_effect).await?,
+        fixture
+            .store
+            .record_applied_judgment_effect(applied_effect)
+            .await?,
         ReviewDurableSealOutcome::Recorded
     );
     assert_eq!(
-        store.current_stage(attempt_id).await?,
+        fixture.store.current_stage(fixture.attempt_id).await?,
         Some(ReviewOrchestrationCurrentStage::AwaitingRepair)
     );
     assert_eq!(
-        store
-            .seal_repair_inventory(attempt_id, vec![finding_ref])
+        fixture
+            .store
+            .seal_repair_inventory(fixture.attempt_id, vec![fixture.finding_ref])
             .await?,
         ReviewDurableSealOutcome::Recorded
     );
     assert_eq!(
-        store
-            .record_repair_outcomes(attempt_id, vec![repair.clone()])
+        fixture
+            .store
+            .record_repair_outcomes(fixture.attempt_id, vec![repair.clone()])
             .await?,
         ReviewDurableSealOutcome::Recorded
     );
     assert_eq!(
-        store
-            .seal_publication_inventory(attempt_id, Vec::new())
+        fixture
+            .store
+            .seal_publication_inventory(fixture.attempt_id, Vec::new())
             .await?,
         ReviewDurableSealOutcome::Recorded
     );
     assert_eq!(
-        store
-            .record_publication_outcomes(attempt_id, Vec::new())
+        fixture
+            .store
+            .record_publication_outcomes(fixture.attempt_id, Vec::new())
             .await?,
         ReviewDurableSealOutcome::Recorded
     );
-    assert_eq!(
-        store.current_stage(attempt_id).await?,
-        Some(ReviewOrchestrationCurrentStage::Complete)
-    );
-    let snapshot = store
-        .load_snapshot(attempt_id)
+    let snapshot = fixture
+        .store
+        .load_snapshot(fixture.attempt_id)
         .await?
         .expect("completed attempt has a coherent snapshot");
-    assert_eq!(snapshot.attempt, attempt);
+
+    assert_eq!(snapshot.attempt, fixture.attempt);
     assert_eq!(
         snapshot.current_stage,
         ReviewOrchestrationCurrentStage::Complete
     );
-    assert_eq!(snapshot.concern_claims, vec![claim]);
-    assert_eq!(snapshot.judgment_plan, Some(plan));
+    assert_eq!(snapshot.concern_claims, vec![fixture.claim]);
+    assert_eq!(snapshot.judgment_plan, Some(fixture.plan));
     assert_eq!(snapshot.applied_judgment_effects, vec![applied_effect]);
     assert_eq!(snapshot.repair_outcomes, Some(vec![repair]));
     assert_eq!(snapshot.publication_outcomes, Some(Vec::new()));
+    Ok(())
+}
 
-    let command = ReviewOrchestrationCommand {
-        command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
-        semantic_digest: [7; 32],
-        attempt: attempt_id,
-        kind: ReviewOrchestrationCommandKind::Publication,
-    };
-    let progress = store
-        .load_progress(attempt_id)
-        .await?
-        .expect("progress exists");
-    let result = ReviewOrchestrationCommandResult {
-        attempt: attempt_id,
-        stage: ReviewOrchestrationStage::Complete,
-        progress,
-    };
-    let guard = expect_new_orchestration_claim(store.begin_command(command).await?);
+/// Equal stage seals replay without changing immutable attempt facts.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_store_replays_equal_stage_seals() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut fixture = prepare_orchestration_fixture(&pool).await?;
+
+    assert_eq!(
+        fixture.store.record_attempt(fixture.attempt).await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
+    assert_eq!(
+        fixture
+            .store
+            .record_import(fixture.attempt_id, fixture.import)
+            .await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
+    assert_eq!(
+        fixture
+            .store
+            .seal_complete_fanout(fixture.attempt_id, vec![fixture.claim])
+            .await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
+    assert_eq!(
+        fixture
+            .store
+            .seal_judgment_plan(fixture.attempt_id, fixture.plan)
+            .await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
+    Ok(())
+}
+
+/// A recovery-only interrupted judgment result remains visible to current-stage
+/// and coherent-snapshot reconstruction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_recovery_preserves_interrupted_judgment_state()
+-> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x7a9;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+    let command = orchestration_command(&fixture, COMMAND_IDENTITY, [10; 32]);
+    let result = incomplete_judgment_result(&fixture).await?;
+    let guard = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
+    assert_eq!(
+        fixture
+            .store
+            .record_command_recovery(command, result.clone())
+            .await?,
+        result
+    );
+    drop(guard);
+
+    assert_eq!(
+        fixture.store.current_stage(fixture.attempt_id).await?,
+        Some(ReviewOrchestrationCurrentStage::JudgmentIncomplete)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_snapshot(fixture.attempt_id)
+            .await?
+            .expect("interrupted attempt has a coherent snapshot")
+            .current_stage,
+        ReviewOrchestrationCurrentStage::JudgmentIncomplete
+    );
+    Ok(())
+}
+
+/// A recovery-only orchestration command reserves its owner-global identity and
+/// its exact retry materializes the typed receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_recovery_reserves_global_command_identity()
+-> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x7aa;
+    const FOREIGN_TARGET_IDENTITY: u128 = 0x7ab;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+    let command = orchestration_command(&fixture, COMMAND_IDENTITY, [11; 32]);
+    let result = incomplete_judgment_result(&fixture).await?;
+    let guard = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
+    assert_eq!(
+        fixture
+            .store
+            .record_command_recovery(command, result.clone())
+            .await?,
+        result
+    );
+    drop(guard);
+    let foreign_target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(FOREIGN_TARGET_IDENTITY)),
+        key("provider"),
+        key("foreign-repository"),
+        ReviewTargetSubject::Commit,
+        key("foreign-head"),
+        None,
+        None,
+    )
+    .expect("foreign target fixture is valid");
+    let foreign_command = ReviewWorkflowCommand::new(
+        command.command_id,
+        [12; 32],
+        ReviewWorkflowOperation::CreateTarget(foreign_target.clone()),
+    );
+    let mut workflow_commands = ReviewWorkflowCommandService::new(fixture.workflow.clone());
+
+    assert_eq!(
+        workflow_commands.execute(foreign_command).await?,
+        ReviewWorkflowCommandOutcome::ConflictingReuse {
+            command_id: command.command_id
+        }
+    );
+    assert_eq!(
+        fixture.workflow.load_target(foreign_target.id()).await?,
+        None
+    );
+    assert_eq!(
+        expect_recorded_orchestration_claim(fixture.store.begin_command(command).await?),
+        result
+    );
+    Ok(())
+}
+
+/// The deferred registry guard rejects a cross-kind receipt even if its
+/// transaction began before it could observe the recovery reservation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_recovery_blocks_cross_kind_registry_commit()
+-> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x7af;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+    let command = orchestration_command(&fixture, COMMAND_IDENTITY, [18; 32]);
+    let result = incomplete_judgment_result(&fixture).await?;
+    let guard = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
+    let mut transaction = pool.begin().await?;
+    assert_eq!(
+        fixture
+            .store
+            .record_command_recovery(command, result.clone())
+            .await?,
+        result
+    );
+    drop(guard);
+
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'review_workflow', 1, transaction_timestamp())",
+    )
+    .bind(command.command_id.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_workflow_command
+            (command_id, command_kind, storage_version, semantic_digest,
+             operation_kind, result_kind, result_target_id)
+         VALUES ($1, 'review_workflow', 1, $2, 'create_target',
+                 'target_created', $3)",
+    )
+    .bind(command.command_id.into_uuid())
+    .bind([19_u8; 32].as_slice())
+    .bind(fixture.attempt.target().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("recovery reserves the command identity at commit");
+    assert_sqlstate(&error, "23505");
+    assert_eq!(
+        expect_recorded_orchestration_claim(fixture.store.begin_command(command).await?),
+        result
+    );
+    Ok(())
+}
+
+/// A committed orchestration receipt replays exactly and conflicting semantic
+/// reuse is rejected.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_command_receipt_replays_and_conflicts() -> Result<(), Box<dyn Error>>
+{
+    const COMMAND_IDENTITY: u128 = 0x7ac;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+    let command = orchestration_command(&fixture, COMMAND_IDENTITY, [13; 32]);
+    let result = incomplete_judgment_result(&fixture).await?;
+    let guard = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
     assert_eq!(guard.record(result.clone()).await?, result);
-    let replayed = expect_recorded_orchestration_claim(store.begin_command(command).await?);
-    assert_eq!(replayed, result);
+
+    assert_eq!(
+        expect_recorded_orchestration_claim(fixture.store.begin_command(command).await?),
+        result
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .begin_command(ReviewOrchestrationCommand {
+                semantic_digest: [14; 32],
+                ..command
+            })
+            .await?,
+        ReviewOrchestrationCommandClaim::Conflicting
+    ));
+    Ok(())
+}
+
+/// An equal concurrent orchestration claim waits for and replays the winner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_equal_command_claim_waits_and_replays() -> Result<(), Box<dyn Error>>
+{
+    const COMMAND_IDENTITY: u128 = 0x7ad;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+    let command = orchestration_command(&fixture, COMMAND_IDENTITY, [15; 32]);
+    let result = incomplete_judgment_result(&fixture).await?;
+    let winner = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
+    let contender_store = fixture.store.clone();
+    let mut contender = tokio::spawn(async move { contender_store.begin_command(command).await });
+    assert_orchestration_claim_waiting(&mut contender).await;
+    assert_eq!(winner.record(result.clone()).await?, result);
+
+    assert_eq!(
+        expect_recorded_orchestration_claim(contender.await??),
+        result
+    );
+    Ok(())
+}
+
+/// A conflicting concurrent orchestration claim waits for and rejects the
+/// winner's different immutable payload.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_conflicting_command_claim_waits_and_rejects()
+-> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x7ae;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+    let command = orchestration_command(&fixture, COMMAND_IDENTITY, [16; 32]);
+    let result = incomplete_judgment_result(&fixture).await?;
+    let winner = expect_new_orchestration_claim(fixture.store.begin_command(command).await?);
+    let contender_store = fixture.store.clone();
     let conflicting = ReviewOrchestrationCommand {
-        semantic_digest: [8; 32],
+        semantic_digest: [17; 32],
         ..command
     };
+    let mut contender =
+        tokio::spawn(async move { contender_store.begin_command(conflicting).await });
+    assert_orchestration_claim_waiting(&mut contender).await;
+    assert_eq!(winner.record(result).await?.attempt, fixture.attempt_id);
+
     assert!(matches!(
-        store.begin_command(conflicting).await?,
+        contender.await??,
         ReviewOrchestrationCommandClaim::Conflicting
     ));
+    Ok(())
+}
 
-    let equal_race = ReviewOrchestrationCommand {
-        command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY + 1)),
-        ..command
-    };
-    let equal_winner = expect_new_orchestration_claim(store.begin_command(equal_race).await?);
-    let equal_store = store.clone();
-    let mut equal_loser = tokio::spawn(async move { equal_store.begin_command(equal_race).await });
-    assert_orchestration_claim_waiting(&mut equal_loser).await;
-    assert_eq!(equal_winner.record(result.clone()).await?, result);
-    let equal_replayed = expect_recorded_orchestration_claim(equal_loser.await??);
-    assert_eq!(equal_replayed, result);
-
-    let different_race = ReviewOrchestrationCommand {
-        command_id: DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY + 2)),
-        ..command
-    };
-    let different_winner =
-        expect_new_orchestration_claim(store.begin_command(different_race).await?);
-    let different_payload = ReviewOrchestrationCommand {
-        semantic_digest: [9; 32],
-        ..different_race
-    };
-    let different_store = store.clone();
-    let mut different_loser =
-        tokio::spawn(async move { different_store.begin_command(different_payload).await });
-    assert_orchestration_claim_waiting(&mut different_loser).await;
-    assert_eq!(different_winner.record(result.clone()).await?, result);
-    assert!(matches!(
-        different_loser.await??,
-        ReviewOrchestrationCommandClaim::Conflicting
-    ));
-
+/// An existing attempt identity rejects different immutable frozen input.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_attempt_rejects_conflicting_frozen_input()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut fixture = prepare_orchestration_fixture(&pool).await?;
     let conflicting_attempt = ReviewOrchestrationAttempt::try_new(
-        attempt_id,
-        fixture.target,
+        fixture.attempt_id,
+        fixture.attempt.target(),
         ReviewPolicy::version_one(),
         key("different-version"),
-        attempt.stage_templates(),
-        attempt.concerns().to_vec(),
+        fixture.attempt.stage_templates(),
+        fixture.attempt.concerns().to_vec(),
     )?;
+
     assert_eq!(
-        store.record_attempt(conflicting_attempt).await?,
+        fixture.store.record_attempt(conflicting_attempt).await?,
         ReviewDurableSealOutcome::Conflict
     );
     Ok(())

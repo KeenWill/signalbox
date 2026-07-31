@@ -176,6 +176,36 @@ CREATE TABLE review_orchestration_command_recovery (
     )
 );
 
+CREATE OR REPLACE FUNCTION require_durable_command_typed_record()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE matching_records bigint;
+BEGIN
+    IF NEW.command_kind <> 'review_orchestration' AND EXISTS (
+        SELECT 1 FROM review_orchestration_command_recovery
+         WHERE command_id = NEW.command_id
+    ) THEN
+        RAISE EXCEPTION 'durable command % is reserved by review orchestration recovery', NEW.command_id
+            USING ERRCODE = '23505';
+    END IF;
+    CASE NEW.command_kind
+        WHEN 'create_session' THEN SELECT count(*) INTO matching_records FROM create_session_command WHERE command_id = NEW.command_id;
+        WHEN 'create_session_from_imported_frontier' THEN SELECT count(*) INTO matching_records FROM create_session_from_imported_frontier_command WHERE command_id = NEW.command_id;
+        WHEN 'replace_session_defaults' THEN SELECT count(*) INTO matching_records FROM replace_session_defaults_command WHERE command_id = NEW.command_id;
+        WHEN 'replace_session_metadata' THEN SELECT count(*) INTO matching_records FROM replace_session_metadata_command WHERE command_id = NEW.command_id;
+        WHEN 'submit_input' THEN SELECT count(*) INTO matching_records FROM submit_input_command WHERE command_id = NEW.command_id;
+        WHEN 'decide_tool_request' THEN SELECT count(*) INTO matching_records FROM decide_tool_request_command WHERE command_id = NEW.command_id;
+        WHEN 'review_workflow' THEN SELECT count(*) INTO matching_records FROM review_workflow_command WHERE command_id = NEW.command_id;
+        WHEN 'review_orchestration' THEN SELECT count(*) INTO matching_records FROM review_orchestration_command WHERE command_id = NEW.command_id;
+        WHEN 'compact_session' THEN SELECT count(*) INTO matching_records FROM compact_session_command WHERE command_id = NEW.command_id;
+        ELSE RAISE EXCEPTION 'unsupported durable command kind %', NEW.command_kind USING ERRCODE = '23514';
+    END CASE;
+    IF matching_records <> 1 THEN
+        RAISE EXCEPTION 'durable command % requires exactly one % typed record', NEW.command_id, NEW.command_kind USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
 CREATE TRIGGER review_orchestration_command_recovery_is_append_only
     BEFORE UPDATE OR DELETE ON review_orchestration_command_recovery
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();

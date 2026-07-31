@@ -133,6 +133,21 @@ pub(crate) async fn inspect(
         .fetch_optional(&mut *connection)
         .await
         .map_err(RegistryInspectionError::Database)?;
+    if row.is_none() {
+        let recovered: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM review_orchestration_command_recovery
+                 WHERE command_id = $1
+            )",
+        )
+        .bind(durable_command_id_to_uuid(command_id))
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(RegistryInspectionError::Database)?;
+        if recovered {
+            return Ok(Some(CommandKind::ReviewOrchestration));
+        }
+    }
 
     row.map(|row| {
         let version: i16 = row

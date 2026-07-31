@@ -9,10 +9,10 @@ references and the application orchestration boundary are verified through PR
 is verified through PR #343 (`agent/review-orchestrator`). The current
 implementation also provides the closed concern library, relational
 orchestration attempt and command-receipt store, client-fed daemon adapter, and
-process and terminal surfaces described below, verified against commit
-`4ab5807d`. This page owns review targets, workflow runs, session-backed passes,
-findings, external links, their relational store, and application orchestration.
-Session execution remains owned by
+process and terminal surfaces described below, verified against PR #349
+(`agent/review-orchestrator-wiring`). This page owns review targets, workflow
+runs, session-backed passes, findings, external links, their relational store,
+and application orchestration. Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
@@ -721,7 +721,10 @@ recovery record have database constraints relating operation kind, stage, and
 constituent progress; a contradictory record is refused. Equal replay returns
 the recorded result, distinct reuse conflicts, and a retry whose receipt was
 lost materializes that receipt from the recovery result rather than deriving an
-answer from later aggregate state.
+answer from later aggregate state. A recovery-only interrupted-judgment result
+participates in current-stage and coherent-snapshot reconstruction, and reserves
+its identity against every owner-global command family while awaiting receipt
+materialization.
 
 The review-workflow store creates and loads complete aggregates, idempotently
 reserves external links, attaches external identifiers, appends external

@@ -1826,6 +1826,11 @@ fn validate_review_orchestration_snapshot(
         || counts.judgment_effect_applied_count.value() > counts.judgment_member_count.value()
         || counts.repair_fixed_count.value() > counts.judgment_member_count.value()
         || counts.publication_published_count.value() > counts.judgment_member_count.value()
+        || counts
+            .repair_fixed_count
+            .value()
+            .checked_add(counts.publication_published_count.value())
+            .is_none_or(|terminal_count| terminal_count > counts.judgment_member_count.value())
     {
         return Err(FrameValidationError::ReviewShape);
     }
@@ -7019,6 +7024,31 @@ mod tests {
 
         let frame = ServerFrame::try_new(
             request(19)?,
+            ServerMessage::ReviewOrchestration { snapshot },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ReviewShape));
+        Ok(())
+    }
+
+    #[test]
+    fn review_orchestration_snapshot_rejects_overlapping_terminal_counts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = orchestration_snapshot_fixture(
+            ReviewOrchestrationState::Complete,
+            ReviewOrchestrationConcernStatus::Succeeded,
+            Some(uuid(5)),
+            ReviewOrchestrationCounts {
+                finding_count: CanonicalU64::new(1),
+                judgment_member_count: CanonicalU64::new(1),
+                judgment_effect_applied_count: CanonicalU64::new(1),
+                repair_fixed_count: CanonicalU64::new(1),
+                publication_published_count: CanonicalU64::new(1),
+            },
+        )?;
+
+        let frame = ServerFrame::try_new(
+            request(20)?,
             ServerMessage::ReviewOrchestration { snapshot },
         );
 

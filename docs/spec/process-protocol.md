@@ -3,9 +3,9 @@
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface at commit `f4f28800`. This page is the normative boundary between a
-local client process and `signalboxd`; domain values, PostgreSQL records, and
-wire messages remain distinct representations.
+surface in PR #349 (`agent/review-orchestrator-wiring`). This page is the
+normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -421,10 +421,12 @@ followed, while the daemon still holds exclusive review-mutation admission, by
 an append-only recovery result containing the operation-derived stage and
 progress. Only then does the daemon commit the typed owner-global receipt. The
 two records constrain operation kind, stage, and constituent progress as one
-coherent shape. If receipt commit is lost, an equal retry materializes it from
-the recovery result and returns that original operation-stage response rather
-than the aggregate's later state. A recorded receipt is inspected before mutable
-aggregate-state preconditions. A semantically equal start similarly preserves
+coherent shape. A recovery-only result reserves its identity across every
+owner-global command family until the typed receipt is materialized. If receipt
+commit is lost, an equal retry materializes it from the recovery result and
+returns that original operation-stage response rather than the aggregate's later
+state. A recorded receipt is inspected before mutable aggregate-state
+preconditions. A semantically equal start similarly preserves
 `review_orchestration_started`; a different frozen attempt fails closed. Fresh
 run admission creates its run and sole pass in one transaction; recovery also
 recognizes and completes a matching run-only intermediate committed by the

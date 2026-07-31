@@ -6324,6 +6324,14 @@ impl ReviewRuntimeDriver {
         .await
     }
 
+    async fn reject_restart_after_import(
+        &mut self,
+        attempt: CanonicalUuid,
+    ) -> Result<(), Box<dyn Error>> {
+        let request = self.start_attempt_request(command()?, attempt);
+        self.request_invalid(request).await
+    }
+
     async fn record_import(
         &mut self,
         attempt: CanonicalUuid,
@@ -6679,6 +6687,7 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
     driver.reject_mismatched_pass_completion(import).await?;
     driver.complete_result_free_pass(import).await?;
     driver.record_import(attempt, import.pass).await?;
+    driver.reject_restart_after_import(attempt).await?;
 
     let correctness = driver
         .create_completed_turn_pass(
