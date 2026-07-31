@@ -143,6 +143,35 @@ fn heartbeat_frame() -> Frame {
     }))
 }
 
+fn leak_page_frame() -> Frame {
+    let report_digest = digest(EXPECTED_ADVERTISEMENT_DIGEST);
+    let registration_revision = positive(7);
+    let page = positive(1);
+    let facts = Vec::new();
+    let page_digest = leak_page_digest(LeakPageDigestInput {
+        registration_revision,
+        report_digest: &report_digest,
+        page,
+        prior_page_digest: None,
+        final_page: true,
+        facts: &facts,
+    })
+    .unwrap_or_else(|error| panic!("page-one leak digest is valid: {error}"));
+    frame(Message::WorkspaceLeakPage(WorkspaceLeakPage {
+        page: LeakPage {
+            correlation: LeakPageCorrelation {
+                registration_revision,
+                report_digest,
+                page,
+            },
+            prior_page_digest: None,
+            final_page: true,
+            facts,
+            page_digest,
+        },
+    }))
+}
+
 fn dispatch_frame(padding_bytes: usize) -> Frame {
     frame(Message::Dispatch(Dispatch {
         correlation: lease_correlation(),
@@ -280,6 +309,41 @@ fn decoder_rejects_noncanonical_uuid() {
 fn decoder_rejects_json_null_for_absent_only_phase() {
     assert!(decode_line(br#"{"version":1,"kind":"heartbeat_ack","payload":{"challenge_sequence":1,"runner_sequence":1,"lease_phase":null}}
 "#).is_err());
+}
+
+#[test]
+fn encoder_emits_explicit_null_for_page_one_prior_digest() {
+    let encoded = encode_line(&leak_page_frame())
+        .unwrap_or_else(|error| panic!("page-one leak frame encodes: {error}"));
+    let value: serde_json::Value = serde_json::from_slice(&encoded)
+        .unwrap_or_else(|error| panic!("encoded page-one leak frame parses: {error}"));
+    let page = value
+        .get("payload")
+        .and_then(|payload| payload.get("page"))
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("page-one leak payload contains a page object"));
+
+    assert!(page.contains_key("prior_page_digest"));
+    assert!(page["prior_page_digest"].is_null());
+}
+
+#[test]
+fn decoder_rejects_omitted_page_one_prior_digest() {
+    let encoded = encode_line(&leak_page_frame())
+        .unwrap_or_else(|error| panic!("page-one leak frame encodes: {error}"));
+    let mut value: serde_json::Value = serde_json::from_slice(&encoded)
+        .unwrap_or_else(|error| panic!("encoded page-one leak frame parses: {error}"));
+    value
+        .get_mut("payload")
+        .and_then(|payload| payload.get_mut("page"))
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap_or_else(|| panic!("page-one leak payload contains a page object"))
+        .remove("prior_page_digest");
+    let mut omitted = serde_json::to_vec(&value)
+        .unwrap_or_else(|error| panic!("omitted page-one leak frame serializes: {error}"));
+    omitted.push(0x0a);
+
+    assert!(decode_line(&omitted).is_err());
 }
 
 #[test]
@@ -718,6 +782,22 @@ fn resumed_frame_rejects_invalid_complete_provision_correlation() {
         directives: ReconnectDirectives {
             workspace_operation: Some(Directive {
                 correlation: OperationCorrelation::Provision(correlation),
+                action: DirectiveAction::Resend,
+            }),
+            ..ReconnectDirectives::default()
+        },
+    }));
+
+    assert!(Frame::try_new(invalid).is_err());
+}
+
+#[test]
+fn resumed_frame_rejects_lease_offer_workspace_correlation() {
+    let invalid = Message::Resumed(Box::new(Resumed {
+        registration_revision: positive(7),
+        directives: ReconnectDirectives {
+            workspace_operation: Some(Directive {
+                correlation: OperationCorrelation::LeaseOffer(lease_correlation()),
                 action: DirectiveAction::Resend,
             }),
             ..ReconnectDirectives::default()

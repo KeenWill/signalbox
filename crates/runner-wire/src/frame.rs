@@ -389,12 +389,8 @@ pub struct RetainedResult {
 pub struct LeakPage {
     /// Complete page correlation.
     pub correlation: LeakPageCorrelation,
-    /// Prior page digest; absent only on page one.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::deserialize_present"
-    )]
+    /// Prior page digest; explicitly null only on page one.
+    #[serde(deserialize_with = "crate::deserialize_required_nullable")]
     pub prior_page_digest: Option<Digest>,
     /// Whether this is the report's final page.
     pub final_page: bool,
@@ -555,7 +551,13 @@ pub struct ReconnectDirectives {
 impl ReconnectDirectives {
     fn validate(&self) -> Result<(), ValueError> {
         if let Some(directive) = &self.workspace_operation {
-            directive.correlation.validate()?;
+            match &directive.correlation {
+                OperationCorrelation::Provision(correlation) => correlation.validate()?,
+                OperationCorrelation::Release(_) => {}
+                OperationCorrelation::LeaseOffer(_) => {
+                    return Err(ValueError::Correlation);
+                }
+            }
         }
         if let Some(directive) = &self.operation_failure {
             directive.correlation.validate()?;

@@ -28,6 +28,14 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// A complete validated version-one runner frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
