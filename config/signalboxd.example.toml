@@ -5,12 +5,14 @@
 # the pinned provider/model identity, and both must stay stable across
 # restarts once any stored call references them.
 #
-# `max_output_tokens` is the deployment's per-selection output ceiling, sent
-# verbatim as the provider request's output-token limit on every operation. It
-# is an operator budget, not a declaration of the model's capability: the
-# working default below is well under each model's hard cap, which is recorded
-# beside the entry. Raise it per selection as the deployment requires, up to
-# but never above the model's cap.
+# `max_output_tokens` is the deployment's per-selection output ceiling.
+# Anthropic receives it as the provider request limit. Codex CLI has no
+# provider-side control, so its adapter renders the value as advisory context
+# and the daemon rejects reported over-limit usage after completion. It is an
+# operator budget, not a declaration of the model's capability: the working
+# default below is well under each model's hard cap, which is recorded beside
+# the entry. Raise it per selection as the deployment requires, up to but never
+# above the model's cap.
 version = 1
 
 [[adapter_mappings]]
