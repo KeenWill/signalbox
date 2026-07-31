@@ -590,19 +590,40 @@ struct ProcessImportedContinuationRetryState {
     prepared: SignalboxPreparedImportedSessionCreation?,
     reusedUnresolvedCreation: Bool
   ) {
+    let retainsPreparedCreation: Bool
     if error is CancellationError {
-      unresolvedCreation = prepared
-    } else if let serviceError = error as? SignalboxProcessServiceError,
-      case .mutationRetryExhausted = serviceError
-    {
-      unresolvedCreation = prepared
-    } else if let openError = error as? SignalboxProcessRequestOpenError,
-      case .definitelyUnsent = openError,
-      reusedUnresolvedCreation
-    {
-      unresolvedCreation = prepared
+      retainsPreparedCreation = true
+    } else if let serviceError = error as? SignalboxProcessServiceError {
+      retainsPreparedCreation = serviceError.retainsPreparedImportedSessionCreation
+    } else if let openError = error as? SignalboxProcessRequestOpenError {
+      retainsPreparedCreation = openError.retainsPreparedImportedSessionCreation(
+        whenReused: reusedUnresolvedCreation
+      )
     } else {
-      unresolvedCreation = nil
+      retainsPreparedCreation = false
+    }
+    unresolvedCreation = retainsPreparedCreation ? prepared : nil
+  }
+}
+
+private extension SignalboxProcessServiceError {
+  var retainsPreparedImportedSessionCreation: Bool {
+    switch self {
+    case .mutationRetryExhausted:
+      return true
+    case .unexpectedMessage, .invalidPage, .deadlineExceeded, .remote:
+      return false
+    }
+  }
+}
+
+private extension SignalboxProcessRequestOpenError {
+  func retainsPreparedImportedSessionCreation(whenReused: Bool) -> Bool {
+    switch self {
+    case .definitelyUnsent:
+      return whenReused
+    case .sendOutcomeUnknown:
+      return true
     }
   }
 }

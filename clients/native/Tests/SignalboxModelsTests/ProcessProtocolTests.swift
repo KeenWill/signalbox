@@ -104,6 +104,15 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertTrue(diagnostic.message.contains("text_preview"))
   }
 
+  func testImportedConversationEntryRejectsUnknownSourceSpeaker() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.importedEntryWithUnknownSourceSpeakerFrame()
+    )
+    let diagnostic = try ProcessProtocolFixture.unknownDiagnostic(in: frame.message)
+
+    XCTAssertEqual(diagnostic, ProcessProtocolFixture.unknownImportedSourceSpeakerDiagnostic)
+  }
+
   func testModelAliasCatalogRequestAndSummaryUseClosedVersionOneShapes() throws {
     let requestFrame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 8),
@@ -641,6 +650,10 @@ private enum ProcessProtocolFixture {
   static let missingConversationTitleDiagnostic = SignalboxDecodingDiagnostic(
     message: "Missing required field at message.conversation.title."
   )
+  static let unknownImportedSourceSpeakerKind = "future_speaker"
+  static let unknownImportedSourceSpeakerDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Invalid field value at message.source_speaker."
+  )
 
   static func duplicateSnapshotBoundaryMessage(
     sessionID: String
@@ -874,6 +887,25 @@ private enum ProcessProtocolFixture {
           "source_format":"codex_rollout_jsonl_v1"
         }
         """
+    )
+  }
+
+  static func importedEntryWithUnknownSourceSpeakerFrame() -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"10",
+        "message":{
+          "type":"imported_conversation_entry",
+          "position":"1",
+          "imported_entry_id":"33333333-3333-4333-8333-333333333333",
+          "source_speaker":{"type":"\(unknownImportedSourceSpeakerKind)"},
+          "content_kind":"source_event",
+          "text_preview":null
+        }
+      }
+      """.utf8
     )
   }
 

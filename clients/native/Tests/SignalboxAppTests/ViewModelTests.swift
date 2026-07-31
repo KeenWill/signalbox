@@ -71,6 +71,25 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(unavailableViewModel.errorMessage, remoteTransportGateMessage)
     }
 
+    func testImportedContinuationRetryReusesPreparedIdentityAfterUnknownSend() throws {
+        let prepared = try ImportedContinuationRetryFixture.preparedCreation()
+        var state = ProcessImportedContinuationRetryState()
+
+        state.recordFailure(
+            ImportedContinuationRetryFixture.sendOutcomeUnknownError,
+            prepared: prepared,
+            reusedUnresolvedCreation: false
+        )
+        let reusable = state.reusableCreation(
+            importedConversationID: prepared.importedConversationID,
+            throughPosition: prepared.throughPosition,
+            relationship: prepared.relationship,
+            modelSelection: prepared.modelSelection
+        )
+
+        XCTAssertEqual(reusable, prepared)
+    }
+
     func testSessionListLoadsMockSessionsAndNeedsApprovalStatus() async {
         let service = MockSignalboxService()
         let viewModel = SessionListViewModel { service }
@@ -487,6 +506,32 @@ final class ViewModelTests: XCTestCase {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
         return try SignalboxJSONCoding.decoder().decode(SignalboxArtifact.self, from: data)
+    }
+}
+
+private enum ImportedContinuationRetryFixture {
+    static let sendOutcomeUnknownError = SignalboxProcessRequestOpenError.sendOutcomeUnknown(
+        "Fixture send outcome is unknown."
+    )
+
+    static func preparedCreation() throws -> SignalboxPreparedImportedSessionCreation {
+        SignalboxPreparedImportedSessionCreation(
+            commandID: try SignalboxCommandID(
+                validating: MockProcessProtocolFixtures.continuedSessionID
+            ),
+            importedConversationID: try SignalboxCanonicalUUID(
+                validating: MockProcessProtocolFixtures.importedConversationID
+            ),
+            throughPosition: SignalboxCanonicalUInt64(
+                rawValue: UInt64(MockProcessProtocolFixtures.importedEntryCount)
+            ),
+            relationship: .resume,
+            modelSelection: .alias(
+                aliasID: try SignalboxCanonicalUUID(
+                    validating: MockProcessProtocolFixtures.aliasID
+                )
+            )
+        )
     }
 }
 

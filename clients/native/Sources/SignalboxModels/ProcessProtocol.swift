@@ -961,6 +961,18 @@ public struct SignalboxImportedConversationEntry: Decodable, Equatable, Sendable
       SignalboxImportedSourceSpeaker.self,
       forKey: .sourceSpeaker
     )
+    switch sourceSpeaker {
+    case .notAttested, .attestedAbsent, .attested:
+      break
+    case .unknown(let kind, _):
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [CodingKeys.sourceSpeaker],
+          debugDescription:
+            "Imported conversation entry source_speaker variant \(kind) is not admitted."
+        )
+      )
+    }
     contentKind = try container.decode(SignalboxImportedContentKind.self, forKey: .contentKind)
     textPreview = try container.decodeIfPresent(
       SignalboxImportedTextPreview.self,
