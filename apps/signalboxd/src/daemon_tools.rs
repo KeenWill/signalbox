@@ -318,8 +318,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        CODE_HOST_TOOL_NAMES, SessionStatusWrite, SessionStatusWriteOutcome, WebFetchRequest,
-        WebFetchResponse, WebFetchTransportFailure,
+        CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
+        CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME,
+        CHANGE_REQUEST_CONVERGENCE_STATE_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
+        CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_REVIEW_THREADS_NAME,
+        CHANGE_REQUEST_STACK_STATE_NAME, CHANGE_REQUEST_SUMMARY_NAME,
+        CHANGE_REQUEST_THREAD_INVENTORY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
+        CHANGE_REQUEST_THREAD_RESOLVE_NAME, REPOSITORY_LIST_DIRECTORY_NAME,
+        REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, SessionStatusWrite,
+        SessionStatusWriteOutcome, WebFetchRequest, WebFetchResponse, WebFetchTransportFailure,
     };
 
     #[derive(Clone, Copy, Debug)]
@@ -397,16 +404,6 @@ mod tests {
             .collect()
     }
 
-    fn daemon_definition_names() -> Vec<&'static str> {
-        CODE_HOST_TOOL_NAMES[..13]
-            .iter()
-            .copied()
-            .chain([CURRENT_TIME_NAME, ECHO_NAME])
-            .chain(CODE_HOST_TOOL_NAMES[13..].iter().copied())
-            .chain([SESSION_STATUS_UPDATE_NAME, WEB_FETCH_NAME])
-            .collect()
-    }
-
     /// The merged process-lifetime catalog exposes every daemon declaration in
     /// deterministic name order.
     #[test]
@@ -425,6 +422,30 @@ mod tests {
         let definitions = catalog.definitions();
         let names = definition_names(&definitions);
 
-        assert_eq!(names, daemon_definition_names());
+        assert_eq!(
+            names,
+            [
+                CHANGE_REQUEST_CHANGED_FILES_NAME,
+                CHANGE_REQUEST_CHECKS_STATUS_NAME,
+                CHANGE_REQUEST_CI_JOB_LOG_NAME,
+                CHANGE_REQUEST_COMMENT_NAME,
+                CHANGE_REQUEST_CONVERGENCE_STATE_NAME,
+                CHANGE_REQUEST_FILE_PATCH_NAME,
+                CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME,
+                CHANGE_REQUEST_REVIEW_THREADS_NAME,
+                CHANGE_REQUEST_STACK_STATE_NAME,
+                CHANGE_REQUEST_SUMMARY_NAME,
+                CHANGE_REQUEST_THREAD_INVENTORY_NAME,
+                CHANGE_REQUEST_THREAD_REPLY_NAME,
+                CHANGE_REQUEST_THREAD_RESOLVE_NAME,
+                CURRENT_TIME_NAME,
+                ECHO_NAME,
+                REPOSITORY_LIST_DIRECTORY_NAME,
+                REPOSITORY_READ_FILE_NAME,
+                REVIEW_GATE_CHECK_NAME,
+                SESSION_STATUS_UPDATE_NAME,
+                WEB_FETCH_NAME,
+            ]
+        );
     }
 }
