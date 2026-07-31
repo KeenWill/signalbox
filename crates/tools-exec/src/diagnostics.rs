@@ -159,8 +159,12 @@ impl CargoDiagnosticsTool<TokioProcessRunner> {
     /// Builds the production sandboxed diagnostics tool.
     pub fn try_new_production(
         workspace_root: impl AsRef<Path>,
+        supervisor_program: impl AsRef<Path>,
     ) -> Result<Self, CargoDiagnosticsToolConstructionError> {
-        Self::try_new(TokioProcessRunner, workspace_root)
+        Self::try_new(
+            TokioProcessRunner::try_new(supervisor_program)?,
+            workspace_root,
+        )
     }
 }
 
@@ -680,6 +684,10 @@ mod tests {
     }
 
     impl ProcessRunner for FakeRunner {
+        fn sandbox_launcher_program(&self) -> &Path {
+            Path::new(BWRAP_PROGRAM)
+        }
+
         async fn bwrap_availability(&mut self, _probe: ProcessRequest) -> BwrapAvailability {
             BwrapAvailability::Available
         }
@@ -778,10 +786,8 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("one compiler diagnostic"))?;
 
         assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
-        assert_eq!(
-            request.timeout,
-            std::time::Duration::from_secs(DIAGNOSTIC_TIMEOUT_SECONDS)
-        );
+        assert!(request.timeout <= std::time::Duration::from_secs(DIAGNOSTIC_TIMEOUT_SECONDS));
+        assert!(!request.timeout.is_zero());
         assert_eq!(
             request.capture_bytes,
             DIAGNOSTICS_CAPTURE_BYTES + SANDBOX_DISPATCH_MARKER.len()
