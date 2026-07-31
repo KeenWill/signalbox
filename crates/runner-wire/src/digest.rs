@@ -22,6 +22,10 @@ pub const DIGEST_VERSION: u64 = 1;
 pub const MAX_CAPABILITY_CLASSES: usize = 16;
 /// Maximum advertised tools.
 pub const MAX_TOOLS: usize = 256;
+/// Maximum advertised workspace capabilities; the closed vocabulary has one variant.
+pub const MAX_WORKSPACE_CAPABILITIES: usize = 1;
+/// Maximum advertised sandbox profiles; the closed vocabulary has two variants.
+pub const MAX_SANDBOX_PROFILES: usize = 2;
 /// Maximum advertised credential profiles.
 pub const MAX_PROFILES: usize = 64;
 /// Maximum advertised repository entries.
@@ -67,8 +71,8 @@ impl Advertisement {
     pub fn validate(&self) -> Result<(), ValueError> {
         validate_inventory(&self.capability_classes, MAX_CAPABILITY_CLASSES)?;
         validate_inventory(&self.tools, MAX_TOOLS)?;
-        validate_inventory(&self.workspace_capabilities, 1)?;
-        validate_inventory(&self.sandbox_profiles, 2)?;
+        validate_inventory(&self.workspace_capabilities, MAX_WORKSPACE_CAPABILITIES)?;
+        validate_inventory(&self.sandbox_profiles, MAX_SANDBOX_PROFILES)?;
         validate_inventory(&self.credential_profiles, MAX_PROFILES)?;
         if self.repositories.len() > MAX_REPOSITORIES
             || self
