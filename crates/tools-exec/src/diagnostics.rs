@@ -12,6 +12,8 @@ use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
 
+#[cfg(test)]
+use crate::process::{BWRAP_PROGRAM, SANDBOX_DISPATCH_MARKER};
 use crate::{
     CaptureCompleteness, ExecArguments, ExecResult, ExecToolConstructionError,
     ExecutionConfinement, OutputEncoding, ProcessOutcome, ProcessRunner, SandboxedCommandRunner,
@@ -703,7 +705,7 @@ mod tests {
                 completeness: stdout_completeness,
             },
             stderr: ProcessOutput {
-                bytes: Vec::new(),
+                bytes: SANDBOX_DISPATCH_MARKER.to_vec(),
                 completeness: CaptureCompleteness::Complete,
             },
         }
@@ -775,7 +777,7 @@ mod tests {
             .first()
             .ok_or_else(|| std::io::Error::other("one compiler diagnostic"))?;
 
-        assert_eq!(request.program, OsString::from("bwrap"));
+        assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
         assert_eq!(
             request.timeout,
             std::time::Duration::from_secs(DIAGNOSTIC_TIMEOUT_SECONDS)
