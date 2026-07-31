@@ -8882,19 +8882,6 @@ fn expect_recorded_orchestration_claim(
     }
 }
 
-#[track_caller]
-fn expect_successful_concern_claim(claim: &ReviewConcernClaim) -> &ReviewConcernSuccess {
-    match claim.outcome() {
-        ReviewConcernOutcome::Succeeded(success) => success,
-        ReviewConcernOutcome::Failed { .. }
-        | ReviewConcernOutcome::Blocked { .. }
-        | ReviewConcernOutcome::Cancelled { .. }
-        | ReviewConcernOutcome::Superseded { .. } => {
-            panic!("orchestration snapshot concern claim is not successful")
-        }
-    }
-}
-
 async fn assert_orchestration_claim_waiting(
     claim: &mut tokio::task::JoinHandle<
         Result<ReviewOrchestrationCommandClaim, ReviewOrchestrationStoreError>,
@@ -9083,6 +9070,14 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         )
         .await?
         .expect("accepted finding exists");
+    let resumed_claims = store.load_concern_claims(attempt_id).await?;
+    assert_eq!(resumed_claims, vec![claim.clone()]);
+    assert_eq!(
+        store
+            .seal_complete_fanout(attempt_id, resumed_claims)
+            .await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
     let fixed = fixture
         .store
         .append_finding_event(
@@ -9147,14 +9142,7 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
         snapshot.current_stage,
         ReviewOrchestrationCurrentStage::Complete
     );
-    assert_eq!(snapshot.concern_claims.len(), 1);
-    assert_eq!(snapshot.concern_claims[0].concern(), claim.concern());
-    let snapshot_success = expect_successful_concern_claim(&snapshot.concern_claims[0]);
-    assert_eq!(snapshot_success.findings().len(), 1);
-    assert_eq!(
-        snapshot_success.findings()[0].status(),
-        ReviewFindingStatus::Fixed
-    );
+    assert_eq!(snapshot.concern_claims, vec![claim]);
     assert_eq!(snapshot.judgment_plan, Some(plan));
     assert_eq!(snapshot.applied_judgment_effects, vec![applied_effect]);
     assert_eq!(snapshot.repair_outcomes, Some(vec![repair]));
@@ -9231,6 +9219,60 @@ async fn review_orchestration_store_resumes_complete_attempt_and_receipts()
     assert_eq!(
         store.record_attempt(conflicting_attempt).await?,
         ReviewDurableSealOutcome::Conflict
+    );
+    Ok(())
+}
+
+/// Concurrent coherent snapshots stay within a configured two-connection pool
+/// and the database's matching hard connection limit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshots_respect_configured_connection_capacity()
+-> Result<(), Box<dyn Error>> {
+    const ATTEMPT_IDENTITY: u128 = 0x7b0;
+
+    let (_container, pool) = migrated_postgres_with_max_connections(2).await?;
+    sqlx::query("ALTER ROLE signalbox CONNECTION LIMIT 2")
+        .execute(&pool)
+        .await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let attempt_id = ReviewOrchestrationAttemptId::from_uuid(uuid(ATTEMPT_IDENTITY));
+    let attempt = ReviewOrchestrationAttempt::try_new(
+        attempt_id,
+        fixture.target,
+        ReviewPolicy::version_one(),
+        key("capacity-proof-v1"),
+        ReviewStageTemplateDigests::new(
+            ReviewTemplateDigest::new([11; 32]),
+            ReviewTemplateDigest::new([12; 32]),
+            ReviewTemplateDigest::new([13; 32]),
+            ReviewTemplateDigest::new([14; 32]),
+        ),
+        vec![ReviewConcernSpec::new(
+            key("correctness"),
+            ReviewTemplateDigest::new([15; 32]),
+        )],
+    )?;
+    let mut store = PostgresReviewOrchestrationStore::new(pool);
+    assert_eq!(
+        store.record_attempt(attempt.clone()).await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    let first_store = store.clone();
+    let second_store = store;
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+        tokio::join!(
+            first_store.load_snapshot(attempt_id),
+            second_store.load_snapshot(attempt_id)
+        )
+    })
+    .await
+    .expect("two admitted snapshots finish within configured capacity");
+    let expected_stage = ReviewOrchestrationCurrentStage::AwaitingImport;
+    assert_eq!(first?.expect("first snapshot exists").attempt, attempt);
+    assert_eq!(
+        second?.expect("second snapshot exists").current_stage,
+        expected_stage
     );
     Ok(())
 }

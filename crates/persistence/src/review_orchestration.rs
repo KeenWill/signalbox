@@ -21,11 +21,7 @@ use signalbox_domain::{
     ReviewPassId, ReviewPassRef, ReviewPolicy, ReviewPolicyVersion, ReviewRunEvidence, ReviewRunId,
     ReviewRunRef, ReviewTargetId, ReviewText,
 };
-use sqlx::{
-    AssertSqlSafe, PgPool, Postgres, Row, Transaction,
-    postgres::{PgPoolOptions, PgRow},
-    types::Uuid,
-};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     command_registry::{self, CommandKind, REVIEW_ORCHESTRATION_KIND, RegistryInspectionError},
@@ -34,6 +30,41 @@ use crate::{
 };
 
 const STORAGE_VERSION: i16 = 1;
+const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
+    accepted_input,
+    turn_lifecycle,
+    review_external_link,
+    review_external_link_attachment,
+    review_external_link_observation,
+    review_external_object_identity,
+    review_finding,
+    review_finding_event,
+    review_finding_event_head,
+    review_orchestration_attempt,
+    review_orchestration_command,
+    review_orchestration_concern,
+    review_orchestration_concern_claim,
+    review_orchestration_concern_finding,
+    review_orchestration_fanout_member,
+    review_orchestration_fanout_seal,
+    review_orchestration_import,
+    review_orchestration_judgment_effect,
+    review_orchestration_judgment_member,
+    review_orchestration_judgment_plan,
+    review_orchestration_publication_inventory,
+    review_orchestration_publication_inventory_seal,
+    review_orchestration_publication_outcome,
+    review_orchestration_publication_outcome_seal,
+    review_orchestration_repair_inventory,
+    review_orchestration_repair_inventory_seal,
+    review_orchestration_repair_outcome,
+    review_orchestration_repair_outcome_seal,
+    review_pass,
+    review_pass_finding_inventory_seal,
+    review_pass_produced_finding,
+    review_run,
+    review_target
+    IN SHARE MODE";
 
 /// PostgreSQL adapter for durable orchestration attempts and command receipts.
 #[derive(Clone, Debug)]
@@ -224,49 +255,52 @@ impl PostgresReviewOrchestrationStore {
         ))
     }
 
-    /// Loads every daemon adapter fact from one exported repeatable-read snapshot.
+    /// Loads every daemon adapter fact from one coherently locked database view.
     ///
-    /// A dedicated single-connection pool imports the exported snapshot so the
-    /// existing canonical workflow reconstruction remains the only decoder for
-    /// run, pass, finding, event, and external-link values.
+    /// Snapshot admission is database-global and transaction-scoped. The
+    /// admitted transaction holds shared locks across every review table used
+    /// by canonical reconstruction while the existing workflow loaders use the
+    /// same configured pool. Concurrent snapshots release unsuccessful
+    /// admission attempts before waiting, preserving one reader connection.
     pub async fn load_snapshot(
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Option<ReviewOrchestrationSnapshotFacts>, ReviewOrchestrationStoreError> {
-        let mut snapshot_keeper = self.pool.begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *snapshot_keeper)
-            .await?;
-        let snapshot: String = sqlx::query_scalar("SELECT pg_export_snapshot()")
-            .fetch_one(&mut *snapshot_keeper)
-            .await?;
-        let import = snapshot_import_statement(&snapshot)?;
-        let snapshot_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .after_connect(move |connection, _metadata| {
-                let import = import.clone();
-                Box::pin(async move {
-                    sqlx::query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                        .execute(&mut *connection)
-                        .await?;
-                    sqlx::query(AssertSqlSafe(import))
-                        .execute(&mut *connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect_with(self.pool.connect_options().as_ref().clone())
-            .await?;
-        let snapshot_store = Self::new(snapshot_pool.clone());
-        let result = snapshot_store
-            .load_snapshot_from_coherent_pool(attempt)
-            .await;
-        snapshot_pool.close().await;
+        if self.pool.options().get_max_connections() < 2 {
+            return Err(corruption(
+                "review orchestration snapshots require two configured pool connections",
+            ));
+        }
+        let snapshot_keeper = self.begin_snapshot_guard().await?;
+        let result = self.load_snapshot_while_locked(attempt).await;
         snapshot_keeper.rollback().await?;
         result
     }
 
-    async fn load_snapshot_from_coherent_pool(
+    async fn begin_snapshot_guard(
+        &self,
+    ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
+        loop {
+            let mut transaction = self.pool.begin().await?;
+            let admitted: bool = sqlx::query_scalar(
+                "SELECT pg_try_advisory_xact_lock(
+                    hashtext('signalbox:review-orchestration'),
+                    hashtext('coherent-snapshot'))",
+            )
+            .fetch_one(&mut *transaction)
+            .await?;
+            if admitted {
+                sqlx::query(REVIEW_SNAPSHOT_LOCKS)
+                    .execute(&mut *transaction)
+                    .await?;
+                return Ok(transaction);
+            }
+            transaction.rollback().await?;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn load_snapshot_while_locked(
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Option<ReviewOrchestrationSnapshotFacts>, ReviewOrchestrationStoreError> {
@@ -964,12 +998,12 @@ impl PostgresReviewOrchestrationStore {
         .await?;
         let mut findings = Vec::with_capacity(rows.len());
         for row in rows {
-            findings.push(
-                self.workflow
-                    .load_finding(ReviewFindingId::from_uuid(row.try_get("finding_id")?))
-                    .await?
-                    .ok_or_else(|| corruption("concern finding is missing"))?,
-            );
+            let current = self
+                .workflow
+                .load_finding(ReviewFindingId::from_uuid(row.try_get("finding_id")?))
+                .await?
+                .ok_or_else(|| corruption("concern finding is missing"))?;
+            findings.push(ReviewFinding::new(current.proposal().clone()));
         }
         Ok(findings)
     }
@@ -1837,27 +1871,6 @@ fn decode_stage(value: String) -> Result<ReviewOrchestrationStage, ReviewOrchest
             "orchestration command result stage is not closed",
         )),
     }
-}
-
-fn snapshot_import_statement(snapshot: &str) -> Result<String, ReviewOrchestrationStoreError> {
-    let mut parts = snapshot.split('-');
-    let valid = snapshot.len() <= 128
-        && parts.next().is_some_and(|part| {
-            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-        && parts.next().is_some_and(|part| {
-            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-        && parts.next().is_some_and(|part| {
-            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-        && parts.next().is_none();
-    if !valid {
-        return Err(corruption(
-            "exported PostgreSQL snapshot identity is invalid",
-        ));
-    }
-    Ok(format!("SET TRANSACTION SNAPSHOT '{snapshot}'"))
 }
 
 fn count_i64(value: usize) -> Result<i64, ReviewOrchestrationStoreError> {
