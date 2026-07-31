@@ -1,6 +1,6 @@
 //! Process-boundary adapter for client-driven review orchestration.
 
-use std::{fmt::Write as _, future::Future};
+use std::future::Future;
 
 use signalbox_application::{
     ReviewConcernOutcome, ReviewConcernSuccess, ReviewConcernWork, ReviewImportOutcome,
@@ -649,7 +649,9 @@ async fn build_submission(
                         ReviewImportTerminalOutcome::Cancelled => {
                             ReviewPassIncompleteStatus::Cancelled
                         }
-                        ReviewImportTerminalOutcome::Succeeded => unreachable!(),
+                        ReviewImportTerminalOutcome::Succeeded => {
+                            return Err(ReviewOrchestrationRuntimeError::InvalidRequest);
+                        }
                     },
                 }
             };
@@ -1102,9 +1104,9 @@ fn build_snapshot(
             let claim = claims
                 .iter()
                 .find(|claim| claim.concern() == expected.key());
-            ReviewOrchestrationConcernSnapshot {
+            Ok(ReviewOrchestrationConcernSnapshot {
                 key: expected.key().as_str().to_owned(),
-                template_digest: wire_digest(expected.template_digest()),
+                template_digest: wire_digest(expected.template_digest())?,
                 status: claim.map_or(
                     ReviewOrchestrationConcernStatus::Pending,
                     |claim| match claim.outcome() {
@@ -1124,9 +1126,9 @@ fn build_snapshot(
                     },
                 ),
                 pass_id: claim.and_then(|claim| concern_pass(claim.outcome())),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, ReviewOrchestrationRuntimeError>>()?;
     let finding_count = claims
         .iter()
         .map(|claim| match claim.outcome() {
@@ -1153,10 +1155,10 @@ fn build_snapshot(
         state: current_to_wire(current),
         concern_set_version: attempt.concern_set_version().as_str().to_owned(),
         stage_template_digests: WireStageDigests {
-            import: wire_digest(digests.import()),
-            judgment: wire_digest(digests.judgment()),
-            repair: wire_digest(digests.repair()),
-            publication: wire_digest(digests.publication()),
+            import: wire_digest(digests.import())?,
+            judgment: wire_digest(digests.judgment())?,
+            repair: wire_digest(digests.repair())?,
+            publication: wire_digest(digests.publication())?,
         },
         concerns,
         counts: ReviewOrchestrationCounts {
@@ -1287,12 +1289,18 @@ fn canonical_count(value: usize) -> Result<CanonicalU64, ReviewOrchestrationRunt
         .map_err(|_| internal(ReviewOrchestrationInternalCause::ServiceContract))
 }
 
-fn wire_digest(value: ReviewTemplateDigest) -> CanonicalDigest {
+fn wire_digest(
+    value: ReviewTemplateDigest,
+) -> Result<CanonicalDigest, ReviewOrchestrationRuntimeError> {
+    const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+
     let mut encoded = String::with_capacity(64);
     for byte in value.bytes() {
-        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+        encoded.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
     }
-    CanonicalDigest::try_new(encoded).expect("lowercase digest encoding is canonical")
+    CanonicalDigest::try_new(encoded)
+        .map_err(|_| internal(ReviewOrchestrationInternalCause::ServiceContract))
 }
 
 fn digest_bytes(value: CanonicalDigest) -> Result<[u8; 32], ReviewOrchestrationRuntimeError> {

@@ -6,11 +6,13 @@ and store foundation was verified through PR #221
 PR #329 (`agent/review-finding-confidence`); targeted cross-run finding
 references and the application orchestration boundary are verified through PR
 #336 (`agent/review-orchestrator`); durable relational current-status admission
-is verified through PR #343 (`agent/review-orchestrator`). Daemon and
-process-protocol wiring remain unimplemented as identified below. This page owns
-review targets, workflow runs, session-backed passes, findings, external links,
-their relational store, and application orchestration. Session execution remains
-owned by [sessions and transcript](sessions-and-transcript.md), turn evidence by
+is verified through PR #343 (`agent/review-orchestrator`). The current
+implementation also provides the closed concern library, relational
+orchestration attempt and command-receipt store, client-fed daemon adapter, and
+process and terminal surfaces described below. This page owns review targets,
+workflow runs, session-backed passes, findings, external links, their relational
+store, and application orchestration. Session execution remains owned by
+[sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
 rest of the daemon by [persistence protocol](persistence-protocol.md). Invariant
@@ -400,6 +402,15 @@ attempt separately retains a domain-separated digest committing the stage or
 concern key, source version, model selection, approval blanket, and separate
 SHA-256 digests of the exact shared-header and body bytes.
 
+For every client-fed pass or finding effect, the daemon loads the named pass,
+its canonical run, and the pass session. The session's copied template name and
+ordinary content digest must equal the currently resolved reserved template
+provenance for that stage or concern; missing or mismatched provenance rejects
+the submission. The application then authenticates the separately frozen
+orchestration digest carried by the attempt. Session execution evidence and
+attempt configuration therefore agree through two independently checked
+bindings rather than a caller-supplied claim.
+
 The application exposes ports for immutable-target context import,
 session-backed passes, repair, and reserved publication. Adapter success returns
 typed evidence naming the exact target, policy, run, pass, session, and template
@@ -646,13 +657,16 @@ failures remain typed by the corresponding port implementation. The service does
 not drop a concern, silently retarget, or publish a partial successful subset as
 complete.
 
-Daemon driving of orchestration is committed but unimplemented. The process
-protocol has no present operations to start or read an orchestration attempt,
-record its frozen concern/template/run inventory, seal and read the complete
-fan-out and judgment plan, load and record per-finding effect receipts, seal
-repair and publication inventories, or load and record their exact terminal
-outcomes. A daemon integration must add those closed wire operations before it
-can drive this application service.
+The daemon implements a client-fed adapter over the application service. Its
+closed operations start an attempt, record import evidence, record one concern
+outcome, seal the complete judgment plan, record one planned judgment effect,
+seal repair outcomes, seal publication outcomes, and read durable progress. Each
+mutation supplies exactly one stage result to the service; every other runner
+port reports that it is awaiting client input. The service may therefore derive
+and seal all newly eligible durable stages, but it cannot silently substitute
+model output or advance through a stage the client did not supply. Stage
+prevalidation rejects an operation that is early, late, or incompatible with the
+current durable attempt.
 
 ## Store and reconstitution
 
@@ -684,11 +698,21 @@ record, unknown discriminator, incomplete history, or failed domain check is
 reported as corruption rather than normalized into a plausible aggregate
 (INV-040, INV-041).
 
-The application defines its durable attempt-store port, including current
-concern slots, stage seals, plan and effect receipts, and terminal repair and
-publication outcomes. A concrete relational adapter for that port is committed
-but unimplemented; no present daemon can persist or resume an attempt through
-it.
+The PostgreSQL orchestration adapter implements the application's complete
+durable attempt-store port. It records the immutable attempt and ordered concern
+slots, imported-context evidence, concern claims and their exact findings, the
+complete fan-out seal, judgment plan and applied effects, repair and publication
+inventory seals, and their terminal outcome seals. Its loaders reconstruct the
+current stage only from those durable records; missing ancestry, an unknown
+closed value, a noncanonical count, or contradictory evidence is corruption
+rather than an inferred partial result.
+
+Each orchestration mutation also uses an owner-global durable command receipt
+that binds command identity to the semantic request digest, closed operation
+kind, and attempt. The recorded result retains the resulting stage and progress
+counts. Equal replay returns that result, distinct reuse conflicts, and a retry
+after aggregate state committed but before its receipt was recorded recognizes
+the exact completed effect before recording the missing receipt.
 
 The review-workflow store creates and loads complete aggregates, idempotently
 reserves external links, attaches external identifiers, appends external
@@ -700,9 +724,12 @@ surface.
 
 The process protocol exposes closed requests to create a target, start a run and
 its session-backed pass, activate that pass, record its complete finding
-inventory or one finding disposition, reserve and attach external links, and
+inventory or one finding event, reserve and attach external links, and
 read targets, runs with their pass, individual findings, or an identity-ordered
-run finding list. Exact wire shapes and compatibility are owned by
+run finding list. It additionally exposes the closed orchestration start,
+import, concern, judgment-plan, judgment-effect, repair, publication, and read
+operations consumed by the client-fed adapter. Exact wire shapes, bounds, and
+compatibility are owned by
 [the process protocol](process-protocol.md#client-requests).
 
 Starting a run requires an existing target plus an accepted input whose
@@ -719,7 +746,7 @@ Read-only success is admission-atomic. The public command that records findings
 transitions the run and pass to succeeded, binds `ProducedFindings`, and inserts
 the complete canonical inventory in one transaction. It cannot commit succeeded
 read-only state with an absent result. The empty inventory follows that same
-path. Finding dispositions and external-link attachments likewise bind their
+path. Finding events and external-link attachments likewise bind their
 exact pass result in the transaction that appends or attaches the effect. Thus
 every committed intermediate point remains a domain-reconstitutable aggregate; a
 process crash cannot expose a state that the store's own loaders classify as
@@ -736,17 +763,21 @@ an equal retry into a rejection. Distinct reuse fails closed. This
 representation is the durable review-command contract.
 
 The terminal client exposes target creation, run admission and activation,
-single-finding read-only completion, finding listing, and target, run, and
-finding reads. A run read reconstructs the run and its optional recorded pass
-from one repeatable-read snapshot, so the response cannot combine lifecycle
-projections from different commits. Mutation commands print their generated
-command identity before socket I/O so an ambiguous attempt can be retried
-exactly. Process-derived text uses the terminal-safe rendering contract owned by
-the process protocol.
+single-finding read-only completion, finding listing, target, run, and finding
+reads, and every orchestration operation above. It accepts complete concern,
+judgment-plan, repair-outcome, and publication-outcome inventories through
+strict local JSON files and renders the durable orchestration stage, ordered
+concern statuses, template digests, and progress counts. A run read reconstructs
+the run and its optional recorded pass from one repeatable-read snapshot, so the
+response cannot combine lifecycle projections from different commits. Mutation
+commands print their generated command identity before socket I/O so an
+ambiguous attempt can be retried exactly. Process-derived text uses the
+terminal-safe rendering contract owned by the process protocol.
 
 ## Open edges
 
-- Concrete adapters, process-protocol additions, and merge-based stack
+- Concrete model, provider, and workspace adapters, the structured model-output
+  runtime, repair reconciliation, post-publication import, and merge-based stack
   propagation remain under
   [review-workflow orchestration](../open-questions.md#destination-features-target-model).
 - [Artifacts](../open-questions.md#general-purpose-artifacts) remain a separate

@@ -63,19 +63,27 @@ use signalbox_persistence::{
     startup::PostgresStartupScanRepository,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
-    ErrorCode, ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker,
-    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MetadataActor,
-    ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage,
-    SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
+    ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
+    ConversationSummary, CurrentModelCallState, ErrorCode, ImportedContentKind,
+    ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+    InputContent, InputDelivery, MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail,
+    RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind,
+    ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
+    ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
     FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
     PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
-    ProcessRuntimeError,
+    ProcessRuntimeError, SessionTemplateConfiguration,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -127,7 +135,19 @@ context_window_tokens = 200000
 [[aliases]]
 alias_id = "00000000-0000-0000-0000-000000000002"
 selection_id = "00000000-0000-0000-0000-000000000001"
+
+[[aliases]]
+alias_id = "7fde05bc-b4c3-44f7-8a87-748814c80191"
+selection_id = "00000000-0000-0000-0000-000000000001"
 "#;
+
+fn session_template_configuration(
+    models: &HubModelConfiguration,
+) -> Result<SessionTemplateConfiguration, Box<dyn Error>> {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/session-templates.example.toml");
+    Ok(SessionTemplateConfiguration::read(&path, || None, models)?)
+}
 
 #[derive(Clone, Debug)]
 struct RecordingCountedScriptedModel {
@@ -470,12 +490,14 @@ impl RunningRuntime {
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
         let runtime_models = model_configuration.runtime_model_catalog();
-        let mut runtime = ProcessRuntime::new(
+        let template_configuration = session_template_configuration(&model_configuration)?;
+        let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             pool.clone(),
             eligibility_nudge,
             InProcessToolDispatchGate::default(),
             model_configuration,
+            template_configuration,
         );
         if let Some(compaction_model) = compaction_model {
             runtime = runtime.with_context_compaction_model(
@@ -514,12 +536,15 @@ impl RunningRuntime {
         let listener = LocalProcessListener::bind(self.socket())?;
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let runtime = ProcessRuntime::new(
+        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let template_configuration = session_template_configuration(&model_configuration)?;
+        let runtime = ProcessRuntime::new_with_templates(
             listener,
             self.pool.clone(),
             eligibility_nudge,
             InProcessToolDispatchGate::default(),
-            HubModelConfiguration::parse(MODEL_CONFIGURATION)?,
+            model_configuration,
+            template_configuration,
         );
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
@@ -5861,4 +5886,999 @@ async fn s03_inv012_inv015_late_result_identity_collision_fails_completion_close
 
     drop(connection);
     runtime.stop().await
+}
+
+const REVIEW_IMPORT_TEMPLATE: &str = "review-import";
+const REVIEW_JUDGMENT_TEMPLATE: &str = "review-judgment";
+const REVIEW_REPAIR_TEMPLATE: &str = "review-repair";
+const REVIEW_PUBLICATION_TEMPLATE: &str = "review-publication";
+const REVIEW_CONCERN_SET_VERSION: &str = "initial-five-v1";
+
+fn review_identity(value: u128) -> CanonicalUuid {
+    CanonicalUuid::from_uuid(Uuid::from_u128(value))
+}
+
+fn review_concern_inputs() -> Vec<ReviewOrchestrationConcernInput> {
+    vec![
+        ReviewOrchestrationConcernInput {
+            key: String::from("correctness"),
+            template_name: String::from("review-concern-correctness"),
+        },
+        ReviewOrchestrationConcernInput {
+            key: String::from("interface-and-type-design"),
+            template_name: String::from("review-concern-interface-and-type-design"),
+        },
+        ReviewOrchestrationConcernInput {
+            key: String::from("test-quality"),
+            template_name: String::from("review-concern-test-quality"),
+        },
+        ReviewOrchestrationConcernInput {
+            key: String::from("security"),
+            template_name: String::from("review-concern-security"),
+        },
+        ReviewOrchestrationConcernInput {
+            key: String::from("documentation-code-drift"),
+            template_name: String::from("review-concern-documentation-code-drift"),
+        },
+    ]
+}
+
+#[derive(Clone, Copy)]
+struct ReviewPassFixture {
+    run: CanonicalUuid,
+    pass: CanonicalUuid,
+    turn: CanonicalUuid,
+    frontier: CanonicalUuid,
+}
+
+#[derive(Clone, Copy)]
+struct ReviewFindingFixtures {
+    accepted_and_fixed: CanonicalUuid,
+    duplicate: CanonicalUuid,
+    accepted_and_published: CanonicalUuid,
+}
+
+struct ReviewConcernEvidence {
+    key: String,
+    pass: CanonicalUuid,
+}
+
+struct ReviewRuntimeDriver {
+    connection: Connection,
+    pool: PgPool,
+    target: CanonicalUuid,
+    next_request: u64,
+}
+
+impl ReviewRuntimeDriver {
+    async fn connect(
+        runtime: &RunningRuntime,
+        target: CanonicalUuid,
+    ) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            connection: Connection::connect(runtime.socket()).await?,
+            pool: runtime.pool.clone(),
+            target,
+            next_request: 1,
+        })
+    }
+
+    fn request_id(&mut self) -> u64 {
+        let request = self.next_request;
+        self.next_request += 1;
+        request
+    }
+
+    async fn request_expect(
+        &mut self,
+        request: ClientRequest,
+        expected: ServerMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        let request_id = self.request_id();
+        self.connection.request(request_id, request).await?;
+        assert_eq!(
+            response_within(&mut self.connection).await?.message(),
+            &expected
+        );
+        Ok(())
+    }
+
+    async fn request_invalid(&mut self, request: ClientRequest) -> Result<(), Box<dyn Error>> {
+        let request_id = self.request_id();
+        self.connection.request(request_id, request).await?;
+        assert_eq!(
+            protocol_error_code(response_within(&mut self.connection).await?.message()),
+            ErrorCode::InvalidRequest,
+        );
+        Ok(())
+    }
+
+    async fn create_target(&mut self) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::CreateReviewTarget {
+                command_id: command()?,
+                target_id: self.target,
+                provider: String::from("github"),
+                repository: String::from("keenwill/signalbox"),
+                subject: ReviewTargetSubject::ChangeRequest {
+                    number: CanonicalU64::new(343),
+                },
+                head_revision: String::from("reviewed-head-revision"),
+                base_revision: Some(String::from("reviewed-base-revision")),
+                stack_parent_target_id: None,
+            },
+            ServerMessage::ReviewTargetCreated {
+                target_id: self.target,
+            },
+        )
+        .await
+    }
+
+    async fn create_session_from_template(
+        &mut self,
+        template_name: &str,
+    ) -> Result<CanonicalUuid, Box<dyn Error>> {
+        let request_id = self.request_id();
+        self.connection
+            .request(
+                request_id,
+                ClientRequest::CreateSessionFromTemplate {
+                    command_id: command()?,
+                    template_name: String::from(template_name),
+                },
+            )
+            .await?;
+        match response_within(&mut self.connection).await?.message() {
+            ServerMessage::SessionCreated { session_id } => Ok(*session_id),
+            message => Err(io::Error::other(format!(
+                "unexpected review-template session response: {message:?}"
+            ))
+            .into()),
+        }
+    }
+
+    async fn submit_review_input(
+        &mut self,
+        session: CanonicalUuid,
+        seed: u128,
+    ) -> Result<(CanonicalUuid, CanonicalUuid), Box<dyn Error>> {
+        let request_id = self.request_id();
+        self.connection
+            .request(
+                request_id,
+                ClientRequest::SubmitInput {
+                    command_id: command()?,
+                    session_id: session,
+                    content: InputContent::new(format!("review pass fixture {seed}")),
+                    expected_defaults_version: Some(CanonicalU64::new(1)),
+                    delivery: None,
+                },
+            )
+            .await?;
+        match response_within(&mut self.connection).await?.message() {
+            ServerMessage::InputSubmitted {
+                session_id,
+                accepted_input_id,
+                turn_id,
+                ..
+            } if *session_id == session => Ok((*accepted_input_id, *turn_id)),
+            message => Err(io::Error::other(format!(
+                "unexpected review-pass input response: {message:?}"
+            ))
+            .into()),
+        }
+    }
+
+    async fn create_completed_turn_pass(
+        &mut self,
+        template_name: &str,
+        workflow: ReviewWorkflow,
+        seed: u128,
+    ) -> Result<ReviewPassFixture, Box<dyn Error>> {
+        let session = self.create_session_from_template(template_name).await?;
+        let (accepted_input, turn) = self.submit_review_input(session, seed).await?;
+        let run = review_identity(seed);
+        let pass = review_identity(seed + 1);
+        self.request_expect(
+            ClientRequest::StartReviewRun {
+                command_id: command()?,
+                target_id: self.target,
+                run_id: run,
+                pass_id: pass,
+                workflow,
+                session_id: session,
+                accepted_input_id: accepted_input,
+            },
+            ServerMessage::ReviewRunStarted {
+                run_id: run,
+                pass_id: pass,
+            },
+        )
+        .await?;
+        activate_turn(&self.pool, SessionId::from_uuid(session.into_uuid())).await?;
+        self.request_expect(
+            ClientRequest::ActivateReviewPass {
+                command_id: command()?,
+                run_id: run,
+                pass_id: pass,
+                turn_id: turn,
+            },
+            ServerMessage::ReviewPassActivated {
+                run_id: run,
+                pass_id: pass,
+            },
+        )
+        .await?;
+        let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+        complete_active_text_turn(
+            &self.pool,
+            SessionId::from_uuid(session.into_uuid()),
+            targets,
+        )
+        .await?;
+        let frontier: Uuid = sqlx::query_scalar(
+            "SELECT terminal_frontier_id FROM turn_lifecycle WHERE turn_id = $1",
+        )
+        .bind(turn.into_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(ReviewPassFixture {
+            run,
+            pass,
+            turn,
+            frontier: CanonicalUuid::from_uuid(frontier),
+        })
+    }
+
+    async fn complete_result_free_pass(
+        &mut self,
+        fixture: ReviewPassFixture,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::CompleteReviewPass {
+                command_id: command()?,
+                run_id: fixture.run,
+                pass_id: fixture.pass,
+                turn_id: Some(fixture.turn),
+                output_frontier_id: Some(fixture.frontier),
+                outcome: ReviewPassTerminalOutcome::Succeeded,
+            },
+            ServerMessage::ReviewPassCompleted {
+                run_id: fixture.run,
+                pass_id: fixture.pass,
+                state: signalbox_process_protocol::ReviewPassLifecycle::Succeeded,
+            },
+        )
+        .await
+    }
+
+    async fn record_findings(
+        &mut self,
+        fixture: ReviewPassFixture,
+        findings: Vec<ReviewFindingInput>,
+    ) -> Result<(), Box<dyn Error>> {
+        let finding_count = CanonicalU64::new(u64::try_from(findings.len())?);
+        self.request_expect(
+            ClientRequest::RecordReviewFindings {
+                command_id: command()?,
+                run_id: fixture.run,
+                pass_id: fixture.pass,
+                turn_id: fixture.turn,
+                output_frontier_id: fixture.frontier,
+                findings,
+            },
+            ServerMessage::ReviewFindingsRecorded {
+                run_id: fixture.run,
+                pass_id: fixture.pass,
+                finding_count,
+            },
+        )
+        .await
+    }
+
+    async fn record_finding_event(
+        &mut self,
+        fixture: ReviewPassFixture,
+        finding: CanonicalUuid,
+        ordinal: u64,
+        event: ReviewFindingEvent,
+        expected_status: ReviewFindingStatus,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::RecordReviewFindingEvent {
+                command_id: command()?,
+                run_id: fixture.run,
+                pass_id: fixture.pass,
+                turn_id: fixture.turn,
+                output_frontier_id: Some(fixture.frontier),
+                finding_id: finding,
+                event_ordinal: CanonicalU64::new(ordinal),
+                event,
+            },
+            ServerMessage::ReviewFindingEventRecorded {
+                finding_id: finding,
+                status: expected_status,
+            },
+        )
+        .await
+    }
+
+    async fn start_attempt(&mut self, attempt: CanonicalUuid) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::StartReviewOrchestration {
+                command_id: command()?,
+                attempt_id: attempt,
+                target_id: self.target,
+                concern_set_version: String::from(REVIEW_CONCERN_SET_VERSION),
+                import_template_name: String::from(REVIEW_IMPORT_TEMPLATE),
+                judgment_template_name: String::from(REVIEW_JUDGMENT_TEMPLATE),
+                repair_template_name: String::from(REVIEW_REPAIR_TEMPLATE),
+                publication_template_name: String::from(REVIEW_PUBLICATION_TEMPLATE),
+                concerns: review_concern_inputs(),
+            },
+            ServerMessage::ReviewOrchestrationStarted {
+                attempt_id: attempt,
+            },
+        )
+        .await
+    }
+
+    async fn record_import(
+        &mut self,
+        attempt: CanonicalUuid,
+        pass: CanonicalUuid,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::RecordReviewImportOutcome {
+                command_id: command()?,
+                attempt_id: attempt,
+                pass_id: Some(pass),
+                external_link_id: None,
+                context_digest: Some(CanonicalDigest::try_new("11".repeat(32))?),
+                outcome: ReviewImportTerminalOutcome::Succeeded,
+            },
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: ReviewOrchestrationState::AwaitingConcerns,
+            },
+        )
+        .await
+    }
+
+    async fn record_concern(
+        &mut self,
+        attempt: CanonicalUuid,
+        concern: &ReviewConcernEvidence,
+        expected_state: ReviewOrchestrationState,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::RecordReviewConcernOutcome {
+                command_id: command()?,
+                attempt_id: attempt,
+                concern: concern.key.clone(),
+                pass_id: Some(concern.pass),
+                outcome: ReviewConcernTerminalOutcome::Succeeded,
+            },
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: expected_state,
+            },
+        )
+        .await
+    }
+
+    async fn record_complete_concerns(
+        &mut self,
+        attempt: CanonicalUuid,
+        concerns: &[ReviewConcernEvidence],
+    ) -> Result<(), Box<dyn Error>> {
+        self.record_concern(
+            attempt,
+            &concerns[0],
+            ReviewOrchestrationState::AwaitingConcerns,
+        )
+        .await?;
+        self.record_concern(
+            attempt,
+            &concerns[1],
+            ReviewOrchestrationState::AwaitingConcerns,
+        )
+        .await?;
+        self.record_concern(
+            attempt,
+            &concerns[2],
+            ReviewOrchestrationState::AwaitingConcerns,
+        )
+        .await?;
+        self.record_concern(
+            attempt,
+            &concerns[3],
+            ReviewOrchestrationState::AwaitingConcerns,
+        )
+        .await?;
+        self.record_concern(
+            attempt,
+            &concerns[4],
+            ReviewOrchestrationState::AwaitingJudgment,
+        )
+        .await
+    }
+
+    async fn record_judgment_plan(
+        &mut self,
+        attempt: CanonicalUuid,
+        analysis_pass: CanonicalUuid,
+        members: Vec<ReviewJudgmentPlanMember>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::RecordReviewJudgmentPlan {
+                command_id: command()?,
+                attempt_id: attempt,
+                analysis_pass_id: analysis_pass,
+                members,
+            },
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: ReviewOrchestrationState::AwaitingJudgmentEffects,
+            },
+        )
+        .await
+    }
+
+    async fn record_effect(
+        &mut self,
+        attempt: CanonicalUuid,
+        finding: CanonicalUuid,
+        pass: CanonicalUuid,
+        expected_state: ReviewOrchestrationState,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::RecordReviewJudgmentEffect {
+                command_id: command()?,
+                attempt_id: attempt,
+                finding_id: finding,
+                event_pass_id: Some(pass),
+                outcome: ReviewJudgmentEffectTerminalOutcome::Applied,
+            },
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: expected_state,
+            },
+        )
+        .await
+    }
+}
+
+fn review_finding(finding_id: CanonicalUuid, title: &str, category: &str) -> ReviewFindingInput {
+    ReviewFindingInput {
+        finding_id,
+        file_path: String::from("apps/signalboxd/src/process_runtime.rs"),
+        line_start: Some(CanonicalU64::new(1)),
+        line_end: Some(CanonicalU64::new(1)),
+        diff_side: Some(ReviewDiffSide::Right),
+        title: String::from(title),
+        body: String::from("The fixture supplies concrete repository evidence."),
+        severity: ReviewSeverity::Medium,
+        is_real_confidence: CanonicalU64::new(9_200),
+        severity_label_confidence: CanonicalU64::new(8_000),
+        category: String::from(category),
+        recommended_fix: Some(String::from("Apply the bounded fixture repair.")),
+    }
+}
+
+fn complete_judgment_members(findings: ReviewFindingFixtures) -> Vec<ReviewJudgmentPlanMember> {
+    vec![
+        ReviewJudgmentPlanMember {
+            finding_id: findings.accepted_and_fixed,
+            disposition: ReviewJudgmentDisposition::Accepted {},
+        },
+        ReviewJudgmentPlanMember {
+            finding_id: findings.duplicate,
+            disposition: ReviewJudgmentDisposition::Duplicate {
+                canonical_finding_id: findings.accepted_and_fixed,
+            },
+        },
+        ReviewJudgmentPlanMember {
+            finding_id: findings.accepted_and_published,
+            disposition: ReviewJudgmentDisposition::Accepted {},
+        },
+    ]
+}
+
+fn direct_cycle_members(findings: ReviewFindingFixtures) -> Vec<ReviewJudgmentPlanMember> {
+    vec![
+        ReviewJudgmentPlanMember {
+            finding_id: findings.accepted_and_fixed,
+            disposition: ReviewJudgmentDisposition::Duplicate {
+                canonical_finding_id: findings.duplicate,
+            },
+        },
+        ReviewJudgmentPlanMember {
+            finding_id: findings.duplicate,
+            disposition: ReviewJudgmentDisposition::Duplicate {
+                canonical_finding_id: findings.accepted_and_fixed,
+            },
+        },
+        ReviewJudgmentPlanMember {
+            finding_id: findings.accepted_and_published,
+            disposition: ReviewJudgmentDisposition::Accepted {},
+        },
+    ]
+}
+
+fn transitive_cycle_members(findings: ReviewFindingFixtures) -> Vec<ReviewJudgmentPlanMember> {
+    vec![
+        ReviewJudgmentPlanMember {
+            finding_id: findings.accepted_and_fixed,
+            disposition: ReviewJudgmentDisposition::Duplicate {
+                canonical_finding_id: findings.duplicate,
+            },
+        },
+        ReviewJudgmentPlanMember {
+            finding_id: findings.duplicate,
+            disposition: ReviewJudgmentDisposition::Duplicate {
+                canonical_finding_id: findings.accepted_and_published,
+            },
+        },
+        ReviewJudgmentPlanMember {
+            finding_id: findings.accepted_and_published,
+            disposition: ReviewJudgmentDisposition::Duplicate {
+                canonical_finding_id: findings.accepted_and_fixed,
+            },
+        },
+    ]
+}
+
+async fn prove_orchestration_plan_rejection(
+    driver: &mut ReviewRuntimeDriver,
+    attempt: CanonicalUuid,
+    import_pass: CanonicalUuid,
+    concerns: &[ReviewConcernEvidence],
+    analysis_pass: CanonicalUuid,
+    members: Vec<ReviewJudgmentPlanMember>,
+    complete_fanout: bool,
+) -> Result<(), Box<dyn Error>> {
+    driver.start_attempt(attempt).await?;
+    driver.record_import(attempt, import_pass).await?;
+    if complete_fanout {
+        driver.record_complete_concerns(attempt, concerns).await?;
+    } else {
+        driver
+            .record_concern(
+                attempt,
+                &concerns[0],
+                ReviewOrchestrationState::AwaitingConcerns,
+            )
+            .await?;
+    }
+    driver
+        .request_invalid(ClientRequest::RecordReviewJudgmentPlan {
+            command_id: command()?,
+            attempt_id: attempt,
+            analysis_pass_id: analysis_pass,
+            members,
+        })
+        .await
+}
+
+fn assert_complete_review_snapshot(
+    snapshot: &ReviewOrchestrationSnapshot,
+    attempt: CanonicalUuid,
+    target: CanonicalUuid,
+    concerns: &[ReviewConcernEvidence],
+) {
+    assert_eq!(snapshot.attempt_id, attempt);
+    assert_eq!(snapshot.target_id, target);
+    assert_eq!(snapshot.state, ReviewOrchestrationState::Complete);
+    assert_eq!(snapshot.concern_set_version, REVIEW_CONCERN_SET_VERSION);
+    assert_eq!(snapshot.concerns.len(), 5);
+    assert_eq!(snapshot.concerns[0].key, concerns[0].key);
+    assert_eq!(
+        snapshot.concerns[0].status,
+        ReviewOrchestrationConcernStatus::Succeeded
+    );
+    assert_eq!(snapshot.concerns[0].pass_id, Some(concerns[0].pass));
+    assert_eq!(snapshot.concerns[1].key, concerns[1].key);
+    assert_eq!(
+        snapshot.concerns[1].status,
+        ReviewOrchestrationConcernStatus::Succeeded
+    );
+    assert_eq!(snapshot.concerns[1].pass_id, Some(concerns[1].pass));
+    assert_eq!(snapshot.concerns[2].key, concerns[2].key);
+    assert_eq!(
+        snapshot.concerns[2].status,
+        ReviewOrchestrationConcernStatus::Succeeded
+    );
+    assert_eq!(snapshot.concerns[2].pass_id, Some(concerns[2].pass));
+    assert_eq!(snapshot.concerns[3].key, concerns[3].key);
+    assert_eq!(
+        snapshot.concerns[3].status,
+        ReviewOrchestrationConcernStatus::Succeeded
+    );
+    assert_eq!(snapshot.concerns[3].pass_id, Some(concerns[3].pass));
+    assert_eq!(snapshot.concerns[4].key, concerns[4].key);
+    assert_eq!(
+        snapshot.concerns[4].status,
+        ReviewOrchestrationConcernStatus::Succeeded
+    );
+    assert_eq!(snapshot.concerns[4].pass_id, Some(concerns[4].pass));
+    assert_eq!(
+        snapshot.counts,
+        ReviewOrchestrationCounts {
+            finding_count: CanonicalU64::new(3),
+            judgment_member_count: CanonicalU64::new(3),
+            judgment_effect_applied_count: CanonicalU64::new(3),
+            repair_fixed_count: CanonicalU64::new(1),
+            publication_published_count: CanonicalU64::new(1),
+        }
+    );
+}
+
+async fn read_complete_review_snapshot(
+    driver: &mut ReviewRuntimeDriver,
+    attempt: CanonicalUuid,
+    concerns: &[ReviewConcernEvidence],
+) -> Result<(), Box<dyn Error>> {
+    let request_id = driver.request_id();
+    driver
+        .connection
+        .request(
+            request_id,
+            ClientRequest::ReadReviewOrchestration {
+                attempt_id: attempt,
+            },
+        )
+        .await?;
+    match response_within(&mut driver.connection).await?.message() {
+        ServerMessage::ReviewOrchestration { snapshot } => {
+            assert_complete_review_snapshot(snapshot, attempt, driver.target, concerns);
+            Ok(())
+        }
+        message => Err(io::Error::other(format!(
+            "unexpected complete review-orchestration snapshot: {message:?}"
+        ))
+        .into()),
+    }
+}
+
+async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let target = review_identity(0xa000);
+    let attempt = review_identity(0xa100);
+    let findings = ReviewFindingFixtures {
+        accepted_and_fixed: review_identity(0xb001),
+        duplicate: review_identity(0xb002),
+        accepted_and_published: review_identity(0xb003),
+    };
+    let mut driver = ReviewRuntimeDriver::connect(&runtime, target).await?;
+    driver.create_target().await?;
+    driver.start_attempt(attempt).await?;
+
+    let import = driver
+        .create_completed_turn_pass(
+            REVIEW_IMPORT_TEMPLATE,
+            ReviewWorkflow::ImportExternalContext,
+            0xc000,
+        )
+        .await?;
+    driver.complete_result_free_pass(import).await?;
+    driver.record_import(attempt, import.pass).await?;
+
+    let correctness = driver
+        .create_completed_turn_pass(
+            "review-concern-correctness",
+            ReviewWorkflow::ReadOnlyReview,
+            0xc100,
+        )
+        .await?;
+    driver
+        .record_findings(
+            correctness,
+            vec![review_finding(
+                findings.accepted_and_fixed,
+                "Accepted repair",
+                "correctness",
+            )],
+        )
+        .await?;
+    let interface = driver
+        .create_completed_turn_pass(
+            "review-concern-interface-and-type-design",
+            ReviewWorkflow::ReadOnlyReview,
+            0xc200,
+        )
+        .await?;
+    driver
+        .record_findings(
+            interface,
+            vec![review_finding(
+                findings.duplicate,
+                "Cross-concern duplicate",
+                "interface-and-type-design",
+            )],
+        )
+        .await?;
+    let tests = driver
+        .create_completed_turn_pass(
+            "review-concern-test-quality",
+            ReviewWorkflow::ReadOnlyReview,
+            0xc300,
+        )
+        .await?;
+    driver
+        .record_findings(
+            tests,
+            vec![review_finding(
+                findings.accepted_and_published,
+                "Accepted publication",
+                "test-quality",
+            )],
+        )
+        .await?;
+    let security = driver
+        .create_completed_turn_pass(
+            "review-concern-security",
+            ReviewWorkflow::ReadOnlyReview,
+            0xc400,
+        )
+        .await?;
+    driver.record_findings(security, Vec::new()).await?;
+    let documentation = driver
+        .create_completed_turn_pass(
+            "review-concern-documentation-code-drift",
+            ReviewWorkflow::ReadOnlyReview,
+            0xc500,
+        )
+        .await?;
+    driver.record_findings(documentation, Vec::new()).await?;
+    let concerns = vec![
+        ReviewConcernEvidence {
+            key: String::from("correctness"),
+            pass: correctness.pass,
+        },
+        ReviewConcernEvidence {
+            key: String::from("interface-and-type-design"),
+            pass: interface.pass,
+        },
+        ReviewConcernEvidence {
+            key: String::from("test-quality"),
+            pass: tests.pass,
+        },
+        ReviewConcernEvidence {
+            key: String::from("security"),
+            pass: security.pass,
+        },
+        ReviewConcernEvidence {
+            key: String::from("documentation-code-drift"),
+            pass: documentation.pass,
+        },
+    ];
+    driver.record_complete_concerns(attempt, &concerns).await?;
+
+    let analysis = driver
+        .create_completed_turn_pass(
+            REVIEW_JUDGMENT_TEMPLATE,
+            ReviewWorkflow::JudgeFindings,
+            0xc600,
+        )
+        .await?;
+    driver.complete_result_free_pass(analysis).await?;
+    driver
+        .record_judgment_plan(attempt, analysis.pass, complete_judgment_members(findings))
+        .await?;
+
+    prove_orchestration_plan_rejection(
+        &mut driver,
+        review_identity(0xa200),
+        import.pass,
+        &concerns,
+        analysis.pass,
+        complete_judgment_members(findings),
+        false,
+    )
+    .await?;
+    prove_orchestration_plan_rejection(
+        &mut driver,
+        review_identity(0xa300),
+        import.pass,
+        &concerns,
+        analysis.pass,
+        direct_cycle_members(findings),
+        true,
+    )
+    .await?;
+    prove_orchestration_plan_rejection(
+        &mut driver,
+        review_identity(0xa400),
+        import.pass,
+        &concerns,
+        analysis.pass,
+        transitive_cycle_members(findings),
+        true,
+    )
+    .await?;
+
+    let accepted_fixed = driver
+        .create_completed_turn_pass(
+            REVIEW_JUDGMENT_TEMPLATE,
+            ReviewWorkflow::JudgeFindings,
+            0xc700,
+        )
+        .await?;
+    driver
+        .record_finding_event(
+            accepted_fixed,
+            findings.accepted_and_fixed,
+            1,
+            ReviewFindingEvent::Accepted {},
+            ReviewFindingStatus::Accepted,
+        )
+        .await?;
+    driver
+        .record_effect(
+            attempt,
+            findings.accepted_and_fixed,
+            accepted_fixed.pass,
+            ReviewOrchestrationState::AwaitingJudgmentEffects,
+        )
+        .await?;
+    let duplicate = driver
+        .create_completed_turn_pass(
+            REVIEW_JUDGMENT_TEMPLATE,
+            ReviewWorkflow::DedupeFindings,
+            0xc800,
+        )
+        .await?;
+    driver
+        .record_finding_event(
+            duplicate,
+            findings.duplicate,
+            1,
+            ReviewFindingEvent::Duplicate {
+                canonical_finding_id: findings.accepted_and_fixed,
+            },
+            ReviewFindingStatus::Duplicate,
+        )
+        .await?;
+    driver
+        .record_effect(
+            attempt,
+            findings.duplicate,
+            duplicate.pass,
+            ReviewOrchestrationState::AwaitingJudgmentEffects,
+        )
+        .await?;
+    let accepted_published = driver
+        .create_completed_turn_pass(
+            REVIEW_JUDGMENT_TEMPLATE,
+            ReviewWorkflow::JudgeFindings,
+            0xc900,
+        )
+        .await?;
+    driver
+        .record_finding_event(
+            accepted_published,
+            findings.accepted_and_published,
+            1,
+            ReviewFindingEvent::Accepted {},
+            ReviewFindingStatus::Accepted,
+        )
+        .await?;
+    driver
+        .record_effect(
+            attempt,
+            findings.accepted_and_published,
+            accepted_published.pass,
+            ReviewOrchestrationState::AwaitingRepair,
+        )
+        .await?;
+
+    let repair = driver
+        .create_completed_turn_pass(REVIEW_REPAIR_TEMPLATE, ReviewWorkflow::FixFindings, 0xca00)
+        .await?;
+    driver
+        .record_finding_event(
+            repair,
+            findings.accepted_and_fixed,
+            2,
+            ReviewFindingEvent::Fixed {},
+            ReviewFindingStatus::Fixed,
+        )
+        .await?;
+    driver
+        .request_expect(
+            ClientRequest::RecordReviewRepairOutcomes {
+                command_id: command()?,
+                attempt_id: attempt,
+                outcomes: vec![
+                    ReviewRepairOutcome {
+                        finding_id: findings.accepted_and_fixed,
+                        event_pass_id: Some(repair.pass),
+                        outcome: ReviewRepairTerminalOutcome::Fixed,
+                    },
+                    ReviewRepairOutcome {
+                        finding_id: findings.accepted_and_published,
+                        event_pass_id: None,
+                        outcome: ReviewRepairTerminalOutcome::Failed,
+                    },
+                ],
+            },
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: ReviewOrchestrationState::AwaitingPublication,
+            },
+        )
+        .await?;
+
+    let external_link = review_identity(0xd000);
+    driver
+        .request_expect(
+            ClientRequest::ReserveReviewExternalLink {
+                command_id: command()?,
+                external_link_id: external_link,
+                finding_id: findings.accepted_and_published,
+                provider: String::from("github"),
+                object_kind: ReviewExternalObjectKind::ReviewComment,
+            },
+            ServerMessage::ReviewExternalLinkReserved {
+                external_link_id: external_link,
+            },
+        )
+        .await?;
+    let publication = driver
+        .create_completed_turn_pass(
+            REVIEW_PUBLICATION_TEMPLATE,
+            ReviewWorkflow::PublishReview,
+            0xcb00,
+        )
+        .await?;
+    driver
+        .request_expect(
+            ClientRequest::AttachReviewExternalLink {
+                command_id: command()?,
+                external_link_id: external_link,
+                run_id: publication.run,
+                pass_id: publication.pass,
+                turn_id: publication.turn,
+                output_frontier_id: publication.frontier,
+                external_object: String::from("provider-comment-1"),
+                event_ordinal: CanonicalU64::new(2),
+            },
+            ServerMessage::ReviewExternalLinkAttached {
+                external_link_id: external_link,
+                external_object: String::from("provider-comment-1"),
+            },
+        )
+        .await?;
+    driver
+        .request_expect(
+            ClientRequest::RecordReviewPublicationOutcomes {
+                command_id: command()?,
+                attempt_id: attempt,
+                outcomes: vec![ReviewPublicationOutcome {
+                    finding_id: findings.accepted_and_published,
+                    external_link_id: Some(external_link),
+                    outcome: ReviewPublicationTerminalOutcome::Published,
+                }],
+            },
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: attempt,
+                state: ReviewOrchestrationState::Complete,
+            },
+        )
+        .await?;
+    read_complete_review_snapshot(&mut driver, attempt, &concerns).await?;
+
+    drop(driver);
+    runtime.stop().await
+}
+
+/// One process client can drive the frozen five-concern review library through
+/// its structural fan-out barrier, cross-concern deduplication, repair, and
+/// reservation-backed publication against the real PostgreSQL adapters.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn review_orchestration_reaches_complete_through_the_process_protocol()
+-> Result<(), Box<dyn Error>> {
+    drive_review_orchestration_process_loop().await
 }
