@@ -576,20 +576,24 @@ impl ProcessRunner for TokioProcessRunner {
 
     async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
         let result = run_process(&self.supervisor_program, probe).await;
-        match result.outcome {
-            ProcessOutcome::Exited { code: Some(0) } => BwrapAvailability::Available,
-            ProcessOutcome::SpawnFailed {
-                reason: ProcessSpawnFailure::NotFound,
-            } => BwrapAvailability::Missing,
-            ProcessOutcome::TimedOut => BwrapAvailability::TimedOut,
-            ProcessOutcome::Exited { .. }
-            | ProcessOutcome::SpawnFailed { .. }
-            | ProcessOutcome::SupervisionFailed { .. } => BwrapAvailability::Unusable,
-        }
+        classify_bwrap_availability(result.outcome)
     }
 
     async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
         run_process(&self.supervisor_program, request).await
+    }
+}
+
+fn classify_bwrap_availability(outcome: ProcessOutcome) -> BwrapAvailability {
+    match outcome {
+        ProcessOutcome::Exited { code: Some(0) } => BwrapAvailability::Available,
+        ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::NotFound,
+        } => BwrapAvailability::Missing,
+        ProcessOutcome::TimedOut => BwrapAvailability::TimedOut,
+        ProcessOutcome::Exited { .. }
+        | ProcessOutcome::SpawnFailed { .. }
+        | ProcessOutcome::SupervisionFailed { .. } => BwrapAvailability::Unusable,
     }
 }
 
@@ -1485,6 +1489,7 @@ mod tests {
     const SETUP_STDOUT: &[u8] = b"12345";
     const SETUP_STDERR: &[u8] = b"67890";
     const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
+    const UNUSABLE_PROBE_EXIT_CODE: i32 = 1;
     const REQUEST_TIMEOUT_SECONDS: u64 = 1;
     const SLOW_PROBE_DELAY: Duration = Duration::from_millis(1_100);
     const TEST_SANDBOX_LAUNCHER: &str = "/fixture/signalbox-exec-supervisor";
@@ -1709,6 +1714,28 @@ mod tests {
             ToolPermissionDefault::Confirm
         );
         Ok(())
+    }
+
+    #[test]
+    fn production_probe_classifies_missing_timeout_and_unusable_evidence() {
+        let missing = ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::NotFound,
+        };
+
+        assert_eq!(
+            classify_bwrap_availability(missing),
+            BwrapAvailability::Missing
+        );
+        assert_eq!(
+            classify_bwrap_availability(ProcessOutcome::TimedOut),
+            BwrapAvailability::TimedOut
+        );
+        assert_eq!(
+            classify_bwrap_availability(ProcessOutcome::Exited {
+                code: Some(UNUSABLE_PROBE_EXIT_CODE),
+            }),
+            BwrapAvailability::Unusable
+        );
     }
 
     #[cfg(target_os = "linux")]
