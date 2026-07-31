@@ -8,8 +8,10 @@ import SwiftUI
   import SignalboxModels
 #endif
 
-private let importedContinuationInProgressMessage =
+let importedContinuationInProgressMessage =
   "An imported conversation continuation is already in progress."
+let importedContinuationEndpointChangedMessage =
+  "The process service changed during continuation. Try again."
 
 @MainActor
 final class ProcessSessionListViewModel: ObservableObject {
@@ -141,6 +143,7 @@ struct ProcessSessionsScreen: View {
   @EnvironmentObject private var coordinator: AppCoordinator
   @StateObject private var viewModel = ProcessSessionListViewModel { nil }
   @State private var selectedConversationID: String?
+  @State private var requestedLocalSessionID: SignalboxCanonicalUUID?
   @State private var showCreationSheet = false
 
   var body: some View {
@@ -174,7 +177,9 @@ struct ProcessSessionsScreen: View {
         }
         .navigationDestination(item: $selectedConversationID) { conversationID in
           if let conversation = viewModel.conversation(id: conversationID) {
-            ProcessConversationDetailScreen(conversation: conversation)
+            ProcessConversationDetailScreen(conversation: conversation) { sessionID in
+              requestedLocalSessionID = sessionID
+            }
           } else {
             EmptyStateView(
               systemImage: "questionmark.folder",
@@ -183,13 +188,9 @@ struct ProcessSessionsScreen: View {
             )
           }
         }
-        .onChange(of: selectedConversationID) { previous, selection in
+        .onChange(of: selectedConversationID) { _, selection in
           if selection == nil {
-            if coordinator.selectedProcessSessionID?.rawValue
-              == viewModel.conversation(id: previous ?? "")?.conversationID.rawValue
-            {
-              coordinator.selectedProcessSessionID = nil
-            } else if coordinator.selectedProcessSessionID != nil {
+            if requestedLocalSessionID != nil {
               Task {
                 await viewModel.refresh()
                 applyRequestedSelection()
@@ -252,7 +253,6 @@ struct ProcessSessionsScreen: View {
         } else {
           List(viewModel.visibleConversations) { conversation in
             Button {
-              coordinator.selectedProcessSessionID = conversation.conversationID
               selectedConversationID = conversation.id
             } label: {
               ProcessConversationRow(conversation: conversation)
@@ -281,10 +281,15 @@ struct ProcessSessionsScreen: View {
 
   private func applyRequestedSelection() {
     guard selectedConversationID == nil,
-      let requested = coordinator.selectedProcessSessionID,
+      let requested = requestedLocalSessionID ?? coordinator.selectedProcessSessionID,
       let conversation = viewModel.conversation(conversationID: requested)
     else {
       return
+    }
+    if requestedLocalSessionID == requested {
+      requestedLocalSessionID = nil
+    } else if coordinator.selectedProcessSessionID == requested {
+      coordinator.selectedProcessSessionID = nil
     }
     selectedConversationID = conversation.id
   }
@@ -517,6 +522,7 @@ private struct ProcessConversationDetailScreen: View {
   @EnvironmentObject private var coordinator: AppCoordinator
   @Environment(\.dismiss) private var dismiss
   let conversation: SignalboxProcessConversation
+  let didCreateSession: (SignalboxCanonicalUUID) -> Void
   @State private var session: SignalboxProcessSession?
   @State private var errorMessage: String?
 
@@ -540,7 +546,7 @@ private struct ProcessConversationDetailScreen: View {
           conversation: conversation,
           continuationRetryStore: coordinator.importedContinuationRetryStore
         ) { sessionID in
-          coordinator.selectedProcessSessionID = sessionID
+          didCreateSession(sessionID)
           NotificationCenter.default.post(name: .refreshRequested, object: nil)
           dismiss()
         }
@@ -561,30 +567,42 @@ private struct ProcessConversationDetailScreen: View {
 }
 
 struct ProcessImportedContinuationRetryState {
-  private var unresolvedCreations: [SignalboxPreparedImportedSessionCreation] = []
+  struct Recovery: Equatable {
+    let prepared: SignalboxPreparedImportedSessionCreation
+    let resolvedSessionID: SignalboxCanonicalUUID?
+  }
 
-  func reusableCreation(
+  private var recoveries: [Recovery] = []
+
+  func recovery(
     importedConversationID: SignalboxCanonicalUUID,
     throughPosition: SignalboxCanonicalUInt64,
     relationship: SignalboxImportedSessionRelationship,
     modelSelection: SignalboxModelSelection
-  ) -> SignalboxPreparedImportedSessionCreation? {
-    unresolvedCreations.first {
-      $0.importedConversationID == importedConversationID
-        && $0.throughPosition == throughPosition
-        && $0.relationship == relationship
-        && $0.modelSelection == modelSelection
+  ) -> Recovery? {
+    recoveries.first {
+      $0.prepared.importedConversationID == importedConversationID
+        && $0.prepared.throughPosition == throughPosition
+        && $0.prepared.relationship == relationship
+        && $0.prepared.modelSelection == modelSelection
     }
   }
 
   mutating func removeAll() {
-    unresolvedCreations.removeAll()
+    recoveries.removeAll()
   }
 
-  mutating func recordSuccess(_ prepared: SignalboxPreparedImportedSessionCreation) {
-    unresolvedCreations.removeAll {
-      $0.commandID == prepared.commandID
+  mutating func recordSuccess(
+    _ prepared: SignalboxPreparedImportedSessionCreation,
+    sessionID: SignalboxCanonicalUUID
+  ) {
+    recoveries.removeAll {
+      $0.prepared.importedConversationID == prepared.importedConversationID
+        && $0.prepared.throughPosition == prepared.throughPosition
+        && $0.prepared.relationship == prepared.relationship
+        && $0.prepared.modelSelection == prepared.modelSelection
     }
+    recoveries.append(Recovery(prepared: prepared, resolvedSessionID: sessionID))
   }
 
   mutating func recordFailure(
@@ -607,14 +625,14 @@ struct ProcessImportedContinuationRetryState {
     guard let prepared else {
       return
     }
-    unresolvedCreations.removeAll {
-      $0.importedConversationID == prepared.importedConversationID
-        && $0.throughPosition == prepared.throughPosition
-        && $0.relationship == prepared.relationship
-        && $0.modelSelection == prepared.modelSelection
+    recoveries.removeAll {
+      $0.prepared.importedConversationID == prepared.importedConversationID
+        && $0.prepared.throughPosition == prepared.throughPosition
+        && $0.prepared.relationship == prepared.relationship
+        && $0.prepared.modelSelection == prepared.modelSelection
     }
     if retainsPreparedCreation {
-      unresolvedCreations.append(prepared)
+      recoveries.append(Recovery(prepared: prepared, resolvedSessionID: nil))
     }
   }
 }
@@ -624,7 +642,7 @@ final class ProcessImportedContinuationRetryStore {
   private var state = ProcessImportedContinuationRetryState()
   private var endpoint: String?
   private var endpointGeneration: UInt64 = 0
-  private var isAttemptInProgress = false
+  private var activeAttemptGeneration: UInt64?
 
   func activateEndpoint(_ endpoint: String?) {
     guard self.endpoint != endpoint else {
@@ -636,24 +654,27 @@ final class ProcessImportedContinuationRetryStore {
   }
 
   func beginAttempt() -> UInt64? {
-    guard !isAttemptInProgress else {
+    guard activeAttemptGeneration != endpointGeneration else {
       return nil
     }
-    isAttemptInProgress = true
+    activeAttemptGeneration = endpointGeneration
     return endpointGeneration
   }
 
-  func endAttempt() {
-    isAttemptInProgress = false
+  func endAttempt(endpointGeneration: UInt64) {
+    guard activeAttemptGeneration == endpointGeneration else {
+      return
+    }
+    activeAttemptGeneration = nil
   }
 
-  func reusableCreation(
+  func recovery(
     importedConversationID: SignalboxCanonicalUUID,
     throughPosition: SignalboxCanonicalUInt64,
     relationship: SignalboxImportedSessionRelationship,
     modelSelection: SignalboxModelSelection
-  ) -> SignalboxPreparedImportedSessionCreation? {
-    state.reusableCreation(
+  ) -> ProcessImportedContinuationRetryState.Recovery? {
+    state.recovery(
       importedConversationID: importedConversationID,
       throughPosition: throughPosition,
       relationship: relationship,
@@ -663,12 +684,14 @@ final class ProcessImportedContinuationRetryStore {
 
   func recordSuccess(
     _ prepared: SignalboxPreparedImportedSessionCreation,
+    sessionID: SignalboxCanonicalUUID,
     endpointGeneration: UInt64
-  ) {
+  ) -> Bool {
     guard endpointGeneration == self.endpointGeneration else {
-      return
+      return false
     }
-    state.recordSuccess(prepared)
+    state.recordSuccess(prepared, sessionID: sessionID)
+    return true
   }
 
   func recordFailure(
@@ -795,38 +818,47 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     aliasID: SignalboxCanonicalUUID
   ) async throws -> SignalboxCanonicalUUID {
     guard !isContinuing else {
-      throw SignalboxProcessServiceError.unexpectedMessage(
+      let error = SignalboxProcessServiceError.unexpectedMessage(
         importedContinuationInProgressMessage
       )
+      errorMessage = error.localizedDescription
+      throw error
     }
     guard let retryEndpointGeneration = continuationRetryStore.beginAttempt() else {
-      throw SignalboxProcessServiceError.unexpectedMessage(
+      let error = SignalboxProcessServiceError.unexpectedMessage(
         importedContinuationInProgressMessage
       )
+      errorMessage = error.localizedDescription
+      throw error
     }
     defer {
-      continuationRetryStore.endAttempt()
-    }
-    guard let service = serviceProvider() else {
-      errorMessage = remoteTransportGateMessage
-      throw SignalboxProcessServiceError.unexpectedMessage(remoteTransportGateMessage)
+      continuationRetryStore.endAttempt(endpointGeneration: retryEndpointGeneration)
     }
     isContinuing = true
     defer {
       isContinuing = false
     }
     let selection = SignalboxModelSelection.alias(aliasID: aliasID)
+    let recovery = continuationRetryStore.recovery(
+      importedConversationID: conversation.conversationID,
+      throughPosition: throughPosition,
+      relationship: relationship,
+      modelSelection: selection
+    )
+    if let resolvedSessionID = recovery?.resolvedSessionID {
+      errorMessage = nil
+      return resolvedSessionID
+    }
+    guard let service = serviceProvider() else {
+      errorMessage = remoteTransportGateMessage
+      throw SignalboxProcessServiceError.unexpectedMessage(remoteTransportGateMessage)
+    }
     var preparedForAttempt: SignalboxPreparedImportedSessionCreation?
     var reusedUnresolvedCreation = false
     do {
       let prepared: SignalboxPreparedImportedSessionCreation
-      if let unresolved = continuationRetryStore.reusableCreation(
-        importedConversationID: conversation.conversationID,
-        throughPosition: throughPosition,
-        relationship: relationship,
-        modelSelection: selection
-      ) {
-        prepared = unresolved
+      if let recovery {
+        prepared = recovery.prepared
         reusedUnresolvedCreation = true
       } else {
         prepared = try await service.prepareImportedSessionCreation(
@@ -838,10 +870,17 @@ final class ProcessImportedConversationViewModel: ObservableObject {
       }
       preparedForAttempt = prepared
       let sessionID = try await service.createSessionFromImportedFrontier(prepared)
-      continuationRetryStore.recordSuccess(
-        prepared,
-        endpointGeneration: retryEndpointGeneration
-      )
+      guard
+        continuationRetryStore.recordSuccess(
+          prepared,
+          sessionID: sessionID,
+          endpointGeneration: retryEndpointGeneration
+        )
+      else {
+        throw SignalboxProcessServiceError.unexpectedMessage(
+          importedContinuationEndpointChangedMessage
+        )
+      }
       errorMessage = nil
       return sessionID
     } catch {

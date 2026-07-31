@@ -82,20 +82,21 @@ final class ViewModelTests: XCTestCase {
             reusedUnresolvedCreation: false,
             endpointGeneration: endpointGeneration
         )
-        store.endAttempt()
+        store.endAttempt(endpointGeneration: endpointGeneration)
         let replacementViewModel = ProcessImportedConversationViewModel(
             serviceProvider: { nil },
             continuationRetryStore: store
         )
         replacementViewModel.replaceServiceProvider { nil }
-        let reusable = store.reusableCreation(
+        let recovery = store.recovery(
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,
             modelSelection: prepared.modelSelection
         )
 
-        XCTAssertEqual(reusable, prepared)
+        XCTAssertEqual(recovery?.prepared, prepared)
+        XCTAssertNil(recovery?.resolvedSessionID)
     }
 
     func testImportedContinuationRetrySurvivesSameEndpointReconnect() throws {
@@ -109,25 +110,25 @@ final class ViewModelTests: XCTestCase {
             reusedUnresolvedCreation: false,
             endpointGeneration: endpointGeneration
         )
-        store.endAttempt()
+        store.endAttempt(endpointGeneration: endpointGeneration)
 
         store.activateEndpoint(ImportedContinuationRetryFixture.primaryEndpoint)
-        let reusableAfterReconnect = store.reusableCreation(
+        let recoveryAfterReconnect = store.recovery(
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,
             modelSelection: prepared.modelSelection
         )
         store.activateEndpoint(ImportedContinuationRetryFixture.replacementEndpoint)
-        let reusableAfterEndpointChange = store.reusableCreation(
+        let recoveryAfterEndpointChange = store.recovery(
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,
             modelSelection: prepared.modelSelection
         )
 
-        XCTAssertEqual(reusableAfterReconnect, prepared)
-        XCTAssertNil(reusableAfterEndpointChange)
+        XCTAssertEqual(recoveryAfterReconnect?.prepared, prepared)
+        XCTAssertNil(recoveryAfterEndpointChange)
     }
 
     func testImportedContinuationRetryIsolatesConcurrentWindowOutcomes() throws {
@@ -142,7 +143,7 @@ final class ViewModelTests: XCTestCase {
             reusedUnresolvedCreation: false,
             endpointGeneration: firstGeneration
         )
-        store.endAttempt()
+        store.endAttempt(endpointGeneration: firstGeneration)
         let secondGeneration = try XCTUnwrap(store.beginAttempt())
         store.recordFailure(
             ImportedContinuationRetryFixture.sendOutcomeUnknownError,
@@ -150,21 +151,23 @@ final class ViewModelTests: XCTestCase {
             reusedUnresolvedCreation: false,
             endpointGeneration: secondGeneration
         )
-        store.endAttempt()
+        store.endAttempt(endpointGeneration: secondGeneration)
         let successGeneration = try XCTUnwrap(store.beginAttempt())
-        store.recordSuccess(
+        let resolvedSessionID = try ImportedContinuationRetryFixture.resolvedSessionID()
+        let recordedSuccess = store.recordSuccess(
             secondPrepared,
+            sessionID: resolvedSessionID,
             endpointGeneration: successGeneration
         )
-        store.endAttempt()
+        store.endAttempt(endpointGeneration: successGeneration)
 
-        let firstReusable = store.reusableCreation(
+        let firstRecovery = store.recovery(
             importedConversationID: firstPrepared.importedConversationID,
             throughPosition: firstPrepared.throughPosition,
             relationship: firstPrepared.relationship,
             modelSelection: firstPrepared.modelSelection
         )
-        let secondReusable = store.reusableCreation(
+        let secondRecovery = store.recovery(
             importedConversationID: secondPrepared.importedConversationID,
             throughPosition: secondPrepared.throughPosition,
             relationship: secondPrepared.relationship,
@@ -172,8 +175,10 @@ final class ViewModelTests: XCTestCase {
         )
 
         XCTAssertNil(competingGeneration)
-        XCTAssertEqual(firstReusable, firstPrepared)
-        XCTAssertNil(secondReusable)
+        XCTAssertTrue(recordedSuccess)
+        XCTAssertEqual(firstRecovery?.prepared, firstPrepared)
+        XCTAssertNil(firstRecovery?.resolvedSessionID)
+        XCTAssertEqual(secondRecovery?.resolvedSessionID, resolvedSessionID)
     }
 
     func testImportedContinuationRetryIgnoresOutcomeFromReplacedEndpoint() throws {
@@ -183,21 +188,84 @@ final class ViewModelTests: XCTestCase {
         let replacedGeneration = try XCTUnwrap(store.beginAttempt())
 
         store.activateEndpoint(ImportedContinuationRetryFixture.replacementEndpoint)
+        let replacementGeneration = try XCTUnwrap(store.beginAttempt())
+        let recordedStaleSuccess = store.recordSuccess(
+            prepared,
+            sessionID: try ImportedContinuationRetryFixture.resolvedSessionID(),
+            endpointGeneration: replacedGeneration
+        )
         store.recordFailure(
             ImportedContinuationRetryFixture.sendOutcomeUnknownError,
             prepared: prepared,
             reusedUnresolvedCreation: false,
             endpointGeneration: replacedGeneration
         )
-        store.endAttempt()
-        let reusable = store.reusableCreation(
+        store.endAttempt(endpointGeneration: replacedGeneration)
+        let competingReplacementGeneration = store.beginAttempt()
+        store.endAttempt(endpointGeneration: replacementGeneration)
+        let nextReplacementGeneration = store.beginAttempt()
+        store.endAttempt(endpointGeneration: try XCTUnwrap(nextReplacementGeneration))
+        let recovery = store.recovery(
             importedConversationID: prepared.importedConversationID,
             throughPosition: prepared.throughPosition,
             relationship: prepared.relationship,
             modelSelection: prepared.modelSelection
         )
 
-        XCTAssertNil(reusable)
+        XCTAssertFalse(recordedStaleSuccess)
+        XCTAssertNil(competingReplacementGeneration)
+        XCTAssertNil(recovery)
+    }
+
+    func testImportedContinuationResolvedReplayReturnsReceiptWithoutService() async throws {
+        let prepared = try ImportedContinuationRetryFixture.preparedCreation()
+        let resolvedSessionID = try ImportedContinuationRetryFixture.resolvedSessionID()
+        let store = ProcessImportedContinuationRetryStore()
+        let endpointGeneration = try XCTUnwrap(store.beginAttempt())
+        let recordedSuccess = store.recordSuccess(
+            prepared,
+            sessionID: resolvedSessionID,
+            endpointGeneration: endpointGeneration
+        )
+        store.endAttempt(endpointGeneration: endpointGeneration)
+        let viewModel = ProcessImportedConversationViewModel(
+            serviceProvider: { nil },
+            continuationRetryStore: store
+        )
+        let conversation = try await ImportedContinuationRetryFixture.importedConversation()
+
+        let replayedSessionID = try await viewModel.continueConversation(
+            conversation: conversation,
+            throughPosition: prepared.throughPosition,
+            relationship: prepared.relationship,
+            aliasID: try ImportedContinuationRetryFixture.aliasID()
+        )
+
+        XCTAssertTrue(recordedSuccess)
+        XCTAssertEqual(replayedSessionID, resolvedSessionID)
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    func testImportedContinuationCompetingWindowPublishesBusyError() async throws {
+        let store = ProcessImportedContinuationRetryStore()
+        let activeGeneration = try XCTUnwrap(store.beginAttempt())
+        let viewModel = ProcessImportedConversationViewModel(
+            serviceProvider: { nil },
+            continuationRetryStore: store
+        )
+        let prepared = try ImportedContinuationRetryFixture.preparedCreation()
+        let conversation = try await ImportedContinuationRetryFixture.importedConversation()
+
+        let sessionID = try? await viewModel.continueConversation(
+            conversation: conversation,
+            throughPosition: prepared.throughPosition,
+            relationship: prepared.relationship,
+            aliasID: try ImportedContinuationRetryFixture.aliasID()
+        )
+        store.endAttempt(endpointGeneration: activeGeneration)
+
+        XCTAssertNil(sessionID)
+        XCTAssertEqual(viewModel.errorMessage, importedContinuationInProgressMessage)
     }
 
     func testSessionListLoadsMockSessionsAndNeedsApprovalStatus() async {
@@ -625,6 +693,29 @@ private enum ImportedContinuationRetryFixture {
     static let sendOutcomeUnknownError = SignalboxProcessRequestOpenError.sendOutcomeUnknown(
         "Fixture send outcome is unknown."
     )
+
+    static func resolvedSessionID() throws -> SignalboxCanonicalUUID {
+        try SignalboxCanonicalUUID(validating: MockProcessProtocolFixtures.continuedSessionID)
+    }
+
+    static func aliasID() throws -> SignalboxCanonicalUUID {
+        try SignalboxCanonicalUUID(validating: MockProcessProtocolFixtures.aliasID)
+    }
+
+    static func importedConversation() async throws -> SignalboxProcessConversation {
+        let service = SignalboxProcessService(
+            requester: SignalboxProcessClient(
+                connectionFactory: MockProcessProtocolConnectionFactory()
+            ),
+            policy: .nativeDefault
+        )
+        let conversations = try await service.listConversations(includeArchived: true)
+        return try XCTUnwrap(
+            conversations.first {
+                $0.conversationID.rawValue == MockProcessProtocolFixtures.importedConversationID
+            }
+        )
+    }
 
     static func preparedCreation() throws -> SignalboxPreparedImportedSessionCreation {
         SignalboxPreparedImportedSessionCreation(

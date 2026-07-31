@@ -714,7 +714,17 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
             diagnostic?.message
               ?? "The imported transcript contained an unrecognized \(kind) message."
           )
-        default:
+        case .sessionCreated, .inputSubmitted, .toolRequestDecided, .sessionDefaults,
+          .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
+          .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
+          .sessionMetadataReplaced, .conversationImportInserted,
+          .conversationImportAlreadyImported, .conversationPageStart,
+          .conversationSummary, .conversationPageEnd, .importedConversationStart,
+          .importedConversationEntry, .importedConversationEnd, .modelAliasesStart,
+          .modelAliasSummary, .modelAliasesEnd, .transcriptSnapshotStart,
+          .transcriptTurn, .transcriptModelCallUsage, .transcriptModelCallsEnd,
+          .transcriptEntry, .transcriptTextEntry, .transcriptContent,
+          .transcriptSnapshotEnd, .sessionEvent, .providerTextDelta:
           throw SignalboxProcessServiceError.unexpectedMessage(
             "The imported transcript sequence was malformed."
           )
