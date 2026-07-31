@@ -782,7 +782,10 @@ mod tests {
             request.timeout,
             std::time::Duration::from_secs(DIAGNOSTIC_TIMEOUT_SECONDS)
         );
-        assert_eq!(request.capture_bytes, DIAGNOSTICS_CAPTURE_BYTES);
+        assert_eq!(
+            request.capture_bytes,
+            DIAGNOSTICS_CAPTURE_BYTES + SANDBOX_DISPATCH_MARKER.len()
+        );
         assert!(request.arguments.contains(&OsString::from("check")));
         assert!(
             request
