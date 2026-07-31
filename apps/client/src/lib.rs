@@ -3207,6 +3207,86 @@ async fn review(
                 .mutation()),
             }
         }
+        ReviewCommand::ReserveExternalLink {
+            command_id,
+            external_link_id,
+            finding_id,
+            provider,
+            object_kind,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::ReserveReviewExternalLink {
+                    command_id,
+                    external_link_id,
+                    finding_id,
+                    provider,
+                    object_kind,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewExternalLinkReserved {
+                    external_link_id: recorded,
+                } if recorded == external_link_id => {
+                    output.review_acknowledgement(&format!("external_link={recorded} reserved"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review external-link reservation returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::AttachExternalLink {
+            command_id,
+            external_link_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            external_object,
+            event_ordinal,
+        } => {
+            let expected_external_object = external_object.clone();
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::AttachReviewExternalLink {
+                    command_id,
+                    external_link_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                    output_frontier_id,
+                    external_object,
+                    event_ordinal,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewExternalLinkAttached {
+                    external_link_id: recorded,
+                    external_object: recorded_object,
+                } if recorded == external_link_id
+                    && recorded_object == expected_external_object =>
+                {
+                    output.review_acknowledgement(&format!("external_link={recorded} attached"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review external-link attachment returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
         ReviewCommand::ReadOrchestration { attempt_id } => {
             let mut connection = client
                 .request(ClientRequest::ReadReviewOrchestration { attempt_id })
@@ -3504,12 +3584,12 @@ mod tests {
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         ConversationOriginFilter, ConversationSummary, FrameEncodeError, ImportedContentKind,
         ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
-        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, ReviewFindingEvent,
-        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind,
-        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
-        encode_server_line,
+        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
+        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot,
+        ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity,
+        ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision,
+        TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -4963,6 +5043,145 @@ mod tests {
 
         let expected_stdout = format!("run={run_id} pass={pass_id} findings=0 recorded\n");
         assert_eq!(String::from_utf8(stdout)?, expected_stdout);
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_reserves_an_external_publication_link() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(1))?;
+        let finding_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let external_link_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ReserveReviewExternalLink {
+                    command_id,
+                    external_link_id,
+                    finding_id,
+                    provider: String::from("example-host"),
+                    object_kind: ReviewExternalObjectKind::ReviewComment,
+                }
+            );
+            let frame = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::ReviewExternalLinkReserved { external_link_id },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        review(
+            &mut client,
+            &mut output,
+            ReviewCommand::ReserveExternalLink {
+                command_id: Some(command_id),
+                external_link_id,
+                finding_id,
+                provider: String::from("example-host"),
+                object_kind: ReviewExternalObjectKind::ReviewComment,
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            String::from_utf8(stdout)?,
+            format!("external_link={external_link_id} reserved\n")
+        );
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_attaches_an_external_publication_link() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(1))?;
+        let external_link_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let run_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let pass_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let output_frontier_id = CanonicalUuid::from_uuid(Uuid::from_u128(6));
+        let event_ordinal = CanonicalU64::new(1);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::AttachReviewExternalLink {
+                    command_id,
+                    external_link_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                    output_frontier_id,
+                    external_object: String::from("provider-object-7"),
+                    event_ordinal,
+                }
+            );
+            let frame = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::ReviewExternalLinkAttached {
+                    external_link_id,
+                    external_object: String::from("provider-object-7"),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        review(
+            &mut client,
+            &mut output,
+            ReviewCommand::AttachExternalLink {
+                command_id: Some(command_id),
+                external_link_id,
+                run_id,
+                pass_id,
+                turn_id,
+                output_frontier_id,
+                external_object: String::from("provider-object-7"),
+                event_ordinal,
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            String::from_utf8(stdout)?,
+            format!("external_link={external_link_id} attached\n")
+        );
         assert!(stderr.is_empty());
         server.await??;
         Ok(())

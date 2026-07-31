@@ -5955,6 +5955,28 @@ impl ReviewRuntimeDriver {
         runtime: &RunningRuntime,
         target: CanonicalUuid,
     ) -> Result<Self, Box<dyn Error>> {
+        sqlx::query(
+            "CREATE TABLE test_rejected_review_orchestration_receipt (command_id uuid PRIMARY KEY)",
+        )
+        .execute(&runtime.pool)
+        .await?;
+        sqlx::query(
+            "CREATE FUNCTION test_review_orchestration_receipt_allowed(candidate uuid)
+             RETURNS boolean LANGUAGE sql
+             RETURN NOT EXISTS (
+                 SELECT 1 FROM test_rejected_review_orchestration_receipt
+                  WHERE command_id = candidate
+             )",
+        )
+        .execute(&runtime.pool)
+        .await?;
+        sqlx::query(
+            "ALTER TABLE review_orchestration_command
+             ADD CONSTRAINT test_reject_orchestration_receipt
+             CHECK (test_review_orchestration_receipt_allowed(command_id))",
+        )
+        .execute(&runtime.pool)
+        .await?;
         Ok(Self {
             connection: Connection::connect(runtime.socket()).await?,
             pool: runtime.pool.clone(),
@@ -5981,6 +6003,34 @@ impl ReviewRuntimeDriver {
             &expected
         );
         Ok(())
+    }
+
+    async fn request_expect_after_lost_orchestration_receipt(
+        &mut self,
+        command_id: CommandId,
+        request: ClientRequest,
+        expected: ServerMessage,
+    ) -> Result<(), Box<dyn Error>> {
+        sqlx::query(
+            "INSERT INTO test_rejected_review_orchestration_receipt (command_id) VALUES ($1)",
+        )
+        .bind(command_id.into_uuid())
+        .execute(&self.pool)
+        .await?;
+        let request_id = self.request_id();
+        self.connection.request(request_id, request.clone()).await?;
+        assert_eq!(
+            protocol_error_code(response_within(&mut self.connection).await?.message()),
+            ErrorCode::CommitAmbiguous,
+        );
+        let removed = sqlx::query(
+            "DELETE FROM test_rejected_review_orchestration_receipt WHERE command_id = $1",
+        )
+        .bind(command_id.into_uuid())
+        .execute(&self.pool)
+        .await?;
+        assert_eq!(removed.rows_affected(), 1);
+        self.request_expect(request, expected).await
     }
 
     async fn request_invalid(&mut self, request: ClientRequest) -> Result<(), Box<dyn Error>> {
@@ -6205,10 +6255,11 @@ impl ReviewRuntimeDriver {
 
     fn start_attempt_request(
         &self,
+        command_id: CommandId,
         attempt: CanonicalUuid,
-    ) -> Result<ClientRequest, Box<dyn Error>> {
-        Ok(ClientRequest::StartReviewOrchestration {
-            command_id: command()?,
+    ) -> ClientRequest {
+        ClientRequest::StartReviewOrchestration {
+            command_id,
             attempt_id: attempt,
             target_id: self.target,
             concern_set_version: String::from(REVIEW_CONCERN_SET_VERSION),
@@ -6217,26 +6268,20 @@ impl ReviewRuntimeDriver {
             repair_template_name: String::from(REVIEW_REPAIR_TEMPLATE),
             publication_template_name: String::from(REVIEW_PUBLICATION_TEMPLATE),
             concerns: review_concern_inputs(),
-        })
+        }
     }
 
     async fn start_attempt(&mut self, attempt: CanonicalUuid) -> Result<(), Box<dyn Error>> {
-        let request = self.start_attempt_request(attempt)?;
-        self.request_expect(
+        let command_id = command()?;
+        let request = self.start_attempt_request(command_id, attempt);
+        self.request_expect_after_lost_orchestration_receipt(
+            command_id,
             request,
             ServerMessage::ReviewOrchestrationStarted {
                 attempt_id: attempt,
             },
         )
         .await
-    }
-
-    async fn reject_repeated_start(
-        &mut self,
-        attempt: CanonicalUuid,
-    ) -> Result<(), Box<dyn Error>> {
-        let request = self.start_attempt_request(attempt)?;
-        self.request_invalid(request).await
     }
 
     async fn reject_result_free_read_only_success(
@@ -6259,9 +6304,11 @@ impl ReviewRuntimeDriver {
         attempt: CanonicalUuid,
         pass: CanonicalUuid,
     ) -> Result<(), Box<dyn Error>> {
-        self.request_expect(
+        let command_id = command()?;
+        self.request_expect_after_lost_orchestration_receipt(
+            command_id,
             ClientRequest::RecordReviewImportOutcome {
-                command_id: command()?,
+                command_id,
                 attempt_id: attempt,
                 pass_id: Some(pass),
                 external_link_id: None,
@@ -6282,9 +6329,11 @@ impl ReviewRuntimeDriver {
         concern: &ReviewConcernEvidence,
         expected_state: ReviewOrchestrationState,
     ) -> Result<(), Box<dyn Error>> {
-        self.request_expect(
+        let command_id = command()?;
+        self.request_expect_after_lost_orchestration_receipt(
+            command_id,
             ClientRequest::RecordReviewConcernOutcome {
-                command_id: command()?,
+                command_id,
                 attempt_id: attempt,
                 concern: concern.key.clone(),
                 pass_id: Some(concern.pass),
@@ -6341,9 +6390,11 @@ impl ReviewRuntimeDriver {
         analysis_pass: CanonicalUuid,
         members: Vec<ReviewJudgmentPlanMember>,
     ) -> Result<(), Box<dyn Error>> {
-        self.request_expect(
+        let command_id = command()?;
+        self.request_expect_after_lost_orchestration_receipt(
+            command_id,
             ClientRequest::RecordReviewJudgmentPlan {
-                command_id: command()?,
+                command_id,
                 attempt_id: attempt,
                 analysis_pass_id: analysis_pass,
                 members,
@@ -6363,9 +6414,11 @@ impl ReviewRuntimeDriver {
         pass: CanonicalUuid,
         expected_state: ReviewOrchestrationState,
     ) -> Result<(), Box<dyn Error>> {
-        self.request_expect(
+        let command_id = command()?;
+        self.request_expect_after_lost_orchestration_receipt(
+            command_id,
             ClientRequest::RecordReviewJudgmentEffect {
-                command_id: command()?,
+                command_id,
                 attempt_id: attempt,
                 finding_id: finding,
                 event_pass_id: Some(pass),
@@ -6600,7 +6653,6 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         .await?;
     driver.complete_result_free_pass(import).await?;
     driver.record_import(attempt, import.pass).await?;
-    driver.reject_repeated_start(attempt).await?;
 
     let correctness = driver
         .create_completed_turn_pass(
@@ -6826,10 +6878,12 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
             ReviewFindingStatus::Fixed,
         )
         .await?;
+    let repair_command = command()?;
     driver
-        .request_expect(
+        .request_expect_after_lost_orchestration_receipt(
+            repair_command,
             ClientRequest::RecordReviewRepairOutcomes {
-                command_id: command()?,
+                command_id: repair_command,
                 attempt_id: attempt,
                 outcomes: vec![
                     ReviewRepairOutcome {
@@ -6891,10 +6945,12 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
             },
         )
         .await?;
+    let publication_command = command()?;
     driver
-        .request_expect(
+        .request_expect_after_lost_orchestration_receipt(
+            publication_command,
             ClientRequest::RecordReviewPublicationOutcomes {
-                command_id: command()?,
+                command_id: publication_command,
                 attempt_id: attempt,
                 outcomes: vec![ReviewPublicationOutcome {
                     finding_id: findings.accepted_and_published,

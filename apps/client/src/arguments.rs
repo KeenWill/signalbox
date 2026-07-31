@@ -8,9 +8,9 @@ use signalbox_process_protocol::{
     ConversationImportFormat, ConversationOrigin, ConversationOriginFilter,
     ImportedSessionRelationship, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
     MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection,
-    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewFindingEvent, ReviewFindingInput,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewPassTerminalOutcome,
-    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
+    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
+    ReviewFindingInput, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewPassTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
 };
 use uuid::Uuid;
 
@@ -232,6 +232,23 @@ pub(crate) enum ReviewCommand {
         attempt_id: CanonicalUuid,
         outcomes_file: PathBuf,
     },
+    ReserveExternalLink {
+        command_id: Option<CommandId>,
+        external_link_id: CanonicalUuid,
+        finding_id: CanonicalUuid,
+        provider: String,
+        object_kind: ReviewExternalObjectKind,
+    },
+    AttachExternalLink {
+        command_id: Option<CommandId>,
+        external_link_id: CanonicalUuid,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        external_object: String,
+        event_ordinal: CanonicalU64,
+    },
     ReadOrchestration {
         attempt_id: CanonicalUuid,
     },
@@ -373,6 +390,10 @@ enum ReviewSubcommand {
     RecordRepairOutcomes(RecordReviewRepairOutcomesArguments),
     /// Seal complete publication outcomes from a strict JSON file.
     RecordPublicationOutcomes(RecordReviewPublicationOutcomesArguments),
+    /// Reserve provider publication identity before the external write.
+    ReserveExternalLink(ReserveReviewExternalLinkArguments),
+    /// Attach the provider object after the external write succeeds.
+    AttachExternalLink(AttachReviewExternalLinkArguments),
     /// Read one review-orchestration attempt.
     ReadOrchestration(ReviewAttemptArguments),
     /// List findings for one exact run.
@@ -630,6 +651,40 @@ struct RecordReviewPublicationOutcomesArguments {
 }
 
 #[derive(Debug, ClapArgs)]
+struct ReserveReviewExternalLinkArguments {
+    #[arg(value_name = "FINDING", value_parser = canonical_uuid)]
+    finding_id: CanonicalUuid,
+    #[arg(value_name = "LINK", value_parser = canonical_uuid)]
+    external_link_id: CanonicalUuid,
+    #[arg(long)]
+    provider: String,
+    #[arg(long, value_enum)]
+    object_kind: ReviewExternalObjectKindArgument,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct AttachReviewExternalLinkArguments {
+    #[arg(value_name = "LINK", value_parser = canonical_uuid)]
+    external_link_id: CanonicalUuid,
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
+    output_frontier_id: CanonicalUuid,
+    #[arg(long)]
+    external_object: String,
+    #[arg(long, value_name = "DECIMAL", value_parser = review_event_ordinal)]
+    event_ordinal: CanonicalU64,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
 struct ReviewAttemptArguments {
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
@@ -689,6 +744,14 @@ enum ReviewJudgmentEffectOutcomeArgument {
     Failed,
     Blocked,
     Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewExternalObjectKindArgument {
+    Review,
+    ReviewThread,
+    ReviewComment,
+    ChangeRequestComment,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1661,6 +1724,38 @@ pub(crate) fn parse(
                     outcomes_file: arguments.outcomes_file,
                 }
             }
+            ReviewSubcommand::ReserveExternalLink(arguments) => {
+                ReviewCommand::ReserveExternalLink {
+                    command_id: arguments.command_id,
+                    external_link_id: arguments.external_link_id,
+                    finding_id: arguments.finding_id,
+                    provider: arguments.provider,
+                    object_kind: match arguments.object_kind {
+                        ReviewExternalObjectKindArgument::Review => {
+                            ReviewExternalObjectKind::Review
+                        }
+                        ReviewExternalObjectKindArgument::ReviewThread => {
+                            ReviewExternalObjectKind::ReviewThread
+                        }
+                        ReviewExternalObjectKindArgument::ReviewComment => {
+                            ReviewExternalObjectKind::ReviewComment
+                        }
+                        ReviewExternalObjectKindArgument::ChangeRequestComment => {
+                            ReviewExternalObjectKind::ChangeRequestComment
+                        }
+                    },
+                }
+            }
+            ReviewSubcommand::AttachExternalLink(arguments) => ReviewCommand::AttachExternalLink {
+                command_id: arguments.command_id,
+                external_link_id: arguments.external_link_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                turn_id: arguments.turn_id,
+                output_frontier_id: arguments.output_frontier_id,
+                external_object: arguments.external_object,
+                event_ordinal: arguments.event_ordinal,
+            },
             ReviewSubcommand::ReadOrchestration(arguments) => ReviewCommand::ReadOrchestration {
                 attempt_id: arguments.attempt_id,
             },
@@ -2268,6 +2363,50 @@ mod tests {
         assert!(repairs.is_ok());
         assert!(publications.is_ok());
         assert!(read.is_ok());
+    }
+
+    #[test]
+    fn review_publication_link_commands_accept_complete_evidence() {
+        let finding = "00000000-0000-0000-0000-000000000001";
+        let link = "00000000-0000-0000-0000-000000000002";
+        let run = "00000000-0000-0000-0000-000000000003";
+        let pass = "00000000-0000-0000-0000-000000000004";
+        let turn = "00000000-0000-0000-0000-000000000005";
+        let frontier = "00000000-0000-0000-0000-000000000006";
+        let reserve = parse(
+            [
+                "review",
+                "reserve-external-link",
+                finding,
+                link,
+                "--provider",
+                "example-host",
+                "--object-kind",
+                "review-comment",
+            ]
+            .map(Into::into),
+        );
+        let attach = parse(
+            [
+                "review",
+                "attach-external-link",
+                link,
+                run,
+                pass,
+                "--turn-id",
+                turn,
+                "--output-frontier-id",
+                frontier,
+                "--external-object",
+                "provider-object-7",
+                "--event-ordinal",
+                "1",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(reserve.is_ok());
+        assert!(attach.is_ok());
     }
 
     #[test]

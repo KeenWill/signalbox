@@ -3,15 +3,15 @@
 use std::future::Future;
 
 use signalbox_application::{
-    ReviewConcernOutcome, ReviewConcernSuccess, ReviewConcernWork, ReviewImportOutcome,
-    ReviewImportedContextEvidence, ReviewJudgmentEffectOutcome, ReviewJudgmentEffectSuccess,
-    ReviewJudgmentEffectWork, ReviewJudgmentPlan,
-    ReviewJudgmentPlanMember as ApplicationPlanMember, ReviewOrchestrationAttempt,
-    ReviewOrchestrationAttemptId, ReviewOrchestrationAttemptStore, ReviewOrchestrationOutcome,
-    ReviewOrchestrationPassRunner, ReviewOrchestrationService, ReviewOrchestrationServiceError,
-    ReviewPassIncompleteStatus, ReviewPlannedDisposition, ReviewPublicationMemberOutcome,
-    ReviewPublicationSuccess, ReviewPublicationWork, ReviewRepairMemberOutcome,
-    ReviewRepairSuccess, ReviewRepairWork, ReviewTemplateDigest,
+    ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSuccess, ReviewConcernWork,
+    ReviewImportOutcome, ReviewImportedContextEvidence, ReviewJudgmentEffectId,
+    ReviewJudgmentEffectOutcome, ReviewJudgmentEffectSuccess, ReviewJudgmentEffectWork,
+    ReviewJudgmentPlan, ReviewJudgmentPlanMember as ApplicationPlanMember,
+    ReviewOrchestrationAttempt, ReviewOrchestrationAttemptId, ReviewOrchestrationAttemptStore,
+    ReviewOrchestrationOutcome, ReviewOrchestrationPassRunner, ReviewOrchestrationService,
+    ReviewOrchestrationServiceError, ReviewPassIncompleteStatus, ReviewPlannedDisposition,
+    ReviewPublicationMemberOutcome, ReviewPublicationSuccess, ReviewPublicationWork,
+    ReviewRepairMemberOutcome, ReviewRepairSuccess, ReviewRepairWork, ReviewTemplateDigest,
 };
 use signalbox_domain::{
     DurableCommandId, ReviewExternalLinkId, ReviewFinding, ReviewFindingEvent, ReviewFindingId,
@@ -105,7 +105,7 @@ pub(crate) async fn execute_review_orchestration_request(
         return Err(internal(ReviewOrchestrationInternalCause::ServiceContract));
     }
     if let Some(current) = prepared.current {
-        prevalidate_stage(prepared.kind, current)?;
+        prevalidate_submission(&store, &prepared.attempt, current, &prepared.submission).await?;
     }
     let start = matches!(prepared.submission, ClientSubmission::AwaitingImport);
     let mut service = ReviewOrchestrationService::new(store.clone(), prepared.submission);
@@ -356,7 +356,6 @@ async fn prepare_mutation(
         .await
         .map_err(map_store_error)?
         .ok_or(ReviewOrchestrationRuntimeError::NotFound)?;
-    prevalidate_submission(&store, &attempt, &request).await?;
     let submission = build_submission(request, pool, templates, &attempt).await?;
     Ok(PreparedMutation {
         command_id,
@@ -453,34 +452,55 @@ fn mutation_identity(
 async fn prevalidate_submission(
     store: &PostgresReviewOrchestrationStore,
     attempt: &ReviewOrchestrationAttempt,
-    request: &ClientRequest,
+    current: ReviewOrchestrationCurrentStage,
+    submission: &ClientSubmission,
 ) -> Result<(), ReviewOrchestrationRuntimeError> {
-    match request {
-        ClientRequest::RecordReviewConcernOutcome { concern, .. } => {
-            let concern = ReviewKey::try_new(concern.clone())
-                .map_err(|_| ReviewOrchestrationRuntimeError::InvalidRequest)?;
-            if !attempt
+    let admitted = match submission {
+        ClientSubmission::AwaitingImport => true,
+        ClientSubmission::Import(outcome) => {
+            current == ReviewOrchestrationCurrentStage::AwaitingImport
+                || store
+                    .load_import(attempt.id())
+                    .await
+                    .map_err(map_store_error)?
+                    .as_ref()
+                    == Some(outcome)
+        }
+        ClientSubmission::Concern { concern, outcome } => {
+            let fresh_stage = matches!(
+                current,
+                ReviewOrchestrationCurrentStage::AwaitingConcerns
+                    | ReviewOrchestrationCurrentStage::FanoutIncomplete
+            );
+            let spec = attempt
                 .concerns()
                 .iter()
-                .any(|expected| expected.key() == &concern)
-            {
-                return Err(ReviewOrchestrationRuntimeError::Rejected);
-            }
+                .find(|expected| expected.key() == concern)
+                .ok_or(ReviewOrchestrationRuntimeError::Rejected)?;
+            let candidate =
+                ReviewConcernClaim::new(concern.clone(), spec.template_digest(), outcome.clone());
             let claims = store
                 .load_concern_claims(attempt.id())
                 .await
                 .map_err(map_store_error)?;
-            if claims
-                .iter()
-                .find(|claim| claim.concern() == &concern)
-                .is_some_and(|claim| {
-                    !matches!(claim.outcome(), ReviewConcernOutcome::Failed { .. })
-                })
-            {
-                return Err(ReviewOrchestrationRuntimeError::Rejected);
+            match claims.iter().find(|claim| claim.concern() == concern) {
+                Some(existing) if existing == &candidate => true,
+                Some(existing) => {
+                    fresh_stage && matches!(existing.outcome(), ReviewConcernOutcome::Failed { .. })
+                }
+                None => fresh_stage,
             }
         }
-        ClientRequest::RecordReviewJudgmentEffect { finding_id, .. } => {
+        ClientSubmission::JudgmentPlan(plan) => {
+            current == ReviewOrchestrationCurrentStage::AwaitingJudgment
+                || store
+                    .load_judgment_plan(attempt.id())
+                    .await
+                    .map_err(map_store_error)?
+                    .as_ref()
+                    == Some(plan)
+        }
+        ClientSubmission::JudgmentEffect { finding, outcome } => {
             let plan = store
                 .load_judgment_plan(attempt.id())
                 .await
@@ -497,47 +517,38 @@ async fn prevalidate_submission(
             {
                 return Err(internal(ReviewOrchestrationInternalCause::StoreCorruption));
             }
-            let expected = plan
-                .members()
-                .get(applied.len())
-                .ok_or(ReviewOrchestrationRuntimeError::Rejected)?;
-            if expected.finding().finding().into_uuid() != finding_id.into_uuid() {
-                return Err(ReviewOrchestrationRuntimeError::Rejected);
+            let effect = ReviewJudgmentEffectId::new(attempt.id(), *finding);
+            if applied.contains(&effect) {
+                matches!(outcome, ReviewJudgmentEffectOutcome::Applied(_))
+            } else {
+                matches!(
+                    current,
+                    ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
+                        | ReviewOrchestrationCurrentStage::JudgmentIncomplete
+                ) && plan
+                    .members()
+                    .get(applied.len())
+                    .is_some_and(|member| member.finding() == *finding)
             }
         }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn prevalidate_stage(
-    kind: ReviewOrchestrationCommandKind,
-    current: ReviewOrchestrationCurrentStage,
-) -> Result<(), ReviewOrchestrationRuntimeError> {
-    let admitted = match kind {
-        ReviewOrchestrationCommandKind::Import => {
-            current == ReviewOrchestrationCurrentStage::AwaitingImport
-        }
-        ReviewOrchestrationCommandKind::Concern => matches!(
-            current,
-            ReviewOrchestrationCurrentStage::AwaitingConcerns
-                | ReviewOrchestrationCurrentStage::FanoutIncomplete
-        ),
-        ReviewOrchestrationCommandKind::JudgmentPlan => {
-            current == ReviewOrchestrationCurrentStage::AwaitingJudgment
-        }
-        ReviewOrchestrationCommandKind::JudgmentEffect => matches!(
-            current,
-            ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
-                | ReviewOrchestrationCurrentStage::JudgmentIncomplete
-        ),
-        ReviewOrchestrationCommandKind::Repair => {
+        ClientSubmission::Repair(outcomes) => {
             current == ReviewOrchestrationCurrentStage::AwaitingRepair
+                || store
+                    .load_repair_outcomes(attempt.id())
+                    .await
+                    .map_err(map_store_error)?
+                    .as_ref()
+                    == Some(outcomes)
         }
-        ReviewOrchestrationCommandKind::Publication => {
+        ClientSubmission::Publication(outcomes) => {
             current == ReviewOrchestrationCurrentStage::AwaitingPublication
+                || store
+                    .load_publication_outcomes(attempt.id())
+                    .await
+                    .map_err(map_store_error)?
+                    .as_ref()
+                    == Some(outcomes)
         }
-        ReviewOrchestrationCommandKind::Start => false,
     };
     admitted
         .then_some(())
