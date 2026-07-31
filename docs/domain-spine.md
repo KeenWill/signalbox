@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The twenty identities defined in `lib.rs`:
+The twenty-one identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -72,6 +72,7 @@ pub struct RunnerEnrollmentId(/* private */);
 pub struct RunnerId(/* private */);
 pub struct RunnerAuthenticationId(/* private */);
 pub struct RunnerLeaseId(/* private */);
+pub struct WorkspaceManifestId(/* private */);
 pub struct ReviewTargetId(/* private */);
 pub struct ReviewRunId(/* private */);
 pub struct ReviewPassId(/* private */);
@@ -167,6 +168,43 @@ pub enum ImportedStructuredValue {
     Array(Box<[ImportedStructuredValue]>),
     Object(Box<[ImportedStructuredObjectMember]>),
 }
+
+pub struct ImportedStructuredFieldError;
+// implements Error; content-silent.
+
+pub fn unique_imported_structured_field<'members>(
+    members: &'members [ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    Option<&'members ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
+
+pub fn imported_text_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedText>, ImportedStructuredFieldError>;
+
+pub fn imported_bool_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<bool>, ImportedStructuredFieldError>;
+
+pub fn imported_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    ImportedSourceAttestation<ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
+
+pub fn imported_string_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<
+    ImportedSourceAttestation<ImportedStructuredValue>,
+    ImportedStructuredFieldError,
+>;
 
 pub enum ImportedSpeaker {
     User,
@@ -4071,6 +4109,39 @@ pub trait ImportedConversationConverter {
         NextEntryId: FnMut() -> ImportedTranscriptEntryId;
 }
 
+pub struct ImportedConversationSkippedRecord<Failure> { /* private */ }
+impl<Failure> ImportedConversationSkippedRecord<Failure> {
+    pub const fn new(source_line: u64, failure: Failure) -> Self;
+    // accessors: source_line(), failure(), into_parts()
+}
+
+pub enum ImportedConversationConversionReport<Failure> {
+    Converted {
+        conversation: ImportedConversation,
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    NoValidRecords {
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+}
+
+pub trait ResilientImportedConversationConverter:
+    ImportedConversationConverter
+{
+    type RecordFailure;
+    fn convert_resilient<NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: &[u8],
+        next_entry_id: NextEntryId,
+    ) -> Result<
+        ImportedConversationConversionReport<Self::RecordFailure>,
+        Self::Error,
+    >
+    where
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId;
+}
+
 pub enum ImportedConversationStoreOutcome {
     Inserted {
         conversation: ImportedConversationId,
@@ -4105,6 +4176,20 @@ pub enum ImportConversationOutcome {
 }
 impl ImportConversationOutcome {
     // accessor: conversation()
+}
+
+pub enum ImportConversationReport<Failure> {
+    Converted {
+        conversation: ImportedConversation,
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    Imported {
+        outcome: ImportConversationOutcome,
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
+    NoValidRecords {
+        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
+    },
 }
 
 pub enum ImportConversationError<ConverterError, StoreError> {
@@ -4148,6 +4233,20 @@ impl<
         source: &[u8],
     ) -> Result<
         ImportConversationOutcome,
+        ImportConversationError<Converter::Error, Store::Error>,
+    >;
+}
+impl<
+    Generator: ImportedConversationIdGenerator,
+    Converter: ResilientImportedConversationConverter,
+    Store: ImportedConversationStore,
+> ImportConversationService<Generator, Converter, Store>
+{
+    pub async fn execute_resilient(
+        &mut self,
+        source: &[u8],
+    ) -> Result<
+        ImportConversationReport<Converter::RecordFailure>,
         ImportConversationError<Converter::Error, Store::Error>,
     >;
 }
@@ -5400,6 +5499,7 @@ pub enum ReviewOrchestrationOutcome {
 pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
     Store(StoreError),
     InvalidImportEvidence(ReviewImportEvidenceFailure),
+    InvalidConcernEvidence(ReviewFanoutBarrierFailure),
     Runner(RunnerError),
     ConcernTaskTerminated,
     DurableConflict,
@@ -5444,6 +5544,7 @@ pub enum ReviewWorkflowOperation {
     CreateTarget(ReviewTarget),
     StartRun { run: ReviewRun, pass: ReviewPass },
     ActivatePass { run: ReviewRun, pass: ReviewPass },
+    CompletePass { run: ReviewRun, pass: ReviewPass },
     RecordFindings {
         pass: ReviewPassEvidence,
         findings: Vec<ReviewFinding>,
@@ -5467,16 +5568,32 @@ pub enum ReviewWorkflowOperationKind {
     CreateTarget,
     StartRun,
     ActivatePass,
+    CompletePass,
     RecordFindings,
     RecordFindingEvent,
     ReserveExternalLink,
     AttachExternalLink,
 }
 
+pub enum ReviewPassCompletionStatus {
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+impl ReviewPassCompletionStatus {
+    pub const fn from_state(state: &ReviewPassState) -> Option<Self>;
+}
+
 pub enum ReviewWorkflowCommandResult {
     TargetCreated { target: ReviewTargetId },
     RunStarted { run: ReviewRunId, pass: ReviewPassId },
     PassActivated { run: ReviewRunId, pass: ReviewPassId },
+    PassCompleted {
+        run: ReviewRunId,
+        pass: ReviewPassId,
+        status: ReviewPassCompletionStatus,
+    },
     FindingsRecorded {
         run: ReviewRunId,
         pass: ReviewPassId,
@@ -6180,11 +6297,17 @@ pub enum RunnerDomainError {
     ContainsNull,
     TooLong,
     InvalidName,
+    InvalidHex,
+    InvalidBranchName,
+    InvalidRelativePath,
     InvalidToolInputSchema,
     DuplicateCapabilityClass(RunnerCapabilityClass),
     DuplicateTool(ToolName),
     DuplicateProfile(CredentialProfileName),
     DuplicateWorkspaceCapability(WorkspaceCapability),
+    DuplicateSandboxProfile(RunnerSandboxProfile),
+    TooManyPermissionOverrides,
+    TooManyAdvertisedRepositories,
     UndeclaredProfileTool(ToolName),
     UnsupportedDaemonIdempotency(ToolName),
     EnrollmentRevoked,
@@ -6193,6 +6316,8 @@ pub enum RunnerDomainError {
     ToolLocusNotAllowed(ToolName),
     CredentialProfileUndeclared(CredentialProfileName),
     WorkspaceCapabilityNotAllowed(WorkspaceCapability),
+    SandboxProfileNotAllowed(RunnerSandboxProfile),
+    RepositoryProfileUnavailable(CredentialProfileName),
     InvalidState,
     CorrelationMismatch,
     GenerationExhausted,
@@ -6201,6 +6326,8 @@ pub enum RunnerDomainError {
     CredentialProfileUnavailable,
     WorkingDirectoryMismatch,
     WorkspaceCapabilityUnavailable,
+    SandboxProfileUnavailable,
+    RepositoryUnavailable,
     WorkspaceMismatch,
     ToolUnavailable,
     GrantRevoked,
@@ -6213,6 +6340,10 @@ pub struct RunnerCapabilityClass(/* private */);
 pub struct CredentialProfileName(/* private */);
 pub struct RunnerWorkingDirectory(/* private */);
 pub struct WorkspaceRepositoryKey(/* private */);
+pub struct CanonicalCloneUrlDigest(/* private */);
+pub struct WorkspaceRevision(/* private */);
+pub struct WorkspaceBranchName(/* private */);
+pub struct WorkspaceRelativePath(/* private */);
 // each checked string exposes try_new(String) and as_str()
 
 pub enum RunnerSelector {
@@ -6267,6 +6398,42 @@ impl CredentialProfilePolicy {
     // accessors: name(), approval_for()
     pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)>;
 }
+pub enum WorkspaceRecovery {
+    Commit { revision: WorkspaceRevision },
+    Branch {
+        name: WorkspaceBranchName,
+        revision: WorkspaceRevision,
+    },
+}
+
+pub enum RunnerSandboxProfile {
+    Ambient,
+    WorkspaceRestricted,
+}
+pub enum RunnerToolPermissionOverride {
+    Auto,
+    Confirm,
+}
+pub struct RunnerToolPermissionOverrides(/* private */);
+impl RunnerToolPermissionOverrides {
+    pub fn try_new(
+        overrides: impl IntoIterator<Item = (ToolName, RunnerToolPermissionOverride)>,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn get(&self, tool: &ToolName) -> Option<RunnerToolPermissionOverride>;
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&ToolName, RunnerToolPermissionOverride)>;
+}
+pub struct RunnerRepositoryEntry { /* private */ }
+impl RunnerRepositoryEntry {
+    pub const fn new(
+        key: WorkspaceRepositoryKey,
+        credential_profile: Option<CredentialProfileName>,
+    ) -> Self;
+    pub const fn key(&self) -> &WorkspaceRepositoryKey;
+    pub const fn credential_profile(&self) -> Option<&CredentialProfileName>;
+}
+
 pub enum WorkspaceCapability {
     WorktreePerSession,
 }
@@ -6277,16 +6444,26 @@ impl RunnerCatalog {
         tools: impl IntoIterator<Item = RunnerToolDeclaration>,
         profiles: impl IntoIterator<Item = CredentialProfilePolicy>,
         workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+        sandboxes: impl IntoIterator<Item = RunnerSandboxProfile>,
     ) -> Result<Self, RunnerDomainError>;
 }
 pub struct RunnerAdvertisement { /* private */ }
 impl RunnerAdvertisement {
+    pub const MAX_REPOSITORIES: usize;
     pub fn new(
         classes: impl IntoIterator<Item = RunnerCapabilityClass>,
         tools: impl IntoIterator<Item = ToolName>,
         profiles: impl IntoIterator<Item = CredentialProfileName>,
         workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+        sandboxes: impl IntoIterator<Item = RunnerSandboxProfile>,
+        repositories: impl IntoIterator<Item = RunnerRepositoryEntry>,
     ) -> Self;
+    pub fn classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass>;
+    pub fn tools(&self) -> impl Iterator<Item = &ToolName>;
+    pub fn profiles(&self) -> impl Iterator<Item = &CredentialProfileName>;
+    pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_;
+    pub fn sandboxes(&self) -> impl Iterator<Item = RunnerSandboxProfile> + '_;
+    pub fn repositories(&self) -> impl Iterator<Item = &RunnerRepositoryEntry>;
 }
 
 pub enum RunnerEnrollmentState {
@@ -6330,7 +6507,8 @@ impl PreparedRunnerRegistration {
 }
 pub struct ValidatedRunnerRegistration { /* private */ }
 pub struct ValidatedRunnerRegistrationReconstitutionInput {
-    /* public complete typed catalog-validation facts, including exact revision */
+    /* public complete typed catalog-validation facts, including exact revision,
+       sandbox inventory, and repository-entry inventory */
 }
 impl ValidatedRunnerRegistration {
     // accessors: enrollment(), runner(), authentication(), revision()
@@ -6341,11 +6519,18 @@ impl ValidatedRunnerRegistration {
         profile: &CredentialProfileName,
     ) -> Option<&CredentialProfilePolicy>;
     pub fn supports_workspace(&self, capability: WorkspaceCapability) -> bool;
+    pub fn supports_sandbox(&self, profile: RunnerSandboxProfile) -> bool;
+    pub fn repository(
+        &self,
+        key: &WorkspaceRepositoryKey,
+    ) -> Option<&RunnerRepositoryEntry>;
     pub fn tool_names(&self) -> impl Iterator<Item = &ToolName>;
     pub fn classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass>;
     pub fn tools(&self) -> impl Iterator<Item = &RunnerToolDeclaration>;
     pub fn profiles(&self) -> impl Iterator<Item = &CredentialProfilePolicy>;
     pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_;
+    pub fn sandboxes(&self) -> impl Iterator<Item = RunnerSandboxProfile> + '_;
+    pub fn repositories(&self) -> impl Iterator<Item = &RunnerRepositoryEntry>;
     pub fn reconstitute(
         enrollment: &RunnerEnrollment,
         catalog: &RunnerCatalog,
@@ -6467,16 +6652,32 @@ pub enum WorkspaceRequirement {
     },
 }
 pub struct ProvisionedWorkspace {
-    /* public typed ownership facts */
+    pub session: SessionId,
+    pub placement_revision: RunnerGeneration,
+    pub runner: RunnerId,
+    pub repository: Option<WorkspaceRepositoryKey>,
+    pub canonical_clone_url_digest: Option<CanonicalCloneUrlDigest>,
+    pub credential_profile: Option<CredentialProfileName>,
+    pub sandbox: RunnerSandboxProfile,
+    pub working_directory: RunnerWorkingDirectory,
+    pub relative_path: WorkspaceRelativePath,
+    pub manifest_id: WorkspaceManifestId,
+    pub recovery: Option<WorkspaceRecovery>,
 }
 pub struct SessionRunnerPlacementRequest {
-    /* public complete requested axes */
+    pub selector: RunnerSelector,
+    pub working_directory: WorkingDirectorySelection,
+    pub credential_profile: Option<CredentialProfileName>,
+    pub workspace: WorkspaceRequirement,
+    pub sandbox: RunnerSandboxProfile,
+    pub permission_overrides: RunnerToolPermissionOverrides,
 }
 pub struct RunnerCredentialGrantLineage {
     /* public exact last-grant runner and revision */
 }
 pub struct PinnedRunnerPlacement {
-    /* public complete pinned facts, including optional grant lineage */
+    /* public complete pinned facts, including optional grant lineage, sandbox,
+       permission overrides, and provisioned-workspace recovery facts */
 }
 pub enum SessionRunnerPlacementState {
     Unpinned,
@@ -6576,6 +6777,8 @@ impl CredentialProfileGrant {
         input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
         registration: &ValidatedRunnerRegistration,
+        sandbox: RunnerSandboxProfile,
+        permission_overrides: &RunnerToolPermissionOverrides,
     ) -> Result<Self, RunnerDomainError>;
 }
 pub struct RunnerCredentialGrantChange {
@@ -7396,9 +7599,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 20                   |
+| domain: lib.rs identities                          | 21                   |
 | domain: actor                                      | 1                    |
-| domain: imported_conversation                      | 31                   |
+| domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
@@ -7425,9 +7628,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 54                   |
-| **signalbox-domain total**                         | **556 (+2 free fn)** |
-| application: conversation_import                   | 8 (incl. 3 traits)   |
+| domain: runner                                     | 63                   |
+| **signalbox-domain total**                         | **567 (+7 free fn)** |
+| application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
 | application: list_conversations                    | 8 (incl. 2 traits)   |
@@ -7437,7 +7640,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
-| application: review_workflow                       | 8 (incl. 2 traits)   |
+| application: review_workflow                       | 9 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)   |
@@ -7445,4 +7648,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **192**              |
+| **signalbox-application total**                    | **197**              |

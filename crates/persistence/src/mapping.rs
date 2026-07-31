@@ -27,6 +27,8 @@ pub(crate) enum DurableCommandKind {
     DecideToolRequest,
     /// Review-workflow command.
     ReviewWorkflow,
+    /// Review-orchestration command.
+    ReviewOrchestration,
     /// Session context compaction.
     CompactSession,
 }
@@ -43,6 +45,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::SubmitInput => "submit_input",
         DurableCommandKind::DecideToolRequest => "decide_tool_request",
         DurableCommandKind::ReviewWorkflow => "review_workflow",
+        DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
     }
 }
@@ -59,6 +62,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "submit_input" => Some(DurableCommandKind::SubmitInput),
         "decide_tool_request" => Some(DurableCommandKind::DecideToolRequest),
         "review_workflow" => Some(DurableCommandKind::ReviewWorkflow),
+        "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),
         _ => None,
     }

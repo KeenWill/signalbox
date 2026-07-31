@@ -8,6 +8,11 @@ import SwiftUI
   import SignalboxModels
 #endif
 
+let importedContinuationInProgressMessage =
+  "An imported conversation continuation is already in progress."
+let importedContinuationEndpointChangedMessage =
+  "The process service changed during continuation. Try again."
+
 @MainActor
 final class ProcessSessionListViewModel: ObservableObject {
   @Published private(set) var conversations: [SignalboxProcessConversation] = []
@@ -138,6 +143,7 @@ struct ProcessSessionsScreen: View {
   @EnvironmentObject private var coordinator: AppCoordinator
   @StateObject private var viewModel = ProcessSessionListViewModel { nil }
   @State private var selectedConversationID: String?
+  @State private var requestedLocalSessionID: SignalboxCanonicalUUID?
   @State private var showCreationSheet = false
 
   var body: some View {
@@ -171,7 +177,9 @@ struct ProcessSessionsScreen: View {
         }
         .navigationDestination(item: $selectedConversationID) { conversationID in
           if let conversation = viewModel.conversation(id: conversationID) {
-            ProcessConversationDetailScreen(conversation: conversation)
+            ProcessConversationDetailScreen(conversation: conversation) { sessionID in
+              requestedLocalSessionID = sessionID
+            }
           } else {
             EmptyStateView(
               systemImage: "questionmark.folder",
@@ -182,7 +190,12 @@ struct ProcessSessionsScreen: View {
         }
         .onChange(of: selectedConversationID) { _, selection in
           if selection == nil {
-            coordinator.selectedProcessSessionID = nil
+            if requestedLocalSessionID != nil {
+              Task {
+                await viewModel.refresh()
+                applyRequestedSelection()
+              }
+            }
           }
         }
         .task {
@@ -240,7 +253,6 @@ struct ProcessSessionsScreen: View {
         } else {
           List(viewModel.visibleConversations) { conversation in
             Button {
-              coordinator.selectedProcessSessionID = conversation.conversationID
               selectedConversationID = conversation.id
             } label: {
               ProcessConversationRow(conversation: conversation)
@@ -269,10 +281,15 @@ struct ProcessSessionsScreen: View {
 
   private func applyRequestedSelection() {
     guard selectedConversationID == nil,
-      let requested = coordinator.selectedProcessSessionID,
+      let requested = requestedLocalSessionID ?? coordinator.selectedProcessSessionID,
       let conversation = viewModel.conversation(conversationID: requested)
     else {
       return
+    }
+    if requestedLocalSessionID == requested {
+      requestedLocalSessionID = nil
+    } else if coordinator.selectedProcessSessionID == requested {
+      coordinator.selectedProcessSessionID = nil
     }
     selectedConversationID = conversation.id
   }
@@ -503,7 +520,9 @@ private struct ProcessConversationRow: View {
 
 private struct ProcessConversationDetailScreen: View {
   @EnvironmentObject private var coordinator: AppCoordinator
+  @Environment(\.dismiss) private var dismiss
   let conversation: SignalboxProcessConversation
+  let didCreateSession: (SignalboxCanonicalUUID) -> Void
   @State private var session: SignalboxProcessSession?
   @State private var errorMessage: String?
 
@@ -523,11 +542,14 @@ private struct ProcessConversationDetailScreen: View {
           ProgressView("Loading session")
         }
       case .imported:
-        UnavailableProcessCapabilityView(
-          title: conversation.displayTitle,
-          detail:
-            "Imported transcript presentation and continuation are not yet wired into this native client."
-        )
+        ProcessImportedConversationScreen(
+          conversation: conversation,
+          continuationRetryStore: coordinator.importedContinuationRetryStore
+        ) { sessionID in
+          didCreateSession(sessionID)
+          NotificationCenter.default.post(name: .refreshRequested, object: nil)
+          dismiss()
+        }
       }
     }
     .task(id: conversation.id) {
@@ -540,6 +562,702 @@ private struct ProcessConversationDetailScreen: View {
       } catch {
         errorMessage = error.localizedDescription
       }
+    }
+  }
+}
+
+final class ProcessImportedContinuationRetryConsumer {}
+
+private final class ProcessImportedContinuationWeakConsumer {
+  weak var value: ProcessImportedContinuationRetryConsumer?
+
+  init(_ value: ProcessImportedContinuationRetryConsumer) {
+    self.value = value
+  }
+
+  func matches(_ consumer: ProcessImportedContinuationRetryConsumer) -> Bool {
+    value === consumer
+  }
+}
+
+struct ProcessImportedContinuationRetryState {
+  struct Recovery: Equatable {
+    let prepared: SignalboxPreparedImportedSessionCreation
+    let resolvedSessionID: SignalboxCanonicalUUID?
+  }
+
+  private struct PendingRecovery {
+    let prepared: SignalboxPreparedImportedSessionCreation
+    var consumers: [ProcessImportedContinuationWeakConsumer]
+  }
+
+  private struct ResolvedReceipt {
+    let prepared: SignalboxPreparedImportedSessionCreation
+    let sessionID: SignalboxCanonicalUUID
+    let consumer: ProcessImportedContinuationWeakConsumer
+  }
+
+  private var pendingRecoveries: [PendingRecovery] = []
+  private var resolvedReceipts: [ResolvedReceipt] = []
+
+  mutating func recovery(
+    importedConversationID: SignalboxCanonicalUUID,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    modelSelection: SignalboxModelSelection,
+    consumer: ProcessImportedContinuationRetryConsumer
+  ) -> Recovery? {
+    pruneDeadConsumers()
+    if let receiptIndex = resolvedReceipts.firstIndex(where: {
+      Self.matchesIntent(
+        $0.prepared,
+        importedConversationID: importedConversationID,
+        throughPosition: throughPosition,
+        relationship: relationship,
+        modelSelection: modelSelection
+      ) && $0.consumer.matches(consumer)
+    }) {
+      let receipt = resolvedReceipts.remove(at: receiptIndex)
+      return Recovery(
+        prepared: receipt.prepared,
+        resolvedSessionID: receipt.sessionID
+      )
+    }
+    guard
+      let pendingIndex = pendingRecoveries.firstIndex(where: {
+        Self.matchesIntent(
+          $0.prepared,
+          importedConversationID: importedConversationID,
+          throughPosition: throughPosition,
+          relationship: relationship,
+          modelSelection: modelSelection
+        )
+      })
+    else {
+      return nil
+    }
+    if !pendingRecoveries[pendingIndex].consumers.contains(where: {
+      $0.matches(consumer)
+    }) {
+      pendingRecoveries[pendingIndex].consumers.append(
+        ProcessImportedContinuationWeakConsumer(consumer)
+      )
+    }
+    return Recovery(
+      prepared: pendingRecoveries[pendingIndex].prepared,
+      resolvedSessionID: nil
+    )
+  }
+
+  mutating func removeAll() {
+    pendingRecoveries.removeAll()
+    resolvedReceipts.removeAll()
+  }
+
+  mutating func recordSuccess(
+    _ prepared: SignalboxPreparedImportedSessionCreation,
+    sessionID: SignalboxCanonicalUUID,
+    consumer: ProcessImportedContinuationRetryConsumer
+  ) {
+    pruneDeadConsumers()
+    guard
+      let pendingIndex = pendingRecoveries.firstIndex(where: {
+        Self.matchesIntent($0.prepared, prepared)
+      })
+    else {
+      return
+    }
+    let pending = pendingRecoveries.remove(at: pendingIndex)
+    for waitingConsumer in pending.consumers {
+      guard let waitingValue = waitingConsumer.value, waitingValue !== consumer else {
+        continue
+      }
+      resolvedReceipts.removeAll {
+        Self.matchesIntent($0.prepared, prepared)
+          && $0.consumer.matches(waitingValue)
+      }
+      resolvedReceipts.append(
+        ResolvedReceipt(
+          prepared: prepared,
+          sessionID: sessionID,
+          consumer: waitingConsumer
+        )
+      )
+    }
+  }
+
+  mutating func recordFailure(
+    _ error: Error,
+    prepared: SignalboxPreparedImportedSessionCreation?,
+    reusedUnresolvedCreation: Bool,
+    consumer: ProcessImportedContinuationRetryConsumer
+  ) {
+    let retainsPreparedCreation: Bool
+    if error is CancellationError {
+      retainsPreparedCreation = true
+    } else if let serviceError = error as? SignalboxProcessServiceError {
+      retainsPreparedCreation = serviceError.retainsPreparedImportedSessionCreation
+    } else if let openError = error as? SignalboxProcessRequestOpenError {
+      retainsPreparedCreation = openError.retainsPreparedImportedSessionCreation(
+        whenReused: reusedUnresolvedCreation
+      )
+    } else {
+      retainsPreparedCreation = false
+    }
+    guard let prepared else {
+      return
+    }
+    pruneDeadConsumers()
+    let pendingIndex = pendingRecoveries.firstIndex {
+      Self.matchesIntent($0.prepared, prepared)
+    }
+    guard retainsPreparedCreation else {
+      if let pendingIndex {
+        pendingRecoveries.remove(at: pendingIndex)
+      }
+      return
+    }
+    if let pendingIndex {
+      if !pendingRecoveries[pendingIndex].consumers.contains(where: {
+        $0.matches(consumer)
+      }) {
+        pendingRecoveries[pendingIndex].consumers.append(
+          ProcessImportedContinuationWeakConsumer(consumer)
+        )
+      }
+    } else {
+      pendingRecoveries.append(
+        PendingRecovery(
+          prepared: prepared,
+          consumers: [ProcessImportedContinuationWeakConsumer(consumer)]
+        )
+      )
+    }
+  }
+
+  private mutating func pruneDeadConsumers() {
+    for index in pendingRecoveries.indices {
+      pendingRecoveries[index].consumers.removeAll { $0.value == nil }
+    }
+    resolvedReceipts.removeAll { $0.consumer.value == nil }
+  }
+
+  private static func matchesIntent(
+    _ candidate: SignalboxPreparedImportedSessionCreation,
+    _ requested: SignalboxPreparedImportedSessionCreation
+  ) -> Bool {
+    matchesIntent(
+      candidate,
+      importedConversationID: requested.importedConversationID,
+      throughPosition: requested.throughPosition,
+      relationship: requested.relationship,
+      modelSelection: requested.modelSelection
+    )
+  }
+
+  private static func matchesIntent(
+    _ candidate: SignalboxPreparedImportedSessionCreation,
+    importedConversationID: SignalboxCanonicalUUID,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    modelSelection: SignalboxModelSelection
+  ) -> Bool {
+    candidate.importedConversationID == importedConversationID
+      && candidate.throughPosition == throughPosition
+      && candidate.relationship == relationship
+      && candidate.modelSelection == modelSelection
+  }
+}
+
+@MainActor
+final class ProcessImportedContinuationRetryStore {
+  private var state = ProcessImportedContinuationRetryState()
+  private var endpoint: String?
+  private var endpointGeneration: UInt64 = 0
+  private var activeAttemptGeneration: UInt64?
+
+  func activateEndpoint(_ endpoint: String?) {
+    guard self.endpoint != endpoint else {
+      return
+    }
+    self.endpoint = endpoint
+    endpointGeneration &+= 1
+    state.removeAll()
+  }
+
+  func beginAttempt() -> UInt64? {
+    guard activeAttemptGeneration != endpointGeneration else {
+      return nil
+    }
+    activeAttemptGeneration = endpointGeneration
+    return endpointGeneration
+  }
+
+  func endAttempt(endpointGeneration: UInt64) {
+    guard activeAttemptGeneration == endpointGeneration else {
+      return
+    }
+    activeAttemptGeneration = nil
+  }
+
+  func recovery(
+    importedConversationID: SignalboxCanonicalUUID,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    modelSelection: SignalboxModelSelection,
+    consumer: ProcessImportedContinuationRetryConsumer
+  ) -> ProcessImportedContinuationRetryState.Recovery? {
+    state.recovery(
+      importedConversationID: importedConversationID,
+      throughPosition: throughPosition,
+      relationship: relationship,
+      modelSelection: modelSelection,
+      consumer: consumer
+    )
+  }
+
+  func recordSuccess(
+    _ prepared: SignalboxPreparedImportedSessionCreation,
+    sessionID: SignalboxCanonicalUUID,
+    consumer: ProcessImportedContinuationRetryConsumer,
+    endpointGeneration: UInt64
+  ) -> Bool {
+    guard endpointGeneration == self.endpointGeneration else {
+      return false
+    }
+    state.recordSuccess(prepared, sessionID: sessionID, consumer: consumer)
+    return true
+  }
+
+  func recordFailure(
+    _ error: Error,
+    prepared: SignalboxPreparedImportedSessionCreation?,
+    reusedUnresolvedCreation: Bool,
+    consumer: ProcessImportedContinuationRetryConsumer,
+    endpointGeneration: UInt64
+  ) {
+    guard endpointGeneration == self.endpointGeneration else {
+      return
+    }
+    state.recordFailure(
+      error,
+      prepared: prepared,
+      reusedUnresolvedCreation: reusedUnresolvedCreation,
+      consumer: consumer
+    )
+  }
+}
+
+private extension SignalboxProcessServiceError {
+  var retainsPreparedImportedSessionCreation: Bool {
+    switch self {
+    case .mutationRetryExhausted:
+      return true
+    case .unexpectedMessage, .invalidPage, .deadlineExceeded, .remote:
+      return false
+    }
+  }
+}
+
+private extension SignalboxProcessRequestOpenError {
+  func retainsPreparedImportedSessionCreation(whenReused: Bool) -> Bool {
+    switch self {
+    case .definitelyUnsent:
+      return whenReused
+    case .sendOutcomeUnknown:
+      return true
+    }
+  }
+}
+
+@MainActor
+final class ProcessImportedConversationViewModel: ObservableObject {
+  @Published private(set) var transcript: SignalboxImportedConversationTranscript?
+  @Published private(set) var aliases: [SignalboxModelAliasSummary] = []
+  @Published private(set) var isLoading = false
+  @Published private(set) var isContinuing = false
+  @Published var errorMessage: String?
+
+  private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
+  private var generation: UInt64 = 0
+  private let continuationRetryStore: ProcessImportedContinuationRetryStore
+  private let continuationConsumer: ProcessImportedContinuationRetryConsumer
+
+  init(serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?) {
+    self.serviceProvider = serviceProvider
+    continuationRetryStore = ProcessImportedContinuationRetryStore()
+    continuationConsumer = ProcessImportedContinuationRetryConsumer()
+  }
+
+  init(
+    serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?,
+    continuationRetryStore: ProcessImportedContinuationRetryStore,
+    continuationConsumer: ProcessImportedContinuationRetryConsumer =
+      ProcessImportedContinuationRetryConsumer()
+  ) {
+    self.serviceProvider = serviceProvider
+    self.continuationRetryStore = continuationRetryStore
+    self.continuationConsumer = continuationConsumer
+  }
+
+  func replaceServiceProvider(
+    _ provider: @escaping () -> (any SignalboxProcessServiceProtocol)?
+  ) {
+    serviceProvider = provider
+    generation &+= 1
+    transcript = nil
+    aliases = []
+    isLoading = false
+    isContinuing = false
+    errorMessage = nil
+  }
+
+  func load(conversation: SignalboxProcessConversation) async {
+    let activeGeneration = generation
+    guard let service = serviceProvider() else {
+      errorMessage = remoteTransportGateMessage
+      return
+    }
+    isLoading = true
+    defer {
+      if generation == activeGeneration {
+        isLoading = false
+      }
+    }
+    do {
+      let transcript = try await service.readImportedConversation(conversation: conversation)
+      guard generation == activeGeneration else {
+        return
+      }
+      self.transcript = transcript
+      errorMessage = nil
+    } catch {
+      guard generation == activeGeneration else {
+        return
+      }
+      errorMessage = error.localizedDescription
+      return
+    }
+    do {
+      let aliases = try await service.listModelAliases()
+      guard generation == activeGeneration else {
+        return
+      }
+      self.aliases = aliases
+      errorMessage = nil
+    } catch {
+      guard generation == activeGeneration else {
+        return
+      }
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  func continueConversation(
+    conversation: SignalboxProcessConversation,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    aliasID: SignalboxCanonicalUUID
+  ) async throws -> SignalboxCanonicalUUID {
+    guard !isContinuing else {
+      let error = SignalboxProcessServiceError.unexpectedMessage(
+        importedContinuationInProgressMessage
+      )
+      errorMessage = error.localizedDescription
+      throw error
+    }
+    guard let retryEndpointGeneration = continuationRetryStore.beginAttempt() else {
+      let error = SignalboxProcessServiceError.unexpectedMessage(
+        importedContinuationInProgressMessage
+      )
+      errorMessage = error.localizedDescription
+      throw error
+    }
+    defer {
+      continuationRetryStore.endAttempt(endpointGeneration: retryEndpointGeneration)
+    }
+    isContinuing = true
+    defer {
+      isContinuing = false
+    }
+    let selection = SignalboxModelSelection.alias(aliasID: aliasID)
+    let recovery = continuationRetryStore.recovery(
+      importedConversationID: conversation.conversationID,
+      throughPosition: throughPosition,
+      relationship: relationship,
+      modelSelection: selection,
+      consumer: continuationConsumer
+    )
+    if let resolvedSessionID = recovery?.resolvedSessionID {
+      errorMessage = nil
+      return resolvedSessionID
+    }
+    guard let service = serviceProvider() else {
+      errorMessage = remoteTransportGateMessage
+      throw SignalboxProcessServiceError.unexpectedMessage(remoteTransportGateMessage)
+    }
+    var preparedForAttempt: SignalboxPreparedImportedSessionCreation?
+    var reusedUnresolvedCreation = false
+    do {
+      let prepared: SignalboxPreparedImportedSessionCreation
+      if let recovery {
+        prepared = recovery.prepared
+        reusedUnresolvedCreation = true
+      } else {
+        prepared = try await service.prepareImportedSessionCreation(
+          conversation: conversation,
+          throughPosition: throughPosition,
+          relationship: relationship,
+          modelSelection: selection
+        )
+      }
+      preparedForAttempt = prepared
+      let sessionID = try await service.createSessionFromImportedFrontier(prepared)
+      guard
+        continuationRetryStore.recordSuccess(
+          prepared,
+          sessionID: sessionID,
+          consumer: continuationConsumer,
+          endpointGeneration: retryEndpointGeneration
+        )
+      else {
+        throw SignalboxProcessServiceError.unexpectedMessage(
+          importedContinuationEndpointChangedMessage
+        )
+      }
+      errorMessage = nil
+      return sessionID
+    } catch {
+      continuationRetryStore.recordFailure(
+        error,
+        prepared: preparedForAttempt,
+        reusedUnresolvedCreation: reusedUnresolvedCreation,
+        consumer: continuationConsumer,
+        endpointGeneration: retryEndpointGeneration
+      )
+      errorMessage = error.localizedDescription
+      throw error
+    }
+  }
+}
+
+private struct ProcessImportedConversationScreen: View {
+  @EnvironmentObject private var coordinator: AppCoordinator
+  let conversation: SignalboxProcessConversation
+  let didContinue: (SignalboxCanonicalUUID) -> Void
+  @StateObject private var viewModel = ProcessImportedConversationViewModel { nil }
+  @State private var selectedPosition: SignalboxCanonicalUInt64?
+  @State private var showContinuationSheet = false
+
+  init(
+    conversation: SignalboxProcessConversation,
+    continuationRetryStore: ProcessImportedContinuationRetryStore,
+    didContinue: @escaping (SignalboxCanonicalUUID) -> Void
+  ) {
+    self.conversation = conversation
+    self.didContinue = didContinue
+    _viewModel = StateObject(
+      wrappedValue: ProcessImportedConversationViewModel(
+        serviceProvider: { nil },
+        continuationRetryStore: continuationRetryStore
+      )
+    )
+  }
+
+  var body: some View {
+    Group {
+      if let transcript = viewModel.transcript {
+        List {
+          Section {
+            LabeledContent("Source", value: sourceFormatLabel)
+            LabeledContent("Entries", value: "\(transcript.entryCount.rawValue)")
+          }
+          if let errorMessage = viewModel.errorMessage {
+            Section {
+              Text(errorMessage)
+                .foregroundStyle(.red)
+                .textSelection(.enabled)
+            }
+          } else if viewModel.aliases.isEmpty, !viewModel.isLoading {
+            Section {
+              Text("The daemon configuration contains no model aliases for continuation.")
+                .foregroundStyle(.secondary)
+            }
+          }
+          Section("Read-only transcript") {
+            ForEach(transcript.entries) { entry in
+              Button {
+                selectedPosition = entry.position
+              } label: {
+                importedEntryRow(entry)
+              }
+              .buttonStyle(.plain)
+              .accessibilityIdentifier("imported-entry-\(entry.position.rawValue)")
+            }
+          }
+        }
+        .accessibilityIdentifier("imported-transcript-list")
+      } else if let errorMessage = viewModel.errorMessage, !viewModel.isLoading {
+        EmptyStateView(
+          systemImage: "exclamationmark.triangle",
+          title: "Imported transcript unavailable",
+          message: errorMessage
+        )
+      } else {
+        ProgressView("Loading imported transcript")
+      }
+    }
+    .navigationTitle(conversation.displayTitle)
+    .toolbar {
+      ToolbarItem(placement: .primaryAction) {
+        Button("Continue") {
+          showContinuationSheet = true
+        }
+        .disabled(
+          selectedPosition == nil || viewModel.aliases.isEmpty || viewModel.isContinuing
+        )
+        .accessibilityIdentifier("continue-imported-conversation-button")
+      }
+    }
+    .sheet(isPresented: $showContinuationSheet) {
+      if let selectedPosition {
+        ProcessImportedContinuationSheet(
+          conversation: conversation,
+          throughPosition: selectedPosition,
+          viewModel: viewModel
+        ) { sessionID in
+          showContinuationSheet = false
+          didContinue(sessionID)
+        }
+      }
+    }
+    .task(id: conversation.id) {
+      viewModel.replaceServiceProvider { coordinator.processService }
+      await viewModel.load(conversation: conversation)
+      selectedPosition = viewModel.transcript?.entries.last?.position
+    }
+  }
+
+  private var sourceFormatLabel: String {
+    switch conversation.importedSourceFormat {
+    case .claudeCodeSessionJSONLV1:
+      "Claude Code JSONL v1"
+    case .claudeCodeSessionJSONLV2:
+      "Claude Code JSONL v2"
+    case .codexRolloutJSONLV1:
+      "Codex rollout JSONL v1"
+    case nil:
+      "Unknown"
+    }
+  }
+
+  @ViewBuilder
+  private func importedEntryRow(_ entry: SignalboxImportedConversationEntry) -> some View {
+    HStack(alignment: .top, spacing: 12) {
+      Image(
+        systemName: selectedPosition == entry.position
+          ? "checkmark.circle.fill" : "circle"
+      )
+      .foregroundStyle(selectedPosition == entry.position ? Color.accentColor : Color.secondary)
+      VStack(alignment: .leading, spacing: 5) {
+        HStack {
+          Text("#\(entry.position.rawValue)")
+            .font(.caption.monospacedDigit().weight(.semibold))
+          Text(entry.sourceSpeakerLabel)
+            .font(.caption)
+          Spacer()
+          Text(entry.contentKindLabel)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        if let preview = entry.textPreview {
+          Text(preview.preview)
+            .textSelection(.enabled)
+          if preview.truncated {
+            Text("Preview truncated")
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+          }
+        } else {
+          Text("No text preview")
+            .foregroundStyle(.secondary)
+        }
+      }
+    }
+    .contentShape(Rectangle())
+  }
+}
+
+private struct ProcessImportedContinuationSheet: View {
+  @Environment(\.dismiss) private var dismiss
+  let conversation: SignalboxProcessConversation
+  let throughPosition: SignalboxCanonicalUInt64
+  @ObservedObject var viewModel: ProcessImportedConversationViewModel
+  let didContinue: (SignalboxCanonicalUUID) -> Void
+  @State private var relationship = SignalboxImportedSessionRelationship.resume
+  @State private var selectedAliasID: SignalboxCanonicalUUID?
+
+  var body: some View {
+    NavigationStack {
+      Form {
+        LabeledContent("Through entry", value: "\(throughPosition.rawValue)")
+        Picker("Relationship", selection: $relationship) {
+          Text("Resume").tag(SignalboxImportedSessionRelationship.resume)
+          Text("Fork").tag(SignalboxImportedSessionRelationship.fork)
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("imported-relationship-picker")
+        Picker("Model alias", selection: $selectedAliasID) {
+          ForEach(viewModel.aliases) { alias in
+            Text("\(alias.aliasID.rawValue) → \(alias.selectionID.rawValue.prefix(8))")
+              .tag(Optional(alias.aliasID))
+          }
+        }
+        .accessibilityIdentifier("imported-model-alias-picker")
+        if let errorMessage = viewModel.errorMessage {
+          Text(errorMessage)
+            .foregroundStyle(.red)
+            .textSelection(.enabled)
+        }
+      }
+      .navigationTitle("Continue Import")
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Cancel") {
+            dismiss()
+          }
+          .disabled(viewModel.isContinuing)
+        }
+        ToolbarItem(placement: .confirmationAction) {
+          Button("Continue") {
+            Task { await continueConversation() }
+          }
+          .disabled(selectedAliasID == nil || viewModel.isContinuing)
+          .accessibilityIdentifier("confirm-imported-continuation-button")
+        }
+      }
+      .task {
+        selectedAliasID = viewModel.aliases.first?.aliasID
+      }
+    }
+    .frame(minWidth: 520, minHeight: 320)
+    .interactiveDismissDisabled(viewModel.isContinuing)
+  }
+
+  private func continueConversation() async {
+    guard let selectedAliasID else {
+      return
+    }
+    do {
+      let sessionID = try await viewModel.continueConversation(
+        conversation: conversation,
+        throughPosition: throughPosition,
+        relationship: relationship,
+        aliasID: selectedAliasID
+      )
+      didContinue(sessionID)
+    } catch {
+      // The view model publishes the actionable failure inside the sheet.
     }
   }
 }

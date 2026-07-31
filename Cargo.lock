@@ -2869,6 +2869,8 @@ dependencies = [
  "clap",
  "expect-test",
  "rustix",
+ "serde",
+ "serde_json",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
@@ -3047,6 +3049,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-runner-wire"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "signalbox-domain",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-tool-contract"
 version = "0.0.0"
 dependencies = [
@@ -3111,6 +3124,22 @@ dependencies = [
  "signalbox-tool-contract",
  "signalbox-tools-basic",
  "tokio",
+]
+
+[[package]]
+name = "signalbox-tools-workspace"
+version = "0.0.0"
+dependencies = [
+ "glob",
+ "regex",
+ "rustix",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-tool-contract",
+ "tempfile",
 ]
 
 [[package]]

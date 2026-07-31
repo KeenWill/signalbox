@@ -66,6 +66,7 @@ const CODEX_SMOKE_WORKFLOW: &str = include_str!("../../../.github/workflows/code
 const LOGIN_TIMEOUT_INVOCATION: &str =
     "env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s";
 const LOGIN_TERM_HOLD_COMMAND: &str = r#"trap "while :; do sleep 1; done" TERM; "$@""#;
+#[cfg(target_os = "linux")]
 const LOGIN_TIMEOUT_DESCENDANT_FIXTURE: &str = r#"#!/bin/sh
 pid_file=$1
 sh -c 'trap "" TERM; printf "%s\n" "$$" > "$1"; while :; do sleep 1; done' sh "$pid_file" &

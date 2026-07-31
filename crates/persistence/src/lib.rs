@@ -18,6 +18,7 @@ pub mod model_execution;
 pub mod outbox;
 pub mod process_read;
 pub mod replace_session_defaults;
+pub mod review_orchestration;
 pub mod review_workflow;
 mod review_workflow_command;
 pub mod runner_protocol;
