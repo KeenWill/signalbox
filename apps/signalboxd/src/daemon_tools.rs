@@ -390,6 +390,13 @@ mod tests {
         }
     }
 
+    fn definition_names(definitions: &[ToolDefinition]) -> Vec<&str> {
+        definitions
+            .iter()
+            .map(|definition| definition.name().as_str())
+            .collect()
+    }
+
     /// The merged process-lifetime catalog exposes every daemon declaration in
     /// deterministic name order.
     #[test]
@@ -406,10 +413,7 @@ mod tests {
         .into_parts();
 
         let definitions = catalog.definitions();
-        let names: Vec<&str> = definitions
-            .iter()
-            .map(|definition| definition.name().as_str())
-            .collect();
+        let names = definition_names(&definitions);
 
         assert_eq!(
             names,
