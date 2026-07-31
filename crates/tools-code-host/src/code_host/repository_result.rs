@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 
 use super::arguments::{CodeHostFilePath, CodeHostRepository, CodeHostRevision};
 use super::result::{
-    CodeHostResultCompleteness, MAX_RESULT_ITEMS, MAX_RESULT_TEXT_BYTES, valid_text,
+    CodeHostResultCompleteness, MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, MAX_RESULT_TEXT_BYTES,
+    valid_text,
 };
 use super::{RepositoryLineRange, RepositoryListDirectoryArguments, RepositoryReadFileArguments};
 
@@ -170,6 +171,16 @@ impl RepositoryReadFileResult {
                 CodeHostResultCompleteness::Truncated => fields.source_bytes > returned_bytes,
             },
         };
+        let complete_first_line_consistent = match (
+            requested_start_line,
+            fields.completeness,
+            fields.content.is_empty() || fields.content.ends_with('\n'),
+        ) {
+            (Some(1), CodeHostResultCompleteness::Complete, false) => {
+                fields.source_bytes == returned_bytes
+            }
+            _ => true,
+        };
         let last_line_complete = fields.content.is_empty()
             || fields.content.ends_with('\n')
             || fields.completeness == CodeHostResultCompleteness::Complete;
@@ -178,6 +189,7 @@ impl RepositoryReadFileResult {
             && valid_text(&fields.content)
             && fields.content.len() <= MAX_REPOSITORY_FILE_CONTENT_BYTES
             && source_bytes_consistent
+            && complete_first_line_consistent
             && source_within_scan_limit
             && fields.last_line_complete == last_line_complete)
             .then_some(Self {
@@ -221,12 +233,14 @@ impl RepositoryReadFileResult {
     }
 
     /// Records that the exact blob is not UTF-8 text.
-    pub fn binary(arguments: &RepositoryReadFileArguments, source_bytes: u64) -> Self {
-        Self {
+    pub fn try_binary(arguments: &RepositoryReadFileArguments, source_bytes: u64) -> Option<Self> {
+        let source_within_scan_limit = arguments.line_range().is_none()
+            || source_bytes <= u64::try_from(MAX_REPOSITORY_FILE_SCAN_BYTES).ok()?;
+        source_within_scan_limit.then_some(Self {
             identity: RepositoryObjectIdentity::from_file_arguments(arguments),
             requested_line_range: arguments.line_range(),
             outcome: RepositoryFileOutcome::Binary { source_bytes },
-        }
+        })
     }
 
     /// Records that bounded transport cannot inspect enough source to select
@@ -402,6 +416,17 @@ impl RepositoryListDirectoryResult {
         observed_entries: usize,
         completeness: CodeHostResultCompleteness,
     ) -> Option<Self> {
+        let result =
+            Self::try_entries_candidate(arguments, entries, observed_entries, completeness)?;
+        (result.encoded_len()? <= MAX_ENCODED_RESULT_BYTES).then_some(result)
+    }
+
+    fn try_entries_candidate(
+        arguments: &RepositoryListDirectoryArguments,
+        entries: Vec<RepositoryDirectoryEntry>,
+        observed_entries: usize,
+        completeness: CodeHostResultCompleteness,
+    ) -> Option<Self> {
         let count_consistent = match completeness {
             CodeHostResultCompleteness::Complete => observed_entries == entries.len(),
             CodeHostResultCompleteness::Truncated => observed_entries >= entries.len(),
@@ -419,6 +444,16 @@ impl RepositoryListDirectoryResult {
                     completeness,
                 },
             })
+    }
+
+    pub(super) fn entries_encoded_len(
+        arguments: &RepositoryListDirectoryArguments,
+        entries: Vec<RepositoryDirectoryEntry>,
+        observed_entries: usize,
+        completeness: CodeHostResultCompleteness,
+    ) -> Option<usize> {
+        Self::try_entries_candidate(arguments, entries, observed_entries, completeness)?
+            .encoded_len()
     }
 
     /// Records that the requested path was absent at the exact revision.
@@ -566,6 +601,34 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// A complete first-line selection without a newline contains every source byte.
+    #[test]
+    fn ranged_content_rejects_an_incomplete_first_line_marked_complete() {
+        const SOURCE: &str = "partial and omitted";
+        const RETURNED_CONTENT: &str = "partial";
+        const REQUESTED_LINE: u32 = 1;
+        let source_bytes = u64::try_from(SOURCE.len()).expect("fixture source size fits u64");
+        let arguments = file_arguments(
+            "src/lib.rs",
+            REVISION,
+            Some(json!({"end": REQUESTED_LINE, "start": REQUESTED_LINE})),
+        );
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: Some(REQUESTED_LINE),
+                end_line: Some(REQUESTED_LINE),
+                returned_lines: 1,
+                last_line_complete: true,
+                content: String::from(RETURNED_CONTENT),
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        );
+
+        assert!(result.is_none());
+    }
+
     /// A selection beginning at the first line cannot be empty when exact source
     /// metadata proves that the blob is nonempty.
     #[test]
@@ -653,6 +716,22 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// A ranged binary result cannot claim that an oversized blob was inspected.
+    #[test]
+    fn ranged_binary_rejects_a_source_above_the_scan_limit() {
+        const REQUESTED_LINE: u32 = 1;
+        let source_bytes = u64::try_from(MAX_REPOSITORY_FILE_SCAN_BYTES + 1)
+            .expect("fixture source size fits u64");
+        let arguments = file_arguments(
+            "assets/image.bin",
+            REVISION,
+            Some(json!({"end": REQUESTED_LINE, "start": REQUESTED_LINE})),
+        );
+        let result = RepositoryReadFileResult::try_binary(&arguments, source_bytes);
+
+        assert!(result.is_none());
+    }
+
     /// A complete whole-file result contains every byte reported by its source
     /// metadata before evidence scrubbing changes the emitted byte count.
     #[test]
@@ -690,6 +769,26 @@ mod tests {
         let entries = vec![entry];
         let observed_entries = entries.len();
         let arguments = directory_arguments("src");
+        let result = RepositoryListDirectoryResult::try_entries(
+            &arguments,
+            entries,
+            observed_entries,
+            CodeHostResultCompleteness::Complete,
+        );
+
+        assert!(result.is_none());
+    }
+
+    /// A typed directory result cannot exceed the encoded tool-result bound.
+    #[test]
+    fn directory_entries_reject_an_oversized_encoded_result() {
+        let escaped_path = "\u{0001}".repeat(crate::code_host::arguments::MAX_FILE_PATH_BYTES);
+        let entry =
+            RepositoryDirectoryEntry::try_new(escaped_path, RepositoryObjectKind::File, None)
+                .expect("fixture entry path is admitted");
+        let entries = vec![entry; MAX_RESULT_ITEMS];
+        let observed_entries = entries.len();
+        let arguments = directory_arguments(".");
         let result = RepositoryListDirectoryResult::try_entries(
             &arguments,
             entries,

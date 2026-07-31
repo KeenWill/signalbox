@@ -403,15 +403,29 @@ impl CodeHostOperation {
     }
 
     fn accepts_repository_result(&self, result: &CodeHostResult) -> bool {
-        match (self, result) {
-            (Self::ReadFile(arguments), CodeHostResult::ReadFile(result)) => {
-                result.matches(arguments)
-            }
-            (Self::ListDirectory(arguments), CodeHostResult::ListDirectory(result)) => {
-                result.matches(arguments)
-            }
-            (Self::ReadFile(_) | Self::ListDirectory(_), _) => false,
-            _ => true,
+        match self {
+            Self::ReadFile(arguments) => match result {
+                CodeHostResult::ReadFile(result) => result.matches(arguments),
+                _ => false,
+            },
+            Self::ListDirectory(arguments) => match result {
+                CodeHostResult::ListDirectory(result) => result.matches(arguments),
+                _ => false,
+            },
+            Self::Summary(_)
+            | Self::ChangedFiles(_)
+            | Self::FilePatch(_)
+            | Self::ChecksStatus(_)
+            | Self::Comment(_)
+            | Self::ConvergenceState(_)
+            | Self::ReviewThreads(_)
+            | Self::StackState(_)
+            | Self::ThreadInventory(_)
+            | Self::ThreadReply(_)
+            | Self::ThreadResolve(_)
+            | Self::CiJobLog(_)
+            | Self::RerunFailedJobs(_)
+            | Self::ReviewGateCheck(_) => true,
         }
     }
 }

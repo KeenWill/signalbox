@@ -362,7 +362,7 @@ impl GitHubCodeHostTransport {
                             )
                         }
                         RepositoryFileBodyKind::Binary => {
-                            Some(RepositoryReadFileResult::binary(&arguments, source_bytes))
+                            RepositoryReadFileResult::try_binary(&arguments, source_bytes)
                         }
                     }
                 }
@@ -1625,14 +1625,19 @@ fn bounded_repository_directory_result(
         CodeHostResultCompleteness::Complete
     };
     loop {
-        let result = RepositoryListDirectoryResult::try_entries(
+        let encoded_len = RepositoryListDirectoryResult::entries_encoded_len(
             arguments,
             entries.clone(),
             observed_entries,
             completeness,
         )?;
-        if result.encoded_len()? <= MAX_ENCODED_RESULT_BYTES {
-            return Some(result);
+        if encoded_len <= MAX_ENCODED_RESULT_BYTES {
+            return RepositoryListDirectoryResult::try_entries(
+                arguments,
+                entries,
+                observed_entries,
+                completeness,
+            );
         }
         entries.pop()?;
         completeness = CodeHostResultCompleteness::Truncated;
