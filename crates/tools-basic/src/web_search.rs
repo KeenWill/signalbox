@@ -584,33 +584,6 @@ impl Error for WebSearchTransportFailure {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WebSearchTransportFailureClass {
-    InvalidCredential,
-    CredentialDiagnosticCollision,
-    RequestFailed,
-    ProviderRejected,
-    InvalidResponse,
-    ResponseTooLarge,
-    DispatchUnknown,
-}
-
-impl WebSearchTransportFailure {
-    const fn class(&self) -> WebSearchTransportFailureClass {
-        match self {
-            Self::InvalidCredential => WebSearchTransportFailureClass::InvalidCredential,
-            Self::CredentialDiagnosticCollision(_) => {
-                WebSearchTransportFailureClass::CredentialDiagnosticCollision
-            }
-            Self::RequestFailed => WebSearchTransportFailureClass::RequestFailed,
-            Self::ProviderRejected(_) => WebSearchTransportFailureClass::ProviderRejected,
-            Self::InvalidResponse => WebSearchTransportFailureClass::InvalidResponse,
-            Self::ResponseTooLarge => WebSearchTransportFailureClass::ResponseTooLarge,
-            Self::DispatchUnknown => WebSearchTransportFailureClass::DispatchUnknown,
-        }
-    }
-}
-
 /// Credential-sanitized result of one injected transport request.
 pub struct WebSearchTransportOutcome {
     result: Result<WebSearchResponse, WebSearchTransportFailure>,
@@ -1102,7 +1075,7 @@ where
         &mut self,
         request: WebSearchRequest,
         correlation: &ToolAttemptDispatchCorrelation,
-    ) -> Result<WebSearchRequestEvidence, WebSearchExecutorError> {
+    ) -> WebSearchRequestOutcome {
         let credential = match self
             .credentials
             .resolve(&self.configuration.credential_reference)
@@ -1111,16 +1084,16 @@ where
             Ok(credential) => credential,
             Err(error) => {
                 report_credential_access_failure(&error, correlation);
-                return Ok(WebSearchRequestEvidence::Uncredentialed(
-                    ToolExecutorEvidence::KnownFailed {
+                return WebSearchRequestOutcome::Evidence(
+                    WebSearchRequestEvidence::Uncredentialed(ToolExecutorEvidence::KnownFailed {
                         detail: Some(self.credential_unavailable_detail.clone()),
-                    },
-                ));
+                    }),
+                );
             }
         };
         let Some(scrubber) = CredentialScrubber::try_new(&credential) else {
             report_credential_value_failure(correlation);
-            return Ok(WebSearchRequestEvidence::Uncredentialed(
+            return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Uncredentialed(
                 ToolExecutorEvidence::KnownFailed {
                     detail: Some(self.credential_unavailable_detail.clone()),
                 },
@@ -1131,11 +1104,6 @@ where
             .search(request, &credential)
             .await
             .into_result();
-        match &transport_result {
-            Ok(_) => {}
-            Err(failure) => report_transport_failure(failure, correlation, &credential)
-                .map_err(|error| credential_safe_executor_error(error, &credential))?,
-        }
         let outcome = match transport_result {
             Ok(response) => success_evidence(response, &scrubber),
             Err(WebSearchTransportFailure::InvalidCredential) => {
@@ -1170,12 +1138,36 @@ where
                 Err(WebSearchExecutorError::DispatchUnknown)
             }
         };
-        let evidence =
-            outcome.map_err(|error| credential_safe_executor_error(error, &credential))?;
-        Ok(WebSearchRequestEvidence::Credentialed {
-            evidence,
-            credential,
-        })
+        match outcome {
+            Ok(evidence) => {
+                WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Credentialed {
+                    evidence,
+                    credential,
+                })
+            }
+            Err(error) => WebSearchRequestOutcome::Error {
+                error: credential_safe_executor_error(error, &credential),
+                credential,
+            },
+        }
+    }
+}
+
+enum WebSearchRequestOutcome {
+    Evidence(WebSearchRequestEvidence),
+    Error {
+        error: WebSearchExecutorError,
+        credential: CredentialValue,
+    },
+}
+
+#[cfg(test)]
+impl WebSearchRequestOutcome {
+    fn into_result(self) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
+        match self {
+            Self::Evidence(evidence) => Ok(evidence.into_evidence()),
+            Self::Error { error, .. } => Err(error),
+        }
     }
 }
 
@@ -1206,11 +1198,37 @@ impl WebSearchRequestEvidence {
     }
 }
 
-fn bind_request_evidence(
+fn bind_request_outcome(
     invocation: ToolExecutionInvocation,
-    outcome: WebSearchRequestEvidence,
+    outcome: WebSearchRequestOutcome,
 ) -> Result<CorrelatedToolExecutorEvidence, WebSearchExecutorError> {
-    let (evidence, credential) = match outcome {
+    let evidence = match outcome {
+        WebSearchRequestOutcome::Evidence(evidence) => evidence,
+        WebSearchRequestOutcome::Error { error, credential } => {
+            let credential_text =
+                std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+            let rendered_result = format!(
+                "{:?}",
+                Result::<&CorrelatedToolExecutorEvidence, _>::Err(&error)
+            );
+            if !credential_text.is_empty() && !rendered_result.contains(credential_text) {
+                return Err(error);
+            }
+            let fallback = invocation.bind(ToolExecutorEvidence::KnownFailed { detail: None });
+            let rendered_fallback =
+                format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&fallback));
+            if !credential_text.is_empty() && !rendered_fallback.contains(credential_text) {
+                return Ok(fallback);
+            }
+            return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+                WebSearchCredentialDiagnostic {
+                    rendered: safe_collision_diagnostic(credential_text),
+                    failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                },
+            ));
+        }
+    };
+    let (evidence, credential) = match evidence {
         WebSearchRequestEvidence::Uncredentialed(evidence) => (evidence, None),
         WebSearchRequestEvidence::Credentialed {
             evidence,
@@ -1251,8 +1269,8 @@ where
         )
         .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)?;
         let correlation = invocation.correlation();
-        let evidence = self.execute_request(request, &correlation).await?;
-        bind_request_evidence(invocation, evidence)
+        let outcome = self.execute_request(request, &correlation).await;
+        bind_request_outcome(invocation, outcome)
     }
 }
 
@@ -1282,38 +1300,6 @@ fn report_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation)
         turn_id = %correlation.turn().as_uuid(),
         "web search credential value was unusable"
     );
-}
-
-fn report_transport_failure(
-    failure: &WebSearchTransportFailure,
-    correlation: &ToolAttemptDispatchCorrelation,
-    credential: &CredentialValue,
-) -> Result<(), WebSearchExecutorError> {
-    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-    let controlled_event = format!(
-        "WARN turn_work: signalbox_tools_basic_web_search: web search transport failed failure={:?} session_id={} turn_id={}",
-        failure.class(),
-        correlation.session().as_uuid(),
-        correlation.turn().as_uuid()
-    );
-    if credential_text.is_empty() || controlled_event.contains(credential_text) {
-        return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
-            WebSearchCredentialDiagnostic {
-                rendered: safe_collision_diagnostic(credential_text),
-                failure_class: transport_failure_diagnostic_class(failure),
-            },
-        ));
-    }
-    tracing::event!(
-        target: "signalbox_tools_basic_web_search",
-        parent: None,
-        tracing::Level::WARN,
-        failure = ?failure.class(),
-        session_id = %correlation.session().as_uuid(),
-        turn_id = %correlation.turn().as_uuid(),
-        "web search transport failed"
-    );
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1500,12 +1486,8 @@ impl CredentialScrubber {
         let Some(host) = url.host_str() else {
             return false;
         };
-        let unbracketed = host
-            .strip_prefix('[')
-            .and_then(|host| host.strip_suffix(']'))
-            .unwrap_or(host);
-        if unbracketed.parse::<std::net::IpAddr>().is_ok() {
-            return false;
+        if let Some(result_host) = parse_ip_literal(host) {
+            return parse_ip_literal(&self.exact).is_some_and(|key| key == result_host);
         }
         let (unicode_host, decoding) = idna::domain_to_unicode(host);
         decoding.is_err() || self.contains_credential(&unicode_host)
@@ -1524,6 +1506,14 @@ impl CredentialScrubber {
         }
         self.redact_text(&text)
     }
+}
+
+fn parse_ip_literal(value: &str) -> Option<std::net::IpAddr> {
+    let unbracketed = value
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(value);
+    unbracketed.parse().ok()
 }
 
 fn form_decoded_contains(text: &str, credential: &[u8]) -> bool {
@@ -1626,13 +1616,13 @@ mod tests {
     const URL_FORM_COLLISION_VALUE: &str = "secret+key";
     const URL_IDNA_COLLISION_KEY: &str = "bücher";
     const URL_IDNA_COLLISION_VALUE: &str = "https://bücher.example/";
+    const URL_IPV6_COLLISION_KEY: &str = "2001:0db8:0:0:0:0:0:1";
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
-    const TURN_SPAN_COLLISION_KEY: &str = "turn_work";
     const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
+    const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
-    const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
     const SESSION_IDENTITY: u128 = 1;
     const TURN_IDENTITY: u128 = 2;
     const ISSUING_ATTEMPT_IDENTITY: u128 = 3;
@@ -1843,16 +1833,22 @@ mod tests {
 
         async fn commit_observation(
             &mut self,
-            _observation: CorrelatedToolAttemptObservation,
+            observation: CorrelatedToolAttemptObservation,
         ) -> Result<EndedToolAttempt, Self::Error> {
-            panic!("credential collision prevents an observation")
+            self.batch
+                .authorize_attempt(observation.correlation().attempt())
+                .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)?
+                .into_parts()
+                .0
+                .apply_terminal_observation(observation)
+                .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)
         }
 
         async fn reread_observation(
             &mut self,
             _observation: &CorrelatedToolAttemptObservation,
         ) -> Result<RetainedToolAttemptObservationStatus, Self::Error> {
-            panic!("credential collision prevents an observation")
+            Ok(RetainedToolAttemptObservationStatus::Pending)
         }
 
         async fn classify_crash_loss<NextTurn>(
@@ -1997,30 +1993,6 @@ mod tests {
         output.text()
     }
 
-    fn capture_transport_failure(
-        failure: &WebSearchTransportFailure,
-        correlation: &ToolAttemptDispatchCorrelation,
-        credential: &CredentialValue,
-    ) -> (String, Result<(), WebSearchExecutorError>) {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .compact()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        let result = tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!(
-                "turn_work",
-                session_id = %correlation.session().as_uuid(),
-                turn_id = %correlation.turn().as_uuid(),
-            );
-            let _entered = span.enter();
-            report_transport_failure(failure, correlation, credential)
-        });
-        (output.text(), result)
-    }
-
     fn result(title: impl Into<String>) -> WebSearchResult {
         WebSearchResult::try_new(WebSearchResultFields {
             title: title.into(),
@@ -2142,8 +2114,8 @@ mod tests {
         let evidence = executor
             .execute_request(request, &correlation)
             .await
-            .expect("synthetic transport completes")
-            .into_evidence();
+            .into_result()
+            .expect("synthetic transport completes");
 
         assert!(matches!(evidence, ToolExecutorEvidence::CompletedText(_)));
         assert_eq!(resolutions.load(Ordering::Relaxed), 1);
@@ -2187,6 +2159,44 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!rendered.contains(EXECUTOR_OUTCOME_COLLISION_KEY));
+    }
+
+    /// INV-035: an executor failure retains the credential until the complete
+    /// `Result` diagnostic is checked, including its outer `Err` marker.
+    #[tokio::test]
+    async fn web_search_bound_executor_error_result_omits_credential_collision() {
+        let diagnostic = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&diagnostic);
+        let credentials = StaticCredentials {
+            value: EXECUTOR_ERROR_COLLISION_KEY,
+        };
+        let (catalog, executor) =
+            WebSearchTool::try_new(credentials, ReflectedTitleTransport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let executor = FormattingExecutor {
+            inner: executor,
+            diagnostic: captured,
+        };
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let rendered = diagnostic
+            .lock()
+            .expect("captured executor diagnostic lock is available")
+            .clone();
+
+        assert!(result.is_ok(), "unexpected service result: {result:?}");
+        assert!(!rendered.contains(EXECUTOR_ERROR_COLLISION_KEY));
     }
 
     /// The rendered schema is the exact query-only wire artifact.
@@ -2477,6 +2487,29 @@ mod tests {
             .expect("fixture response is admitted");
 
         assert!(success_evidence(response, &scrubber()).is_ok());
+    }
+
+    /// INV-035: equivalent IPv6 spellings cannot conceal a credential in a
+    /// provider result host after URL canonicalization.
+    #[test]
+    fn web_search_rejects_canonicalized_ipv6_credential_in_result_host() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("IPv6 fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_IPV6_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
     }
 
     #[test]
@@ -2844,6 +2877,7 @@ mod tests {
         let executor_error = executor
             .execute_request(request(), &correlation)
             .await
+            .into_result()
             .expect_err("dispatch remains ambiguous");
 
         assert!(!format!("{executor_error:?}").contains(UNKNOWN_PROSE_COLLISION_KEY));
@@ -2876,6 +2910,7 @@ mod tests {
         let executor_error = executor
             .execute_request(request(), &correlation)
             .await
+            .into_result()
             .expect_err("credential removal invalidates the result title");
 
         assert!(!format!("{executor_error:?}").contains(EVIDENCE_ERROR_COLLISION_KEY));
@@ -2918,21 +2953,6 @@ mod tests {
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
     }
 
-    #[test]
-    fn transport_failure_diagnostic_preserves_safe_classification() {
-        let correlation = dispatch_correlation();
-        let failure = WebSearchTransportFailure::RequestFailed;
-        let credential = CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec());
-
-        let (diagnostic, result) = capture_transport_failure(&failure, &correlation, &credential);
-
-        result.expect("safe transport diagnostic is emitted");
-        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
-        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
-        assert!(diagnostic.contains(TRANSPORT_FAILURE_CLASSIFICATION));
-        assert!(!diagnostic.contains(SYNTHETIC_KEY));
-    }
-
     /// INV-035: generating a safe transport diagnostic fails closed when the
     /// ordinary redaction sentinel itself contains the credential.
     #[test]
@@ -2953,44 +2973,6 @@ mod tests {
             failure,
             WebSearchTransportFailure::CredentialDiagnosticCollision(_)
         ));
-    }
-
-    /// INV-035: a transport event whose controlled rendering collides with the
-    /// request credential is suppressed before any log record is emitted.
-    #[test]
-    fn web_search_transport_event_collision_emits_no_credential() {
-        let credential = CredentialValue::new(DIAGNOSTIC_REDACTION_OVERLAP_KEY.as_bytes().to_vec());
-        let failure = credential_safe_transport_failure(
-            WebSearchTransportFailure::RequestFailed,
-            &credential,
-        );
-        let correlation = dispatch_correlation();
-
-        let (diagnostic, result) = capture_transport_failure(&failure, &correlation, &credential);
-
-        let error = result.expect_err("colliding event fails before emission");
-        assert!(!diagnostic.contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
-        assert!(!format!("{error:?}").contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
-        assert!(!error.to_string().contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
-    }
-
-    /// INV-035: transport events account for the production turn span so a
-    /// contextual-name collision suppresses the event before emission.
-    #[test]
-    fn web_search_transport_event_omits_colliding_turn_span_context() {
-        let credential = CredentialValue::new(TURN_SPAN_COLLISION_KEY.as_bytes().to_vec());
-        let failure = WebSearchTransportFailure::RequestFailed;
-        let correlation = dispatch_correlation();
-
-        let (diagnostic, result) = capture_transport_failure(&failure, &correlation, &credential);
-
-        let error = result.expect_err("colliding turn context suppresses the event");
-        assert!(
-            !diagnostic.contains(TURN_SPAN_COLLISION_KEY),
-            "root-scoped event unexpectedly retained span context: {diagnostic}"
-        );
-        assert!(!format!("{error:?}").contains(TURN_SPAN_COLLISION_KEY));
-        assert!(!error.to_string().contains(TURN_SPAN_COLLISION_KEY));
     }
 
     /// INV-035: provider response and error diagnostics never render
