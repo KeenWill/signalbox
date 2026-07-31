@@ -339,21 +339,23 @@ private actor MockProcessProtocolState {
             ] as [String: Any]
           )
         }
-      page.append(
-        (
-          MockProcessProtocolFixtures.importedConversationID,
-          [
-            "type": "conversation_summary",
-            "conversation": [
-              "origin": "imported_conversation",
-              "imported_conversation_id": MockProcessProtocolFixtures.importedConversationID,
-              "title": "Imported process-protocol notes",
-              "entry_count": String(MockProcessProtocolFixtures.importedEntryCount),
-              "source_format": "codex_rollout_jsonl_v1",
-            ],
-          ] as [String: Any]
+      if scenario == nil {
+        page.append(
+          (
+            MockProcessProtocolFixtures.importedConversationID,
+            [
+              "type": "conversation_summary",
+              "conversation": [
+                "origin": "imported_conversation",
+                "imported_conversation_id": MockProcessProtocolFixtures.importedConversationID,
+                "title": "Imported process-protocol notes",
+                "entry_count": String(MockProcessProtocolFixtures.importedEntryCount),
+                "source_format": "codex_rollout_jsonl_v1",
+              ],
+            ] as [String: Any]
+          )
         )
-      )
+      }
       page.sort { $0.0 < $1.0 }
       var messages: [[String: Any]] = [["type": "conversation_page_start"]]
       messages.append(contentsOf: page.map(\.1))

@@ -13,10 +13,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let transcript = try await service.readImportedConversation(conversation: imported)
     let aliases = try await service.listModelAliases()
     let alias = try XCTUnwrap(aliases.first)
+    let lastPosition = try XCTUnwrap(transcript.entries.last?.position)
     let prepared = try await service.prepareImportedSessionCreation(
       conversation: imported,
-      throughPosition: transcript.entries.last?.position
-        ?? SignalboxCanonicalUInt64(rawValue: 0),
+      throughPosition: lastPosition,
       relationship: .resume,
       modelSelection: .alias(aliasID: alias.aliasID)
     )
