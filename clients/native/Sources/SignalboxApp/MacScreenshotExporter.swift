@@ -125,6 +125,9 @@ enum MacScreenshotExporter {
         size: CGSize,
         to outputURL: URL
     ) async throws {
+        // Sheets are composited from their parent window. An off-screen
+        // ImageRenderer would miss that AppKit-owned surface and produce a
+        // golden that does not match the shipping presentation seam.
         let window = NSWindow(
             contentRect: CGRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .resizable],

@@ -73,6 +73,8 @@ public struct SignalboxProcessConversation: Identifiable, Equatable, Sendable {
   }
 
   public var id: String {
+    // Native and imported records carry UUIDs from independent namespaces.
+    // SwiftUI selection therefore needs the origin prefix to prevent aliasing.
     switch record {
     case .native(let native):
       return "native-\(native.sessionID.rawValue)"
@@ -229,6 +231,8 @@ public struct SignalboxProcessStreamedText: Identifiable, Equatable, Sendable {
 
   @discardableResult
   public mutating func append(_ delta: SignalboxProviderTextDelta) -> Bool {
+    // Provider deltas are not retained by the snapshot capacity guard, so the
+    // presentation accumulator enforces its own independent heap bound.
     let (retainedBytes, overflowed) = text.utf8.count.addingReportingOverflow(
       delta.content.utf8.count
     )

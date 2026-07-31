@@ -14,6 +14,8 @@ let importedContinuationEndpointChangedMessage =
   "The process service changed during continuation. Try again."
 
 @MainActor
+/// Refresh and mutation publications are gated by both service generation and
+/// operation identity, so a replaced socket cannot update the new endpoint's UI.
 final class ProcessSessionListViewModel: ObservableObject {
   @Published private(set) var conversations: [SignalboxProcessConversation] = []
   @Published var showArchived = false
@@ -770,6 +772,8 @@ struct ProcessImportedContinuationRetryState {
 }
 
 @MainActor
+/// Retains outcome-unknown continuation commands across view replacement while
+/// keeping resolution and in-flight ownership scoped to one endpoint generation.
 final class ProcessImportedContinuationRetryStore {
   private var state = ProcessImportedContinuationRetryState()
   private var endpoint: String?
@@ -1274,6 +1278,9 @@ private enum ProcessSessionPresentationError: LocalizedError {
 }
 
 @MainActor
+/// The synchronization driver is the only authority for transcript ordering.
+/// This view model projects its updates and separately retains retry identities
+/// for mutations whose send outcome may be unknown.
 final class ProcessSessionDetailViewModel: ObservableObject {
   enum TranscriptRow: Identifiable {
     case timeline(SignalboxTimelineItem)
