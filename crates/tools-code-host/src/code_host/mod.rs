@@ -15,6 +15,9 @@ mod change_request_thread_inventory;
 mod change_request_thread_reply;
 mod change_request_thread_resolve;
 mod github;
+mod repository_list_directory;
+mod repository_read_file;
+mod repository_result;
 mod result;
 mod review_gate_check;
 mod review_slog;
@@ -50,6 +53,12 @@ pub use change_request_thread_inventory::ThreadInventoryArguments;
 pub use change_request_thread_reply::ThreadReplyArguments;
 pub use change_request_thread_resolve::ThreadResolveArguments;
 pub use github::{GitHubCodeHostConstructionError, GitHubCodeHostTransport};
+pub use repository_list_directory::RepositoryListDirectoryArguments;
+pub use repository_read_file::{RepositoryLineRange, RepositoryReadFileArguments};
+pub use repository_result::{
+    RepositoryDirectoryEntry, RepositoryFileContentFields, RepositoryListDirectoryResult,
+    RepositoryObjectKind, RepositoryReadFileResult,
+};
 pub use result::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, CiJobLogResult,
@@ -76,6 +85,10 @@ pub const CHANGE_REQUEST_SUMMARY_NAME: &str = change_request_summary::NAME;
 pub const CHANGE_REQUEST_CHANGED_FILES_NAME: &str = change_request_changed_files::NAME;
 /// Registry name for per-file patch lookup.
 pub const CHANGE_REQUEST_FILE_PATCH_NAME: &str = change_request_file_patch::NAME;
+/// Registry name for exact-revision repository file reads.
+pub const REPOSITORY_READ_FILE_NAME: &str = repository_read_file::NAME;
+/// Registry name for exact-revision repository directory listings.
+pub const REPOSITORY_LIST_DIRECTORY_NAME: &str = repository_list_directory::NAME;
 /// Registry name for check-status lookup.
 pub const CHANGE_REQUEST_CHECKS_STATUS_NAME: &str = change_request_checks_status::NAME;
 /// Registry name for top-level comment creation.
@@ -100,7 +113,7 @@ pub const CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME: &str = change_request_rerun_fai
 pub const REVIEW_GATE_CHECK_NAME: &str = review_gate_check::NAME;
 
 /// Registry names in deterministic catalog order.
-pub const CODE_HOST_TOOL_NAMES: [&str; 14] = [
+pub const CODE_HOST_TOOL_NAMES: [&str; 16] = [
     CHANGE_REQUEST_CHANGED_FILES_NAME,
     CHANGE_REQUEST_CHECKS_STATUS_NAME,
     CHANGE_REQUEST_CI_JOB_LOG_NAME,
@@ -114,6 +127,8 @@ pub const CODE_HOST_TOOL_NAMES: [&str; 14] = [
     CHANGE_REQUEST_THREAD_INVENTORY_NAME,
     CHANGE_REQUEST_THREAD_REPLY_NAME,
     CHANGE_REQUEST_THREAD_RESOLVE_NAME,
+    REPOSITORY_LIST_DIRECTORY_NAME,
+    REPOSITORY_READ_FILE_NAME,
     REVIEW_GATE_CHECK_NAME,
 ];
 
@@ -124,8 +139,20 @@ const CODE_HOST_REJECTED_DETAIL: &str =
 const CHANGED_FILE_NOT_FOUND_DETAIL: &str =
     "requested changed file was not found in the change request";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CodeHostToolKind {
+macro_rules! define_code_host_tool_kinds {
+    ($( $(#[$attribute:meta])* $variant:ident),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum CodeHostToolKind {
+            $($(#[$attribute])* $variant),+
+        }
+
+        impl CodeHostToolKind {
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+define_code_host_tool_kinds! {
     /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`
     /// because the code host observes the authenticated request.
     Summary,
@@ -133,6 +160,10 @@ enum CodeHostToolKind {
     ChangedFiles,
     /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
     FilePatch,
+    /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
+    ListDirectory,
+    /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
+    ReadFile,
     /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
     ChecksStatus,
     /// Registry effect posture: mutation, `Confirm`, and `ExternalEffect`.
@@ -158,28 +189,13 @@ enum CodeHostToolKind {
 }
 
 impl CodeHostToolKind {
-    const ALL: [Self; 14] = [
-        Self::Summary,
-        Self::ChangedFiles,
-        Self::FilePatch,
-        Self::ChecksStatus,
-        Self::Comment,
-        Self::ConvergenceState,
-        Self::ReviewThreads,
-        Self::StackState,
-        Self::ThreadInventory,
-        Self::ThreadReply,
-        Self::ThreadResolve,
-        Self::CiJobLog,
-        Self::RerunFailedJobs,
-        Self::ReviewGateCheck,
-    ];
-
     const fn name(self) -> &'static str {
         match self {
             Self::Summary => change_request_summary::NAME,
             Self::ChangedFiles => change_request_changed_files::NAME,
             Self::FilePatch => change_request_file_patch::NAME,
+            Self::ListDirectory => repository_list_directory::NAME,
+            Self::ReadFile => repository_read_file::NAME,
             Self::ChecksStatus => change_request_checks_status::NAME,
             Self::Comment => change_request_comment::NAME,
             Self::ConvergenceState => change_request_convergence_state::NAME,
@@ -205,6 +221,16 @@ impl CodeHostToolKind {
                 change_request_changed_files::Contract,
             >(permission, ToolEffectClass::ExternalEffect),
             Self::FilePatch => compile_contract_definition::<change_request_file_patch::Contract>(
+                permission,
+                ToolEffectClass::ExternalEffect,
+            ),
+            Self::ListDirectory => {
+                compile_contract_definition::<repository_list_directory::Contract>(
+                    permission,
+                    ToolEffectClass::ExternalEffect,
+                )
+            }
+            Self::ReadFile => compile_contract_definition::<repository_read_file::Contract>(
                 permission,
                 ToolEffectClass::ExternalEffect,
             ),
@@ -261,6 +287,8 @@ impl CodeHostToolKind {
             Self::Summary
             | Self::ChangedFiles
             | Self::FilePatch
+            | Self::ListDirectory
+            | Self::ReadFile
             | Self::ChecksStatus
             | Self::ConvergenceState
             | Self::ReviewThreads
@@ -272,36 +300,67 @@ impl CodeHostToolKind {
     }
 
     const fn mutates(self) -> bool {
-        matches!(
-            self,
-            Self::Comment | Self::ThreadReply | Self::ThreadResolve | Self::RerunFailedJobs
-        )
+        match self {
+            Self::Comment | Self::ThreadReply | Self::ThreadResolve | Self::RerunFailedJobs => true,
+            Self::Summary
+            | Self::ChangedFiles
+            | Self::FilePatch
+            | Self::ListDirectory
+            | Self::ReadFile
+            | Self::ChecksStatus
+            | Self::ConvergenceState
+            | Self::ReviewThreads
+            | Self::StackState
+            | Self::ThreadInventory
+            | Self::CiJobLog
+            | Self::ReviewGateCheck => false,
+        }
     }
 
     fn accepts_result(self, result: &CodeHostResult) -> bool {
-        matches!(
-            (self, result),
-            (Self::Summary, CodeHostResult::Summary(_))
-                | (Self::ChangedFiles, CodeHostResult::ChangedFiles(_))
-                | (Self::FilePatch, CodeHostResult::FilePatch(_))
-                | (Self::ChecksStatus, CodeHostResult::ChecksStatus(_))
-                | (Self::Comment, CodeHostResult::Comment(_))
-                | (Self::ConvergenceState, CodeHostResult::ConvergenceState(_))
-                | (Self::ReviewThreads, CodeHostResult::ReviewThreads(_))
-                | (Self::StackState, CodeHostResult::StackState(_))
-                | (Self::ThreadInventory, CodeHostResult::ThreadInventory(_))
-                | (Self::ThreadReply, CodeHostResult::ThreadReply(_))
-                | (Self::ThreadResolve, CodeHostResult::ThreadResolve(_))
-                | (Self::CiJobLog, CodeHostResult::CiJobLog(_))
-                | (Self::RerunFailedJobs, CodeHostResult::RerunFailedJobs(_))
-                | (Self::ReviewGateCheck, CodeHostResult::ReviewGateCheck(_))
-        )
+        let result_kind = match result {
+            CodeHostResult::Summary(_) => Self::Summary,
+            CodeHostResult::ChangedFiles(_) => Self::ChangedFiles,
+            CodeHostResult::FilePatch(_) => Self::FilePatch,
+            CodeHostResult::ListDirectory(_) => Self::ListDirectory,
+            CodeHostResult::ReadFile(_) => Self::ReadFile,
+            CodeHostResult::ChecksStatus(_) => Self::ChecksStatus,
+            CodeHostResult::Comment(_) => Self::Comment,
+            CodeHostResult::ConvergenceState(_) => Self::ConvergenceState,
+            CodeHostResult::ReviewThreads(_) => Self::ReviewThreads,
+            CodeHostResult::StackState(_) => Self::StackState,
+            CodeHostResult::ThreadInventory(_) => Self::ThreadInventory,
+            CodeHostResult::ThreadReply(_) => Self::ThreadReply,
+            CodeHostResult::ThreadResolve(_) => Self::ThreadResolve,
+            CodeHostResult::CiJobLog(_) => Self::CiJobLog,
+            CodeHostResult::RerunFailedJobs(_) => Self::RerunFailedJobs,
+            CodeHostResult::ReviewGateCheck(_) => Self::ReviewGateCheck,
+        };
+        match self {
+            Self::Summary
+            | Self::ChangedFiles
+            | Self::FilePatch
+            | Self::ListDirectory
+            | Self::ReadFile
+            | Self::ChecksStatus
+            | Self::Comment
+            | Self::ConvergenceState
+            | Self::ReviewThreads
+            | Self::StackState
+            | Self::ThreadInventory
+            | Self::ThreadReply
+            | Self::ThreadResolve
+            | Self::CiJobLog
+            | Self::RerunFailedJobs
+            | Self::ReviewGateCheck => self == result_kind,
+        }
     }
 }
 
 fn kind_for_name(name: &str) -> Option<CodeHostToolKind> {
     CodeHostToolKind::ALL
-        .into_iter()
+        .iter()
+        .copied()
         .find(|kind| kind.name() == name)
 }
 
@@ -314,6 +373,10 @@ pub enum CodeHostOperation {
     ChangedFiles(ChangedFilesArguments),
     /// Read one file patch.
     FilePatch(FilePatchArguments),
+    /// List one directory at an exact revision.
+    ListDirectory(RepositoryListDirectoryArguments),
+    /// Read one file at an exact revision.
+    ReadFile(RepositoryReadFileArguments),
     /// Read checks for one frozen revision.
     ChecksStatus(ChecksStatusArguments),
     /// Post one top-level comment.
@@ -345,6 +408,8 @@ impl CodeHostOperation {
             Self::Summary(_) => change_request_summary::NAME,
             Self::ChangedFiles(_) => change_request_changed_files::NAME,
             Self::FilePatch(_) => change_request_file_patch::NAME,
+            Self::ListDirectory(_) => repository_list_directory::NAME,
+            Self::ReadFile(_) => repository_read_file::NAME,
             Self::ChecksStatus(_) => change_request_checks_status::NAME,
             Self::Comment(_) => change_request_comment::NAME,
             Self::ConvergenceState(_) => change_request_convergence_state::NAME,
@@ -358,6 +423,61 @@ impl CodeHostOperation {
             Self::ReviewGateCheck(_) => review_gate_check::NAME,
         }
     }
+
+    fn accepts_repository_result(&self, result: &CodeHostResult) -> bool {
+        match self {
+            Self::ReadFile(arguments) => match result {
+                CodeHostResult::ReadFile(result) => result.matches(arguments),
+                CodeHostResult::Summary(_)
+                | CodeHostResult::ChangedFiles(_)
+                | CodeHostResult::FilePatch(_)
+                | CodeHostResult::ListDirectory(_)
+                | CodeHostResult::ChecksStatus(_)
+                | CodeHostResult::Comment(_)
+                | CodeHostResult::ReviewThreads(_)
+                | CodeHostResult::ThreadReply(_)
+                | CodeHostResult::ThreadResolve(_)
+                | CodeHostResult::CiJobLog(_)
+                | CodeHostResult::RerunFailedJobs(_)
+                | CodeHostResult::ConvergenceState(_)
+                | CodeHostResult::StackState(_)
+                | CodeHostResult::ThreadInventory(_)
+                | CodeHostResult::ReviewGateCheck(_) => false,
+            },
+            Self::ListDirectory(arguments) => match result {
+                CodeHostResult::ListDirectory(result) => result.matches(arguments),
+                CodeHostResult::Summary(_)
+                | CodeHostResult::ChangedFiles(_)
+                | CodeHostResult::FilePatch(_)
+                | CodeHostResult::ReadFile(_)
+                | CodeHostResult::ChecksStatus(_)
+                | CodeHostResult::Comment(_)
+                | CodeHostResult::ReviewThreads(_)
+                | CodeHostResult::ThreadReply(_)
+                | CodeHostResult::ThreadResolve(_)
+                | CodeHostResult::CiJobLog(_)
+                | CodeHostResult::RerunFailedJobs(_)
+                | CodeHostResult::ConvergenceState(_)
+                | CodeHostResult::StackState(_)
+                | CodeHostResult::ThreadInventory(_)
+                | CodeHostResult::ReviewGateCheck(_) => false,
+            },
+            Self::Summary(_)
+            | Self::ChangedFiles(_)
+            | Self::FilePatch(_)
+            | Self::ChecksStatus(_)
+            | Self::Comment(_)
+            | Self::ConvergenceState(_)
+            | Self::ReviewThreads(_)
+            | Self::StackState(_)
+            | Self::ThreadInventory(_)
+            | Self::ThreadReply(_)
+            | Self::ThreadResolve(_)
+            | Self::CiJobLog(_)
+            | Self::RerunFailedJobs(_)
+            | Self::ReviewGateCheck(_) => true,
+        }
+    }
 }
 
 fn decode_operation(
@@ -368,6 +488,8 @@ fn decode_operation(
         CodeHostToolKind::Summary => change_request_summary::decode(arguments),
         CodeHostToolKind::ChangedFiles => change_request_changed_files::decode(arguments),
         CodeHostToolKind::FilePatch => change_request_file_patch::decode(arguments),
+        CodeHostToolKind::ListDirectory => repository_list_directory::decode(arguments),
+        CodeHostToolKind::ReadFile => repository_read_file::decode(arguments),
         CodeHostToolKind::ChecksStatus => change_request_checks_status::decode(arguments),
         CodeHostToolKind::Comment => change_request_comment::decode(arguments),
         CodeHostToolKind::ConvergenceState => change_request_convergence_state::decode(arguments),
@@ -428,7 +550,7 @@ impl ToolArgumentValidator for CodeHostArgumentValidator {
     }
 }
 
-/// All fourteen compiled code-host declarations and their matching executor.
+/// All sixteen compiled code-host declarations and their matching executor.
 ///
 /// Effect postures are explicit per declaration: summary, files, patch,
 /// checks, threads, job-log, convergence, stack, thread-inventory, and
@@ -461,7 +583,7 @@ impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
             ToolExecutionErrorDetail::try_new(String::from(CHANGED_FILE_NOT_FOUND_DETAIL))
                 .map_err(|_| CodeHostToolsConstructionError::ErrorDetail)?;
         let mut compiled = Vec::with_capacity(CodeHostToolKind::ALL.len());
-        for kind in CodeHostToolKind::ALL {
+        for &kind in CodeHostToolKind::ALL {
             let definition = kind.definition().map_err(|error| match error {
                 ToolContractCompileError::Name => CodeHostToolsConstructionError::Name,
                 ToolContractCompileError::Schema => CodeHostToolsConstructionError::Schema,
@@ -521,7 +643,7 @@ impl fmt::Display for CodeHostToolsConstructionError {
 
 impl Error for CodeHostToolsConstructionError {}
 
-/// Credential-resolving executor for all fourteen code-host declarations.
+/// Credential-resolving executor for all sixteen code-host declarations.
 #[derive(Clone, Debug)]
 pub struct CodeHostExecutor<Credentials, Transport> {
     credentials: Credentials,
@@ -581,8 +703,14 @@ where
                 detail: Some(self.credential_unavailable_detail.clone()),
             }));
         };
+        let result_operation = operation.clone();
         let result = match self.transport.execute(operation, &credential).await {
-            Ok(result) if kind.accepts_result(&result) => result,
+            Ok(result)
+                if kind.accepts_result(&result)
+                    && result_operation.accepts_repository_result(&result) =>
+            {
+                result
+            }
             Ok(_) => return Err(caller_bug()),
             Err(failure) => {
                 if let Some(class) = transport_failure_class(kind, failure) {
@@ -606,7 +734,11 @@ where
             }
         };
         let mut value = result.into_json_value();
-        scrubber.redact_value(&mut value);
+        if scrub_result_value(kind, &scrubber, &mut value).is_none() {
+            return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.code_host_rejected_detail.clone()),
+            }));
+        }
         let content = serde_json::to_string(&value).map_err(|_| caller_bug())?;
         if content.len() > result::MAX_ENCODED_RESULT_BYTES {
             if kind.mutates() {
@@ -729,6 +861,66 @@ impl CredentialScrubber {
     }
 }
 
+fn scrub_result_value(
+    kind: CodeHostToolKind,
+    scrubber: &CredentialScrubber,
+    value: &mut serde_json::Value,
+) -> Option<()> {
+    let repository_structure = repository_result_structure(kind, value);
+    let is_file_content = kind == CodeHostToolKind::ReadFile
+        && value.get("outcome").and_then(serde_json::Value::as_str) == Some("content");
+    scrubber.redact_value(value);
+    if repository_structure
+        .as_ref()
+        .is_some_and(|expected| repository_result_structure(kind, value).as_ref() != Some(expected))
+    {
+        return None;
+    }
+    if !is_file_content {
+        return Some(());
+    }
+
+    let content = value.get("content")?.as_str()?;
+    let returned_bytes = content.len();
+    if returned_bytes > repository_result::MAX_REPOSITORY_FILE_CONTENT_BYTES {
+        return None;
+    }
+    let returned_lines = repository_result::line_count(content);
+    if value.get("returned_lines")?.as_u64()? != u64::from(returned_lines) {
+        return None;
+    }
+    let truncated = value.get("truncated")?.as_bool()?;
+    let last_line_complete = content.is_empty() || content.ends_with('\n') || !truncated;
+    if value.get("last_line_complete")?.as_bool()? != last_line_complete {
+        return None;
+    }
+    value.as_object_mut()?.insert(
+        String::from("returned_bytes"),
+        serde_json::Value::from(returned_bytes),
+    );
+    Some(())
+}
+
+fn repository_result_structure(
+    kind: CodeHostToolKind,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if kind == CodeHostToolKind::ListDirectory {
+        return Some(value.clone());
+    }
+    if kind != CodeHostToolKind::ReadFile {
+        return None;
+    }
+
+    let mut structure = value.clone();
+    let object = structure.as_object_mut()?;
+    if object.get("outcome").and_then(serde_json::Value::as_str) == Some("content") {
+        object.remove("content")?;
+        object.remove("returned_bytes")?;
+    }
+    Some(structure)
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::Expect;
@@ -781,7 +973,17 @@ mod tests {
         assert_eq!(catalog.validate_arguments(&name, &arguments(value)), Ok(()));
     }
 
-    /// The fourteen declarations encode the read/mutation approval split and make
+    #[track_caller]
+    fn assert_invalid(catalog: &CompiledToolCatalog, name: &str, value: &str) {
+        let name = ToolName::try_new(name.to_owned()).expect("fixture name is admitted");
+        assert!(
+            catalog
+                .validate_arguments(&name, &arguments(value))
+                .is_err()
+        );
+    }
+
+    /// The sixteen declarations encode the read/mutation approval split and make
     /// every remote observation explicit as an external effect.
     #[test]
     fn code_host_definitions_carry_exact_policy() {
@@ -800,6 +1002,16 @@ mod tests {
         assert_definition(
             &catalog,
             change_request_file_patch::NAME,
+            ToolPermissionDefault::Auto,
+        );
+        assert_definition(
+            &catalog,
+            repository_list_directory::NAME,
+            ToolPermissionDefault::Auto,
+        );
+        assert_definition(
+            &catalog,
+            repository_read_file::NAME,
             ToolPermissionDefault::Auto,
         );
         assert_definition(
@@ -940,7 +1152,7 @@ mod tests {
                       "description": "Exact repository-relative changed path.",
                       "maxLength": 4096,
                       "minLength": 1,
-                      "pattern": "^[^/\\u0000][^\\u0000]*$",
+                      "pattern": "^(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+)(?:/(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+))*$",
                       "type": "string"
                     },
                     "repository": {
@@ -957,6 +1169,122 @@ mod tests {
                   ],
                   "type": "object"
                 }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `repository_list_directory`.
+    #[test]
+    fn repository_list_directory_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            repository_list_directory::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "description": "Exact repository-relative directory path; `.` lists the repository root.",
+                      "maxLength": 4096,
+                      "minLength": 1,
+                      "pattern": "^(?:\\.|(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+)(?:/(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+))*)$",
+                      "type": "string"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "revision": {
+                      "description": "Required exact lowercase 40-hex commit revision.",
+                      "maxLength": 40,
+                      "minLength": 40,
+                      "pattern": "^[0-9a-f]{40}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "path",
+                    "revision"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `repository_read_file`.
+    #[test]
+    fn repository_read_file_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            repository_read_file::NAME,
+            expect_test::expect![[r##"
+                {
+                  "$defs": {
+                    "RepositoryLineRange": {
+                      "additionalProperties": false,
+                      "description": "One inclusive, positive line range.",
+                      "properties": {
+                        "end": {
+                          "description": "Last one-based line to return, inclusive.",
+                          "maximum": 4294967295,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "start": {
+                          "description": "First one-based line to return.",
+                          "maximum": 4294967295,
+                          "minimum": 1,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "properties": {
+                    "line_range": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/RepositoryLineRange"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Optional inclusive one-based line range."
+                    },
+                    "path": {
+                      "description": "Exact repository-relative path; `.` addresses the repository root.",
+                      "maxLength": 4096,
+                      "minLength": 1,
+                      "pattern": "^(?:\\.|(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+)(?:/(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+))*)$",
+                      "type": "string"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "revision": {
+                      "description": "Required exact lowercase 40-hex commit revision.",
+                      "maxLength": 40,
+                      "minLength": 40,
+                      "pattern": "^[0-9a-f]{40}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "path",
+                    "revision"
+                  ],
+                  "type": "object"
+                }"##]],
         );
     }
 
@@ -1407,6 +1735,118 @@ mod tests {
         );
     }
 
+    /// The repository root cannot identify one changed file.
+    #[test]
+    fn change_request_file_patch_typed_decode_rejects_bare_dot_root() {
+        assert_invalid(
+            &catalog(),
+            change_request_file_patch::NAME,
+            r#"{"number":17,"path":".","repository":"owner/repository"}"#,
+        );
+    }
+
+    /// Directory-list arguments require an exact path and revision.
+    #[test]
+    fn repository_list_directory_typed_decode_accepts_exact_shape() {
+        assert_valid(
+            &catalog(),
+            repository_list_directory::NAME,
+            r#"{"path":"src","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// The documented bare-dot spelling selects the repository root.
+    #[test]
+    fn repository_list_directory_typed_decode_accepts_bare_dot_root() {
+        assert_valid(
+            &catalog(),
+            repository_list_directory::NAME,
+            r#"{"path":".","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// A trailing separator cannot turn an existing directory into false
+    /// absence evidence after GitHub canonicalizes its response path.
+    #[test]
+    fn repository_list_directory_typed_decode_rejects_trailing_separator() {
+        assert_invalid(
+            &catalog(),
+            repository_list_directory::NAME,
+            r#"{"path":"src/","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// Empty interior components are not canonical repository path identities.
+    #[test]
+    fn repository_read_file_typed_decode_rejects_empty_path_component() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":"src//lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// Dot components are not admitted as aliases for canonical paths.
+    #[test]
+    fn repository_read_file_typed_decode_rejects_dot_path_component() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":"./src/lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// Parent components cannot select an alias whose echoed host path differs.
+    #[test]
+    fn repository_read_file_typed_decode_rejects_parent_path_component() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":"src/../lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// Dot-prefixed names remain canonical components even though the aliases
+    /// `.` and `..` are rejected away from the documented bare-dot root.
+    #[test]
+    fn repository_read_file_typed_decode_accepts_dot_prefixed_components() {
+        assert_valid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":".git/objects/...","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// File-read arguments retain one inclusive line range at an exact revision.
+    #[test]
+    fn repository_read_file_typed_decode_accepts_line_range() {
+        assert_valid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"line_range":{"end":40,"start":20},"path":"src/lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// A repository file read cannot silently default to a moving branch head.
+    #[test]
+    fn repository_read_file_typed_decode_requires_revision() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":"src/lib.rs","repository":"owner/repository"}"#,
+        );
+    }
+
+    /// A reversed range cannot become a misleading empty successful read.
+    #[test]
+    fn repository_read_file_typed_decode_rejects_reversed_range() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"line_range":{"end":20,"start":40},"path":"src/lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
     /// Check-status arguments require one lowercase forty-hex revision.
     #[test]
     fn change_request_checks_status_typed_decode_accepts_exact_shape() {
@@ -1540,6 +1980,193 @@ mod tests {
                 "nested": ["[redacted]"],
             })
         );
+    }
+
+    /// File byte counts describe emitted scrubbed content rather than the
+    /// credential-bearing source retained before evidence redaction.
+    #[test]
+    fn repository_file_returned_bytes_are_counted_after_credential_scrubbing() {
+        const CREDENTIAL: &str = "github_pat_synthetic_1234567890abcdefghijklmnopqrstuvwxyz";
+        const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let source_content = format!("before {CREDENTIAL} after\n");
+        let source_bytes =
+            u64::try_from(source_content.len()).expect("fixture source size fits u64");
+        let arguments: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/lib.rs",
+            "repository": "owner/repository",
+            "revision": REVISION,
+        }))
+        .expect("fixture file arguments are admitted");
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                selected_source_bytes: source_bytes,
+                start_line: Some(1),
+                end_line: Some(1),
+                returned_lines: 1,
+                last_line_complete: true,
+                content: source_content,
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        )
+        .expect("fixture file result is admitted");
+        let mut value = CodeHostResult::ReadFile(result).into_json_value();
+
+        scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value)
+            .expect("typed file result remains shaped after scrubbing");
+
+        let emitted_content = "before [redacted] after\n";
+        assert_eq!(value["content"], emitted_content);
+        assert_eq!(value["returned_bytes"], emitted_content.len());
+        assert_eq!(value["source_bytes"], source_bytes);
+        assert!(!value.to_string().contains(CREDENTIAL));
+    }
+
+    /// Credential redaction cannot expand emitted file content past its
+    /// advertised retained-content bound.
+    #[test]
+    fn repository_file_scrubbing_rejects_content_expansion_past_the_bound() {
+        const CREDENTIAL: &str = "content";
+        const SOURCE_CONTENT_REPETITIONS: usize = 8 * 1024;
+        const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let source_content = CREDENTIAL.repeat(SOURCE_CONTENT_REPETITIONS);
+        let source_bytes =
+            u64::try_from(source_content.len()).expect("fixture source size fits u64");
+        let arguments: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/lib.rs",
+            "repository": "owner/repository",
+            "revision": REVISION,
+        }))
+        .expect("fixture file arguments are admitted");
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                selected_source_bytes: source_bytes,
+                start_line: Some(1),
+                end_line: Some(1),
+                returned_lines: 1,
+                last_line_complete: true,
+                content: source_content,
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        )
+        .expect("fixture file result is admitted");
+        let mut value = CodeHostResult::ReadFile(result).into_json_value();
+
+        let scrubbed = scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value);
+
+        assert!(scrubbed.is_none());
+    }
+
+    /// Credential redaction cannot leave line metadata describing the
+    /// credential-bearing source rather than the emitted content.
+    #[test]
+    fn repository_file_scrubbing_rejects_changed_line_structure() {
+        const CREDENTIAL: &str = "\nsecond";
+        const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+        const SOURCE_CONTENT: &str = "first\nsecond\nthird\n";
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let source_bytes =
+            u64::try_from(SOURCE_CONTENT.len()).expect("fixture source size fits u64");
+        let arguments: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/lib.rs",
+            "repository": "owner/repository",
+            "revision": REVISION,
+        }))
+        .expect("fixture file arguments are admitted");
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                selected_source_bytes: source_bytes,
+                start_line: Some(1),
+                end_line: Some(3),
+                returned_lines: 3,
+                last_line_complete: true,
+                content: String::from(SOURCE_CONTENT),
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        )
+        .expect("fixture file result is admitted before scrubbing");
+        let mut value = CodeHostResult::ReadFile(result).into_json_value();
+
+        let scrubbed = scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value);
+
+        assert!(scrubbed.is_none());
+    }
+
+    /// Credential redaction cannot collapse distinct directory entry
+    /// identities after the typed result validates their uniqueness.
+    #[test]
+    fn repository_directory_scrubbing_rejects_entry_identity_collision() {
+        const CREDENTIAL: &str = "token";
+        const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let arguments: RepositoryListDirectoryArguments =
+            serde_json::from_value(serde_json::json!({
+                "path": "src",
+                "repository": "owner/repository",
+                "revision": REVISION,
+            }))
+            .expect("fixture directory arguments are admitted");
+        let credential_path = format!("{}/{CREDENTIAL}", arguments.path().as_str());
+        let redacted_path = format!("{}/[redacted]", arguments.path().as_str());
+        let entries = vec![
+            RepositoryDirectoryEntry::try_new(credential_path, RepositoryObjectKind::File, Some(1))
+                .expect("fixture credential-bearing entry is admitted"),
+            RepositoryDirectoryEntry::try_new(redacted_path, RepositoryObjectKind::File, Some(2))
+                .expect("fixture redacted-spelling entry is admitted"),
+        ];
+        let observed_entries = entries.len();
+        let result = RepositoryListDirectoryResult::try_entries(
+            &arguments,
+            entries,
+            observed_entries,
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("fixture directory result is admitted before scrubbing");
+        let mut value = CodeHostResult::ListDirectory(result).into_json_value();
+
+        let scrubbed = scrub_result_value(CodeHostToolKind::ListDirectory, &scrubber, &mut value);
+
+        assert!(scrubbed.is_none());
+    }
+
+    /// A custom transport cannot satisfy one exact repository operation with a
+    /// valid result constructed for another path and revision.
+    #[test]
+    fn repository_operation_rejects_another_result_identity() {
+        let requested: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/a.rs",
+            "repository": "owner/repository",
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+        }))
+        .expect("fixture requested arguments are admitted");
+        let returned: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/b.rs",
+            "repository": "owner/repository",
+            "revision": "89abcdef0123456789abcdef0123456789abcdef",
+        }))
+        .expect("fixture returned arguments are admitted");
+        let result = CodeHostResult::ReadFile(
+            RepositoryReadFileResult::try_path_not_found(&returned)
+                .expect("fixture non-root path admits absence"),
+        );
+        let operation = CodeHostOperation::ReadFile(requested);
+
+        assert!(!operation.accepts_repository_result(&result));
     }
 
     /// A malformed acknowledgement after a mutation is fail-closed as

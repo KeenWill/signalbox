@@ -14,20 +14,23 @@ runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Template-derived blanket creation was verified
 through PR #311 (`agent/session-templates-spec`), and the exact-origin
 `web_fetch` egress policy and complete bounded file-patch lookup through PR #330
-(`agent/audit-verified-fixes`). The runner executable stack rooted at this
-foundation proposal extends the same laws to the runner locus. This page owns
-logical tool requests, approval policy and decisions, physical tool attempts,
-result admission, intra-turn continuation, crash classification, the compiled
-registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
-model-call staging and provider translation in
-[model-call-execution](model-call-execution.md); durable-command identity in
-[identity-and-commands](identity-and-commands.md); and relational mechanics in
-[persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant test index](../invariants.md). The runner-locus paragraphs in
-this page are the foundation proposal at the bottom of their implementing stack
-and become verified only with those child pull requests.
+(`agent/audit-verified-fixes`). The exact-revision repository-read extension is
+verified through PR #348 (`agent/repository-read-tools`) at implementation ref
+`2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
+at this foundation proposal extends the same laws to the runner locus. This page
+owns logical tool requests, approval policy and decisions, physical tool
+attempts, result admission, intra-turn continuation, crash classification, the
+compiled registry, and the daemon-local catalog. Turn and attempt lifecycle law
+lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entry vocabulary in
+[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
+provider translation in [model-call-execution](model-call-execution.md);
+durable-command identity in [identity-and-commands](identity-and-commands.md);
+and relational mechanics in [persistence-protocol](persistence-protocol.md).
+Invariant tags cite [the invariant test index](../invariants.md). The
+runner-locus paragraphs in this page are the foundation proposal at the bottom
+of their implementing stack and become verified only with those child pull
+requests.
 
 ## Intra-turn rounds and request batches
 
@@ -831,10 +834,11 @@ tools:
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
 
-The Tier 1 catalog adds fourteen GitHub change-request tools. Every operation is
-`ExternalEffect` because GitHub observes its authenticated request. The ten
+The code-host catalog contains sixteen GitHub tools. Every operation is
+`ExternalEffect` because GitHub observes its authenticated request. The twelve
 read-only declarations — `change_request_summary`,
 `change_request_changed_files`, `change_request_file_patch`,
+`repository_read_file`, `repository_list_directory`,
 `change_request_checks_status`, `change_request_review_threads`,
 `change_request_ci_job_log`, `change_request_convergence_state`,
 `change_request_stack_state`, `change_request_thread_inventory`, and
@@ -860,6 +864,54 @@ The declarations and compact result objects are:
   semantic detail `requested changed file was not found in the change request`;
   it is not presented as a host rejection. A next-page signal beyond page 30
   violates the bounded response contract and fails closed.
+- `repository_read_file` accepts `repository`, one repository-relative `path`,
+  and a required exact lowercase 40-hex commit `revision`; it never defaults to
+  a branch head. An optional `line_range` has positive one-based `start` and
+  inclusive `end` members with `start` no greater than `end`. A content outcome
+  returns at most 64 KiB of exact UTF-8 text together with source and returned
+  byte counts, requested and returned line bounds, returned line count,
+  final-line completeness, and `truncated`. The returned byte count describes
+  the emitted content after credential scrubbing. GitHub cannot address a raw
+  blob by line, so a ranged read inspects the complete blob only when its
+  reported source size is at most 1 MiB; a larger blob produces the distinct
+  `line_range_unavailable` outcome with the requested range, source bytes, scan
+  limit, and `truncated: true` without fetching the blob. Complete bounded
+  ranged inspection classifies a NUL-bearing or non-UTF-8 blob as binary even
+  when those bytes lie outside the selected lines. A ranged content result can
+  claim truncation only when the exact source bytes observed inside the selected
+  lines exceed the retained bytes; source bytes before the selection cannot
+  impersonate discarded selected content. `path_not_found`,
+  `revision_not_found`, `not_a_file` with the observed repository-object type,
+  and `binary_file` with source bytes are separate non-content outcomes; every
+  file outcome carries `truncated`. Before any Contents request, the GitHub
+  adapter requests the bounded SHA representation of `/commits/{revision}`.
+  Success must return the exact required revision; a different resolution,
+  including a forty-hex branch or tag name that resolves to another commit,
+  fails execution before repository content is read. An exact resolution pins
+  the Contents request to that commit, and a Contents 404 then means
+  `path_not_found`. A commit conflict proves an empty repository and returns
+  `revision_not_found` without a Contents request. A commit 422 whose bounded
+  JSON `message` is exactly `No commit found for SHA: {revision}` also proves
+  absence without a Contents request; any other 422 remains failed execution. A
+  commit 404 permits one Contents visibility probe pinned to the requested
+  revision: only a bounded 404 body that exactly names that revision as an
+  absent ref returns `revision_not_found`; a generic 404 remains failed
+  execution because metadata visibility alone cannot prove absence. A successful
+  text or binary file read therefore uses three requests (commit resolution,
+  Contents metadata, immutable blob), a directory result or path absence uses
+  two (commit resolution and Contents), and revision absence uses one or two.
+  Every request shares one 30-second transaction budget, and every request after
+  resolution names the resolved commit or immutable blob rather than a moving
+  reference.
+- `repository_list_directory` accepts `repository`, one repository-relative
+  directory `path`, and the same required exact commit `revision`. An entries
+  outcome retains at most 100 immediate children with path, repository-object
+  type, and optional source byte size, plus observed and returned entry counts
+  and `truncated`. Reaching the contents endpoint's 1,000-entry ceiling is
+  explicitly incomplete even when GitHub supplies no continuation signal.
+  `path_not_found`, `revision_not_found`, and `not_a_directory` with the
+  observed repository-object type remain distinct outcomes, each carrying
+  `truncated`.
 - `change_request_checks_status` accepts `repository` and one exact lowercase
   40-hex `revision`; it returns that revision and the first page of at most 100
   check runs, each with id, name, status, optional conclusion, and URL, plus
@@ -948,10 +1000,12 @@ The declarations and compact result objects are:
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
-opaque node ids and GraphQL cursors are at most 512 bytes. A returned node id,
-head revision, or stack or inventory continuation is admitted by the same
-predicate its argument counterpart uses, so those identities and continuations
-can be passed back as arguments. Convergence-state cursors identify a diagnostic
+opaque node ids and GraphQL cursors are at most 512 bytes. Paths use canonical
+repository-relative spelling: no empty, dot, or parent component is admitted,
+with bare `.` reserved for the repository root. A returned node id, head
+revision, or stack or inventory continuation is admitted by the same predicate
+its argument counterpart uses, so those identities and continuations can be
+passed back as arguments. Convergence-state cursors identify a diagnostic
 truncation boundary; that tool and the gate remain indeterminate rather than
 performing an unbounded continuation scan. Every returned URL is one absolute
 credential-free HTTPS location. Typed construction rejects aggregate convergence
@@ -964,13 +1018,23 @@ page as complete.
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
 rustls with a TLS 1.2 floor; sends the fixed GitHub REST version `2026-03-10`;
-applies a 30-second whole-exchange timeout; and retains at most 512 KiB from any
-JSON response. The authenticated job-log endpoint is the sole redirect-shaped
-exchange: after exactly one 302 response, the adapter validates its bounded
-HTTPS location, resolves and pins a wholly public destination set, and performs
-one credential-free download with redirect following still disabled. Credential
-delivery and redaction are owned by
-[configuration-and-credentials](configuration-and-credentials.md).
+applies a 30-second whole-exchange timeout; and retains at most 512 KiB from an
+ordinary JSON response. The exact-revision contents lookup admits at most
+303,407,104 bytes of JSON ingress. That bound covers the 1,000-entry observation
+ceiling plus one framing allowance, budgeting each entry for eleven worst-case
+JSON-expanded fields: nine maximum repository paths, one separately admitted 4
+KiB symlink target, one separately admitted 8 KiB submodule URL marker, and 8
+KiB of fixed material, before projecting the shared result bound. Both
+repository tools implement the commit preflight, absence classification, request
+counts, and aggregate transaction deadline stated in their declarations above.
+After exact resolution, each Contents request is pinned to the resolved commit;
+a file read pins its subsequent request to the immutable blob identity returned
+by that lookup rather than re-reading a moving reference. The authenticated
+job-log endpoint is the sole redirect-shaped exchange: after exactly one 302
+response, the adapter validates its bounded HTTPS location, resolves and pins a
+wholly public destination set, and performs one credential-free download with
+redirect following still disabled. Credential delivery and redaction are owned
+by [configuration-and-credentials](configuration-and-credentials.md).
 
 A missing or unusable credential and a definitive client rejection produce only
 fixed known-failure detail, and the two are told apart: credential bytes that
@@ -986,7 +1050,7 @@ detail.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
-preexisting names and the fourteen code-host names; disagreement between the
+preexisting names and the sixteen code-host names; disagreement between the
 advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
