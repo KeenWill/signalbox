@@ -397,6 +397,16 @@ mod tests {
             .collect()
     }
 
+    fn daemon_definition_names() -> Vec<&'static str> {
+        CODE_HOST_TOOL_NAMES[..13]
+            .iter()
+            .copied()
+            .chain([CURRENT_TIME_NAME, ECHO_NAME])
+            .chain(CODE_HOST_TOOL_NAMES[13..].iter().copied())
+            .chain([SESSION_STATUS_UPDATE_NAME, WEB_FETCH_NAME])
+            .collect()
+    }
+
     /// The merged process-lifetime catalog exposes every daemon declaration in
     /// deterministic name order.
     #[test]
@@ -415,30 +425,6 @@ mod tests {
         let definitions = catalog.definitions();
         let names = definition_names(&definitions);
 
-        assert_eq!(
-            names,
-            vec![
-                CODE_HOST_TOOL_NAMES[0],
-                CODE_HOST_TOOL_NAMES[1],
-                CODE_HOST_TOOL_NAMES[2],
-                CODE_HOST_TOOL_NAMES[3],
-                CODE_HOST_TOOL_NAMES[4],
-                CODE_HOST_TOOL_NAMES[5],
-                CODE_HOST_TOOL_NAMES[6],
-                CODE_HOST_TOOL_NAMES[7],
-                CODE_HOST_TOOL_NAMES[8],
-                CODE_HOST_TOOL_NAMES[9],
-                CODE_HOST_TOOL_NAMES[10],
-                CODE_HOST_TOOL_NAMES[11],
-                CODE_HOST_TOOL_NAMES[12],
-                CURRENT_TIME_NAME,
-                ECHO_NAME,
-                CODE_HOST_TOOL_NAMES[13],
-                CODE_HOST_TOOL_NAMES[14],
-                CODE_HOST_TOOL_NAMES[15],
-                SESSION_STATUS_UPDATE_NAME,
-                WEB_FETCH_NAME,
-            ]
-        );
+        assert_eq!(names, daemon_definition_names());
     }
 }

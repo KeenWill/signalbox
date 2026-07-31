@@ -60,6 +60,8 @@ const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_EN
         + MAX_REPOSITORY_SYMLINK_TARGET_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
         + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
+const COMMIT_SHA_ACCEPT: &str = "application/vnd.github.sha";
+const MAX_COMMIT_SHA_RESPONSE_BYTES: usize = 41;
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
@@ -357,12 +359,18 @@ impl GitHubCodeHostTransport {
                     {
                         return Err(CodeHostTransportFailure::InvalidResponse);
                     }
+                    let selected_source_bytes = if arguments.line_range().is_some() {
+                        body.observed_selected_bytes
+                    } else {
+                        source_bytes
+                    };
                     match body.kind {
                         RepositoryFileBodyKind::Text(selection) => {
                             RepositoryReadFileResult::try_content(
                                 &arguments,
                                 RepositoryFileContentFields {
                                     source_bytes,
+                                    selected_source_bytes,
                                     start_line: selection.start_line,
                                     end_line: selection.end_line,
                                     returned_lines: selection.returned_lines,
@@ -453,7 +461,17 @@ impl GitHubCodeHostTransport {
         revision: &super::CodeHostRevision,
         credential: &CredentialValue,
     ) -> Result<RepositoryPathLookup, CodeHostTransportFailure> {
-        let url = self.repository_contents_url(repository, path, revision)?;
+        let resolution = self
+            .repository_revision_resolution(repository, revision, credential)
+            .await?;
+        let (resolved_revision, revision_visible) = match resolution {
+            RepositoryRevisionResolution::Exact(resolved_revision) => (resolved_revision, true),
+            RepositoryRevisionResolution::Missing => (revision.clone(), false),
+            RepositoryRevisionResolution::EmptyRepository => {
+                return Ok(RepositoryPathLookup::RevisionNotFound);
+            }
+        };
+        let url = self.repository_contents_url(repository, path, &resolved_revision)?;
         let response = self
             .send_authenticated_with_accept(
                 Method::GET,
@@ -464,7 +482,7 @@ impl GitHubCodeHostTransport {
             )
             .await?;
         match response.status() {
-            StatusCode::OK => {
+            StatusCode::OK if revision_visible => {
                 let (value, completeness) = bounded_json_page(
                     response,
                     StatusCode::OK,
@@ -473,12 +491,13 @@ impl GitHubCodeHostTransport {
                 .await?;
                 parse_repository_path_lookup(&value, path.as_str(), completeness)
             }
+            StatusCode::OK => Err(CodeHostTransportFailure::InvalidResponse),
+            StatusCode::NOT_FOUND if revision_visible => Ok(RepositoryPathLookup::PathNotFound),
             StatusCode::NOT_FOUND => {
                 if repository_contents_response_names_missing_revision(response, revision).await? {
                     Ok(RepositoryPathLookup::RevisionNotFound)
                 } else {
-                    self.classify_missing_repository_path(repository, revision, credential)
-                        .await
+                    Err(CodeHostTransportFailure::Rejected)
                 }
             }
             status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
@@ -486,20 +505,22 @@ impl GitHubCodeHostTransport {
         }
     }
 
-    async fn classify_missing_repository_path(
+    async fn repository_revision_resolution(
         &self,
         repository: &CodeHostRepository,
         revision: &super::CodeHostRevision,
         credential: &CredentialValue,
-    ) -> Result<RepositoryPathLookup, CodeHostTransportFailure> {
-        let url = self.repository_url(repository, &["git", "commits", revision.as_str()], None)?;
+    ) -> Result<RepositoryRevisionResolution, CodeHostTransportFailure> {
+        let url = self.repository_url(repository, &["commits", revision.as_str()], None)?;
         let response = self
-            .send_authenticated(Method::GET, url, None, credential)
+            .send_authenticated_with_accept(Method::GET, url, None, COMMIT_SHA_ACCEPT, credential)
             .await?;
         match response.status() {
-            StatusCode::OK => Ok(RepositoryPathLookup::PathNotFound),
-            StatusCode::CONFLICT => Ok(RepositoryPathLookup::RevisionNotFound),
-            StatusCode::NOT_FOUND => Err(CodeHostTransportFailure::Rejected),
+            StatusCode::OK => exact_repository_revision_from_response(response, revision)
+                .await
+                .map(RepositoryRevisionResolution::Exact),
+            StatusCode::NOT_FOUND => Ok(RepositoryRevisionResolution::Missing),
+            StatusCode::CONFLICT => Ok(RepositoryRevisionResolution::EmptyRepository),
             status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
             _ => Err(CodeHostTransportFailure::DispatchUnknown),
         }
@@ -1543,6 +1564,13 @@ impl CodeHostTransport for GitHubCodeHostTransport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum RepositoryRevisionResolution {
+    Exact(super::CodeHostRevision),
+    Missing,
+    EmptyRepository,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum RepositoryPathLookup {
     File {
         blob: String,
@@ -1585,7 +1613,24 @@ enum RepositoryFileBodyKind {
 struct RepositoryFileBody {
     kind: RepositoryFileBodyKind,
     observed_source_bytes: u64,
+    observed_selected_bytes: u64,
     source_exhausted: bool,
+}
+
+async fn exact_repository_revision_from_response(
+    response: Response,
+    expected: &super::CodeHostRevision,
+) -> Result<super::CodeHostRevision, CodeHostTransportFailure> {
+    let (body, completeness) =
+        read_bounded(response.bytes_stream(), MAX_COMMIT_SHA_RESPONSE_BYTES).await?;
+    if completeness == CodeHostResultCompleteness::Truncated {
+        return Err(CodeHostTransportFailure::ResponseTooLarge);
+    }
+    let body = body.strip_suffix(b"\n").unwrap_or(&body);
+    if body != expected.as_str().as_bytes() {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    Ok(expected.clone())
 }
 
 async fn repository_contents_response_names_missing_revision(
@@ -1801,6 +1846,7 @@ where
     let mut retained = Vec::new();
     let mut validated = Vec::new();
     let mut observed_source_bytes = 0_u64;
+    let mut observed_selected_bytes = 0_u64;
     let mut completeness = CodeHostResultCompleteness::Complete;
     let mut source_exhausted = true;
 
@@ -1819,6 +1865,9 @@ where
             if current_line >= requested_start
                 && requested_end.is_none_or(|end| current_line <= end)
             {
+                observed_selected_bytes = observed_selected_bytes
+                    .checked_add(1)
+                    .ok_or(CodeHostTransportFailure::InvalidResponse)?;
                 if retained.len() == MAX_REPOSITORY_FILE_CONTENT_BYTES {
                     completeness = CodeHostResultCompleteness::Truncated;
                     if line_range.is_none() {
@@ -1854,6 +1903,7 @@ where
     Ok(RepositoryFileBody {
         kind,
         observed_source_bytes,
+        observed_selected_bytes,
         source_exhausted,
     })
 }
@@ -2712,12 +2762,40 @@ mod tests {
         );
     }
 
+    /// A forty-hex ref name cannot impersonate the exact commit argument when
+    /// GitHub resolves it to a different object identity.
+    #[tokio::test]
+    async fn repository_hex_named_ref_cannot_impersonate_exact_commit() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: FILE_PATCH_MOVED_REVISION.as_bytes(),
+                },
+            )
+            .await
+        });
+        let failure = transport
+            .repository_read_file(
+                repository_read_arguments("src/lib.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect_err("a differently resolved ref cannot produce repository evidence");
+        let request = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::InvalidResponse);
+        assert_eq!(request, revision_request());
+    }
+
     /// A path present only at a moving head is still absent from the exact
     /// reviewed revision, and both requests remain pinned to that revision.
     #[tokio::test]
     async fn repository_file_at_head_does_not_replace_requested_revision() {
         let (transport, listener) = repository_test_transport().await;
         let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
             let path_request = serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
@@ -2726,15 +2804,7 @@ mod tests {
                 },
             )
             .await;
-            let revision_request = serve_test_response(
-                &listener,
-                TestHttpResponse::Json {
-                    status: "200 OK",
-                    body: b"{}",
-                },
-            )
-            .await;
-            [path_request, revision_request]
+            [revision_request, path_request]
         });
         let arguments = repository_read_arguments("src/lib.rs", None);
         let result = transport
@@ -2752,7 +2822,7 @@ mod tests {
                 "truncated": false,
             })
         );
-        assert_eq!(requests, missing_path_requests(arguments.path().as_str()));
+        assert_eq!(requests, path_lookup_requests(arguments.path().as_str()));
     }
 
     /// A revision the host does not recognize is distinct from a path absent at
@@ -2762,14 +2832,23 @@ mod tests {
         let (transport, listener) = repository_test_transport().await;
         let response_body = missing_revision_body();
         let server = tokio::spawn(async move {
-            serve_test_response(
+            let revision_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            let path_request = serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
                     status: "404 Not Found",
                     body: &response_body,
                 },
             )
-            .await
+            .await;
+            [revision_request, path_request]
         });
         let arguments = repository_read_arguments("src/lib.rs", None);
         let result = transport
@@ -2787,7 +2866,7 @@ mod tests {
                 "truncated": false,
             })
         );
-        assert_eq!(requests, contents_request(arguments.path().as_str()));
+        assert_eq!(requests, path_lookup_requests(arguments.path().as_str()));
     }
 
     /// An empty repository's commit probe returns the distinct conflict that
@@ -2796,23 +2875,14 @@ mod tests {
     async fn repository_empty_conflict_is_a_missing_revision_result() {
         let (transport, listener) = repository_test_transport().await;
         let server = tokio::spawn(async move {
-            let path_request = serve_test_response(
-                &listener,
-                TestHttpResponse::Json {
-                    status: "404 Not Found",
-                    body: b"{}",
-                },
-            )
-            .await;
-            let revision_request = serve_test_response(
+            serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
                     status: "409 Conflict",
                     body: b"{}",
                 },
             )
-            .await;
-            [path_request, revision_request]
+            .await
         });
         let arguments = repository_read_arguments("src/lib.rs", None);
         let result = transport
@@ -2830,7 +2900,7 @@ mod tests {
                 "truncated": false,
             })
         );
-        assert_eq!(requests, missing_path_requests(arguments.path().as_str()));
+        assert_eq!(requests, revision_request());
     }
 
     /// Metadata-only access leaves both content-bearing probes ambiguous, so a
@@ -2839,14 +2909,6 @@ mod tests {
     async fn repository_metadata_only_access_is_not_a_missing_revision_result() {
         let (transport, listener) = repository_test_transport().await;
         let server = tokio::spawn(async move {
-            let path_request = serve_test_response(
-                &listener,
-                TestHttpResponse::Json {
-                    status: "404 Not Found",
-                    body: b"{}",
-                },
-            )
-            .await;
             let revision_request = serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
@@ -2855,7 +2917,15 @@ mod tests {
                 },
             )
             .await;
-            [path_request, revision_request]
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            [revision_request, path_request]
         });
         let failure = transport
             .repository_read_file(
@@ -2867,7 +2937,7 @@ mod tests {
         let requests = repository_server_result(server).await;
 
         assert_eq!(failure, CodeHostTransportFailure::Rejected);
-        assert_eq!(requests, missing_path_requests("src/lib.rs"));
+        assert_eq!(requests, path_lookup_requests("src/lib.rs"));
     }
 
     /// A definitive host rejection remains failed execution rather than being
@@ -2895,7 +2965,7 @@ mod tests {
         let request = repository_server_result(server).await;
 
         assert_eq!(failure, CodeHostTransportFailure::Rejected);
-        assert_eq!(request, contents_request("src/lib.rs"));
+        assert_eq!(request, revision_request());
     }
 
     /// Reading a directory as a file yields its repository object kind without
@@ -2907,7 +2977,7 @@ mod tests {
         let directory =
             repository_directory_value(arguments.path().as_str(), Vec::new()).to_string();
         let server = tokio::spawn(async move {
-            serve_test_response(
+            serve_exact_revision_then(
                 &listener,
                 TestHttpResponse::Json {
                     status: "200 OK",
@@ -2932,7 +3002,7 @@ mod tests {
                 "truncated": false,
             })
         );
-        assert_eq!(request, contents_request(arguments.path().as_str()));
+        assert_eq!(request, path_lookup_requests(arguments.path().as_str()));
     }
 
     /// Invalid UTF-8 or NUL-bearing blob content is identified as binary and
@@ -2946,6 +3016,7 @@ mod tests {
         let metadata = repository_file_value(path.as_str(), source.len()).to_string();
         let source_for_server = source.clone();
         let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
             let path_request = serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
@@ -2961,7 +3032,7 @@ mod tests {
                 },
             )
             .await;
-            [path_request, blob_request]
+            [revision_request, path_request, blob_request]
         });
         let result = transport
             .repository_read_file(arguments, &test_credential())
@@ -2993,6 +3064,7 @@ mod tests {
         let metadata = repository_file_value("src/lines.rs", source.len()).to_string();
         let source_for_server = source.clone();
         let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
             let path_request = serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
@@ -3008,7 +3080,7 @@ mod tests {
                 },
             )
             .await;
-            [path_request, blob_request]
+            [revision_request, path_request, blob_request]
         });
         let result = transport
             .repository_read_file(
@@ -3045,17 +3117,19 @@ mod tests {
         assert_eq!(requests, file_read_requests("src/lines.rs"));
     }
 
-    /// Ranged text classification scans the complete bounded blob so binary
-    /// bytes outside the selected lines cannot be hidden by a text prefix.
+    /// Ranged truncation is backed by source bytes observed inside the
+    /// requested selection rather than unrelated bytes before it.
     #[tokio::test]
-    async fn repository_file_line_range_validates_the_whole_blob_as_binary() {
-        const REQUESTED_START: u32 = 1;
-        const REQUESTED_END: u32 = 1;
-        let source = b"first\nsecond\nthird\xff".to_vec();
+    async fn repository_file_range_truncation_is_witnessed_inside_selection() {
+        const REQUESTED_START: u32 = 2;
+        const REQUESTED_END: u32 = 3;
+        let selected_prefix = format!("{}\n", "x".repeat(MAX_REPOSITORY_FILE_CONTENT_BYTES - 1));
+        let source = format!("first\n{selected_prefix}y").into_bytes();
         let (transport, listener) = repository_test_transport().await;
-        let metadata = repository_file_value("src/mixed.rs", source.len()).to_string();
+        let metadata = repository_file_value("src/lines.rs", source.len()).to_string();
         let source_for_server = source.clone();
         let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
             let path_request = serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
@@ -3071,7 +3145,62 @@ mod tests {
                 },
             )
             .await;
-            [path_request, blob_request]
+            [revision_request, path_request, blob_request]
+        });
+        let result = transport
+            .repository_read_file(
+                repository_read_arguments(
+                    "src/lines.rs",
+                    Some(serde_json::json!({
+                        "end": REQUESTED_END,
+                        "start": REQUESTED_START,
+                    })),
+                ),
+                &test_credential(),
+            )
+            .await
+            .expect("selected source excess produces honest truncation")
+            .into_json_value();
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(result["source_bytes"], source.len());
+        assert_eq!(result["returned_bytes"], MAX_REPOSITORY_FILE_CONTENT_BYTES);
+        assert_eq!(result["returned_lines"], 1);
+        assert_eq!(result["start_line"], REQUESTED_START);
+        assert_eq!(result["end_line"], REQUESTED_START);
+        assert_eq!(result["last_line_complete"], true);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(requests, file_read_requests("src/lines.rs"));
+    }
+
+    /// Ranged text classification scans the complete bounded blob so binary
+    /// bytes outside the selected lines cannot be hidden by a text prefix.
+    #[tokio::test]
+    async fn repository_file_line_range_validates_the_whole_blob_as_binary() {
+        const REQUESTED_START: u32 = 1;
+        const REQUESTED_END: u32 = 1;
+        let source = b"first\nsecond\nthird\xff".to_vec();
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value("src/mixed.rs", source.len()).to_string();
+        let source_for_server = source.clone();
+        let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await;
+            let blob_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: &source_for_server,
+                },
+            )
+            .await;
+            [revision_request, path_request, blob_request]
         });
         let result = transport
             .repository_read_file(
@@ -3112,7 +3241,7 @@ mod tests {
         let (transport, listener) = repository_test_transport().await;
         let metadata = repository_file_value("src/huge.rs", SOURCE_BYTES).to_string();
         let server = tokio::spawn(async move {
-            serve_test_response(
+            serve_exact_revision_then(
                 &listener,
                 TestHttpResponse::Json {
                     status: "200 OK",
@@ -3152,7 +3281,7 @@ mod tests {
                 "truncated": true,
             })
         );
-        assert_eq!(request, contents_request("src/huge.rs"));
+        assert_eq!(request, path_lookup_requests("src/huge.rs"));
     }
 
     /// A source larger than the retained text bound exposes every count and the
@@ -3164,6 +3293,7 @@ mod tests {
         let metadata = repository_file_value("src/large.rs", source.len()).to_string();
         let source_for_server = source.clone();
         let server = tokio::spawn(async move {
+            let revision_request = serve_exact_revision(&listener).await;
             let path_request = serve_test_response(
                 &listener,
                 TestHttpResponse::Json {
@@ -3179,7 +3309,7 @@ mod tests {
                 },
             )
             .await;
-            [path_request, blob_request]
+            [revision_request, path_request, blob_request]
         });
         let result = transport
             .repository_read_file(
@@ -3380,7 +3510,7 @@ mod tests {
         .to_string();
         let encoded_bytes = directory.len();
         let server = tokio::spawn(async move {
-            serve_test_response(
+            serve_exact_revision_then(
                 &listener,
                 TestHttpResponse::Json {
                     status: "200 OK",
@@ -3400,7 +3530,7 @@ mod tests {
         assert_eq!(result["outcome"], "entries");
         assert_eq!(result["observed_entries"], OBSERVED_ENTRIES);
         assert_eq!(result["truncated"], true);
-        assert_eq!(request, contents_request("src"));
+        assert_eq!(request, path_lookup_requests("src"));
     }
 
     /// A directory larger than the result item bound reports both the observed
@@ -3413,7 +3543,7 @@ mod tests {
             repository_directory_value("src", repository_directory_entries(OBSERVED_ENTRIES))
                 .to_string();
         let server = tokio::spawn(async move {
-            serve_test_response(
+            serve_exact_revision_then(
                 &listener,
                 TestHttpResponse::Json {
                     status: "200 OK",
@@ -3440,7 +3570,7 @@ mod tests {
                 .len(),
             MAX_RESULT_ITEMS
         );
-        assert_eq!(request, contents_request("src"));
+        assert_eq!(request, path_lookup_requests("src"));
     }
 
     async fn repository_test_transport() -> (GitHubCodeHostTransport, tokio::net::TcpListener) {
@@ -3602,23 +3732,23 @@ mod tests {
         }
     }
 
+    fn revision_request() -> String {
+        format!("GET /repos/{FILE_PATCH_REPOSITORY}/commits/{REPOSITORY_REVISION} HTTP/1.1")
+    }
+
     fn contents_request(path: &str) -> String {
         format!(
             "GET /repos/{FILE_PATCH_REPOSITORY}/contents/{path}?ref={REPOSITORY_REVISION} HTTP/1.1"
         )
     }
 
-    fn missing_path_requests(path: &str) -> [String; 2] {
-        [
-            contents_request(path),
-            format!(
-                "GET /repos/{FILE_PATCH_REPOSITORY}/git/commits/{REPOSITORY_REVISION} HTTP/1.1"
-            ),
-        ]
+    fn path_lookup_requests(path: &str) -> [String; 2] {
+        [revision_request(), contents_request(path)]
     }
 
-    fn file_read_requests(path: &str) -> [String; 2] {
+    fn file_read_requests(path: &str) -> [String; 3] {
         [
+            revision_request(),
             contents_request(path),
             format!("GET /repos/{FILE_PATCH_REPOSITORY}/git/blobs/{REPOSITORY_BLOB} HTTP/1.1"),
         ]
@@ -3650,6 +3780,25 @@ mod tests {
                 },
             }
         }
+    }
+
+    async fn serve_exact_revision(listener: &tokio::net::TcpListener) -> String {
+        serve_test_response(
+            listener,
+            TestHttpResponse::Raw {
+                body: REPOSITORY_REVISION.as_bytes(),
+            },
+        )
+        .await
+    }
+
+    async fn serve_exact_revision_then(
+        listener: &tokio::net::TcpListener,
+        response: TestHttpResponse<'_>,
+    ) -> [String; 2] {
+        let revision_request = serve_exact_revision(listener).await;
+        let path_request = serve_test_response(listener, response).await;
+        [revision_request, path_request]
     }
 
     async fn serve_test_response(

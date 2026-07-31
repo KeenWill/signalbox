@@ -2004,6 +2004,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(1),
                 returned_lines: 1,
@@ -2048,6 +2049,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(1),
                 returned_lines: 1,
@@ -2086,6 +2088,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(3),
                 returned_lines: 3,

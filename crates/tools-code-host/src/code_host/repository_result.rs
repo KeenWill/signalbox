@@ -85,6 +85,8 @@ impl RepositoryObjectIdentity {
 pub struct RepositoryFileContentFields {
     /// Exact source blob size reported by GitHub.
     pub source_bytes: u64,
+    /// Exact source bytes observed inside the requested selection.
+    pub selected_source_bytes: u64,
     /// First returned line, absent when no content was returned.
     pub start_line: Option<u32>,
     /// Inclusive last returned line, absent when no content was returned.
@@ -183,6 +185,19 @@ impl RepositoryReadFileResult {
         };
         let content_ends_at_line_boundary =
             fields.content.is_empty() || fields.content.ends_with('\n');
+        let selected_source_bytes_consistent = fields.selected_source_bytes <= fields.source_bytes
+            && match requested_line_range {
+                None => fields.selected_source_bytes == fields.source_bytes,
+                Some(_) => true,
+            }
+            && match fields.completeness {
+                CodeHostResultCompleteness::Complete => {
+                    fields.selected_source_bytes == returned_bytes
+                }
+                CodeHostResultCompleteness::Truncated => {
+                    fields.selected_source_bytes > returned_bytes
+                }
+            };
         let complete_first_line_consistent = match fields.completeness {
             CodeHostResultCompleteness::Complete => match requested_start_line {
                 Some(1) => content_ends_at_line_boundary || fields.source_bytes == returned_bytes,
@@ -227,6 +242,7 @@ impl RepositoryReadFileResult {
             && valid_text(&fields.content)
             && fields.content.len() <= MAX_REPOSITORY_FILE_CONTENT_BYTES
             && source_bytes_consistent
+            && selected_source_bytes_consistent
             && complete_first_line_consistent
             && range_coverage_consistent
             && retention_bound_consistent
@@ -686,6 +702,8 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: u64::try_from(RETURNED_CONTENT.len())
+                    .expect("fixture selected size fits u64"),
                 start_line: Some(RETURNED_START),
                 end_line: Some(RETURNED_END),
                 returned_lines: RETURNED_LINES,
@@ -714,6 +732,8 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: u64::try_from(RETURNED_CONTENT.len())
+                    .expect("fixture selected size fits u64"),
                 start_line: Some(REQUESTED_LINE),
                 end_line: Some(REQUESTED_LINE),
                 returned_lines: 1,
@@ -744,12 +764,47 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: u64::try_from(RETURNED_CONTENT.len())
+                    .expect("fixture selected size fits u64"),
                 start_line: Some(REQUESTED_START),
                 end_line: Some(REQUESTED_START),
                 returned_lines: 1,
                 last_line_complete: true,
                 content: String::from(RETURNED_CONTENT),
                 completeness: CodeHostResultCompleteness::Complete,
+            },
+        );
+
+        assert!(result.is_none());
+    }
+
+    /// Bytes before a selected range cannot impersonate truncation within that
+    /// range when every selected byte was retained.
+    #[test]
+    fn ranged_content_rejects_truncation_not_observed_inside_selection() {
+        const REQUESTED_START: u32 = 2;
+        const REQUESTED_END: u32 = 3;
+        let content = format!("{}\n", "x".repeat(MAX_REPOSITORY_FILE_CONTENT_BYTES - 1));
+        let returned_bytes = u64::try_from(content.len()).expect("fixture content size fits u64");
+        let source_bytes = returned_bytes
+            .checked_add(2)
+            .expect("fixture source size fits u64");
+        let arguments = file_arguments(
+            "src/lib.rs",
+            REVISION,
+            Some(json!({"end": REQUESTED_END, "start": REQUESTED_START})),
+        );
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                selected_source_bytes: returned_bytes,
+                start_line: Some(REQUESTED_START),
+                end_line: Some(REQUESTED_START),
+                returned_lines: 1,
+                last_line_complete: true,
+                content,
+                completeness: CodeHostResultCompleteness::Truncated,
             },
         );
 
@@ -775,6 +830,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(REQUESTED_LINE),
                 end_line: Some(REQUESTED_LINE),
                 returned_lines: 1,
@@ -802,6 +858,8 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: u64::try_from(CONTENT.len())
+                    .expect("fixture selected size fits u64"),
                 start_line: Some(REQUESTED_LINE),
                 end_line: Some(REQUESTED_LINE),
                 returned_lines: 1,
@@ -831,6 +889,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: 0,
                 start_line: None,
                 end_line: None,
                 returned_lines: 0,
@@ -859,6 +918,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: 0,
                 start_line: None,
                 end_line: None,
                 returned_lines: 0,
@@ -889,6 +949,8 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: u64::try_from(CONTENT.len())
+                    .expect("fixture selected size fits u64"),
                 start_line: Some(REQUESTED_START),
                 end_line: Some(REQUESTED_END),
                 returned_lines: 1,
@@ -941,6 +1003,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(REQUESTED_LINE),
                 end_line: Some(REQUESTED_LINE),
                 returned_lines: 1,
@@ -1030,6 +1093,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(1),
                 returned_lines: 1,
@@ -1191,6 +1255,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(1),
                 returned_lines: 1,
@@ -1215,6 +1280,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(1),
                 returned_lines: 1,
@@ -1238,6 +1304,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(1),
                 returned_lines: 1,
@@ -1261,6 +1328,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(1),
                 returned_lines: 1,
@@ -1284,6 +1352,7 @@ mod tests {
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
+                selected_source_bytes: source_bytes,
                 start_line: Some(1),
                 end_line: Some(1),
                 returned_lines: 1,
