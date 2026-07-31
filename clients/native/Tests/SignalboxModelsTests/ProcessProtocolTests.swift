@@ -23,6 +23,112 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-033: imported continuation requests retain their closed version-one shape.
+  func testImportedContinuationRequestUsesTheVersionOneFrontierShape() throws {
+    let importedConversationID = "33333333-3333-4333-8333-333333333333"
+    let aliasID = "44444444-4444-4444-8444-444444444444"
+    let frame = SignalboxProcessClientFrame(
+      requestID: try SignalboxRequestID(validating: 10),
+      request: .createSessionFromImportedFrontier(
+        commandID: try SignalboxCommandID(validating: turnID),
+        importedConversationID: try SignalboxCanonicalUUID(
+          validating: importedConversationID
+        ),
+        throughPosition: SignalboxCanonicalUInt64(rawValue: 2),
+        relationship: .resume,
+        initialModelSelection: .alias(
+          aliasID: try SignalboxCanonicalUUID(validating: aliasID)
+        )
+      )
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(frame)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"request":{"command_id":"\#(turnID)","imported_conversation_id":"\#(importedConversationID)","initial_model_selection":{"alias_id":"\#(aliasID)","kind":"alias"},"relationship":"resume","through_position":"2","type":"create_session_from_imported_frontier"},"request_id":"10","version":1}"#
+    )
+  }
+
+  /// INV-033: admitted imported-entry members decode without weakening the closed shape.
+  func testImportedConversationEntryDecodesItsAttestedTextPreview() throws {
+    let importedEntryID = "33333333-3333-4333-8333-333333333333"
+    let position = SignalboxCanonicalUInt64(rawValue: 1)
+    let preview = "Owner fixture text"
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"10",
+        "message":{
+          "type":"imported_conversation_entry",
+          "position":"\(position.rawValue)",
+          "imported_entry_id":"\(importedEntryID)",
+          "source_speaker":{"type":"attested","speaker":"user"},
+          "content_kind":"text",
+          "text_preview":{"preview":"\(preview)","truncated":false}
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+    let entry = try ProcessProtocolFixture.importedEntry(in: frame.message)
+
+    XCTAssertEqual(entry.position, position)
+    XCTAssertEqual(entry.importedEntryID.rawValue, importedEntryID)
+    XCTAssertEqual(entry.sourceSpeakerLabel, "User")
+    XCTAssertEqual(entry.contentKind, .text)
+    XCTAssertEqual(entry.textPreview?.preview, preview)
+    XCTAssertEqual(entry.textPreview?.truncated, false)
+  }
+
+  /// INV-033: omitting a required nullable imported-entry member fails explicitly.
+  func testImportedConversationEntryRequiresExplicitNullablePreview() throws {
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"10",
+        "message":{
+          "type":"imported_conversation_entry",
+          "position":"1",
+          "imported_entry_id":"33333333-3333-4333-8333-333333333333",
+          "source_speaker":{"type":"not_attested"},
+          "content_kind":"source_event"
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+    let diagnostic = try ProcessProtocolFixture.unknownDiagnostic(in: frame.message)
+
+    XCTAssertTrue(diagnostic.message.contains("text_preview"))
+  }
+
+  /// INV-033: an unknown imported source-speaker variant fails explicitly.
+  func testImportedConversationEntryRejectsUnknownSourceSpeaker() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.importedEntryWithUnknownSourceSpeakerFrame()
+    )
+    let diagnostic = try ProcessProtocolFixture.unknownDiagnostic(in: frame.message)
+
+    XCTAssertEqual(diagnostic, ProcessProtocolFixture.unknownImportedSourceSpeakerDiagnostic)
+  }
+
+  /// INV-033: explicit null preview admission stays distinct from an omitted member.
+  func testImportedConversationEntryAcceptsAttestedSpeakerWithoutTextPreview() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.attestedSpeakerWithoutTextPreviewFrame()
+    )
+    let entry = try ProcessProtocolFixture.importedEntry(in: frame.message)
+
+    XCTAssertEqual(entry.sourceSpeakerLabel, "User")
+    XCTAssertEqual(entry.contentKind, .text)
+    XCTAssertNil(entry.textPreview)
+  }
+
   func testModelAliasCatalogRequestAndSummaryUseClosedVersionOneShapes() throws {
     let requestFrame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 8),
@@ -560,6 +666,10 @@ private enum ProcessProtocolFixture {
   static let missingConversationTitleDiagnostic = SignalboxDecodingDiagnostic(
     message: "Missing required field at message.conversation.title."
   )
+  static let unknownImportedSourceSpeakerKind = "future_speaker"
+  static let unknownImportedSourceSpeakerDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Invalid field value at message.source_speaker."
+  )
 
   static func duplicateSnapshotBoundaryMessage(
     sessionID: String
@@ -796,6 +906,44 @@ private enum ProcessProtocolFixture {
     )
   }
 
+  static func importedEntryWithUnknownSourceSpeakerFrame() -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"10",
+        "message":{
+          "type":"imported_conversation_entry",
+          "position":"1",
+          "imported_entry_id":"33333333-3333-4333-8333-333333333333",
+          "source_speaker":{"type":"\(unknownImportedSourceSpeakerKind)"},
+          "content_kind":"source_event",
+          "text_preview":null
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func attestedSpeakerWithoutTextPreviewFrame() -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"10",
+        "message":{
+          "type":"imported_conversation_entry",
+          "position":"1",
+          "imported_entry_id":"33333333-3333-4333-8333-333333333333",
+          "source_speaker":{"type":"attested","speaker":"user"},
+          "content_kind":"text",
+          "text_preview":null
+        }
+      }
+      """.utf8
+    )
+  }
+
   static func rejectionDetail(
     in message: SignalboxProcessServerMessage
   ) throws -> SignalboxRejectionDetail {
@@ -942,6 +1090,24 @@ private enum ProcessProtocolFixture {
     return evidence
   }
 
+  static func importedEntry(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxImportedConversationEntry {
+    guard case .importedConversationEntry(let entry) = message else {
+      throw ProcessProtocolFixtureError.missingImportedEntry
+    }
+    return entry
+  }
+
+  static func unknownDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxDecodingDiagnostic {
+    guard case .unknown(_, _, let diagnostic) = message, let diagnostic else {
+      throw ProcessProtocolFixtureError.missingUnknownDiagnostic
+    }
+    return diagnostic
+  }
+
   static func modelCallCount(
     in message: SignalboxProcessServerMessage
   ) throws -> UInt64 {
@@ -994,8 +1160,10 @@ private enum ProcessProtocolFixture {
 }
 
 private enum ProcessProtocolFixtureError: Error {
+  case missingImportedEntry
   case missingRejectionDetail
   case missingModelCallUsage
   case missingModelCallsEnd
   case missingProviderFailureCause
+  case missingUnknownDiagnostic
 }
