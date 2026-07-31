@@ -2010,7 +2010,8 @@ pub enum ClientRequest {
         run_id: CanonicalUuid,
         pass_id: CanonicalUuid,
         turn_id: CanonicalUuid,
-        output_frontier_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        output_frontier_id: Option<CanonicalUuid>,
         finding_id: CanonicalUuid,
         /// Exact contiguous event ordinal the appended disposition occupies.
         event_ordinal: CanonicalU64,
@@ -2259,10 +2260,18 @@ impl ClientRequest {
             return Err(FrameValidationError::ReviewShape);
         }
         if let Self::RecordReviewFindingEvent {
-            finding_id, event, ..
+            finding_id,
+            output_frontier_id,
+            event,
+            ..
         } = self
         {
             validate_review_finding_event(event)?;
+            let blocked = matches!(event, ReviewFindingEvent::BlockedWithReason { .. });
+            if blocked == output_frontier_id.is_some() {
+                return Err(FrameValidationError::ReviewShape);
+            }
+
             let self_reference = match event {
                 ReviewFindingEvent::Duplicate {
                     canonical_finding_id,
@@ -6540,7 +6549,7 @@ mod tests {
                 run_id: uuid(3),
                 pass_id: uuid(4),
                 turn_id: uuid(5),
-                output_frontier_id: uuid(6),
+                output_frontier_id: Some(uuid(6)),
                 finding_id: uuid(7),
                 event_ordinal: CanonicalU64::new(2),
                 event: ReviewFindingEvent::Duplicate {
@@ -6723,6 +6732,41 @@ mod tests {
     fn review_published_outcome_requires_external_link_evidence() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"14","request":{"type":"record_review_publication_outcomes","command_id":"00000000-0000-0000-0000-000000000002","attempt_id":"00000000-0000-0000-0000-000000000003","outcomes":[{"finding_id":"00000000-0000-0000-0000-000000000004","external_link_id":null,"outcome":"published"}]}}"#,
+        );
+    }
+
+    #[test]
+    fn review_blocked_finding_event_round_trips_with_null_frontier()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new(
+            request(27)?,
+            ClientRequest::RecordReviewFindingEvent {
+                command_id: command(2)?,
+                run_id: uuid(3),
+                pass_id: uuid(4),
+                turn_id: uuid(5),
+                output_frontier_id: None,
+                finding_id: uuid(7),
+                event_ordinal: CanonicalU64::new(2),
+                event: ReviewFindingEvent::BlockedWithReason {
+                    reason: String::from("requires reconciliation"),
+                    external_link_id: None,
+                },
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn review_finding_event_rejects_frontier_mismatched_to_event() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"27","request":{"type":"record_review_finding_event","command_id":"00000000-0000-0000-0000-000000000002","run_id":"00000000-0000-0000-0000-000000000003","pass_id":"00000000-0000-0000-0000-000000000004","turn_id":"00000000-0000-0000-0000-000000000005","output_frontier_id":"00000000-0000-0000-0000-000000000006","finding_id":"00000000-0000-0000-0000-000000000007","event_ordinal":"1","event":{"kind":"blocked_with_reason","reason":"requires reconciliation","external_link_id":null}}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"27","request":{"type":"record_review_finding_event","command_id":"00000000-0000-0000-0000-000000000002","run_id":"00000000-0000-0000-0000-000000000003","pass_id":"00000000-0000-0000-0000-000000000004","turn_id":"00000000-0000-0000-0000-000000000005","output_frontier_id":null,"finding_id":"00000000-0000-0000-0000-000000000007","event_ordinal":"1","event":{"kind":"accepted"}}}"#,
         );
     }
 

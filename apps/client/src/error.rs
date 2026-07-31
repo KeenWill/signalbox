@@ -10,6 +10,9 @@ pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
     SystemPromptFile(io::Error),
+    ReviewInputFile(io::Error),
+    ReviewInputJson(serde_json::Error),
+    ReviewInputExceedsFrame,
     ScanDirectory(io::Error),
     SourceExceedsFrame,
     ScanIncomplete {
@@ -49,6 +52,14 @@ impl ClientError {
         Self::SystemPromptFile(error)
     }
 
+    pub(crate) fn review_input_file(error: io::Error) -> Self {
+        Self::ReviewInputFile(error)
+    }
+
+    pub(crate) fn review_input_json(error: serde_json::Error) -> Self {
+        Self::ReviewInputJson(error)
+    }
+
     pub(crate) fn scan_directory(error: io::Error) -> Self {
         Self::ScanDirectory(error)
     }
@@ -62,6 +73,9 @@ impl ClientError {
             Self::Remote { .. }
             | Self::SourceFile(_)
             | Self::SystemPromptFile(_)
+            | Self::ReviewInputFile(_)
+            | Self::ReviewInputJson(_)
+            | Self::ReviewInputExceedsFrame
             | Self::SourceExceedsFrame => self,
             Self::Io(_)
             | Self::ScanDirectory(_)
@@ -93,6 +107,15 @@ impl fmt::Display for ClientError {
             }
             Self::SystemPromptFile(_) => {
                 formatter.write_str("the system prompt file could not be read")
+            }
+            Self::ReviewInputFile(_) => {
+                formatter.write_str("the review JSON input file could not be read")
+            }
+            Self::ReviewInputJson(_) => {
+                formatter.write_str("the review JSON input file is not an exact admitted shape")
+            }
+            Self::ReviewInputExceedsFrame => {
+                formatter.write_str("the review JSON input exceeds the process frame bound")
             }
             Self::ScanDirectory(_) => {
                 formatter.write_str("the conversation import scan directory could not be read")
@@ -150,13 +173,16 @@ impl Error for ClientError {
             Self::Io(error)
             | Self::SourceFile(error)
             | Self::SystemPromptFile(error)
+            | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
+            Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
             Self::Protocol(_)
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::ReviewInputExceedsFrame
             | Self::SourceExceedsFrame
             | Self::ScanIncomplete { .. }
             | Self::TurnRecoveryRequired
