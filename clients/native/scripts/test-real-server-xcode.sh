@@ -220,7 +220,7 @@ if [[ ! -S "$SOCKET_PATH" ]]; then
 	exit 1
 fi
 
-DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_DERIVED_DATA_PATH:-$NATIVE_ROOT/.derivedData-real-server}"
+DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_REAL_SERVER_DERIVED_DATA_PATH:-$NATIVE_ROOT/.derivedData-real-server}"
 RESULT_BUNDLE_PATH="${SIGNALBOX_NATIVE_REAL_SERVER_RESULT_BUNDLE_PATH:-$DERIVED_DATA_PATH/Logs/Test/SignalboxNative-RealServer.xcresult}"
 DESTINATION="${XCODE_DESTINATION:-platform=macOS,arch=$(uname -m)}"
 BUILD_CMD=(
@@ -287,7 +287,18 @@ printf '\n'
 "${TEST_CMD[@]}"
 
 summary="$(xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE_PATH" --compact)"
-if [[ "$summary" != *'"result":"Passed"'* ]]; then
-	printf '%s\n' "$summary" >&2
-	exit 65
-fi
+python3 - "$summary" <<'PY'
+import json
+import sys
+
+summary = json.loads(sys.argv[1])
+if (
+    summary.get("result") != "Passed"
+    or summary.get("passedTests", 0) < 1
+    or summary.get("failedTests") != 0
+    or summary.get("skippedTests") != 0
+    or summary.get("totalTestCount") != summary.get("passedTests")
+):
+    print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
+    raise SystemExit(65)
+PY

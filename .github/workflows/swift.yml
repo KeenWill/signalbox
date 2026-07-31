@@ -3,13 +3,23 @@ name: Swift
 on:
   pull_request:
     paths:
+      - "apps/signalboxd/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
       - "clients/native/**"
       - ".github/workflows/swift.yml"
+      - "rust-toolchain.toml"
   push:
     branches: [main]
     paths:
+      - "apps/signalboxd/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
       - "clients/native/**"
       - ".github/workflows/swift.yml"
+      - "rust-toolchain.toml"
 
 permissions:
   contents: read
