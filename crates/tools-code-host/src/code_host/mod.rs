@@ -307,10 +307,21 @@ impl CodeHostToolKind {
     }
 
     const fn mutates(self) -> bool {
-        matches!(
-            self,
-            Self::Comment | Self::ThreadReply | Self::ThreadResolve | Self::RerunFailedJobs
-        )
+        match self {
+            Self::Comment | Self::ThreadReply | Self::ThreadResolve | Self::RerunFailedJobs => true,
+            Self::Summary
+            | Self::ChangedFiles
+            | Self::FilePatch
+            | Self::ListDirectory
+            | Self::ReadFile
+            | Self::ChecksStatus
+            | Self::ConvergenceState
+            | Self::ReviewThreads
+            | Self::StackState
+            | Self::ThreadInventory
+            | Self::CiJobLog
+            | Self::ReviewGateCheck => false,
+        }
     }
 
     fn accepts_result(self, result: &CodeHostResult) -> bool {
@@ -729,7 +740,11 @@ where
             }
         };
         let mut value = result.into_json_value();
-        scrub_result_value(kind, &scrubber, &mut value).ok_or_else(caller_bug)?;
+        if scrub_result_value(kind, &scrubber, &mut value).is_none() {
+            return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.code_host_rejected_detail.clone()),
+            }));
+        }
         let content = serde_json::to_string(&value).map_err(|_| caller_bug())?;
         if content.len() > result::MAX_ENCODED_RESULT_BYTES {
             if kind.mutates() {
@@ -871,8 +886,18 @@ fn scrub_result_value(
         return Some(());
     }
 
-    let returned_bytes = value.get("content")?.as_str()?.len();
+    let content = value.get("content")?.as_str()?;
+    let returned_bytes = content.len();
     if returned_bytes > repository_result::MAX_REPOSITORY_FILE_CONTENT_BYTES {
+        return None;
+    }
+    let returned_lines = repository_result::line_count(content);
+    if value.get("returned_lines")?.as_u64()? != u64::from(returned_lines) {
+        return None;
+    }
+    let truncated = value.get("truncated")?.as_bool()?;
+    let last_line_complete = content.is_empty() || content.ends_with('\n') || !truncated;
+    if value.get("last_line_complete")?.as_bool()? != last_line_complete {
         return None;
     }
     value.as_object_mut()?.insert(
@@ -2028,6 +2053,44 @@ mod tests {
             },
         )
         .expect("fixture file result is admitted");
+        let mut value = CodeHostResult::ReadFile(result).into_json_value();
+
+        let scrubbed = scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value);
+
+        assert!(scrubbed.is_none());
+    }
+
+    /// Credential redaction cannot leave line metadata describing the
+    /// credential-bearing source rather than the emitted content.
+    #[test]
+    fn repository_file_scrubbing_rejects_changed_line_structure() {
+        const CREDENTIAL: &str = "\nsecond";
+        const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+        const SOURCE_CONTENT: &str = "first\nsecond\nthird\n";
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let source_bytes =
+            u64::try_from(SOURCE_CONTENT.len()).expect("fixture source size fits u64");
+        let arguments: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
+            "path": "src/lib.rs",
+            "repository": "owner/repository",
+            "revision": REVISION,
+        }))
+        .expect("fixture file arguments are admitted");
+        let result = RepositoryReadFileResult::try_content(
+            &arguments,
+            RepositoryFileContentFields {
+                source_bytes,
+                start_line: Some(1),
+                end_line: Some(3),
+                returned_lines: 3,
+                last_line_complete: true,
+                content: String::from(SOURCE_CONTENT),
+                completeness: CodeHostResultCompleteness::Complete,
+            },
+        )
+        .expect("fixture file result is admitted before scrubbing");
         let mut value = CodeHostResult::ReadFile(result).into_json_value();
 
         let scrubbed = scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value);

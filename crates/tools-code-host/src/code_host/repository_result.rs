@@ -394,7 +394,7 @@ impl RepositoryReadFileResult {
     }
 }
 
-fn line_count(content: &str) -> u32 {
+pub(super) fn line_count(content: &str) -> u32 {
     if content.is_empty() {
         return 0;
     }

@@ -3793,15 +3793,16 @@ mod tests {
         assert_eq!(parse_changed_file(&value), Ok((expected_file, None)));
     }
 
-    /// Paths returned by GitHub remain repository-relative across both result
-    /// shapes that expose them.
+    /// Paths returned by GitHub retain canonical repository-relative
+    /// components across both result shapes that expose them.
     #[test]
-    fn returned_paths_reject_absolute_values() {
+    fn returned_paths_reject_noncanonical_values() {
         let absolute_path = String::from("/src/lib.rs");
-        let changed_file =
+        let noncanonical_path = String::from("src/../lib.rs");
+        let absolute_changed_file =
             ChangedFile::try_new(absolute_path.clone(), String::from("modified"), 1, 0);
-        let review_thread = ReviewThread::try_new(ReviewThreadFields {
-            id: String::from("PRRT_fixture"),
+        let absolute_review_thread = ReviewThread::try_new(ReviewThreadFields {
+            id: String::from("PRRT_absolute_fixture"),
             resolved: false,
             outdated: false,
             path: absolute_path,
@@ -3809,9 +3810,22 @@ mod tests {
             comments: Vec::new(),
             comments_truncated: false,
         });
+        let noncanonical_changed_file =
+            ChangedFile::try_new(noncanonical_path.clone(), String::from("modified"), 1, 0);
+        let noncanonical_review_thread = ReviewThread::try_new(ReviewThreadFields {
+            id: String::from("PRRT_noncanonical_fixture"),
+            resolved: false,
+            outdated: false,
+            path: noncanonical_path,
+            line: Some(1),
+            comments: Vec::new(),
+            comments_truncated: false,
+        });
 
-        assert_eq!(changed_file, None);
-        assert_eq!(review_thread, None);
+        assert_eq!(absolute_changed_file, None);
+        assert_eq!(absolute_review_thread, None);
+        assert_eq!(noncanonical_changed_file, None);
+        assert_eq!(noncanonical_review_thread, None);
     }
 
     /// A GraphQL mutation error cannot be mistaken for a definitive

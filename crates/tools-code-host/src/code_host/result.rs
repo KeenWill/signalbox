@@ -6,7 +6,7 @@ use reqwest::Url;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
-use super::arguments::{MAX_FILE_PATH_BYTES, valid_opaque_id, valid_revision};
+use super::arguments::{CodeHostFilePath, valid_opaque_id, valid_revision};
 
 pub(super) const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
@@ -102,10 +102,7 @@ impl JsonSchema for CodeHostUrl {
 }
 
 pub(super) fn valid_path(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with('/')
-        && value.len() <= MAX_FILE_PATH_BYTES
-        && !value.contains('\0')
+    CodeHostFilePath::try_new(value.to_owned()).is_ok()
 }
 
 /// Typed result of `change_request_summary`.

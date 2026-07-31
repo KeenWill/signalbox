@@ -15,21 +15,22 @@ runner-protocol batch reconstitution through PR #260
 through PR #311 (`agent/session-templates-spec`), and the exact-origin
 `web_fetch` egress policy and complete bounded file-patch lookup through PR #330
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
-verified through PR #348 (`agent/repository-read-tools`). The runner executable
-stack rooted at this foundation proposal extends the same laws to the runner
-locus. This page owns logical tool requests, approval policy and decisions,
-physical tool attempts, result admission, intra-turn continuation, crash
-classification, the compiled registry, and the daemon-local catalog. Turn and
-attempt lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
-model-call staging and provider translation in
-[model-call-execution](model-call-execution.md); durable-command identity in
-[identity-and-commands](identity-and-commands.md); and relational mechanics in
-[persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant test index](../invariants.md). The runner-locus paragraphs in
-this page are the foundation proposal at the bottom of their implementing stack
-and become verified only with those child pull requests.
+verified through PR #348 (`agent/repository-read-tools`) at implementation ref
+`12274fcc13adeb0016a8c548040e7b7961715ec3`. The runner executable stack rooted
+at this foundation proposal extends the same laws to the runner locus. This page
+owns logical tool requests, approval policy and decisions, physical tool
+attempts, result admission, intra-turn continuation, crash classification, the
+compiled registry, and the daemon-local catalog. Turn and attempt lifecycle law
+lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entry vocabulary in
+[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
+provider translation in [model-call-execution](model-call-execution.md);
+durable-command identity in [identity-and-commands](identity-and-commands.md);
+and relational mechanics in [persistence-protocol](persistence-protocol.md).
+Invariant tags cite [the invariant test index](../invariants.md). The
+runner-locus paragraphs in this page are the foundation proposal at the bottom
+of their implementing stack and become verified only with those child pull
+requests.
 
 ## Intra-turn rounds and request batches
 
