@@ -1,8 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use signalbox_tools_exec::{
-    BwrapAvailability, ExecArguments, ExecutionConfinement, ProcessOutcome, SandboxedCommandRunner,
-    TokioProcessRunner,
+    ExecArguments, ExecutionConfinement, ProcessOutcome, SandboxedCommandRunner, TokioProcessRunner,
 };
 
 #[tokio::test]
@@ -64,12 +63,6 @@ fn procfs_children_available() -> bool {
         observed_task = true;
     }
     observed_task
-}
-
-#[test]
-fn bwrap_gate_distinguishes_missing_from_unusable_evidence() {
-    assert_ne!(BwrapAvailability::Missing, BwrapAvailability::Unusable);
-    assert_ne!(BwrapAvailability::TimedOut, BwrapAvailability::Unusable);
 }
 
 #[test]

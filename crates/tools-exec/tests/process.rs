@@ -1,6 +1,12 @@
 #![cfg(target_os = "linux")]
 
-use std::{collections::BTreeMap, ffi::OsString, os::unix::fs::PermissionsExt, time::Duration};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use signalbox_tools_exec::{
     CaptureCompleteness, ProcessEnvironment, ProcessOutcome, ProcessRequest, ProcessRunner,
@@ -20,16 +26,39 @@ const REPLACEMENT_SUPERVISOR_EXIT_CODE: i32 = 99;
 const SUPERVISOR_PIN_DIRECTORY: &str = "signalbox-exec-supervisor-pin";
 const PARENT_KILL_PID_FILE: &str = "signalbox-exec-parent-kill";
 const GRANDPARENT_KILL_PID_FILE: &str = "signalbox-exec-grandparent-kill";
+const CANCELLATION_PID_FILE: &str = "signalbox-tools-exec-cancel";
+
+struct TemporaryPath {
+    path: PathBuf,
+}
+
+impl TemporaryPath {
+    fn new(stem: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let identity = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("{stem}-{}-{identity}", std::process::id()));
+        Ok(Self { path })
+    }
+
+    fn as_path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
 
 #[tokio::test]
 async fn production_runner_pins_the_supervisor_executable_identity()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let directory =
-            std::env::temp_dir().join(format!("{SUPERVISOR_PIN_DIRECTORY}-{}", std::process::id()));
-        std::fs::create_dir(&directory)?;
-        let supplied = directory.join("supervisor");
-        let moved = directory.join("original-supervisor");
+        let directory = TemporaryPath::new(SUPERVISOR_PIN_DIRECTORY)?;
+        std::fs::create_dir(directory.as_path())?;
+        let supplied = directory.as_path().join("supervisor");
+        let moved = directory.as_path().join("original-supervisor");
         std::fs::copy(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"), &supplied)?;
         std::fs::set_permissions(&supplied, std::fs::Permissions::from_mode(0o700))?;
         let mut runner = TokioProcessRunner::try_new(&supplied)?;
@@ -51,7 +80,6 @@ async fn production_runner_pins_the_supervisor_executable_identity()
 
         let result = runner.run(request).await;
         drop(runner);
-        std::fs::remove_dir_all(directory)?;
 
         assert_eq!(
             result.outcome,
@@ -333,11 +361,10 @@ async fn production_runner_kills_descendants_on_timeout() -> Result<(), Box<dyn 
 async fn production_runner_survives_target_killing_its_direct_parent()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let pid_file =
-            std::env::temp_dir().join(format!("{PARENT_KILL_PID_FILE}-{}", std::process::id()));
+        let pid_file = TemporaryPath::new(PARENT_KILL_PID_FILE)?;
         let script = format!(
             "printf %s $$ > {}; kill -KILL $PPID; exec {} 30",
-            pid_file.display(),
+            pid_file.as_path().display(),
             fixture_program("sleep")?.display()
         );
         let request = shell_request(&script, Duration::from_secs(5), std::env::current_dir()?)?;
@@ -345,8 +372,7 @@ async fn production_runner_survives_target_killing_its_direct_parent()
 
         let result = production_runner()?.run(request).await;
         let elapsed = started.elapsed();
-        let target = std::fs::read_to_string(&pid_file)?.parse::<u32>()?;
-        let _ = std::fs::remove_file(&pid_file);
+        let target = std::fs::read_to_string(pid_file.as_path())?.parse::<u32>()?;
         await_process_absent(target).await?;
 
         assert_eq!(
@@ -366,12 +392,11 @@ async fn production_runner_survives_target_killing_its_direct_parent()
 async fn production_runner_survives_target_killing_the_authority_supervisor()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let pid_file =
-            std::env::temp_dir().join(format!("{GRANDPARENT_KILL_PID_FILE}-{}", std::process::id()));
+        let pid_file = TemporaryPath::new(GRANDPARENT_KILL_PID_FILE)?;
         let script = format!(
             "supervisor=$({} '/^PPid:/ {{print $2}}' /proc/$PPID/status); printf %s $$ > {}; kill -KILL $supervisor; exec {} 30",
             fixture_program("awk")?.display(),
-            pid_file.display(),
+            pid_file.as_path().display(),
             fixture_program("sleep")?.display()
         );
         let request = shell_request(&script, Duration::from_secs(5), std::env::current_dir()?)?;
@@ -379,8 +404,7 @@ async fn production_runner_survives_target_killing_the_authority_supervisor()
 
         let result = production_runner()?.run(request).await;
         let elapsed = started.elapsed();
-        let target = std::fs::read_to_string(&pid_file)?.parse::<u32>()?;
-        let _ = std::fs::remove_file(&pid_file);
+        let target = std::fs::read_to_string(pid_file.as_path())?.parse::<u32>()?;
         await_process_absent(target).await?;
 
         assert_eq!(
@@ -444,27 +468,22 @@ async fn production_runner_reaps_new_session_descendant_on_timeout()
 async fn production_runner_reaps_new_session_descendant_on_cancellation()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let pid_file = std::path::PathBuf::from(format!(
-            "/tmp/signalbox-tools-exec-cancel-{}",
-            std::process::id()
-        ));
+        let pid_file = TemporaryPath::new(CANCELLATION_PID_FILE)?;
         let script = format!(
             "{} {} -c '{} 30' >/dev/null 2>&1 & printf %s $! > {}; wait",
             fixture_program("setsid")?.display(),
             fixture_program("sh")?.display(),
             fixture_program("sleep")?.display(),
-            pid_file.display()
+            pid_file.as_path().display()
         );
         let request = shell_request(&script, Duration::from_secs(30), std::env::current_dir()?)?;
         let mut runner = production_runner()?;
         let task = tokio::spawn(async move { runner.run(request).await });
-        let descendant = await_pid_file(&pid_file).await?;
+        let descendant = await_pid_file(pid_file.as_path()).await?;
 
         task.abort();
         let cancellation = task.await;
         await_process_absent(descendant).await?;
-        let _ = std::fs::remove_file(&pid_file);
-
         assert!(cancellation.is_err());
         assert!(!std::path::Path::new(&format!("/proc/{descendant}")).exists());
         Ok(())
