@@ -52,7 +52,7 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    InputDelivery, ProtocolVersion, RequestId, ServerMessage, decode_server_line,
+    InputDelivery, ProtocolVersion, RequestId, ServerMessage, ToolDecision, decode_server_line,
     encode_client_line,
 };
 use signalboxd::{
@@ -66,17 +66,22 @@ use signalboxd::{
     ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
     CiJobLogResult, CodeHostOperation, CodeHostResult, CodeHostResultCompleteness,
     CodeHostTransport, CodeHostTransportFailure, ConvergenceStateFields, ConvergenceStateResult,
-    DaemonTools, FilePatchResult, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
-    ProcessRuntime, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass,
+    ConversationIntrospectionPort, ConversationListPage, ConversationListRequest,
+    ConversationTranscriptRequest, DaemonTools, DaemonToolsConstructionError, FilePatchResult,
+    GitHubEgressPolicy, GitHubOperation, GitHubResult, GitHubTransport, GitHubTransportFailure,
+    HubModelConfiguration, ImportedTranscriptRequest, LocalProcessListener,
+    LocalWorkspaceFileSystem, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
+    PostgresConversationIntrospection, PostgresProviderModelExecution,
+    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
+    REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass,
     ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose, ReviewThread,
     ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
     ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
     ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
     SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
-    ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, WebFetchBodyCompleteness,
-    WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse, WebFetchTransport,
-    WebFetchTransportFailure,
+    ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
+    WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
+    WebFetchTransport, WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use tempfile::tempdir;
@@ -108,6 +113,7 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
 const FIXTURE_ID_SEED: u128 = 0x3100;
 const DECISION_COMMAND_ID: u128 = 0x3110;
 const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
+const FIXTURE_USER_CONTENT: &str = "offline tool-loop request";
 const PROCESS_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -212,7 +218,7 @@ impl ToolLoopFixture {
             .execute(SubmitInputRequest::try_new(
                 DurableCommandId::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 3)),
                 session,
-                UserContent::try_text(String::from("offline tool-loop request"))
+                UserContent::try_text(String::from(FIXTURE_USER_CONTENT))
                     .expect("fixture user content is admitted"),
                 DeliveryRequest::StartWhenNoActiveTurn {
                     configuration: default_configuration(),
@@ -572,6 +578,35 @@ fn continuation_tool_exchange(
         .collect())
 }
 
+fn continuation_result_json(
+    runtime: &ScriptedModel<ModelCallId>,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    let result = continuation_tool_exchange(runtime)?
+        .into_iter()
+        .find_map(|part| match part {
+            MessagePart::ToolResult(result) => Some(result.content),
+            _ => None,
+        })
+        .ok_or_else(|| std::io::Error::other("continuation carried no tool result"))?;
+    Ok(serde_json::from_str(&result)?)
+}
+
+#[track_caller]
+fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>) {
+    let names = operation
+        .tools
+        .iter()
+        .map(|definition| definition.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 35);
+    assert!(names.contains(&REPOSITORY_READ_FILE_NAME));
+    assert!(names.contains(&PULL_REQUEST_METADATA_NAME));
+    assert!(names.contains(&PULL_REQUEST_PUBLISH_REVIEW_NAME));
+    assert!(names.contains(&READ_FILE_NAME));
+    assert!(names.contains(&WRITE_FILE_NAME));
+    assert!(names.contains(&signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME));
+}
+
 fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) -> MessagePart {
     MessagePart::ToolCall(RuntimeToolCallProposal {
         id: ToolCallId::new(request.into_uuid().to_string()),
@@ -830,6 +865,187 @@ impl CodeHostTransport for UnusedCodeHostTransport {
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         Err(CodeHostTransportFailure::Rejected)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UnusedGitHubTransport;
+
+impl GitHubTransport for UnusedGitHubTransport {
+    async fn execute(
+        &mut self,
+        _operation: GitHubOperation,
+        _credential: &CredentialValue,
+        _egress_policy: &GitHubEgressPolicy,
+    ) -> Result<GitHubResult, GitHubTransportFailure> {
+        Err(GitHubTransportFailure::PreDispatchInfrastructure)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UnusedConversationPort;
+
+impl ConversationIntrospectionPort for UnusedConversationPort {
+    type Error = UnusedSessionStatusWriterError;
+
+    async fn list_conversations(
+        &mut self,
+        _request: ConversationListRequest,
+    ) -> Result<ConversationListPage, Self::Error> {
+        Ok(ConversationListPage::new(Vec::new(), false))
+    }
+
+    async fn read_conversation(
+        &mut self,
+        _request: ConversationTranscriptRequest,
+    ) -> Result<Option<TranscriptPage>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn read_imported_conversation(
+        &mut self,
+        _request: ImportedTranscriptRequest,
+    ) -> Result<Option<TranscriptPage>, Self::Error> {
+        Ok(None)
+    }
+}
+
+type OfflineDaemonTools<Writer, HostTransport> = DaemonTools<
+    fn() -> SystemTime,
+    OfflineWebTransport,
+    Writer,
+    OfflineCodeHostCredentials,
+    HostTransport,
+    UnusedGitHubTransport,
+    LocalWorkspaceFileSystem,
+    UnusedConversationPort,
+>;
+
+fn offline_daemon_tools<Writer, HostTransport>(
+    web: OfflineWebTransport,
+    writer: Writer,
+    code_host: HostTransport,
+    web_fetch_egress_policy: WebFetchEgressPolicy,
+) -> Result<OfflineDaemonTools<Writer, HostTransport>, DaemonToolsConstructionError> {
+    fn epoch() -> SystemTime {
+        SystemTime::UNIX_EPOCH
+    }
+
+    let workspace = tempdir().expect("fixture workspace root exists");
+    DaemonTools::try_new(
+        epoch as fn() -> SystemTime,
+        web,
+        writer,
+        OfflineCodeHostCredentials,
+        code_host,
+        OfflineCodeHostCredentials,
+        UnusedGitHubTransport,
+        GitHubEgressPolicy::github_api_only(),
+        LocalWorkspaceFileSystem,
+        workspace.path(),
+        UnusedConversationPort,
+        web_fetch_egress_policy,
+    )
+}
+
+#[derive(Clone, Debug)]
+struct RecordingGitHubTransport {
+    result: GitHubResult,
+    operations: Arc<Mutex<Vec<GitHubOperation>>>,
+    credential_matches: Arc<Mutex<Vec<bool>>>,
+    policy_matches: Arc<Mutex<Vec<bool>>>,
+}
+
+impl RecordingGitHubTransport {
+    fn responding(result: GitHubResult) -> Self {
+        Self {
+            result,
+            operations: Arc::new(Mutex::new(Vec::new())),
+            credential_matches: Arc::new(Mutex::new(Vec::new())),
+            policy_matches: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn operations(&self) -> Vec<GitHubOperation> {
+        self.operations
+            .lock()
+            .expect("fixture GitHub operation lock is available")
+            .clone()
+    }
+
+    fn credential_matches(&self) -> Vec<bool> {
+        self.credential_matches
+            .lock()
+            .expect("fixture GitHub credential lock is available")
+            .clone()
+    }
+
+    fn policy_matches(&self) -> Vec<bool> {
+        self.policy_matches
+            .lock()
+            .expect("fixture GitHub policy lock is available")
+            .clone()
+    }
+}
+
+impl GitHubTransport for RecordingGitHubTransport {
+    async fn execute(
+        &mut self,
+        operation: GitHubOperation,
+        credential: &CredentialValue,
+        policy: &GitHubEgressPolicy,
+    ) -> Result<GitHubResult, GitHubTransportFailure> {
+        self.operations
+            .lock()
+            .expect("fixture GitHub operation lock is available")
+            .push(operation);
+        self.credential_matches
+            .lock()
+            .expect("fixture GitHub credential lock is available")
+            .push(credential.expose_bytes() == OFFLINE_CODE_HOST_TOKEN);
+        self.policy_matches
+            .lock()
+            .expect("fixture GitHub policy lock is available")
+            .push(policy.admitted_origin() == "https://api.github.com");
+        Ok(self.result.clone())
+    }
+}
+
+type CommissionedDaemonTools<HostTransport, GitHubTransportType> = DaemonTools<
+    fn() -> SystemTime,
+    OfflineWebTransport,
+    UnusedSessionStatusWriter,
+    OfflineCodeHostCredentials,
+    HostTransport,
+    GitHubTransportType,
+    LocalWorkspaceFileSystem,
+    PostgresConversationIntrospection,
+>;
+
+fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
+    pool: &PgPool,
+    code_host: HostTransport,
+    github: GitHubTransportType,
+    workspace_root: &std::path::Path,
+) -> Result<CommissionedDaemonTools<HostTransport, GitHubTransportType>, DaemonToolsConstructionError>
+{
+    fn epoch() -> SystemTime {
+        SystemTime::UNIX_EPOCH
+    }
+
+    DaemonTools::try_new(
+        epoch as fn() -> SystemTime,
+        OfflineWebTransport::unused(),
+        UnusedSessionStatusWriter,
+        OfflineCodeHostCredentials,
+        code_host,
+        OfflineCodeHostCredentials,
+        github,
+        GitHubEgressPolicy::github_api_only(),
+        LocalWorkspaceFileSystem,
+        workspace_root,
+        PostgresConversationIntrospection::new(pool.clone()),
+        WebFetchEgressPolicy::deny_all(),
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1097,11 +1313,9 @@ async fn code_host_tool_completes_offline(
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let web = OfflineWebTransport::unused();
     let code_host = RecordingCodeHostTransport::responding(result);
-    let (tool_catalog, tool_executor) = DaemonTools::try_new(
-        || SystemTime::UNIX_EPOCH,
+    let (tool_catalog, tool_executor) = offline_daemon_tools(
         web.clone(),
         UnusedSessionStatusWriter,
-        OfflineCodeHostCredentials,
         code_host.clone(),
         WebFetchEgressPolicy::deny_all(),
     )?
@@ -1120,9 +1334,12 @@ async fn code_host_tool_completes_offline(
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
     if approval == ExpectedCodeHostApproval::Confirm {
-        fixture
-            .decide(request, ToolApprovalDecision::Approve)
-            .await?;
+        assert!(
+            code_host.operations().is_empty(),
+            "confirmed code-host mutations cannot dispatch before owner approval"
+        );
+        let receipt = approve_through_process(&fixture, request, 0x3c01).await?;
+        assert_approved_receipt(receipt, request);
         execution.resume_active(fixture.session).await?;
     }
     let operations = code_host.operations();
@@ -1643,11 +1860,9 @@ async fn tier_zero_echo_completes_offline_tool_loop() -> Result<(), Box<dyn Erro
     let web = OfflineWebTransport::unused();
     let echoed_text = "offline echo";
     let arguments = serde_json::json!({"text": echoed_text}).to_string();
-    let (tool_catalog, tool_executor) = DaemonTools::try_new(
-        || SystemTime::UNIX_EPOCH,
+    let (tool_catalog, tool_executor) = offline_daemon_tools(
         web.clone(),
         UnusedSessionStatusWriter,
-        OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
         WebFetchEgressPolicy::deny_all(),
     )?
@@ -1699,11 +1914,9 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
     .expect("fixture response is bounded");
     let web = OfflineWebTransport::responding(response);
     let expected_url = "https://example.com/offline";
-    let (tool_catalog, tool_executor) = DaemonTools::try_new(
-        || SystemTime::UNIX_EPOCH,
+    let (tool_catalog, tool_executor) = offline_daemon_tools(
         web.clone(),
         UnusedSessionStatusWriter,
-        OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
         WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])?,
     )?
@@ -1767,11 +1980,9 @@ async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<d
         "title": expected_title,
     })
     .to_string();
-    let (tool_catalog, tool_executor) = DaemonTools::try_new(
-        || SystemTime::UNIX_EPOCH,
+    let (tool_catalog, tool_executor) = offline_daemon_tools(
         web.clone(),
         PostgresSessionStatusWriter::new(fixture.pool.clone()),
-        OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
         WebFetchEgressPolicy::deny_all(),
     )?
@@ -1856,6 +2067,255 @@ async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<d
         web.requests().is_empty(),
         "session status must not enter the web transport"
     );
+    Ok(())
+}
+
+/// S10: the composed GitHub metadata read is catalog-visible and crosses only
+/// the injected credential, egress policy, and hermetic transport.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    let expected = serde_json::json!({"number": 17, "title": "offline pull request"});
+    let github = RecordingGitHubTransport::responding(GitHubResult::metadata(expected.clone()));
+    let (tool_catalog, tool_executor) = commissioned_daemon_tools(
+        &fixture.pool,
+        UnusedCodeHostTransport,
+        github.clone(),
+        workspace.path(),
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({
+        "repository": "KeenWill/signalbox",
+        "number": 17
+    })
+    .to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(PULL_REQUEST_METADATA_NAME, arguments.as_str())]),
+            completion_script("GitHub metadata observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    assert_eq!(
+        github.operations()[0].tool_name(),
+        PULL_REQUEST_METADATA_NAME
+    );
+    assert_eq!(github.credential_matches(), vec![true]);
+    assert_eq!(github.policy_matches(), vec![true]);
+    assert_eq!(continuation_result_json(&runtime)?, expected);
+    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    Ok(())
+}
+
+/// S10: the composed workspace read is rooted in the injected temporary
+/// directory and returns its exact fixture content without network access.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    let relative_path = "note.txt";
+    let fixture_content = "workspace fixture\n";
+    fs::write(workspace.path().join(relative_path), fixture_content)?;
+    let (tool_catalog, tool_executor) = commissioned_daemon_tools(
+        &fixture.pool,
+        UnusedCodeHostTransport,
+        UnusedGitHubTransport,
+        workspace.path(),
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({"path": relative_path, "max_bytes": 1024}).to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(READ_FILE_NAME, arguments.as_str())]),
+            completion_script("workspace content observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    assert_eq!(
+        continuation_result_json(&runtime)?,
+        serde_json::json!({
+            "path": relative_path,
+            "content": fixture_content,
+            "bytes_read": fixture_content.len(),
+            "total_bytes": fixture_content.len(),
+            "truncated": false
+        })
+    );
+    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    Ok(())
+}
+
+/// S10: the composed conversation port reads the invoking session's real
+/// persisted semantic transcript rather than a synthetic transcript value.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    let (tool_catalog, tool_executor) = commissioned_daemon_tools(
+        &fixture.pool,
+        UnusedCodeHostTransport,
+        UnusedGitHubTransport,
+        workspace.path(),
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({
+        "after_position": null,
+        "max_entries": 100,
+        "max_bytes": 131072
+    })
+    .to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(
+                signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME,
+                arguments.as_str(),
+            )]),
+            completion_script("own transcript observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let result = continuation_result_json(&runtime)?;
+    let entries = result["entries"]
+        .as_array()
+        .expect("conversation result carries entries");
+
+    assert_eq!(
+        result["session_id"],
+        serde_json::json!(fixture.session.into_uuid().to_string())
+    );
+    assert!(entries.iter().any(|entry| {
+        entry["kind"] == serde_json::json!("user")
+            && entry["content"] == serde_json::json!(FIXTURE_USER_CONTENT)
+    }));
+    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    Ok(())
+}
+
+/// S10: workspace mutation remains parked with no filesystem effect until an
+/// owner approval is recorded through the process protocol.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_workspace_write_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    let relative_path = "approved.txt";
+    let destination = workspace.path().join(relative_path);
+    let expected_content = "approved workspace write";
+    let (tool_catalog, tool_executor) = commissioned_daemon_tools(
+        &fixture.pool,
+        UnusedCodeHostTransport,
+        UnusedGitHubTransport,
+        workspace.path(),
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({
+        "path": relative_path,
+        "content": expected_content
+    })
+    .to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(WRITE_FILE_NAME, arguments.as_str())]),
+            completion_script("workspace write observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+
+    assert!(!destination.exists());
+    let receipt = approve_through_process(&fixture, request, 0x3c02).await?;
+    assert_approved_receipt(receipt, request);
+    assert!(!destination.exists());
+    execution.resume_active(fixture.session).await?;
+    assert_eq!(fs::read_to_string(&destination)?, expected_content);
+    assert_eq!(
+        continuation_result_json(&runtime)?,
+        serde_json::json!({
+            "path": relative_path,
+            "bytes_written": expected_content.len(),
+            "created": true
+        })
+    );
+    Ok(())
+}
+
+/// S10: review publication remains parked with no transport effect until an
+/// owner approval is recorded through the process protocol.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_github_publish_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    let expected = serde_json::json!({"review_id": 91, "state": "APPROVED"});
+    let github =
+        RecordingGitHubTransport::responding(GitHubResult::published_review(expected.clone()));
+    let (tool_catalog, tool_executor) = commissioned_daemon_tools(
+        &fixture.pool,
+        UnusedCodeHostTransport,
+        github.clone(),
+        workspace.path(),
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({
+        "repository": "KeenWill/signalbox",
+        "number": 17,
+        "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "event": "approve",
+        "comments": []
+    })
+    .to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(PULL_REQUEST_PUBLISH_REVIEW_NAME, arguments.as_str())]),
+            completion_script("published review observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+
+    assert!(github.operations().is_empty());
+    let receipt = approve_through_process(&fixture, request, 0x3c03).await?;
+    assert_approved_receipt(receipt, request);
+    assert!(github.operations().is_empty());
+    execution.resume_active(fixture.session).await?;
+    assert_eq!(
+        github.operations()[0].tool_name(),
+        PULL_REQUEST_PUBLISH_REVIEW_NAME
+    );
+    assert_eq!(github.credential_matches(), vec![true]);
+    assert_eq!(github.policy_matches(), vec![true]);
+    assert_eq!(continuation_result_json(&runtime)?, expected);
     Ok(())
 }
 
@@ -3062,6 +3522,35 @@ async fn submit_frame_through_process(
     shutdown.send(true)?;
     timeout(Duration::from_secs(10), runtime_task).await???;
     Ok(response)
+}
+
+async fn approve_through_process(
+    fixture: &ToolLoopFixture,
+    request: ToolRequestId,
+    command_seed: u128,
+) -> Result<ServerMessage, Box<dyn Error>> {
+    let frame = ClientFrame::try_new_for_version(
+        ProtocolVersion::One,
+        RequestId::try_new(1)?,
+        ClientRequest::DecideToolRequest {
+            command_id: CommandId::try_from_uuid(Uuid::from_u128(command_seed))?,
+            session_id: CanonicalUuid::from_uuid(fixture.session.into_uuid()),
+            tool_request_id: CanonicalUuid::from_uuid(request.into_uuid()),
+            decision: ToolDecision::Approve {},
+        },
+    )?;
+    submit_frame_through_process(fixture, &frame).await
+}
+
+#[track_caller]
+fn assert_approved_receipt(message: ServerMessage, request: ToolRequestId) {
+    assert_eq!(
+        message,
+        ServerMessage::ToolRequestDecided {
+            tool_request_id: CanonicalUuid::from_uuid(request.into_uuid()),
+            decision: ToolDecision::Approve {},
+        }
+    );
 }
 
 /// S02 / S10 / INV-006: a provider refusal on the continuation model call of

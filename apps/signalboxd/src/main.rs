@@ -774,6 +774,12 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
+    let daemon_tool_configuration = model_configuration.daemon_tools().map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::ModelConfiguration(&error),
+        )
+    })?;
     let template_configuration = SessionTemplateConfiguration::read(
         configuration.template_configuration_file(),
         || env::var_os("HOME").map(PathBuf::from),
@@ -867,6 +873,8 @@ async fn run_hub(
         pool.clone(),
         code_host_credentials,
         code_host_transport,
+        daemon_tool_configuration.github_egress_policy(),
+        daemon_tool_configuration.workspace_root(),
         model_configuration.web_fetch_egress_policy(),
     ) {
         Ok(tools) => tools.into_parts(),
