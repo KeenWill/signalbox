@@ -4898,6 +4898,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_records_an_empty_complete_finding_inventory() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let findings_file = directory.path().join("findings.json");
+        fs::write(&findings_file, br#"{"findings":[]}"#)?;
+        let listener = UnixListener::bind(&socket)?;
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(1))?;
+        let run_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let pass_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let output_frontier_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::RecordReviewFindings {
+                    command_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                    output_frontier_id,
+                    findings: Vec::new(),
+                }
+            );
+            let frame = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::ReviewFindingsRecorded {
+                    run_id,
+                    pass_id,
+                    finding_count: CanonicalU64::new(0),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        review(
+            &mut client,
+            &mut output,
+            ReviewCommand::RecordFindings {
+                command_id: Some(command_id),
+                run_id,
+                pass_id,
+                turn_id,
+                output_frontier_id,
+                findings_file,
+            },
+        )
+        .await?;
+
+        let expected_stdout = format!("run={run_id} pass={pass_id} findings=0 recorded\n");
+        assert_eq!(String::from_utf8(stdout)?, expected_stdout);
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn review_list_rejects_terminal_count_before_writing_items() -> Result<(), Box<dyn Error>>
     {
         let directory = tempfile::tempdir()?;
