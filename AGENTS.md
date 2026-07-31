@@ -155,9 +155,13 @@ one finished and awaiting owner merge:
   dispositioned in a prior wave is a re-raise, declined by the same standing
   policy with a link to the prior thread. Neither standing decline applies to a
   finding that reproduces on the current head: a defect reintroduced by a later
-  wave's edits is live and is dispositioned on its merits. If a wave finds any
-  defect introduced by a previous wave's fix, stop and escalate to the owner
-  instead of continuing the loop.
+  wave's edits is live and is dispositioned on its merits. If a wave finds a
+  defect introduced by one of this effort's own earlier fix waves, fix it in
+  the next wave — an agent's own regression is always must-fix and never
+  grounds to stop (owner ruling 2026-08-01, after three same-night escalations
+  each ended in the identical authorization). Stop and escalate to the owner
+  only when the defect was introduced by a different effort's fix, because
+  repairing it means editing work someone else owns.
 
 **Stacked pull requests.** Stacks may grow as deep as the work requires; the
 owner merges in batches, so never wait on a merge to continue. Keep every stack
