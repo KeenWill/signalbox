@@ -4,7 +4,7 @@
 //! run, pass, finding, event, and external-link values are always reconstructed
 //! through [`ReviewWorkflowStore`].
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use signalbox_application::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
@@ -30,6 +30,8 @@ use crate::{
 };
 
 const STORAGE_VERSION: i16 = 1;
+const SNAPSHOT_ADMISSION_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
+const SNAPSHOT_ADMISSION_MAX_BACKOFF: Duration = Duration::from_millis(100);
 const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
     accepted_input,
     turn_lifecycle,
@@ -261,7 +263,9 @@ impl PostgresReviewOrchestrationStore {
     /// admitted transaction holds shared locks across every review table used
     /// by canonical reconstruction while the existing workflow loaders use the
     /// same configured pool. Concurrent snapshots release unsuccessful
-    /// admission attempts before waiting, preserving one reader connection.
+    /// admission attempts before an exponentially backed-off retry; the wait
+    /// begins at 10 ms and is capped at 100 ms, preserving one reader connection
+    /// without polling PostgreSQL on every scheduler turn.
     pub async fn load_snapshot(
         &self,
         attempt: ReviewOrchestrationAttemptId,
@@ -280,6 +284,7 @@ impl PostgresReviewOrchestrationStore {
     async fn begin_snapshot_guard(
         &self,
     ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
+        let mut backoff = SNAPSHOT_ADMISSION_INITIAL_BACKOFF;
         loop {
             let mut transaction = self.pool.begin().await?;
             let admitted: bool = sqlx::query_scalar(
@@ -296,7 +301,8 @@ impl PostgresReviewOrchestrationStore {
                 return Ok(transaction);
             }
             transaction.rollback().await?;
-            tokio::task::yield_now().await;
+            tokio::time::sleep(backoff).await;
+            backoff = std::cmp::min(backoff.saturating_mul(2), SNAPSHOT_ADMISSION_MAX_BACKOFF);
         }
     }
 

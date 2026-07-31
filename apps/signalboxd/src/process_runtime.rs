@@ -153,6 +153,7 @@ const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
+const REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS: u32 = 2;
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -610,6 +611,18 @@ async fn acquire_snapshot_reader_permit(
     }
 }
 
+async fn acquire_review_orchestration_snapshot_permit(
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => Ok(None),
+        permit = budget.acquire_many_owned(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS) => permit
+            .map(Some)
+            .map_err(|_| ProcessConnectionError::SnapshotReaderBudgetClosed),
+    }
+}
+
 async fn acquire_import_permit(
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
@@ -671,7 +684,7 @@ async fn acquire_review_command_permit_while_buffered(
 fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
-    if available == 0 {
+    if available < REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS {
         return None;
     }
     usize::try_from(available).ok()
@@ -1354,7 +1367,7 @@ where
             .await
         }
         request @ ClientRequest::ReadReviewOrchestration { .. } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+            let Some(snapshot_permit) = acquire_review_orchestration_snapshot_permit(
                 Arc::clone(&services.snapshot_reader_budget),
                 &mut shutdown,
             )
@@ -9573,11 +9586,12 @@ mod tests {
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
         MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
         OperationalImportError, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
-        ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId,
-        ReviewCommandAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
-        acquire_import_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
+        ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
+        REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS, RequestId, ReviewCommandAdmission,
+        SnapshotSpoolError, SubmitInputModelExecutionDiagnostic, acquire_import_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_review_orchestration_snapshot_permit, acquire_snapshot_reader_permit,
         admitted_user_content, canonical_review_request_digest, consume_snapshot_queued_update,
         context_compaction_failure_disposition, execute_import,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
@@ -10323,6 +10337,28 @@ context_window_tokens = 200000
             .ok_or_else(|| io::Error::other("ready input must acquire a frame slot"))?;
         assert_eq!(budget.available_permits(), 0);
         drop(permit);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_orchestration_snapshot_reserves_its_two_pool_connections()
+    -> Result<(), Box<dyn Error>> {
+        let reserved = usize::try_from(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS)?;
+        let capacity = reserved + 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+
+        let permit = acquire_review_orchestration_snapshot_permit(
+            Arc::clone(&budget),
+            &mut shutdown_receiver,
+        )
+        .await?
+        .ok_or_else(|| io::Error::other("the running fixture must acquire a permit"))?;
+
+        assert_eq!(budget.available_permits(), capacity - reserved);
+        drop(permit);
+        assert_eq!(budget.available_permits(), capacity);
+        assert!(snapshot_reader_capacity(3).is_none());
         Ok(())
     }
 
