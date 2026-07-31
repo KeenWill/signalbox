@@ -47,6 +47,8 @@ public struct SignalboxProcessApplicationPolicy: Equatable, Sendable {
   public let metadataPageSize: SignalboxCanonicalUInt64
   public let maximumMetadataPages: UInt
   public let maximumMetadataListUTF8Bytes: UInt
+  public let maximumImportedEntries: UInt
+  public let maximumImportedPreviewUTF8Bytes: UInt
   public let ambiguousMutationRetryDelays: [Duration]
   public let oneShotResponseDeadline: Duration
   public let synchronization: SignalboxSessionSynchronizationPolicy
@@ -55,6 +57,8 @@ public struct SignalboxProcessApplicationPolicy: Equatable, Sendable {
     metadataPageSize: SignalboxCanonicalUInt64,
     maximumMetadataPages: UInt,
     maximumMetadataListUTF8Bytes: UInt = 32 * 1_024 * 1_024,
+    maximumImportedEntries: UInt = 50_000,
+    maximumImportedPreviewUTF8Bytes: UInt = 32 * 1_024 * 1_024,
     ambiguousMutationRetryDelays: [Duration],
     oneShotResponseDeadline: Duration = .seconds(20),
     synchronization: SignalboxSessionSynchronizationPolicy
@@ -62,6 +66,8 @@ public struct SignalboxProcessApplicationPolicy: Equatable, Sendable {
     self.metadataPageSize = metadataPageSize
     self.maximumMetadataPages = maximumMetadataPages
     self.maximumMetadataListUTF8Bytes = maximumMetadataListUTF8Bytes
+    self.maximumImportedEntries = maximumImportedEntries
+    self.maximumImportedPreviewUTF8Bytes = maximumImportedPreviewUTF8Bytes
     self.ambiguousMutationRetryDelays = ambiguousMutationRetryDelays
     self.oneShotResponseDeadline = oneShotResponseDeadline
     self.synchronization = synchronization
@@ -156,6 +162,38 @@ public struct SignalboxPreparedSessionCreation: Equatable, Sendable {
   }
 }
 
+public struct SignalboxPreparedImportedSessionCreation: Equatable, Sendable {
+  public let commandID: SignalboxCommandID
+  public let importedConversationID: SignalboxCanonicalUUID
+  public let throughPosition: SignalboxCanonicalUInt64
+  public let relationship: SignalboxImportedSessionRelationship
+  public let modelSelection: SignalboxModelSelection
+
+  public init(
+    commandID: SignalboxCommandID,
+    importedConversationID: SignalboxCanonicalUUID,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    modelSelection: SignalboxModelSelection
+  ) {
+    self.commandID = commandID
+    self.importedConversationID = importedConversationID
+    self.throughPosition = throughPosition
+    self.relationship = relationship
+    self.modelSelection = modelSelection
+  }
+
+  fileprivate var request: SignalboxProcessClientRequest {
+    .createSessionFromImportedFrontier(
+      commandID: commandID,
+      importedConversationID: importedConversationID,
+      throughPosition: throughPosition,
+      relationship: relationship,
+      initialModelSelection: modelSelection
+    )
+  }
+}
+
 public struct SignalboxPreparedToolRequestDecision: Equatable, Sendable {
   public let commandID: SignalboxCommandID
   public let sessionID: SignalboxCanonicalUUID
@@ -224,6 +262,9 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   func readSession(
     conversation: SignalboxProcessConversation
   ) async throws -> SignalboxProcessSession
+  func readImportedConversation(
+    conversation: SignalboxProcessConversation
+  ) async throws -> SignalboxImportedConversationTranscript
   func setConversationArchived(
     _ archived: Bool,
     conversation: SignalboxProcessConversation
@@ -245,6 +286,15 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   ) async throws -> SignalboxPreparedSessionCreation
   func createSession(
     _ creation: SignalboxPreparedSessionCreation
+  ) async throws -> SignalboxCanonicalUUID
+  func prepareImportedSessionCreation(
+    conversation: SignalboxProcessConversation,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    modelSelection: SignalboxModelSelection
+  ) async throws -> SignalboxPreparedImportedSessionCreation
+  func createSessionFromImportedFrontier(
+    _ creation: SignalboxPreparedImportedSessionCreation
   ) async throws -> SignalboxCanonicalUUID
   func prepareToolRequestDecision(
     sessionID: SignalboxCanonicalUUID,
@@ -291,6 +341,14 @@ extension SignalboxProcessServiceProtocol {
     )
   }
 
+  public func readImportedConversation(
+    conversation _: SignalboxProcessConversation
+  ) async throws -> SignalboxImportedConversationTranscript {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement imported-conversation reads."
+    )
+  }
+
   public func setConversationArchived(
     _ archived: Bool,
     conversation: SignalboxProcessConversation
@@ -317,6 +375,26 @@ extension SignalboxProcessServiceProtocol {
     _ = creation
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement session creation."
+    )
+  }
+
+  public func prepareImportedSessionCreation(
+    conversation _: SignalboxProcessConversation,
+    throughPosition _: SignalboxCanonicalUInt64,
+    relationship _: SignalboxImportedSessionRelationship,
+    modelSelection _: SignalboxModelSelection
+  ) async throws -> SignalboxPreparedImportedSessionCreation {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement imported-conversation continuation."
+    )
+  }
+
+  public func createSessionFromImportedFrontier(
+    _ creation: SignalboxPreparedImportedSessionCreation
+  ) async throws -> SignalboxCanonicalUUID {
+    _ = creation
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement imported-conversation continuation."
     )
   }
 
@@ -555,6 +633,99 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     )
   }
 
+  public func readImportedConversation(
+    conversation: SignalboxProcessConversation
+  ) async throws -> SignalboxImportedConversationTranscript {
+    guard case .imported(let imported) = conversation.record else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "Native sessions do not have imported transcript entries."
+      )
+    }
+    guard imported.entryCount.rawValue <= UInt64(policy.maximumImportedEntries) else {
+      throw SignalboxProcessServiceError.invalidPage(
+        "The imported conversation exceeded the native entry-retention cap."
+      )
+    }
+    return try await withExchange(
+      request: .readImportedConversation(
+        importedConversationID: imported.importedConversationID
+      )
+    ) { exchange in
+      var entries: [SignalboxImportedConversationEntry] = []
+      var entryIDs: Set<SignalboxCanonicalUUID> = []
+      var retainedPreviewBytes: UInt = 0
+      var started = false
+      while let frame = try await nextFrame(from: exchange) {
+        switch frame.message {
+        case .importedConversationStart(let conversationID) where !started:
+          guard conversationID == imported.importedConversationID else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The imported transcript start named a different conversation."
+            )
+          }
+          started = true
+        case .importedConversationEntry(let entry) where started:
+          guard entries.count < policy.maximumImportedEntries else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The imported transcript exceeded the native entry-retention cap."
+            )
+          }
+          guard entry.position.rawValue == UInt64(entries.count) + 1 else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "Imported transcript positions were not contiguous and one-based."
+            )
+          }
+          guard entryIDs.insert(entry.importedEntryID).inserted else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The imported transcript repeated an entry identity."
+            )
+          }
+          let previewBytes = UInt(entry.textPreview?.preview.utf8.count ?? 0)
+          let (nextBytes, overflowed) =
+            retainedPreviewBytes.addingReportingOverflow(previewBytes)
+          guard !overflowed, nextBytes <= policy.maximumImportedPreviewUTF8Bytes else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The imported transcript exceeded the native preview-retention cap."
+            )
+          }
+          retainedPreviewBytes = nextBytes
+          entries.append(entry)
+        case .importedConversationEnd(let end) where started:
+          guard end.importedConversationID == imported.importedConversationID else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The imported transcript end named a different conversation."
+            )
+          }
+          guard end.entryCount.rawValue == UInt64(entries.count),
+            end.entryCount == imported.entryCount
+          else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The imported transcript count did not match its sequence and summary."
+            )
+          }
+          return SignalboxImportedConversationTranscript(
+            importedConversationID: imported.importedConversationID,
+            entries: entries
+          )
+        case .protocolError(let error):
+          throw remote(error)
+        case .unknown(let kind, _, let diagnostic):
+          throw SignalboxProcessServiceError.invalidPage(
+            diagnostic?.message
+              ?? "The imported transcript contained an unrecognized \(kind) message."
+          )
+        default:
+          throw SignalboxProcessServiceError.unexpectedMessage(
+            "The imported transcript sequence was malformed."
+          )
+        }
+      }
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The imported transcript ended before its terminator."
+      )
+    }
+  }
+
   public func setConversationArchived(
     _ archived: Bool,
     conversation: SignalboxProcessConversation
@@ -670,6 +841,47 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
 
   public func createSession(
     _ creation: SignalboxPreparedSessionCreation
+  ) async throws -> SignalboxCanonicalUUID {
+    try await mutation(
+      creation.request,
+      success: { message in
+        guard case .sessionCreated(let sessionID) = message else {
+          return nil
+        }
+        return sessionID
+      }
+    )
+  }
+
+  public func prepareImportedSessionCreation(
+    conversation: SignalboxProcessConversation,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    modelSelection: SignalboxModelSelection
+  ) async throws -> SignalboxPreparedImportedSessionCreation {
+    guard case .imported(let imported) = conversation.record else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "Only imported conversations can be continued from an imported frontier."
+      )
+    }
+    guard throughPosition.rawValue > 0,
+      throughPosition.rawValue <= imported.entryCount.rawValue
+    else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The selected imported frontier is outside the conversation."
+      )
+    }
+    return SignalboxPreparedImportedSessionCreation(
+      commandID: try commandID(),
+      importedConversationID: imported.importedConversationID,
+      throughPosition: throughPosition,
+      relationship: relationship,
+      modelSelection: modelSelection
+    )
+  }
+
+  public func createSessionFromImportedFrontier(
+    _ creation: SignalboxPreparedImportedSessionCreation
   ) async throws -> SignalboxCanonicalUUID {
     try await mutation(
       creation.request,

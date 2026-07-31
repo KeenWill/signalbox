@@ -33,6 +33,14 @@ enum MockProcessProtocolFixtures {
   static let selectionID = "aaaaaaaa-0000-4000-8000-000000000001"
   static let aliasID = "aaaaaaaa-0000-4000-8000-000000000002"
   static let createdSessionID = "aaaaaaaa-0000-4000-8000-000000000003"
+  static let continuedSessionID = "aaaaaaaa-0000-4000-8000-000000000004"
+  static let importedConversationID = "99999999-0000-4000-8000-000000000001"
+  static let importedUserEntryID = "99999999-0000-4000-8000-000000000002"
+  static let importedAssistantEntryID = "99999999-0000-4000-8000-000000000003"
+  static let importedEntryCount = 2
+  static let importedUserPreview = "Summarize the process-protocol boundary."
+  static let importedAssistantPreview =
+    "The process protocol keeps the daemon boundary explicit."
   static let submittedAcceptedInputID = "bbbbbbbb-0000-4000-8000-000000000001"
   static let submittedTurnID = "cccccccc-0000-4000-8000-000000000001"
   static let activeUserEntryID = "dddddddd-0000-4000-8000-000000000001"
@@ -234,25 +242,121 @@ private actor MockProcessProtocolState {
           ]
         ]
       )
+    case "read_imported_conversation":
+      guard
+        request["imported_conversation_id"] as? String
+          == MockProcessProtocolFixtures.importedConversationID
+      else {
+        throw MockProcessProtocolError.invalidRequest
+      }
+      return try response(
+        requestID: requestID,
+        messages: [
+          [
+            "type": "imported_conversation_start",
+            "imported_conversation_id": MockProcessProtocolFixtures.importedConversationID,
+          ],
+          [
+            "type": "imported_conversation_entry",
+            "position": "1",
+            "imported_entry_id": MockProcessProtocolFixtures.importedUserEntryID,
+            "source_speaker": ["type": "attested", "speaker": "user"],
+            "content_kind": "text",
+            "text_preview": [
+              "preview": MockProcessProtocolFixtures.importedUserPreview,
+              "truncated": false,
+            ],
+          ],
+          [
+            "type": "imported_conversation_entry",
+            "position": "2",
+            "imported_entry_id": MockProcessProtocolFixtures.importedAssistantEntryID,
+            "source_speaker": ["type": "attested", "speaker": "assistant"],
+            "content_kind": "text",
+            "text_preview": [
+              "preview": MockProcessProtocolFixtures.importedAssistantPreview,
+              "truncated": false,
+            ],
+          ],
+          [
+            "type": "imported_conversation_end",
+            "imported_conversation_id": MockProcessProtocolFixtures.importedConversationID,
+            "entry_count": String(MockProcessProtocolFixtures.importedEntryCount),
+          ],
+        ]
+      )
+    case "create_session_from_imported_frontier":
+      let selection = request["initial_model_selection"] as? [String: Any]
+      let throughPosition = request["through_position"] as? String
+      let relationship = request["relationship"] as? String
+      guard
+        request["command_id"] is String,
+        request["imported_conversation_id"] as? String
+          == MockProcessProtocolFixtures.importedConversationID,
+        throughPosition.map({ ["1", "2"].contains($0) }) == true,
+        relationship.map({ ["resume", "fork"].contains($0) }) == true,
+        selection?["kind"] as? String == "alias",
+        selection?["alias_id"] as? String == MockProcessProtocolFixtures.aliasID
+      else {
+        throw MockProcessProtocolError.invalidRequest
+      }
+      if !sessions.contains(where: { $0.id == MockProcessProtocolFixtures.continuedSessionID }) {
+        sessions.append(
+          Session(
+            id: MockProcessProtocolFixtures.continuedSessionID,
+            defaultsVersion: "1",
+            title: "Continued imported session",
+            tags: [],
+            archived: false
+          )
+        )
+      }
+      return try response(
+        requestID: requestID,
+        messages: [
+          [
+            "type": "session_created",
+            "session_id": MockProcessProtocolFixtures.continuedSessionID,
+          ]
+        ]
+      )
     case "list_conversations":
       let includeArchived = request["include_archived"] as? Bool ?? false
-      let page = sessions
+      var page = sessions
         .filter { includeArchived || !$0.archived }
-        .sorted { $0.id < $1.id }
-      var messages: [[String: Any]] = [["type": "conversation_page_start"]]
-      messages.append(
-        contentsOf: page.map { session in
+        .map { session in
+          (
+            session.id,
+            [
+              "type": "conversation_summary",
+              "conversation": [
+                "origin": "native_session",
+                "session_id": session.id,
+                "title": session.title,
+                "archived": session.archived,
+                "defaults_version": session.defaultsVersion,
+              ],
+            ] as [String: Any]
+          )
+        }
+      page.append(
+        (
+          MockProcessProtocolFixtures.importedConversationID,
           [
             "type": "conversation_summary",
             "conversation": [
-              "origin": "native_session",
-              "session_id": session.id,
-              "title": session.title,
-              "archived": session.archived,
-              "defaults_version": session.defaultsVersion,
+              "origin": "imported_conversation",
+              "imported_conversation_id": MockProcessProtocolFixtures.importedConversationID,
+              "title": "Imported process-protocol notes",
+              "entry_count": String(MockProcessProtocolFixtures.importedEntryCount),
+              "source_format": "codex_rollout_jsonl_v1",
             ],
-          ]
-        })
+          ] as [String: Any]
+        )
+      )
+      page.sort { $0.0 < $1.0 }
+      var messages: [[String: Any]] = [["type": "conversation_page_start"]]
+      messages.append(contentsOf: page.map(\.1))
       messages.append([
         "type": "conversation_page_end",
         "conversation_count": String(page.count),

@@ -30,14 +30,15 @@ REST, WebSocket, or OpenAI-compatible surfaces.
   its required successor input.
 - Create a session by selecting a model alias read from the running daemon and
   optionally supplying a system prompt.
+- Inspect the bounded, read-only entry inventory for an imported conversation
+  and create a resume or fork session from a selected frontier and model alias.
 - Exercise the real encoder, decoder, request identity, and JSONL framing in
   deterministic mock UI flows.
 
 The process protocol exposes no runner, template, monitor, or artifact catalog;
 those views remain explicit capability gates rather than fabricated client
-behavior. Imported conversations appear in the unified list, while transcript
-inspection and continuation remain deferred to a separate native UI slice over
-the landed imported-conversation read.
+behavior. Imported conversations open as read-only transcript inventories and
+can continue into native sessions from an explicitly selected entry.
 
 ## Transport gate
 
@@ -129,8 +130,6 @@ The following work remains:
 
 - Remote/mobile transport, authentication, authorization, and revocation await
   an owner-approved server design.
-- Imported transcript inspection and continuation await their native UI slice
-  over the imported-conversation read.
 - Runners, templates, monitor summaries, and artifacts await real
   process-protocol operations.
 - Compact-width navigation omits Templates until its information architecture is

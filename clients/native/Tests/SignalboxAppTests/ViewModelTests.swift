@@ -5,6 +5,42 @@ import XCTest
 
 @MainActor
 final class ViewModelTests: XCTestCase {
+    func testImportedConversationViewModelContinuesLoadedSelectedFrontier() async throws {
+        let service = SignalboxProcessService(
+            requester: SignalboxProcessClient(
+                connectionFactory: MockProcessProtocolConnectionFactory()
+            ),
+            policy: .nativeDefault
+        )
+        let conversations = try await service.listConversations(includeArchived: true)
+        let imported = try XCTUnwrap(
+            conversations.first {
+                $0.conversationID.rawValue == MockProcessProtocolFixtures.importedConversationID
+            }
+        )
+        let viewModel = ProcessImportedConversationViewModel { service }
+
+        await viewModel.load(conversation: imported)
+        let alias = try XCTUnwrap(viewModel.aliases.first)
+        let position = try XCTUnwrap(viewModel.transcript?.entries.last?.position)
+        let sessionID = try await viewModel.continueConversation(
+            conversation: imported,
+            throughPosition: position,
+            relationship: .resume,
+            aliasID: alias.aliasID
+        )
+
+        XCTAssertEqual(
+            viewModel.transcript?.entries.count,
+            MockProcessProtocolFixtures.importedEntryCount
+        )
+        XCTAssertEqual(
+            sessionID.rawValue,
+            MockProcessProtocolFixtures.continuedSessionID
+        )
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
     func testSessionListLoadsMockSessionsAndNeedsApprovalStatus() async {
         let service = MockSignalboxService()
         let viewModel = SessionListViewModel { service }

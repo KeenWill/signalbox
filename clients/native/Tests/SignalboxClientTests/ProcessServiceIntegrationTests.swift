@@ -3,6 +3,65 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessServiceIntegrationTests: XCTestCase {
+  func testImportedTranscriptCanContinueAsANativeSession() async throws {
+    let service = makeService()
+    let conversations = try await service.listConversations(includeArchived: true)
+    let imported = try fixtureConversation(
+      MockProcessProtocolFixtures.importedConversationID,
+      in: conversations
+    )
+    let transcript = try await service.readImportedConversation(conversation: imported)
+    let aliases = try await service.listModelAliases()
+    let alias = try XCTUnwrap(aliases.first)
+    let prepared = try await service.prepareImportedSessionCreation(
+      conversation: imported,
+      throughPosition: transcript.entries.last?.position
+        ?? SignalboxCanonicalUInt64(rawValue: 0),
+      relationship: .resume,
+      modelSelection: .alias(aliasID: alias.aliasID)
+    )
+
+    let sessionID = try await service.createSessionFromImportedFrontier(prepared)
+    let refreshed = try await service.listConversations(includeArchived: true)
+    let continued = try fixtureConversation(sessionID.rawValue, in: refreshed)
+
+    XCTAssertEqual(
+      transcript.entries.count,
+      MockProcessProtocolFixtures.importedEntryCount
+    )
+    XCTAssertEqual(transcript.entries.first?.sourceSpeakerLabel, "User")
+    XCTAssertEqual(transcript.entries.last?.sourceSpeakerLabel, "Assistant")
+    XCTAssertEqual(sessionID.rawValue, MockProcessProtocolFixtures.continuedSessionID)
+    XCTAssertEqual(continued.origin, .native)
+  }
+
+  func testImportedTranscriptRejectsANoncontiguousFirstPosition() async throws {
+    let conversations = try await makeService().listConversations(includeArchived: true)
+    let imported = try fixtureConversation(
+      MockProcessProtocolFixtures.importedConversationID,
+      in: conversations
+    )
+    let firstPosition = SignalboxCanonicalUInt64(rawValue: 2)
+    let requester = StaticProcessRequester(
+      frames: [
+        try ProcessDriverFixture.importedConversationStart(
+          conversationID: imported.conversationID
+        ),
+        try ProcessDriverFixture.importedConversationEntry(
+          position: firstPosition,
+          entryID: MockProcessProtocolFixtures.importedUserEntryID
+        ),
+      ]
+    )
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let error = await capturedServiceError {
+      _ = try await service.readImportedConversation(conversation: imported)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.noncontiguousImportedPositionError)
+  }
+
   func testModelAliasCatalogCreatesAUnifiedNativeConversation() async throws {
     let service = makeService()
 
@@ -3146,6 +3205,52 @@ private enum ProcessDriverFixture {
   static let invalidMetadataReceiptError = SignalboxProcessServiceError.unexpectedMessage(
     "The metadata replacement receipt violated the metadata contract."
   )
+  static let noncontiguousImportedPositionError = SignalboxProcessServiceError.invalidPage(
+    "Imported transcript positions were not contiguous and one-based."
+  )
+
+  static func importedConversationStart(
+    conversationID: SignalboxCanonicalUUID
+  ) throws -> SignalboxProcessServerFrame {
+    try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"1",
+          "message":{
+            "type":"imported_conversation_start",
+            "imported_conversation_id":"\(conversationID.rawValue)"
+          }
+        }
+        """.utf8
+      )
+    )
+  }
+
+  static func importedConversationEntry(
+    position: SignalboxCanonicalUInt64,
+    entryID: String
+  ) throws -> SignalboxProcessServerFrame {
+    try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"1",
+          "message":{
+            "type":"imported_conversation_entry",
+            "position":"\(position.rawValue)",
+            "imported_entry_id":"\(entryID)",
+            "source_speaker":{"type":"attested","speaker":"user"},
+            "content_kind":"text",
+            "text_preview":{"preview":"Fixture text","truncated":false}
+          }
+        }
+        """.utf8
+      )
+    )
+  }
   static let oneRowMetadataPolicy = SignalboxProcessApplicationPolicy(
     metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,

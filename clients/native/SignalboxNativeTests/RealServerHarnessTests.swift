@@ -137,6 +137,50 @@ final class RealServerHarnessTests: XCTestCase {
 
     XCTAssertEqual(firstFrameAfterReconnect.message, .sessionsStart)
   }
+
+  func testRealDaemonCompletesImportedTranscriptContinuationWithoutAModelCall() async throws {
+    let socketPath = try realServerSocketPath()
+    let client = realServerClient(socketPath: socketPath)
+    let importExchange = try await client.open(
+      .importConversation(
+        format: .codexRolloutJSONLV1,
+        source: RealServerFixture.importedRollout
+      )
+    )
+    let importedConversationID = try requireImportedConversationID(
+      try await requireFrame(from: importExchange).message
+    )
+    await importExchange.close()
+    let service = realServerService(socketPath: socketPath)
+    let conversations = try await service.listConversations(includeArchived: true)
+    let conversation = try XCTUnwrap(
+      conversations.first(where: { $0.conversationID == importedConversationID })
+    )
+    let transcript = try await service.readImportedConversation(conversation: conversation)
+    let aliases = try await service.listModelAliases()
+    let alias = try XCTUnwrap(aliases.first)
+    let creation = try await service.prepareImportedSessionCreation(
+      conversation: conversation,
+      throughPosition: try XCTUnwrap(transcript.entries.last?.position),
+      relationship: .resume,
+      modelSelection: .alias(aliasID: alias.aliasID)
+    )
+
+    let sessionID = try await service.createSessionFromImportedFrontier(creation)
+    let sessions = try await service.listSessions(includeArchived: true)
+
+    XCTAssertEqual(transcript.importedConversationID, importedConversationID)
+    XCTAssertEqual(transcript.entries.count, RealServerFixture.importedEntryCount)
+    XCTAssertEqual(
+      transcript.entries[1].textPreview?.preview,
+      RealServerFixture.importedQuestion
+    )
+    XCTAssertEqual(
+      transcript.entries[2].textPreview?.preview,
+      RealServerFixture.importedAnswer
+    )
+    XCTAssertNotNil(sessions.first(where: { $0.id == sessionID }))
+  }
 }
 
 private enum RealServerFixture {
@@ -144,6 +188,9 @@ private enum RealServerFixture {
   static let rejectedInput = "This input must be rejected before model execution."
   static let staleDefaultsVersion = SignalboxCanonicalUInt64(rawValue: 99)
   static let initialDefaultsVersion = SignalboxCanonicalUInt64(rawValue: 1)
+  static let importedEntryCount = 3
+  static let importedQuestion = "Owner fixture question"
+  static let importedAnswer = "Owner fixture answer"
   static let modelAlias = SignalboxModelAliasSummary(
     aliasID: try! SignalboxCanonicalUUID(
       validating: "30000000-0000-4000-8000-000000000001"
@@ -164,6 +211,15 @@ private enum RealServerFixture {
     #"{"version":1,"request_id":"52","request":{"type":"list_sessions"}"#.utf8
       + [0x0A]
   )
+  static var importedRollout: Data {
+    Data(
+      """
+      {"timestamp":"t0","type":"session_meta","payload":{"id":"owner-fixture","session_id":"owner-fixture"}}
+      {"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"\(importedQuestion)"}]}}
+      {"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"\(importedAnswer)"}]}}
+      """.utf8
+    )
+  }
 }
 
 private func realServerSocketPath() throws -> String {
@@ -226,6 +282,18 @@ private func requireProtocolError(
     throw RealServerFixtureError.unexpectedMessage
   }
   return error
+}
+
+private func requireImportedConversationID(
+  _ message: SignalboxProcessServerMessage
+) throws -> SignalboxCanonicalUUID {
+  switch message {
+  case .conversationImportInserted(let importedConversationID),
+    .conversationImportAlreadyImported(let importedConversationID):
+    return importedConversationID
+  default:
+    throw RealServerFixtureError.unexpectedMessage
+  }
 }
 
 private func readLine(

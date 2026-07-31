@@ -13,6 +13,7 @@ public enum SignalboxProcessProtocol {
   public static let maximumConversationPageSize: UInt64 = 100
   public static let maximumConversationTitleUTF8Bytes = 262_144
   public static let maximumImportedConversationTitleScalars = 256
+  public static let maximumImportedTextPreviewUTF8Bytes = 256
   public static let maximumModelAliasCatalogEntries = 10_000
   public static let maximumStreamedTextUTF8Bytes = 8 * 1024 * 1024
 }
@@ -287,6 +288,14 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     metadata: SignalboxProcessSessionMetadata
   )
   case importConversation(format: SignalboxConversationImportFormat, source: Data)
+  case readImportedConversation(importedConversationID: SignalboxCanonicalUUID)
+  case createSessionFromImportedFrontier(
+    commandID: SignalboxCommandID,
+    importedConversationID: SignalboxCanonicalUUID,
+    throughPosition: SignalboxCanonicalUInt64,
+    relationship: SignalboxImportedSessionRelationship,
+    initialModelSelection: SignalboxModelSelection
+  )
   case stopTurn(
     commandID: SignalboxCommandID,
     sessionID: SignalboxCanonicalUUID,
@@ -354,6 +363,22 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode("import_conversation", forKey: "type")
       try container.encode(format, forKey: "format")
       try container.encode(source.base64EncodedString(), forKey: "source")
+    case .readImportedConversation(let importedConversationID):
+      try container.encode("read_imported_conversation", forKey: "type")
+      try container.encode(importedConversationID, forKey: "imported_conversation_id")
+    case .createSessionFromImportedFrontier(
+      let commandID,
+      let importedConversationID,
+      let throughPosition,
+      let relationship,
+      let selection
+    ):
+      try container.encode("create_session_from_imported_frontier", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(importedConversationID, forKey: "imported_conversation_id")
+      try container.encode(throughPosition, forKey: "through_position")
+      try container.encode(relationship, forKey: "relationship")
+      try container.encode(selection, forKey: "initial_model_selection")
     case .stopTurn(
       let commandID,
       let sessionID,
@@ -470,6 +495,11 @@ public enum SignalboxConversationImportFormat: String, Codable, Equatable, Senda
   case codexRolloutJSONLV1 = "codex_rollout_jsonl_v1"
 }
 
+public enum SignalboxImportedSessionRelationship: String, Codable, Equatable, Sendable {
+  case resume
+  case fork
+}
+
 public struct SignalboxProcessClientFrame: Encodable, Equatable, Sendable {
   public let version: SignalboxProcessProtocolVersion
   public let requestID: SignalboxRequestID
@@ -566,6 +596,9 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case conversationPageStart
   case conversationSummary(SignalboxConversationSummary)
   case conversationPageEnd(SignalboxConversationPageEnd)
+  case importedConversationStart(importedConversationID: SignalboxCanonicalUUID)
+  case importedConversationEntry(SignalboxImportedConversationEntry)
+  case importedConversationEnd(SignalboxImportedConversationEnd)
   case modelAliasesStart
   case modelAliasSummary(SignalboxModelAliasSummary)
   case modelAliasesEnd(aliasCount: SignalboxCanonicalUInt64)
@@ -652,6 +685,26 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .conversationSummary(try decoder.decode("conversation"))
       case "conversation_page_end":
         self = .conversationPageEnd(try SignalboxConversationPageEnd(from: decoder))
+      case "imported_conversation_start":
+        try tagged.rejectUnadmittedFields(
+          ["type", "imported_conversation_id"],
+          decoder: decoder
+        )
+        self = .importedConversationStart(
+          importedConversationID: try decoder.decode("imported_conversation_id")
+        )
+      case "imported_conversation_entry":
+        self = .importedConversationEntry(
+          try SignalboxImportedConversationEntry(from: decoder)
+        )
+      case "imported_conversation_end":
+        try tagged.rejectUnadmittedFields(
+          ["type", "imported_conversation_id", "entry_count"],
+          decoder: decoder
+        )
+        self = .importedConversationEnd(
+          try SignalboxImportedConversationEnd(from: decoder)
+        )
       case "model_aliases_start":
         try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
         self = .modelAliasesStart
@@ -843,6 +896,105 @@ public enum SignalboxImportedConversationSourceFormat: String, Decodable, Equata
   case claudeCodeSessionJSONLV1 = "claude_code_session_jsonl_v1"
   case claudeCodeSessionJSONLV2 = "claude_code_session_jsonl_v2"
   case codexRolloutJSONLV1 = "codex_rollout_jsonl_v1"
+}
+
+public struct SignalboxImportedTextPreview: Decodable, Equatable, Sendable {
+  public let preview: String
+  public let truncated: Bool
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["preview", "truncated"], decoder: decoder)
+    try payload.requireFields(["preview", "truncated"], decoder: decoder)
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    preview = try container.decode(String.self, forKey: .preview)
+    truncated = try container.decode(Bool.self, forKey: .truncated)
+    guard
+      preview.utf8.count <= SignalboxProcessProtocol.maximumImportedTextPreviewUTF8Bytes,
+      !truncated || !preview.isEmpty
+    else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Imported text preview violates its bounded prefix shape."
+        )
+      )
+    }
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case preview
+    case truncated
+  }
+}
+
+public struct SignalboxImportedConversationEntry: Decodable, Equatable, Sendable {
+  public let position: SignalboxCanonicalUInt64
+  public let importedEntryID: SignalboxCanonicalUUID
+  public let sourceSpeaker: SignalboxImportedSourceSpeaker
+  public let contentKind: SignalboxImportedContentKind
+  public let textPreview: SignalboxImportedTextPreview?
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      [
+        "type", "position", "imported_entry_id", "source_speaker",
+        "content_kind", "text_preview",
+      ],
+      decoder: decoder
+    )
+    try tagged.requireFields(
+      [
+        "position", "imported_entry_id", "source_speaker", "content_kind",
+        "text_preview",
+      ],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    position = try container.decode(SignalboxCanonicalUInt64.self, forKey: .position)
+    importedEntryID = try container.decode(
+      SignalboxCanonicalUUID.self,
+      forKey: .importedEntryID
+    )
+    sourceSpeaker = try container.decode(
+      SignalboxImportedSourceSpeaker.self,
+      forKey: .sourceSpeaker
+    )
+    contentKind = try container.decode(SignalboxImportedContentKind.self, forKey: .contentKind)
+    textPreview = try container.decodeIfPresent(
+      SignalboxImportedTextPreview.self,
+      forKey: .textPreview
+    )
+    guard position.rawValue > 0,
+      textPreview == nil || contentKind == .text
+    else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Imported conversation entry has a contradictory shape."
+        )
+      )
+    }
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case position
+    case importedEntryID = "imported_entry_id"
+    case sourceSpeaker = "source_speaker"
+    case contentKind = "content_kind"
+    case textPreview = "text_preview"
+  }
+}
+
+public struct SignalboxImportedConversationEnd: Decodable, Equatable, Sendable {
+  public let importedConversationID: SignalboxCanonicalUUID
+  public let entryCount: SignalboxCanonicalUInt64
+
+  private enum CodingKeys: String, CodingKey {
+    case importedConversationID = "imported_conversation_id"
+    case entryCount = "entry_count"
+  }
 }
 
 public struct SignalboxNativeConversationSummary: Equatable, Sendable {
