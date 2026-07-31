@@ -122,6 +122,7 @@ pub(crate) async fn execute_review_orchestration_request(
         Some(current) => {
             prevalidate_submission(
                 &store,
+                command,
                 &prepared.attempt,
                 current,
                 &prepared.submission,
@@ -144,6 +145,7 @@ pub(crate) async fn execute_review_orchestration_request(
     let (stage, progress) = if admission == SubmissionAdmission::EqualEffectReplay {
         replay_result(
             &store,
+            command,
             &prepared.attempt,
             &prepared.submission,
             current_progress,
@@ -493,6 +495,7 @@ fn mutation_identity(
 
 async fn prevalidate_submission(
     store: &PostgresReviewOrchestrationStore,
+    command: ReviewOrchestrationCommand,
     attempt: &ReviewOrchestrationAttempt,
     current: ReviewOrchestrationCurrentStage,
     submission: &ClientSubmission,
@@ -531,23 +534,32 @@ async fn prevalidate_submission(
                 .ok_or(ReviewOrchestrationRuntimeError::Rejected)?;
             let candidate =
                 ReviewConcernClaim::new(concern.clone(), spec.template_digest(), outcome.clone());
-            let claims = store
-                .load_concern_claims(attempt.id())
-                .await
-                .map_err(map_store_error)?;
-            match claims.iter().find(|claim| claim.concern() == concern) {
-                Some(existing) if effect_recorded && existing == &candidate => {
-                    Some(SubmissionAdmission::EqualEffectReplay)
+            if effect_recorded {
+                let (recorded, _, _) = store
+                    .load_concern_replay_facts(command, concern)
+                    .await
+                    .map_err(map_store_error)?
+                    .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
+                (recorded == candidate).then_some(SubmissionAdmission::EqualEffectReplay)
+            } else {
+                let claims = store
+                    .load_concern_claims(attempt.id())
+                    .await
+                    .map_err(map_store_error)?;
+                match claims.iter().find(|claim| claim.concern() == concern) {
+                    Some(existing)
+                        if fresh_stage
+                            && matches!(
+                                existing.outcome(),
+                                ReviewConcernOutcome::Failed { .. }
+                            ) =>
+                    {
+                        Some(SubmissionAdmission::Fresh)
+                    }
+                    Some(_) => None,
+                    None if fresh_stage => Some(SubmissionAdmission::Fresh),
+                    None => None,
                 }
-                Some(existing)
-                    if fresh_stage
-                        && matches!(existing.outcome(), ReviewConcernOutcome::Failed { .. }) =>
-                {
-                    Some(SubmissionAdmission::Fresh)
-                }
-                Some(_) => None,
-                None if fresh_stage => Some(SubmissionAdmission::Fresh),
-                None => None,
             }
         }
         ClientSubmission::JudgmentPlan(plan) => {
@@ -637,6 +649,7 @@ async fn prevalidate_submission(
 
 async fn replay_result(
     store: &PostgresReviewOrchestrationStore,
+    command: ReviewOrchestrationCommand,
     attempt: &ReviewOrchestrationAttempt,
     submission: &ClientSubmission,
     current: ReviewOrchestrationProgress,
@@ -654,8 +667,8 @@ async fn replay_result(
             Ok((ReviewOrchestrationStage::ImportIncomplete, progress))
         }
         ClientSubmission::Concern { concern, .. } => {
-            let (claim_count, all_succeeded) = store
-                .load_concern_replay_facts(attempt.id(), concern)
+            let (_, claim_count, all_succeeded) = store
+                .load_concern_replay_facts(command, concern)
                 .await
                 .map_err(map_post_effect_store_error)?
                 .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;

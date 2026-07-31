@@ -768,7 +768,9 @@ the store's own loaders classify as corruption.
 Every review mutation carries an owner-global command identity. Before its
 aggregate effect, the adapter commits a typed intent binding that identity to
 the validated semantic request. The primary aggregate effect commits atomically
-with an append-only marker of the exact command. The operation answer is then
+with an append-only marker of the exact command. A concern marker also binds the
+immutable claim sequence it created, so later replacement of a failed claim
+cannot redirect exact replay to the successor. The operation answer is then
 derived from the submitted outcome and completed barrier facts, then stored in
 an append-only recovery record before the intent is atomically replaced by the
 typed receipt. Exclusive admission prevents overlap while the process lives; the

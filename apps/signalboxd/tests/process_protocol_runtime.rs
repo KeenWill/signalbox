@@ -6276,6 +6276,28 @@ impl ReviewRuntimeDriver {
         .await
     }
 
+    async fn complete_failed_pass(
+        &mut self,
+        fixture: ReviewPassFixture,
+    ) -> Result<(), Box<dyn Error>> {
+        self.request_expect(
+            ClientRequest::CompleteReviewPass {
+                command_id: command()?,
+                run_id: fixture.run,
+                pass_id: fixture.pass,
+                turn_id: Some(fixture.turn),
+                output_frontier_id: None,
+                outcome: ReviewPassTerminalOutcome::Failed,
+            },
+            ServerMessage::ReviewPassCompleted {
+                run_id: fixture.run,
+                pass_id: fixture.pass,
+                state: signalbox_process_protocol::ReviewPassLifecycle::Failed,
+            },
+        )
+        .await
+    }
+
     async fn record_findings(
         &mut self,
         fixture: ReviewPassFixture,
@@ -6465,18 +6487,19 @@ impl ReviewRuntimeDriver {
         .await
     }
 
-    async fn record_concern_with_lost_recovery(
+    async fn record_failed_concern_with_lost_recovery(
         &mut self,
         attempt: CanonicalUuid,
         concern: &ReviewConcernEvidence,
+        failed_pass: CanonicalUuid,
     ) -> Result<ClientRequest, Box<dyn Error>> {
         let command_id = command()?;
         let request = ClientRequest::RecordReviewConcernOutcome {
             command_id,
             attempt_id: attempt,
             concern: concern.key.clone(),
-            pass_id: Some(concern.pass),
-            outcome: ReviewConcernTerminalOutcome::Succeeded,
+            pass_id: Some(failed_pass),
+            outcome: ReviewConcernTerminalOutcome::Failed,
         };
         self.request_with_lost_orchestration_recovery(command_id, request.clone())
             .await?;
@@ -6834,6 +6857,15 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         .await?;
     driver.reject_restart_after_import(attempt).await?;
 
+    let failed_correctness = driver
+        .create_completed_turn_pass(
+            "review-concern-correctness",
+            ReviewWorkflow::ReadOnlyReview,
+            0xc050,
+        )
+        .await?;
+    driver.complete_failed_pass(failed_correctness).await?;
+
     let correctness = driver
         .create_completed_turn_pass(
             "review-concern-correctness",
@@ -6927,7 +6959,14 @@ async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>>
         },
     ];
     let first_concern_retry = driver
-        .record_concern_with_lost_recovery(attempt, &concerns[0])
+        .record_failed_concern_with_lost_recovery(attempt, &concerns[0], failed_correctness.pass)
+        .await?;
+    driver
+        .record_concern(
+            attempt,
+            &concerns[0],
+            ReviewOrchestrationState::AwaitingConcerns,
+        )
         .await?;
     driver
         .record_concerns_after_first(attempt, &concerns)

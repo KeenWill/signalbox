@@ -422,21 +422,23 @@ excluded. Before hashing, the daemon canonicalizes a complete
 does not distinguish the same semantic inventory. Before an orchestration
 effect, the adapter commits an immutable typed intent binding command identity,
 semantic digest, attempt, and closed operation kind. The effect and an
-append-only marker naming its exact command commit atomically. They are
-followed, while the daemon still holds exclusive review-mutation admission, by
-an append-only recovery result containing the operation-derived stage and
-progress. The typed owner-global receipt then atomically replaces the intent.
-The intent, recovery, and receipt constraints keep operation kind, stage, and
-constituent progress coherent. If the process stops after the effect but before
-recovery, the intent preserves exact-retry identity and the effect marker proves
-that this command caused the operation-specific durable effect; the retry must
-also authenticate that equal effect independently of the aggregate current
-stage, reconstruct progress for the original operation stage without later
-facts, and finish the recovery and receipt. A fresh command at the later stage
-remains rejected. If receipt commit is lost, an equal retry materializes it from
-the recovery result and returns that original operation-stage response rather
-than later aggregate state. A recorded receipt is inspected before mutable
-aggregate-state preconditions. A semantically equal start similarly preserves
+append-only marker naming its exact command commit atomically. A concern marker
+also binds the immutable claim sequence it created; later replacement of a
+failed claim cannot redirect replay to the successor. They are followed, while
+the daemon still holds exclusive review-mutation admission, by an append-only
+recovery result containing the operation-derived stage and progress. The typed
+owner-global receipt then atomically replaces the intent. The intent, recovery,
+and receipt constraints keep operation kind, stage, and constituent progress
+coherent. If the process stops after the effect but before recovery, the intent
+preserves exact-retry identity and the effect marker proves that this command
+caused the operation-specific durable effect; the retry must also authenticate
+that equal effect independently of the aggregate current stage, reconstruct
+progress for the original operation stage without later facts, and finish the
+recovery and receipt. A fresh command at the later stage remains rejected. If
+receipt commit is lost, an equal retry materializes it from the recovery result
+and returns that original operation-stage response rather than later aggregate
+state. A recorded receipt is inspected before mutable aggregate-state
+preconditions. A semantically equal start similarly preserves
 `review_orchestration_started`; a different frozen attempt fails closed. Fresh
 run admission creates its run and sole pass in one transaction; recovery also
 recognizes and completes a matching run-only intermediate committed by the

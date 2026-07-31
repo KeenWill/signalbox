@@ -7,6 +7,10 @@ ALTER TABLE review_orchestration_concern_claim
     ADD CONSTRAINT review_orchestration_concern_claim_effect_sequence_unique
     UNIQUE (effect_sequence);
 
+ALTER TABLE review_orchestration_concern_claim
+    ADD CONSTRAINT review_orchestration_concern_claim_effect_attempt_unique
+    UNIQUE (effect_sequence, attempt_id);
+
 CREATE TABLE review_orchestration_command_intent (
     command_id uuid PRIMARY KEY,
     command_kind text NOT NULL CHECK (command_kind = 'review_orchestration'),
@@ -26,6 +30,11 @@ CREATE TABLE review_orchestration_command_effect (
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     operation_kind text NOT NULL CHECK (operation_kind IN
         ('start', 'import', 'concern', 'judgment_plan', 'judgment_effect', 'repair', 'publication')),
+    concern_effect_sequence bigint,
+    CHECK ((operation_kind = 'concern') = (concern_effect_sequence IS NOT NULL)),
+    FOREIGN KEY (concern_effect_sequence, attempt_id)
+        REFERENCES review_orchestration_concern_claim(effect_sequence, attempt_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (command_id)
         REFERENCES durable_command(command_id) ON DELETE RESTRICT
 );

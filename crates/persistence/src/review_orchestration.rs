@@ -245,40 +245,54 @@ impl PostgresReviewOrchestrationStore {
         Ok(Some(decode_progress(&row)?))
     }
 
-    /// Loads concern-barrier facts as they stood when one concern effect landed.
+    /// Loads the exact concern claim and barrier facts caused by one command.
     pub async fn load_concern_replay_facts(
         &self,
-        attempt: ReviewOrchestrationAttemptId,
+        command: ReviewOrchestrationCommand,
         concern: &ReviewKey,
-    ) -> Result<Option<(usize, bool)>, ReviewOrchestrationStoreError> {
+    ) -> Result<Option<(ReviewConcernClaim, usize, bool)>, ReviewOrchestrationStoreError> {
+        let candidate = sqlx::query(
+            "SELECT claim.concern_key, claim.claim_ordinal, claim.template_digest,
+                    claim.outcome_kind, claim.pass_id, claim.effect_sequence
+               FROM review_orchestration_command_effect AS effect
+               JOIN review_orchestration_concern_claim AS claim
+                 ON claim.effect_sequence = effect.concern_effect_sequence
+                AND claim.attempt_id = effect.attempt_id
+              WHERE effect.command_id = $1
+                AND effect.attempt_id = $2
+                AND effect.operation_kind = 'concern'
+                AND claim.concern_key = $3",
+        )
+        .bind(durable_command_id_to_uuid(command.command_id))
+        .bind(command.attempt.as_uuid())
+        .bind(concern.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+        let sequence: i64 = candidate.try_get("effect_sequence")?;
+        let claim = self
+            .decode_concern_claim(command.attempt, &candidate)
+            .await?;
         let row = sqlx::query(
-            "WITH candidate AS (
-                 SELECT max(effect_sequence) AS effect_sequence
-                   FROM review_orchestration_concern_claim
-                  WHERE attempt_id = $1 AND concern_key = $2
-             ), claims_at_effect AS (
+            "WITH claims_at_effect AS (
                  SELECT DISTINCT ON (claim.concern_key)
                         claim.concern_key, claim.outcome_kind
                    FROM review_orchestration_concern_claim AS claim
-                   JOIN candidate
-                     ON claim.effect_sequence <= candidate.effect_sequence
-                  WHERE claim.attempt_id = $1
+                  WHERE claim.attempt_id = $1 AND claim.effect_sequence <= $2
                   ORDER BY claim.concern_key, claim.claim_ordinal DESC
              )
-             SELECT (SELECT effect_sequence FROM candidate) AS effect_sequence,
-                    count(*) AS claim_count,
+             SELECT count(*) AS claim_count,
                     COALESCE(bool_and(outcome_kind = 'succeeded'), false) AS all_succeeded
                FROM claims_at_effect",
         )
-        .bind(attempt.as_uuid())
-        .bind(concern.as_str())
+        .bind(command.attempt.as_uuid())
+        .bind(sequence)
         .fetch_one(&self.pool)
         .await?;
-        let sequence: Option<i64> = row.try_get("effect_sequence")?;
-        if sequence.is_none() {
-            return Ok(None);
-        }
         Ok(Some((
+            claim,
             decode_count(row.try_get("claim_count")?)?,
             row.try_get("all_succeeded")?,
         )))
@@ -723,6 +737,7 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
                 &mut transaction,
                 attempt.id(),
                 ReviewOrchestrationCommandKind::Start,
+                None,
             )
             .await?;
             commit_or_ambiguous(transaction).await?;
@@ -822,6 +837,7 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
                 &mut transaction,
                 attempt,
                 ReviewOrchestrationCommandKind::Import,
+                None,
             )
             .await?;
             commit_or_ambiguous(transaction).await?;
@@ -904,10 +920,11 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
         .fetch_one(&mut *transaction)
         .await?;
         let (kind, pass) = encode_concern_outcome(claim.outcome());
-        sqlx::query(
+        let effect_sequence: i64 = sqlx::query_scalar(
             "INSERT INTO review_orchestration_concern_claim
                 (attempt_id, concern_key, claim_ordinal, template_digest, outcome_kind, pass_id)
-             VALUES ($1,$2,$3,$4,$5,$6)",
+             VALUES ($1,$2,$3,$4,$5,$6)
+             RETURNING effect_sequence",
         )
         .bind(attempt.as_uuid())
         .bind(claim.concern().as_str())
@@ -915,7 +932,7 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
         .bind(claim.template_digest().bytes().as_slice())
         .bind(kind)
         .bind(pass.map(|value| value.into_uuid()))
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         if let ReviewConcernOutcome::Succeeded(success) = claim.outcome() {
             for (ordinal, finding) in success.findings().iter().enumerate() {
@@ -938,6 +955,7 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
             &mut transaction,
             attempt,
             ReviewOrchestrationCommandKind::Concern,
+            Some(effect_sequence),
         )
         .await?;
         commit_or_ambiguous(transaction).await?;
@@ -1276,6 +1294,7 @@ async fn insert_effect_marker(
     transaction: &mut Transaction<'_, Postgres>,
     attempt: ReviewOrchestrationAttemptId,
     kind: ReviewOrchestrationCommandKind,
+    concern_effect_sequence: Option<i64>,
 ) -> Result<(), ReviewOrchestrationStoreError> {
     let Some(command) = store.effect_command else {
         return Ok(());
@@ -1285,13 +1304,20 @@ async fn insert_effect_marker(
             "orchestration effect command does not match the primary effect",
         ));
     }
+    if (kind == ReviewOrchestrationCommandKind::Concern) != concern_effect_sequence.is_some() {
+        return Err(corruption(
+            "orchestration concern effect marker lacks its exact claim sequence",
+        ));
+    }
     sqlx::query(
         "INSERT INTO review_orchestration_command_effect
-            (command_id, attempt_id, operation_kind) VALUES ($1,$2,$3)",
+            (command_id, attempt_id, operation_kind, concern_effect_sequence)
+         VALUES ($1,$2,$3,$4)",
     )
     .bind(durable_command_id_to_uuid(command.command_id))
     .bind(attempt.as_uuid())
     .bind(encode_command_kind(kind))
+    .bind(concern_effect_sequence)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -1367,6 +1393,7 @@ async fn seal_judgment_plan_impl(
         &mut transaction,
         attempt,
         ReviewOrchestrationCommandKind::JudgmentPlan,
+        None,
     )
     .await?;
     commit_or_ambiguous(transaction).await?;
@@ -1499,6 +1526,7 @@ async fn record_applied_effect_impl(
         &mut transaction,
         effect.attempt(),
         ReviewOrchestrationCommandKind::JudgmentEffect,
+        None,
     )
     .await?;
     commit_or_ambiguous(transaction).await?;
@@ -1655,6 +1683,7 @@ async fn record_repairs(
         &mut transaction,
         attempt,
         ReviewOrchestrationCommandKind::Repair,
+        None,
     )
     .await?;
     commit_or_ambiguous(transaction).await?;
@@ -1784,6 +1813,7 @@ async fn record_publications(
         &mut transaction,
         attempt,
         ReviewOrchestrationCommandKind::Publication,
+        None,
     )
     .await?;
     commit_or_ambiguous(transaction).await?;
