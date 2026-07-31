@@ -14,6 +14,10 @@
 //! tools independently and does not decide which session catalogs contain
 //! either one.
 //!
+//! [`CargoDiagnosticsTool`] builds on the same sandboxed core to run bounded
+//! whole-workspace Cargo check, clippy, and test passes. It returns typed
+//! compiler locations and test outcomes rather than raw terminal output.
+//!
 //! This day-one profile does not fence the network or impose resource limits.
 //! A full profile providing both is a blocking condition before these tools may
 //! execute untrusted code. Shell sessions and PTYs are likewise outside this
@@ -25,10 +29,19 @@
 //! `SIGNALBOX_RUN_BWRAP_INTEGRATION=1 cargo test -p signalbox-tools-exec
 //! --test bwrap`.
 
+mod diagnostics;
 mod process;
 #[cfg(target_os = "linux")]
 mod supervisor_protocol;
 
+pub use diagnostics::{
+    CARGO_DIAGNOSTICS_NAME, CargoDiagnostic, CargoDiagnosticRecords, CargoDiagnosticSpan,
+    CargoDiagnosticsArguments, CargoDiagnosticsCommand, CargoDiagnosticsExecution,
+    CargoDiagnosticsExecutor, CargoDiagnosticsExecutorError, CargoDiagnosticsResult,
+    CargoDiagnosticsRunner, CargoDiagnosticsStream, CargoDiagnosticsTool,
+    CargoDiagnosticsToolConstructionError, CargoTestOutcome, CargoTestRecords, CargoTestResult,
+    InvalidCargoDiagnosticsArguments,
+};
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
     ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
