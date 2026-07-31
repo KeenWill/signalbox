@@ -71,13 +71,14 @@ const MAX_REPOSITORY_BYTES: usize = 256;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 4 * 1024;
 const MAX_URL_BYTES: usize = 8 * 1024;
+const MAX_OPAQUE_ID_BYTES: usize = 512;
 const MIN_INLINE_COMMENT_LINE: u32 = 1;
 const MAX_INLINE_COMMENTS: usize = 50;
 const ERROR_TRUNCATION_SUFFIX: &str = " … [truncated]";
 const INVALID_ARGUMENTS_DETAIL: &str = "GitHub pull-request tool arguments are invalid";
 const CREDENTIAL_UNAVAILABLE_DETAIL: &str = "GitHub credential is unavailable";
 const REQUEST_REJECTED_DETAIL: &str = "GitHub rejected the pull-request operation";
-const REVISION_CHANGED_DETAIL: &str = "pull-request base or head changed during the diff read";
+const REVISION_CHANGED_DETAIL: &str = "pull-request diff snapshot changed during the diff read";
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!) {
@@ -570,12 +571,18 @@ enum ToolKind {
 }
 
 impl ToolKind {
-    const ALL: [Self; 4] = [
-        Self::Diff,
-        Self::Metadata,
-        Self::PublishReview,
-        Self::ReviewThreads,
-    ];
+    fn all() -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(Self::Diff), |kind| kind.successor())
+    }
+
+    const fn successor(self) -> Option<Self> {
+        match self {
+            Self::Diff => Some(Self::Metadata),
+            Self::Metadata => Some(Self::PublishReview),
+            Self::PublishReview => Some(Self::ReviewThreads),
+            Self::ReviewThreads => None,
+        }
+    }
 
     const fn name(self) -> &'static str {
         match self {
@@ -587,7 +594,10 @@ impl ToolKind {
     }
 
     const fn mutates(self) -> bool {
-        matches!(self, Self::PublishReview)
+        match self {
+            Self::Diff | Self::Metadata | Self::ReviewThreads => false,
+            Self::PublishReview => true,
+        }
     }
 
     const fn permission(self) -> ToolPermissionDefault {
@@ -620,18 +630,17 @@ impl ToolKind {
     }
 
     fn accepts(self, result: &GitHubResult) -> bool {
-        matches!(
-            (self, result.kind),
-            (Self::Diff, GitHubResultKind::Diff)
-                | (Self::Metadata, GitHubResultKind::Metadata)
-                | (Self::PublishReview, GitHubResultKind::PublishedReview)
-                | (Self::ReviewThreads, GitHubResultKind::ReviewThreads)
-        )
+        match self {
+            Self::Diff => result.kind == GitHubResultKind::Diff,
+            Self::Metadata => result.kind == GitHubResultKind::Metadata,
+            Self::PublishReview => result.kind == GitHubResultKind::PublishedReview,
+            Self::ReviewThreads => result.kind == GitHubResultKind::ReviewThreads,
+        }
     }
 }
 
 fn kind_for_name(name: &str) -> Option<ToolKind> {
-    ToolKind::ALL.into_iter().find(|kind| kind.name() == name)
+    ToolKind::all().find(|kind| kind.name() == name)
 }
 
 /// Typed operation crossing the injected transport boundary.
@@ -863,8 +872,7 @@ impl<Credentials, Transport> GitHubTools<Credentials, Transport> {
         let credential_detail = make_detail(CREDENTIAL_UNAVAILABLE_DETAIL)?;
         let rejected_detail = make_detail(REQUEST_REJECTED_DETAIL)?;
         let revision_detail = make_detail(REVISION_CHANGED_DETAIL)?;
-        let compiled = ToolKind::ALL
-            .into_iter()
+        let compiled = ToolKind::all()
             .map(|kind| {
                 let definition = kind.definition().map_err(|error| match error {
                     ToolContractCompileError::Name => GitHubToolsConstructionError::Name,
@@ -1178,7 +1186,10 @@ impl ToolKind {
 const fn infrastructure(outcome: CommitOutcome) -> GitHubExecutorError {
     GitHubExecutorError {
         class: OperatorFailureClass::Infrastructure {
-            commit_ambiguous: matches!(outcome, CommitOutcome::Ambiguous),
+            commit_ambiguous: match outcome {
+                CommitOutcome::Definite => false,
+                CommitOutcome::Ambiguous => true,
+            },
         },
     }
 }
@@ -1486,9 +1497,7 @@ impl GitHubApiTransport {
             .pull_request_value(&arguments, credential, policy, remaining_timeout(deadline)?)
             .await?;
         let current = normalize_diff_snapshot(&current_value, arguments.number())?;
-        if initial.base_revision != current.base_revision
-            || initial.head_revision != current.head_revision
-        {
+        if !diff_snapshot_unchanged(&initial, &current) {
             return Err(GitHubTransportFailure::RevisionChanged);
         }
         Ok(GitHubResult::diff(serde_json::json!({
@@ -1832,6 +1841,12 @@ struct DiffSnapshot {
     changed_files: usize,
 }
 
+fn diff_snapshot_unchanged(initial: &DiffSnapshot, current: &DiffSnapshot) -> bool {
+    initial.base_revision == current.base_revision
+        && initial.head_revision == current.head_revision
+        && initial.changed_files == current.changed_files
+}
+
 fn normalize_diff_snapshot(
     value: &serde_json::Value,
     expected_number: PullRequestNumber,
@@ -1941,7 +1956,7 @@ fn normalize_thread(
         .map(normalize_comment)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::json!({
-        "id": checked_text(required_string(object, "id")?, TextPresence::Required)?,
+        "id": checked_opaque_id(required_string(object, "id")?)?,
         "resolved": required_bool(object, "isResolved")?,
         "outdated": required_bool(object, "isOutdated")?,
         "path": checked_path(required_string(object, "path")?)?,
@@ -1969,7 +1984,7 @@ fn normalize_comment(
         .map(|author| checked_text(author, TextPresence::Required))
         .transpose()?;
     Ok(serde_json::json!({
-        "id": checked_text(required_string(object, "id")?, TextPresence::Required)?,
+        "id": checked_opaque_id(required_string(object, "id")?)?,
         "author": author,
         "body": checked_text(required_string(object, "body")?, TextPresence::Optional)?,
         "created_at": checked_text(required_string(object, "createdAt")?, TextPresence::Required)?,
@@ -2022,6 +2037,14 @@ fn checked_text(value: String, presence: TextPresence) -> Result<String, GitHubT
     valid_text(&value, presence)
         .then_some(value)
         .ok_or_else(|| invalid_response(None))
+}
+
+fn checked_opaque_id(value: String) -> Result<String, GitHubTransportFailure> {
+    (!value.is_empty()
+        && value.len() <= MAX_OPAQUE_ID_BYTES
+        && !value.chars().any(char::is_control))
+    .then_some(value)
+    .ok_or_else(|| invalid_response(None))
 }
 
 fn checked_revision(value: String) -> Result<String, GitHubTransportFailure> {
@@ -2173,6 +2196,7 @@ mod tests {
     const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
     const PULL_REQUEST_NUMBER: u64 = 348;
     const CHANGED_FILES: usize = 1;
+    const CHANGED_FILES_AFTER_SNAPSHOT: usize = CHANGED_FILES + 1;
     const FILE_PATH: &str = "crates/example/src/lib.rs";
     const FILE_PATCH: &str = "@@ -1 +1 @@\n-old\n+new";
     const THREADS_TRUNCATED: bool = false;
@@ -2194,9 +2218,12 @@ mod tests {
     const LAST_OVERFLOW_FILE_INDEX: usize = DIFF_FILES_FOR_RESULT_OVERFLOW - 1;
     const AGGREGATE_PATCH_BYTES: usize = MAX_TEXT_BYTES / 4;
     const ITEMS_BEYOND_PAGE_BOUND: usize = PAGE_SIZE + 1;
+    const OPAQUE_ID_BYTES_BEYOND_BOUND: usize = MAX_OPAQUE_ID_BYTES + 1;
     const PROVIDER_ERROR_TEXT: &str = "private provider detail";
     const PATCH_FILLER: &str = "x";
     const SHORT_PATCH: &str = "";
+    const OPAQUE_ID_FILLER: &str = "N";
+    const CONTROLLED_OPAQUE_ID: &str = "PRRC_fixture\n";
 
     struct SyntheticCredentials;
     struct SyntheticTransport;
@@ -2404,6 +2431,20 @@ mod tests {
         assert_eq!(snapshot.base_revision, BASE_REVISION);
         assert_eq!(snapshot.head_revision, HEAD_REVISION);
         assert_eq!(snapshot.changed_files, CHANGED_FILES);
+    }
+
+    #[test]
+    fn diff_snapshot_change_detects_changed_file_count() {
+        let number =
+            PullRequestNumber::try_from(PULL_REQUEST_NUMBER).expect("fixture number is admitted");
+        let initial = normalize_diff_snapshot(&metadata_response(), number)
+            .expect("initial snapshot is valid");
+        let mut current_response = metadata_response();
+        current_response["changed_files"] = serde_json::json!(CHANGED_FILES_AFTER_SNAPSHOT);
+        let current =
+            normalize_diff_snapshot(&current_response, number).expect("current snapshot is valid");
+
+        assert!(!diff_snapshot_unchanged(&initial, &current));
     }
 
     #[test]
@@ -2642,6 +2683,24 @@ mod tests {
                 .clone();
         response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"] =
             serde_json::Value::Array(vec![comment; ITEMS_BEYOND_PAGE_BOUND]);
+
+        assert!(normalize_threads(&response).is_err());
+    }
+
+    #[test]
+    fn graphql_rejects_oversized_review_thread_id() {
+        let mut response = threads_response();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["id"] =
+            serde_json::Value::String(OPAQUE_ID_FILLER.repeat(OPAQUE_ID_BYTES_BEYOND_BOUND));
+
+        assert!(normalize_threads(&response).is_err());
+    }
+
+    #[test]
+    fn graphql_rejects_controlled_review_comment_id() {
+        let mut response = threads_response();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"]
+            [0]["id"] = serde_json::Value::String(CONTROLLED_OPAQUE_ID.to_owned());
 
         assert!(normalize_threads(&response).is_err());
     }
