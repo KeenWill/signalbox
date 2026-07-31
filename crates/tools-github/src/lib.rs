@@ -819,6 +819,8 @@ pub enum GitHubTransportFailure {
         /// Sanitized response excerpt.
         detail: Option<SanitizedGitHubError>,
     },
+    /// GitHub returned definitive GraphQL rejection evidence.
+    GraphQlRejected,
     /// A success response violated the bounded contract.
     InvalidResponse {
         /// Sanitized response excerpt.
@@ -855,6 +857,9 @@ impl fmt::Display for GitHubTransportFailure {
                     formatter,
                     "GitHub rejected the request with HTTP status {status}"
                 )
+            }
+            Self::GraphQlRejected => {
+                formatter.write_str("GitHub returned definitive GraphQL rejection evidence")
             }
             Self::InvalidResponse { detail: _ } => {
                 formatter.write_str("GitHub returned an invalid response")
@@ -1314,6 +1319,7 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
             GitHubTransportFailure::Rejected { status, .. } if status_is_definitive(*status) => {
                 self.rejected_detail.clone()
             }
+            GitHubTransportFailure::GraphQlRejected => self.rejected_detail.clone(),
             GitHubTransportFailure::InvalidResponse { .. } if !kind.mutates() => {
                 self.rejected_detail.clone()
             }
@@ -1371,7 +1377,7 @@ fn classify_error_body_failure(
     status: StatusCode,
     failure: GitHubTransportFailure,
 ) -> GitHubTransportFailure {
-    if status.is_client_error() {
+    if status_is_definitive(status.as_u16()) {
         GitHubTransportFailure::Rejected {
             status: status.as_u16(),
             detail: None,
@@ -1941,6 +1947,7 @@ fn mutation_failure(failure: GitHubTransportFailure) -> GitHubTransportFailure {
     match failure {
         GitHubTransportFailure::InvalidCredential
         | GitHubTransportFailure::Rejected { .. }
+        | GitHubTransportFailure::GraphQlRejected
         | GitHubTransportFailure::EgressRejected => failure,
         GitHubTransportFailure::InvalidResponse { .. }
         | GitHubTransportFailure::ResponseTooLarge
@@ -2121,11 +2128,11 @@ fn normalize_metadata(
     let base = required_object(required(object, "base")?)?;
     let head = required_object(required(object, "head")?)?;
     let title = checked_text(required_string(object, "title")?, TextPresence::Required)?;
-    let body = optional_string(object, "body")?
+    let body = required_nullable_string(object, "body")?
         .map(|body| checked_text(body, TextPresence::Optional))
         .transpose()?;
     let state = checked_text(required_string(object, "state")?, TextPresence::Required)?;
-    let author = optional_object_string(object, "user", "login")?
+    let author = required_nullable_object_string(object, "user", "login")?
         .map(|author| checked_text(author, TextPresence::Required))
         .transpose()?;
     Ok(serde_json::json!({
@@ -2183,9 +2190,7 @@ fn validate_graphql_errors(value: &serde_json::Value) -> Result<(), GitHubTransp
         return Ok(());
     }
     if errors.iter().all(graphql_error_is_definitive) {
-        return Err(GitHubTransportFailure::rejected(
-            StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
-        ));
+        return Err(GitHubTransportFailure::GraphQlRejected);
     }
     Err(GitHubTransportFailure::DispatchUnknown)
 }
@@ -2406,6 +2411,20 @@ fn required_string(
         .ok_or_else(|| invalid_response(None))
 }
 
+fn required_nullable_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<String>, GitHubTransportFailure> {
+    match required(object, field)? {
+        serde_json::Value::Null => Ok(None),
+        value => value
+            .as_str()
+            .map(str::to_owned)
+            .map(Some)
+            .ok_or_else(|| invalid_response(None)),
+    }
+}
+
 fn optional_string(
     object: &serde_json::Map<String, serde_json::Value>,
     field: &str,
@@ -2449,6 +2468,19 @@ fn required_bool(
     required(object, field)?
         .as_bool()
         .ok_or_else(|| invalid_response(None))
+}
+
+fn required_nullable_object_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    nested_field: &str,
+) -> Result<Option<String>, GitHubTransportFailure> {
+    match required(object, field)? {
+        serde_json::Value::Null => Ok(None),
+        value => required_object(value)
+            .and_then(|nested| required_string(nested, nested_field))
+            .map(Some),
+    }
 }
 
 fn optional_object_string(
@@ -2517,6 +2549,7 @@ mod tests {
     const GITHUB_FILE_CEILING: usize = 3_000;
     const FILES_BEYOND_CEILING: usize = 3_001;
     const CLIENT_ERROR_STATUS: u16 = 422;
+    const REDIRECT_STATUS: u16 = 302;
     const SERVER_ERROR_STATUS: u16 = 503;
     const SYNTHETIC_TOKEN: &str = "github_pat_synthetic_fixture_secret";
     const SYNTHETIC_UNICODE_TOKEN: &str = "github_pat_synthétic_fixture_secret";
@@ -2873,6 +2906,47 @@ mod tests {
     }
 
     #[test]
+    fn metadata_requires_nullable_members_to_be_present() {
+        let number =
+            PullRequestNumber::try_from(PULL_REQUEST_NUMBER).expect("fixture number is admitted");
+        let mut without_body = metadata_response();
+        without_body
+            .as_object_mut()
+            .expect("metadata fixture is an object")
+            .remove("body")
+            .expect("metadata fixture contains body");
+        let mut without_user = metadata_response();
+        without_user
+            .as_object_mut()
+            .expect("metadata fixture is an object")
+            .remove("user")
+            .expect("metadata fixture contains user");
+
+        assert_eq!(
+            normalize_metadata(&without_body, number),
+            Err(invalid_response(None))
+        );
+        assert_eq!(
+            normalize_metadata(&without_user, number),
+            Err(invalid_response(None))
+        );
+    }
+
+    #[test]
+    fn metadata_accepts_present_null_body_and_user() {
+        let number =
+            PullRequestNumber::try_from(PULL_REQUEST_NUMBER).expect("fixture number is admitted");
+        let mut response = metadata_response();
+        response["body"] = serde_json::Value::Null;
+        response["user"] = serde_json::Value::Null;
+
+        let parsed = normalize_metadata(&response, number).expect("nullable members are admitted");
+
+        assert_eq!(parsed["body"], response["body"]);
+        assert_eq!(parsed["author"], response["user"]);
+    }
+
+    #[test]
     fn diff_snapshot_ignores_unrelated_metadata_fields() {
         let mut response = metadata_response();
         response["body"] = serde_json::Value::String("é".repeat(MAX_TEXT_BYTES));
@@ -3202,6 +3276,17 @@ mod tests {
     }
 
     #[test]
+    fn redirect_status_remains_definitive_after_error_body_failure() {
+        let redirect_status =
+            StatusCode::from_u16(REDIRECT_STATUS).expect("fixture status is valid");
+        let failure =
+            classify_error_body_failure(redirect_status, GitHubTransportFailure::DispatchUnknown);
+
+        assert!(status_is_definitive(REDIRECT_STATUS));
+        assert_eq!(failure, GitHubTransportFailure::rejected(REDIRECT_STATUS));
+    }
+
+    #[test]
     fn inv_035_provider_response_text_never_enters_durable_error_detail() {
         let executor = GitHubTools::try_new(
             SyntheticCredentials,
@@ -3259,7 +3344,7 @@ mod tests {
 
         assert_eq!(
             validate_graphql_errors(&response),
-            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
+            Err(GitHubTransportFailure::GraphQlRejected)
         );
     }
 
@@ -3273,7 +3358,7 @@ mod tests {
 
         assert_eq!(
             validate_graphql_errors(&response),
-            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
+            Err(GitHubTransportFailure::GraphQlRejected)
         );
     }
 
