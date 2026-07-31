@@ -425,6 +425,10 @@ impl RepositoryDirectoryEntry {
         })
     }
 
+    pub(super) fn path(&self) -> &str {
+        self.path.as_str()
+    }
+
     pub(super) fn into_value(self) -> Value {
         json!({
             "object_type": self.kind.as_str(),

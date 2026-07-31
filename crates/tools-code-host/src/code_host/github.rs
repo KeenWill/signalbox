@@ -1,6 +1,6 @@
 //! Production GitHub REST/GraphQL adapter for the code-host tool suite.
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{collections::HashSet, error::Error, fmt, future::Future, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -1689,6 +1689,15 @@ fn parse_repository_path_lookup(
                 .iter()
                 .map(|entry| parse_repository_directory_entry(entry, requested_path))
                 .collect::<Result<Vec<_>, _>>()?;
+            let unique_paths = entries
+                .iter()
+                .map(|entry| entry.path())
+                .collect::<HashSet<_>>()
+                .len()
+                == entries.len();
+            if !unique_paths {
+                return Err(CodeHostTransportFailure::InvalidResponse);
+            }
             Ok(RepositoryPathLookup::Directory {
                 entries,
                 completeness,
@@ -3334,6 +3343,19 @@ mod tests {
         );
     }
 
+    /// A duplicate outside the retained prefix invalidates the complete host
+    /// observation instead of becoming an honest truncation claim.
+    #[test]
+    fn repository_directory_rejects_duplicate_in_discarded_suffix() {
+        let value =
+            repository_directory_value("src", repository_directory_entries_with_suffix_duplicate());
+
+        assert_eq!(
+            parse_repository_path_lookup(&value, "src", CodeHostResultCompleteness::Complete,),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
     /// A complete standard contents-entry shape can repeat every admitted
     /// escaped path and still reach bounded projection.
     #[tokio::test]
@@ -3522,6 +3544,12 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    fn repository_directory_entries_with_suffix_duplicate() -> Vec<serde_json::Value> {
+        let mut entries = repository_directory_entries(MAX_RESULT_ITEMS);
+        entries.push(entries[0].clone());
+        entries
     }
 
     fn repository_directory_lookup_completeness(
