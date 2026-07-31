@@ -1,4 +1,4 @@
-//! `change_request_file_patch` registry declaration and typed arguments.
+//! `repository_list_directory` registry declaration and typed arguments.
 
 use signalbox_domain::NormalizedToolArguments;
 use signalbox_tool_contract::ToolContract;
@@ -6,55 +6,55 @@ use signalbox_tool_contract::ToolContract;
 use super::{
     CodeHostOperation,
     arguments::{
-        CodeHostChangeRequestNumber, CodeHostChangedFilePath, CodeHostFilePath, CodeHostRepository,
-        InvalidCodeHostArguments, decode as decode_arguments,
+        CodeHostFilePath, CodeHostRepository, CodeHostRevision, InvalidCodeHostArguments,
+        decode as decode_arguments,
     },
 };
 
 /// Registry declaration effect posture: read-only, `Auto`, and
 /// `ExternalEffect` because GitHub observes the authenticated request.
-pub(super) const NAME: &str = "change_request_file_patch";
+pub(super) const NAME: &str = "repository_list_directory";
 pub(super) const DESCRIPTION: &str =
-    "Returns the bounded code-host patch for one exact changed file.";
+    "Lists bounded entries from one repository directory at a required exact revision.";
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct FilePatchArguments {
+pub struct RepositoryListDirectoryArguments {
     /// Exact owner/repository spelling.
     repository: CodeHostRepository,
-    /// Change-request number.
-    number: CodeHostChangeRequestNumber,
-    /// Exact repository-relative changed path.
-    path: CodeHostChangedFilePath,
+    /// Exact repository-relative directory path; `.` lists the repository root.
+    path: CodeHostFilePath,
+    /// Required exact lowercase 40-hex commit revision.
+    revision: CodeHostRevision,
 }
 
 pub(super) struct Contract;
 
 impl ToolContract for Contract {
-    type Arguments = FilePatchArguments;
+    type Arguments = RepositoryListDirectoryArguments;
     const NAME: &'static str = NAME;
     const DESCRIPTION: &'static str = DESCRIPTION;
 }
 
-impl FilePatchArguments {
+impl RepositoryListDirectoryArguments {
     /// Borrows the exact repository selector.
     pub fn repository(&self) -> &CodeHostRepository {
         &self.repository
     }
 
-    /// Returns the change-request number.
-    pub const fn number(&self) -> CodeHostChangeRequestNumber {
-        self.number
-    }
-
     /// Borrows the exact repository-relative path.
     pub fn path(&self) -> &CodeHostFilePath {
-        self.path.as_file_path()
+        &self.path
+    }
+
+    /// Borrows the required exact revision.
+    pub fn revision(&self) -> &CodeHostRevision {
+        &self.revision
     }
 }
 
 pub(super) fn decode(
     arguments: &NormalizedToolArguments,
 ) -> Result<CodeHostOperation, InvalidCodeHostArguments> {
-    decode_arguments(arguments).map(CodeHostOperation::FilePatch)
+    decode_arguments(arguments).map(CodeHostOperation::ListDirectory)
 }

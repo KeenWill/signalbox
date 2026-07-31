@@ -318,8 +318,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        CODE_HOST_TOOL_NAMES, SessionStatusWrite, SessionStatusWriteOutcome, WebFetchRequest,
-        WebFetchResponse, WebFetchTransportFailure,
+        CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
+        CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME,
+        CHANGE_REQUEST_CONVERGENCE_STATE_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
+        CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_REVIEW_THREADS_NAME,
+        CHANGE_REQUEST_STACK_STATE_NAME, CHANGE_REQUEST_SUMMARY_NAME,
+        CHANGE_REQUEST_THREAD_INVENTORY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
+        CHANGE_REQUEST_THREAD_RESOLVE_NAME, REPOSITORY_LIST_DIRECTORY_NAME,
+        REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, SessionStatusWrite,
+        SessionStatusWriteOutcome, WebFetchRequest, WebFetchResponse, WebFetchTransportFailure,
     };
 
     #[derive(Clone, Copy, Debug)]
@@ -390,6 +397,13 @@ mod tests {
         }
     }
 
+    fn definition_names(definitions: &[ToolDefinition]) -> Vec<&str> {
+        definitions
+            .iter()
+            .map(|definition| definition.name().as_str())
+            .collect()
+    }
+
     /// The merged process-lifetime catalog exposes every daemon declaration in
     /// deterministic name order.
     #[test]
@@ -406,30 +420,29 @@ mod tests {
         .into_parts();
 
         let definitions = catalog.definitions();
-        let names: Vec<&str> = definitions
-            .iter()
-            .map(|definition| definition.name().as_str())
-            .collect();
+        let names = definition_names(&definitions);
 
         assert_eq!(
             names,
-            vec![
-                CODE_HOST_TOOL_NAMES[0],
-                CODE_HOST_TOOL_NAMES[1],
-                CODE_HOST_TOOL_NAMES[2],
-                CODE_HOST_TOOL_NAMES[3],
-                CODE_HOST_TOOL_NAMES[4],
-                CODE_HOST_TOOL_NAMES[5],
-                CODE_HOST_TOOL_NAMES[6],
-                CODE_HOST_TOOL_NAMES[7],
-                CODE_HOST_TOOL_NAMES[8],
-                CODE_HOST_TOOL_NAMES[9],
-                CODE_HOST_TOOL_NAMES[10],
-                CODE_HOST_TOOL_NAMES[11],
-                CODE_HOST_TOOL_NAMES[12],
+            [
+                CHANGE_REQUEST_CHANGED_FILES_NAME,
+                CHANGE_REQUEST_CHECKS_STATUS_NAME,
+                CHANGE_REQUEST_CI_JOB_LOG_NAME,
+                CHANGE_REQUEST_COMMENT_NAME,
+                CHANGE_REQUEST_CONVERGENCE_STATE_NAME,
+                CHANGE_REQUEST_FILE_PATCH_NAME,
+                CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME,
+                CHANGE_REQUEST_REVIEW_THREADS_NAME,
+                CHANGE_REQUEST_STACK_STATE_NAME,
+                CHANGE_REQUEST_SUMMARY_NAME,
+                CHANGE_REQUEST_THREAD_INVENTORY_NAME,
+                CHANGE_REQUEST_THREAD_REPLY_NAME,
+                CHANGE_REQUEST_THREAD_RESOLVE_NAME,
                 CURRENT_TIME_NAME,
                 ECHO_NAME,
-                CODE_HOST_TOOL_NAMES[13],
+                REPOSITORY_LIST_DIRECTORY_NAME,
+                REPOSITORY_READ_FILE_NAME,
+                REVIEW_GATE_CHECK_NAME,
                 SESSION_STATUS_UPDATE_NAME,
                 WEB_FETCH_NAME,
             ]
