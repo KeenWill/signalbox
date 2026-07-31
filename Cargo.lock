@@ -3091,6 +3091,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "futures-util",
+ "idna",
  "jiff",
  "reqwest",
  "rustls",

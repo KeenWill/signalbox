@@ -31,4 +31,5 @@ pub use web_search::{
     WebSearchExecutorError, WebSearchPageCompleteness, WebSearchProvider, WebSearchProviderError,
     WebSearchRequest, WebSearchResponse, WebSearchResult, WebSearchResultFields, WebSearchTool,
     WebSearchToolConstructionError, WebSearchTransport, WebSearchTransportFailure,
+    WebSearchTransportOutcome,
 };

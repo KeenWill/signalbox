@@ -49,6 +49,7 @@ const MAX_RESULT_TITLE_BYTES: usize = 2 * 1024;
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
 const MAX_RESULT_SNIPPET_BYTES: usize = 16 * 1024;
 const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
+const MAX_FORM_DECODE_PASSES: usize = 4;
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
 /// Configured web-search provider.
@@ -1126,7 +1127,8 @@ where
             .into_result();
         match &transport_result {
             Ok(_) => {}
-            Err(failure) => report_transport_failure(failure, correlation),
+            Err(failure) => report_transport_failure(failure, correlation, &credential)
+                .map_err(|error| credential_safe_executor_error(error, &credential))?,
         }
         let outcome = match transport_result {
             Ok(response) => success_evidence(response, &scrubber),
@@ -1219,7 +1221,23 @@ fn report_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation)
 fn report_transport_failure(
     failure: &WebSearchTransportFailure,
     correlation: &ToolAttemptDispatchCorrelation,
-) {
+    credential: &CredentialValue,
+) -> Result<(), WebSearchExecutorError> {
+    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    let controlled_event = format!(
+        "WARN signalbox_tools_basic_web_search: web search transport failed failure={:?} session_id={} turn_id={}",
+        failure.class(),
+        correlation.session().as_uuid(),
+        correlation.turn().as_uuid()
+    );
+    if credential_text.is_empty() || controlled_event.contains(credential_text) {
+        return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+            WebSearchCredentialDiagnostic {
+                rendered: safe_collision_diagnostic(credential_text),
+                failure_class: transport_failure_diagnostic_class(failure),
+            },
+        ));
+    }
     tracing::warn!(
         target: "signalbox_tools_basic_web_search",
         failure = ?failure.class(),
@@ -1227,6 +1245,7 @@ fn report_transport_failure(
         turn_id = %correlation.turn().as_uuid(),
         "web search transport failed"
     );
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1275,7 +1294,7 @@ fn success_evidence(
         .into_iter()
         .take(MAX_RETURNED_RESULTS)
         .map(|result| {
-            if scrubber.contains_percent_encoded_credential(&result.url) {
+            if scrubber.url_contains_encoded_credential(&result.url) {
                 return Err(WebSearchExecutorError::EvidenceEncoding);
             }
             let sanitized = WebSearchResult::try_new(WebSearchResultFields {
@@ -1395,12 +1414,26 @@ impl CredentialScrubber {
     fn contains_credential(&self, text: &str) -> bool {
         text.contains(&self.exact)
             || text.contains(&self.json_escaped)
-            || self.contains_percent_encoded_credential(text)
+            || self.contains_form_encoded_credential(text)
     }
 
-    fn contains_percent_encoded_credential(&self, text: &str) -> bool {
-        percent_decoded_contains(text, self.exact.as_bytes())
-            || percent_decoded_contains(text, self.json_escaped.as_bytes())
+    fn contains_form_encoded_credential(&self, text: &str) -> bool {
+        form_decoded_contains(text, self.exact.as_bytes())
+            || form_decoded_contains(text, self.json_escaped.as_bytes())
+    }
+
+    fn url_contains_encoded_credential(&self, text: &str) -> bool {
+        if self.contains_form_encoded_credential(text) {
+            return true;
+        }
+        let Ok(url) = Url::parse(text) else {
+            return true;
+        };
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let (unicode_host, decoding) = idna::domain_to_unicode(host);
+        decoding.is_err() || self.contains_credential(&unicode_host)
     }
 
     fn redact_body(&self, body: &[u8]) -> String {
@@ -1418,10 +1451,10 @@ impl CredentialScrubber {
     }
 }
 
-fn percent_decoded_contains(text: &str, credential: &[u8]) -> bool {
+fn form_decoded_contains(text: &str, credential: &[u8]) -> bool {
     let mut encoded = text.as_bytes().to_vec();
-    loop {
-        let decoded = percent_decode_once(&encoded);
+    for _ in 0..MAX_FORM_DECODE_PASSES {
+        let decoded = form_decode_once(&encoded);
         if decoded == encoded {
             return false;
         }
@@ -1433,16 +1466,20 @@ fn percent_decoded_contains(text: &str, credential: &[u8]) -> bool {
         }
         encoded = decoded;
     }
+    form_decode_once(&encoded) != encoded
 }
 
-fn percent_decode_once(encoded: &[u8]) -> Vec<u8> {
+fn form_decode_once(encoded: &[u8]) -> Vec<u8> {
     let mut decoded = Vec::with_capacity(encoded.len());
     let mut index = 0;
     while index < encoded.len() {
         let byte = encoded[index];
         let high = encoded.get(index + 1).copied().and_then(hex_value);
         let low = encoded.get(index + 2).copied().and_then(hex_value);
-        if byte == b'%'
+        if byte == b'+' {
+            decoded.push(b' ');
+            index += 1;
+        } else if byte == b'%'
             && let (Some(high), Some(low)) = (high, low)
         {
             decoded.push((high << 4) | low);
@@ -1497,6 +1534,12 @@ mod tests {
     const URL_SCHEME_COLLISION_KEY: &str = "https";
     const URL_ENCODED_COLLISION_KEY: &str = "secret/key";
     const URL_ENCODED_COLLISION_VALUE: &str = "secret%2Fkey";
+    const URL_FORM_COLLISION_KEY: &str = "secret key";
+    const URL_FORM_COLLISION_VALUE: &str = "secret+key";
+    const URL_IDNA_COLLISION_KEY: &str = "bücher";
+    const URL_IDNA_COLLISION_VALUE: &str = "https://bücher.example/";
+    const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
+    const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
     const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
@@ -1690,17 +1733,18 @@ mod tests {
     fn capture_transport_failure(
         failure: &WebSearchTransportFailure,
         correlation: &ToolAttemptDispatchCorrelation,
-    ) -> String {
+        credential: &CredentialValue,
+    ) -> (String, Result<(), WebSearchExecutorError>) {
         let output = CapturedTelemetry::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
             .with_writer(output.clone())
             .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            report_transport_failure(failure, correlation);
+        let result = tracing::subscriber::with_default(subscriber, || {
+            report_transport_failure(failure, correlation, credential)
         });
-        output.text()
+        (output.text(), result)
     }
 
     fn result(title: impl Into<String>) -> WebSearchResult {
@@ -2055,6 +2099,69 @@ mod tests {
 
         assert_eq!(
             success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: a form-encoded space cannot retain a reversible credential in
+    /// a provider result URL.
+    #[test]
+    fn web_search_rejects_form_encoded_credential_in_result_url() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: format!("{FIXTURE_RESULT_URL}?token={URL_FORM_COLLISION_VALUE}"),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("form-encoded fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_FORM_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: IDNA serialization cannot retain a reversible credential in a
+    /// provider result host.
+    #[test]
+    fn web_search_rejects_idna_encoded_credential_in_result_host() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(URL_IDNA_COLLISION_VALUE),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("IDNA fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_IDNA_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    #[test]
+    fn web_search_rejects_result_url_encoding_beyond_the_decode_bound() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: format!("{FIXTURE_RESULT_URL}?token={EXCESSIVE_FORM_ENCODING_VALUE}"),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("deeply encoded fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+
+        assert_eq!(
+            success_evidence(response, &scrubber()),
             Err(WebSearchExecutorError::EvidenceEncoding)
         );
     }
@@ -2475,9 +2582,11 @@ mod tests {
     fn transport_failure_diagnostic_preserves_safe_classification() {
         let correlation = dispatch_correlation();
         let failure = WebSearchTransportFailure::RequestFailed;
+        let credential = CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec());
 
-        let diagnostic = capture_transport_failure(&failure, &correlation);
+        let (diagnostic, result) = capture_transport_failure(&failure, &correlation, &credential);
 
+        result.expect("safe transport diagnostic is emitted");
         assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(TRANSPORT_FAILURE_CLASSIFICATION));
@@ -2488,7 +2597,6 @@ mod tests {
     /// ordinary redaction sentinel itself contains the credential.
     #[test]
     fn web_search_transport_diagnostic_redaction_overlap_fails_closed() {
-        const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
         let credential = CredentialValue::new(DIAGNOSTIC_REDACTION_OVERLAP_KEY.as_bytes().to_vec());
         let failure = credential_safe_transport_failure(
             WebSearchTransportFailure::RequestFailed,
@@ -2505,6 +2613,25 @@ mod tests {
             failure,
             WebSearchTransportFailure::CredentialDiagnosticCollision(_)
         ));
+    }
+
+    /// INV-035: a transport event whose controlled rendering collides with the
+    /// request credential is suppressed before any log record is emitted.
+    #[test]
+    fn web_search_transport_event_collision_emits_no_credential() {
+        let credential = CredentialValue::new(DIAGNOSTIC_REDACTION_OVERLAP_KEY.as_bytes().to_vec());
+        let failure = credential_safe_transport_failure(
+            WebSearchTransportFailure::RequestFailed,
+            &credential,
+        );
+        let correlation = dispatch_correlation();
+
+        let (diagnostic, result) = capture_transport_failure(&failure, &correlation, &credential);
+
+        let error = result.expect_err("colliding event fails before emission");
+        assert!(!diagnostic.contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
+        assert!(!format!("{error:?}").contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
+        assert!(!error.to_string().contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
     }
 
     /// INV-035: provider response and error diagnostics never render
