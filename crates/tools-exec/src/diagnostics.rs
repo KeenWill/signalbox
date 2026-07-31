@@ -647,9 +647,13 @@ mod tests {
     const DIAGNOSTIC_LINE: u64 = 7;
     const DIAGNOSTIC_COLUMN_START: u64 = 9;
     const DIAGNOSTIC_COLUMN_END: u64 = 12;
+    const DIAGNOSTIC_TIMEOUT_SECONDS: u64 = 42;
     const PASSING_TEST: &str = "crate::passes";
     const FAILING_TEST: &str = "crate::fails";
     const IGNORED_TEST: &str = "crate::later";
+    const TEST_COUNT: usize = [PASSING_TEST, FAILING_TEST, IGNORED_TEST].len();
+    const BOUNDED_TEXT_FIXTURE: &str = "abcé";
+    const BOUNDED_TEXT_LIMIT: usize = 4;
 
     #[derive(Clone, Debug)]
     struct FakeRunner {
@@ -746,8 +750,9 @@ mod tests {
     #[tokio::test]
     async fn check_returns_primary_diagnostic_and_exact_cargo_shape() -> Result<(), Box<dyn Error>>
     {
+        let expected_outcome = ProcessOutcome::Exited { code: Some(1) };
         let fake = FakeRunner::returning(process_result(
-            ProcessOutcome::Exited { code: Some(1) },
+            expected_outcome,
             &compiler_message(),
             CaptureCompleteness::Complete,
         ));
@@ -757,7 +762,7 @@ mod tests {
         let result = runner
             .try_run(CargoDiagnosticsArguments {
                 command: CargoDiagnosticsCommand::Check,
-                timeout_seconds: 42,
+                timeout_seconds: DIAGNOSTIC_TIMEOUT_SECONDS,
             })
             .await?;
         let requests = observation.requests();
@@ -771,7 +776,10 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("one compiler diagnostic"))?;
 
         assert_eq!(request.program, OsString::from("bwrap"));
-        assert_eq!(request.timeout, std::time::Duration::from_secs(42));
+        assert_eq!(
+            request.timeout,
+            std::time::Duration::from_secs(DIAGNOSTIC_TIMEOUT_SECONDS)
+        );
         assert_eq!(request.capture_bytes, DIAGNOSTICS_CAPTURE_BYTES);
         assert!(request.arguments.contains(&OsString::from("check")));
         assert!(
@@ -791,10 +799,7 @@ mod tests {
         );
         assert_eq!(diagnostic.level, DIAGNOSTIC_LEVEL);
         assert_eq!(diagnostic.message, DIAGNOSTIC_MESSAGE);
-        assert_eq!(
-            result.execution.outcome,
-            ProcessOutcome::Exited { code: Some(1) }
-        );
+        assert_eq!(result.execution.outcome, expected_outcome);
         Ok(())
     }
 
@@ -802,8 +807,9 @@ mod tests {
     async fn test_returns_outcomes_and_reports_timeout_with_truncated_source()
     -> Result<(), Box<dyn Error>> {
         let stdout = test_output();
+        let expected_outcome = ProcessOutcome::TimedOut;
         let fake = FakeRunner::returning(process_result(
-            ProcessOutcome::TimedOut,
+            expected_outcome,
             &stdout,
             CaptureCompleteness::Truncated,
         ));
@@ -816,13 +822,13 @@ mod tests {
             })
             .await?;
 
-        assert_eq!(result.execution.outcome, ProcessOutcome::TimedOut);
+        assert_eq!(result.execution.outcome, expected_outcome);
         assert_eq!(
             result.execution.stdout.completeness,
             CaptureCompleteness::Truncated
         );
         assert!(result.tests.source_truncated);
-        assert_eq!(result.tests.values.len(), 3);
+        assert_eq!(result.tests.values.len(), TEST_COUNT);
         assert_eq!(result.tests.values[0].name, PASSING_TEST);
         assert_eq!(result.tests.values[0].outcome, CargoTestOutcome::Passed);
         assert_eq!(result.tests.values[1].name, FAILING_TEST);
@@ -834,9 +840,9 @@ mod tests {
 
     #[test]
     fn bounded_text_preserves_utf8_boundary_and_reports_truncation() {
-        let (text, completeness) = bounded_text("abcé", 4);
+        let (text, completeness) = bounded_text(BOUNDED_TEXT_FIXTURE, BOUNDED_TEXT_LIMIT);
 
-        assert_eq!(text, "abc");
+        assert_eq!(text, &BOUNDED_TEXT_FIXTURE[..3]);
         assert_eq!(completeness, CaptureCompleteness::Truncated);
     }
 
@@ -868,15 +874,17 @@ mod tests {
 
     #[test]
     fn spawn_failure_remains_typed_without_terminal_text() {
+        let expected_confinement = ExecutionConfinement::SandboxRefused {
+            availability: BwrapAvailability::Missing,
+        };
+        let expected_outcome = ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::SandboxUnavailable,
+        };
         let result = structured_result(
             CargoDiagnosticsCommand::Check,
             ExecResult {
-                confinement: ExecutionConfinement::SandboxRefused {
-                    availability: BwrapAvailability::Missing,
-                },
-                outcome: ProcessOutcome::SpawnFailed {
-                    reason: ProcessSpawnFailure::SandboxUnavailable,
-                },
+                confinement: expected_confinement,
+                outcome: expected_outcome,
                 stdout: crate::OutputCapture {
                     text: String::new(),
                     completeness: CaptureCompleteness::Complete,
@@ -890,18 +898,8 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            result.execution.confinement,
-            ExecutionConfinement::SandboxRefused {
-                availability: BwrapAvailability::Missing,
-            }
-        );
-        assert_eq!(
-            result.execution.outcome,
-            ProcessOutcome::SpawnFailed {
-                reason: ProcessSpawnFailure::SandboxUnavailable,
-            }
-        );
+        assert_eq!(result.execution.confinement, expected_confinement);
+        assert_eq!(result.execution.outcome, expected_outcome);
         assert_eq!(result.diagnostics.values, Vec::new());
         assert_eq!(result.tests.values, Vec::new());
     }
