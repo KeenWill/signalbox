@@ -789,6 +789,8 @@ pub enum GitHubTransportFailure {
     ResponseTooLarge,
     /// Base or head changed during a diff read.
     RevisionChanged,
+    /// Client setup failed before the request could be dispatched.
+    PreDispatchInfrastructure,
     /// Physical dispatch outcome is unknown.
     DispatchUnknown,
     /// The destination was outside the explicit policy.
@@ -821,6 +823,9 @@ impl fmt::Display for GitHubTransportFailure {
             Self::ResponseTooLarge => formatter.write_str("GitHub response exceeded the byte cap"),
             Self::RevisionChanged => {
                 formatter.write_str("GitHub pull-request revision changed during the read")
+            }
+            Self::PreDispatchInfrastructure => {
+                formatter.write_str("GitHub request could not be dispatched")
             }
             Self::DispatchUnknown => formatter.write_str("GitHub request outcome is unknown"),
             Self::EgressRejected => formatter.write_str("GitHub request destination was rejected"),
@@ -1276,6 +1281,9 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
             }
             GitHubTransportFailure::RevisionChanged => self.revision_detail.clone(),
             GitHubTransportFailure::EgressRejected => self.rejected_detail.clone(),
+            GitHubTransportFailure::PreDispatchInfrastructure => {
+                return Err(infrastructure(CommitOutcome::Definite));
+            }
             GitHubTransportFailure::Rejected { .. }
             | GitHubTransportFailure::InvalidResponse { .. }
             | GitHubTransportFailure::ResponseTooLarge
@@ -1698,6 +1706,11 @@ impl GitHubApiTransport {
         credential: &CredentialValue,
         policy: &GitHubEgressPolicy,
     ) -> Result<GitHubResult, GitHubTransportFailure> {
+        if !arguments.valid_combination() {
+            return Err(GitHubTransportFailure::rejected(
+                StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+            ));
+        }
         let number = arguments.number().get().to_string();
         let url =
             self.repository_url(arguments.repository(), &["pulls", &number, "reviews"], None)?;
@@ -1884,6 +1897,9 @@ fn mutation_failure(failure: GitHubTransportFailure) -> GitHubTransportFailure {
         | GitHubTransportFailure::ResponseTooLarge
         | GitHubTransportFailure::RevisionChanged
         | GitHubTransportFailure::DispatchUnknown => GitHubTransportFailure::DispatchUnknown,
+        GitHubTransportFailure::PreDispatchInfrastructure => {
+            GitHubTransportFailure::PreDispatchInfrastructure
+        }
     }
 }
 
@@ -1892,7 +1908,9 @@ const fn classify_destination_failure(
 ) -> GitHubTransportFailure {
     match failure {
         PublicDestinationClientError::DestinationRejected => GitHubTransportFailure::EgressRejected,
-        PublicDestinationClientError::Infrastructure => GitHubTransportFailure::DispatchUnknown,
+        PublicDestinationClientError::Infrastructure => {
+            GitHubTransportFailure::PreDispatchInfrastructure
+        }
     }
 }
 
@@ -2147,10 +2165,31 @@ fn normalize_threads(
         .iter()
         .map(normalize_thread)
         .collect::<Result<Vec<_>, _>>()?;
+    validate_unique_review_identities(&threads)?;
     Ok(serde_json::json!({
         "threads": threads,
         "truncated": nested_bool(connection, &["pageInfo", "hasNextPage"])?,
     }))
+}
+
+fn validate_unique_review_identities(
+    threads: &[serde_json::Value],
+) -> Result<(), GitHubTransportFailure> {
+    let mut thread_ids = HashSet::new();
+    for thread in threads {
+        let thread = required_object(thread)?;
+        if !thread_ids.insert(required_string(thread, "id")?) {
+            return Err(invalid_response(None));
+        }
+        let mut comment_ids = HashSet::new();
+        for comment in required_array(required(thread, "comments")?)? {
+            let comment = required_object(comment)?;
+            if !comment_ids.insert(required_string(comment, "id")?) {
+                return Err(invalid_response(None));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn normalize_thread(
@@ -2424,6 +2463,7 @@ mod tests {
     const ZERO_INLINE_COMMENT_LINE: u32 = MIN_INLINE_COMMENT_LINE - 1;
     const AGGREGATE_PATCH_BYTES: usize = MAX_TEXT_BYTES / 4;
     const ITEMS_BEYOND_PAGE_BOUND: usize = PAGE_SIZE + 1;
+    const INLINE_COMMENTS_BEYOND_MAX: usize = MAX_INLINE_COMMENTS + 1;
     const OPAQUE_ID_BYTES_BEYOND_BOUND: usize = MAX_OPAQUE_ID_BYTES + 1;
     const PROVIDER_ERROR_TEXT: &str = "private provider detail";
     const PATCH_FILLER: &str = "x";
@@ -2452,6 +2492,20 @@ mod tests {
 
     fn publish_arguments(value: serde_json::Value) -> PublishReviewArguments {
         serde_json::from_value(value).expect("publish fixture is admitted")
+    }
+
+    async fn execute_publish(
+        arguments: PublishReviewArguments,
+    ) -> Result<GitHubResult, GitHubTransportFailure> {
+        let mut transport = GitHubApiTransport::try_new().expect("fixed transport constructs");
+        let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
+        transport
+            .execute(
+                GitHubOperation::PublishReview(arguments),
+                &credential,
+                &GitHubEgressPolicy::github_api_only(),
+            )
+            .await
     }
 
     fn definition(catalog: &CompiledToolCatalog, name: &str) -> ToolDefinition {
@@ -2606,6 +2660,52 @@ mod tests {
                 .is_err()
         );
         assert_eq!(catalog.validate_arguments(&name, &approval), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn public_transport_rejects_inline_only_comment_before_dispatch() {
+        let arguments = publish_arguments(serde_json::json!({
+            "repository": "KeenWill/signalbox", "number": 1,
+            "commit_id": HEAD_REVISION, "event": "comment",
+            "comments": [{
+                "path": FILE_PATH, "line": 1, "side": "right", "body": REVIEW_COMMENT_BODY
+            }]
+        }));
+
+        assert_eq!(
+            execute_publish(arguments).await,
+            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
+        );
+    }
+
+    #[tokio::test]
+    async fn public_transport_rejects_bodyless_change_request_before_dispatch() {
+        let arguments = publish_arguments(serde_json::json!({
+            "repository": "KeenWill/signalbox", "number": 1,
+            "commit_id": HEAD_REVISION, "event": "request_changes"
+        }));
+
+        assert_eq!(
+            execute_publish(arguments).await,
+            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
+        );
+    }
+
+    #[tokio::test]
+    async fn public_transport_rejects_too_many_comments_before_dispatch() {
+        let comment = serde_json::json!({
+            "path": FILE_PATH, "line": 1, "side": "right", "body": REVIEW_COMMENT_BODY
+        });
+        let arguments = publish_arguments(serde_json::json!({
+            "repository": "KeenWill/signalbox", "number": 1,
+            "commit_id": HEAD_REVISION, "event": "approve",
+            "comments": vec![comment; INLINE_COMMENTS_BEYOND_MAX]
+        }));
+
+        assert_eq!(
+            execute_publish(arguments).await,
+            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
+        );
     }
 
     #[test]
@@ -2910,6 +3010,30 @@ mod tests {
     }
 
     #[test]
+    fn client_setup_failure_preserves_definite_commit_outcome() {
+        let failure = classify_destination_failure(PublicDestinationClientError::Infrastructure);
+        let executor = GitHubTools::try_new(
+            SyntheticCredentials,
+            SyntheticTransport,
+            GitHubEgressPolicy::github_api_only(),
+        )
+        .expect("static declarations compile")
+        .into_parts()
+        .1;
+        let error = executor
+            .failure_detail(ToolKind::PublishReview, &failure)
+            .expect_err("pre-dispatch infrastructure is surfaced to the operator");
+
+        assert_eq!(failure, GitHubTransportFailure::PreDispatchInfrastructure);
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+    }
+
+    #[test]
     fn provider_status_distinguishes_rejection_from_infrastructure() {
         let client_status =
             StatusCode::from_u16(CLIENT_ERROR_STATUS).expect("fixture status is valid");
@@ -3064,6 +3188,30 @@ mod tests {
                 .clone();
         response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"] =
             serde_json::Value::Array(vec![comment; ITEMS_BEYOND_PAGE_BOUND]);
+
+        assert!(normalize_threads(&response).is_err());
+    }
+
+    #[test]
+    fn graphql_rejects_duplicate_review_thread_ids() {
+        let mut response = threads_response();
+        let thread =
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0].clone();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
+            serde_json::json!([thread.clone(), thread]);
+
+        assert!(normalize_threads(&response).is_err());
+    }
+
+    #[test]
+    fn graphql_rejects_duplicate_review_comment_ids_within_thread() {
+        let mut response = threads_response();
+        let comment =
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]
+                ["nodes"][0]
+                .clone();
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"] =
+            serde_json::json!([comment.clone(), comment]);
 
         assert!(normalize_threads(&response).is_err());
     }
