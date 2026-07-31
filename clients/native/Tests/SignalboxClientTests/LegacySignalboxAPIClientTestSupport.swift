@@ -1,4 +1,7 @@
+// Test-only retention of the retired REST client. Production composition and
+// product targets expose no HTTP transport.
 import Foundation
+@testable import SignalboxNative
 #if canImport(SignalboxModels)
 import SignalboxModels
 #endif
@@ -354,10 +357,14 @@ public final class SignalboxAPIClient: SignalboxClientProtocol, Sendable {
     }
 
     public func streamMessages(sessionID: SignalboxSessionID) -> AsyncThrowingStream<SignalboxServerMessage, Error> {
-        let stream = SignalboxWebSocketStream(
-            url: webSocketURL(path: "/api/v1/sessions/\(sessionID.rawValue)/stream")
-        )
-        return stream.messages()
+        _ = sessionID
+        return AsyncThrowingStream { continuation in
+            continuation.finish(
+                throwing: SignalboxClientError.requestFailed(
+                    "The retired REST compatibility client has no product WebSocket transport."
+                )
+            )
+        }
     }
 
     private func postConfirmation(

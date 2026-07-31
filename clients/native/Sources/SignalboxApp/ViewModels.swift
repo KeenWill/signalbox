@@ -10,7 +10,6 @@ import SwiftUI
 
 @MainActor
 final class AppCoordinator: ObservableObject {
-    @Published var settings: SignalboxSettingsViewModel
     @Published var service: (any SignalboxClientProtocol)?
     @Published var processSettings: SignalboxProcessSettingsViewModel
     @Published var processService: (any SignalboxProcessServiceProtocol)?
@@ -26,17 +25,11 @@ final class AppCoordinator: ObservableObject {
         self.screenshotScenario = screenshotScenario
         let shouldInstallMockService = isMockMode || screenshotScenario?.requiresMockService == true
         self.isMockMode = shouldInstallMockService
+        LegacyRemoteSettingsCleanup.perform()
         if resetPersistedSettings {
-            UserDefaults.standard.removeObject(forKey: NativeAppConstants.serverURLDefaultsKey)
             UserDefaults.standard.removeObject(forKey: NativeProcessConstants.socketDefaultsKey)
-            KeychainSecretStore().deleteSecret()
         }
-        self.settings = SignalboxSettingsViewModel()
         self.processSettings = SignalboxProcessSettingsViewModel()
-        if resetPersistedSettings {
-            self.settings.serverURLText = ""
-            self.settings.apiKey = ""
-        }
         if let screenshotScenario {
             selectedSection = screenshotScenario.selectedSection
             selectedSessionID = screenshotScenario.selectedSessionID
@@ -54,14 +47,11 @@ final class AppCoordinator: ObservableObject {
                 ),
                 policy: .nativeDefault
             )
-            self.settings.serverURLText = NativeAppConstants.defaultServerURL
-            self.settings.apiKey = "mock-key"
             self.processSettings.socketPath = "In-memory single-version JSONL harness"
             self.processSettings.markConnectedForHarness()
         } else if screenshotScenario == .setup {
             self.service = nil
             self.processService = nil
-            self.settings.apiKey = ""
             self.processSettings.socketPath = ""
             self.processSettings.markNotConfigured()
         } else {
@@ -88,6 +78,9 @@ final class AppCoordinator: ObservableObject {
         _ replacement: (any SignalboxProcessServiceProtocol)?,
         socketPath: String?
     ) {
+        // Endpoint activation precedes publication so no view can claim a
+        // command against the replacement while the retry store names the old
+        // daemon generation.
         importedContinuationRetryStore.activateEndpoint(socketPath)
         processService = replacement
         NotificationCenter.default.post(name: .processServiceChanged, object: nil)
@@ -105,6 +98,9 @@ final class AppCoordinator: ObservableObject {
             return
         }
         let candidate = Self.makeProcessService(socketPath: socketPath)
+        // Remove the prior service before probing. Views must observe the
+        // connection gate, never continue issuing work to a socket the user is
+        // replacing.
         replaceProcessService(nil, socketPath: socketPath)
         await processSettings.test(using: candidate, expectedSocketPath: socketPath)
         if processSettings.connectionStatus == .connected,
@@ -427,7 +423,7 @@ final class SessionDetailViewModel: ObservableObject {
 
     init(
         session: SignalboxSessionMetadata,
-        streamHelloTimeout: Duration = SignalboxWebSocketStream.defaultHeartbeatTimeout,
+        streamHelloTimeout: Duration = .seconds(10),
         waitForStreamHello: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
         },

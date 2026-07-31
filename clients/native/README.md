@@ -136,7 +136,7 @@ The following work remains:
   owner-approved; regular-width and macOS navigation retain the explicit
   capability gate.
 - The app, client, and model test directories are separate targets in the shared
-  scheme. The older REST/WebSocket implementation remains compiled because the
-  native and client bundles directly test it and legacy presentation view
-  models still use its client protocol; production composition does not install
-  it.
+  scheme. Retired REST/WebSocket implementations now compile only as test-bundle
+  compatibility support. Product sources retain a transport-free client
+  protocol seam for legacy presentation fixtures; production composition
+  installs only the process client.

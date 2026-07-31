@@ -10,6 +10,8 @@ public enum SignalboxJSONValue: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
+        // Decode Bool before Double: Foundation-backed JSON decoders may bridge
+        // both through NSNumber, but wire booleans must not become 0 or 1.
         if container.decodeNil() {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
@@ -127,6 +129,8 @@ public struct SignalboxDecodingDiagnostic: Equatable, Sendable {
 }
 
 public enum SignalboxDateParser {
+    // The wire admits both fractional and whole-second RFC 3339 timestamps;
+    // ISO8601DateFormatter requires separate option sets for those shapes.
     private static func fractionalFormatter() -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
