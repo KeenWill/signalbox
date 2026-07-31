@@ -509,7 +509,13 @@ pub enum WebSearchTransportFailure {
 #[derive(Clone, Eq, PartialEq)]
 pub struct WebSearchCredentialDiagnostic {
     rendered: String,
-    dispatch_unknown: bool,
+    failure_class: WebSearchCredentialDiagnosticClass,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WebSearchCredentialDiagnosticClass {
+    CallerOrHubBug,
+    InfrastructureCommitAmbiguous,
 }
 
 impl fmt::Debug for WebSearchCredentialDiagnostic {
@@ -664,29 +670,32 @@ fn credential_safe_transport_failure(
     credential: &CredentialValue,
 ) -> WebSearchTransportFailure {
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-    let (source_contains_credential, executor_contains_credential, dispatch_unknown) =
-        match &failure {
-            WebSearchTransportFailure::ProviderRejected(error) => (
-                format!("{error:?}").contains(credential_text)
-                    || error.to_string().contains(credential_text),
+    let (source_contains_credential, executor_contains_credential, failure_class) = match &failure {
+        WebSearchTransportFailure::ProviderRejected(error) => (
+            format!("{error:?}").contains(credential_text)
+                || error.to_string().contains(credential_text),
+            false,
+            WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+        ),
+        WebSearchTransportFailure::InvalidCredential
+        | WebSearchTransportFailure::CredentialDiagnosticCollision(_)
+        | WebSearchTransportFailure::RequestFailed
+        | WebSearchTransportFailure::InvalidResponse
+        | WebSearchTransportFailure::ResponseTooLarge => (
+            false,
+            false,
+            WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+        ),
+        WebSearchTransportFailure::DispatchUnknown => {
+            let executor_error = WebSearchExecutorError::DispatchUnknown;
+            (
                 false,
-                false,
-            ),
-            WebSearchTransportFailure::InvalidCredential
-            | WebSearchTransportFailure::CredentialDiagnosticCollision(_)
-            | WebSearchTransportFailure::RequestFailed
-            | WebSearchTransportFailure::InvalidResponse
-            | WebSearchTransportFailure::ResponseTooLarge => (false, false, false),
-            WebSearchTransportFailure::DispatchUnknown => {
-                let executor_error = WebSearchExecutorError::DispatchUnknown;
-                (
-                    false,
-                    format!("{executor_error:?}").contains(credential_text)
-                        || executor_error.to_string().contains(credential_text),
-                    true,
-                )
-            }
-        };
+                format!("{executor_error:?}").contains(credential_text)
+                    || executor_error.to_string().contains(credential_text),
+                WebSearchCredentialDiagnosticClass::InfrastructureCommitAmbiguous,
+            )
+        }
+    };
     if credential_text.is_empty()
         || format!("{failure:?}").contains(credential_text)
         || failure.to_string().contains(credential_text)
@@ -695,7 +704,7 @@ fn credential_safe_transport_failure(
     {
         WebSearchTransportFailure::CredentialDiagnosticCollision(WebSearchCredentialDiagnostic {
             rendered: safe_collision_diagnostic(credential_text),
-            dispatch_unknown,
+            failure_class,
         })
     } else {
         failure
@@ -713,6 +722,36 @@ fn safe_collision_diagnostic(credential: &str) -> String {
         String::from("?")
     } else {
         String::from("!")
+    }
+}
+
+fn credential_safe_executor_error(
+    error: WebSearchExecutorError,
+    credential: &CredentialValue,
+) -> WebSearchExecutorError {
+    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    let failure_class = match &error {
+        WebSearchExecutorError::ArgumentValidationDrift
+        | WebSearchExecutorError::EvidenceEncoding => {
+            WebSearchCredentialDiagnosticClass::CallerOrHubBug
+        }
+        WebSearchExecutorError::DispatchUnknown => {
+            WebSearchCredentialDiagnosticClass::InfrastructureCommitAmbiguous
+        }
+        WebSearchExecutorError::CredentialDiagnosticCollision(diagnostic) => {
+            diagnostic.failure_class
+        }
+    };
+    if credential_text.is_empty()
+        || format!("{error:?}").contains(credential_text)
+        || error.to_string().contains(credential_text)
+    {
+        WebSearchExecutorError::CredentialDiagnosticCollision(WebSearchCredentialDiagnostic {
+            rendered: safe_collision_diagnostic(credential_text),
+            failure_class,
+        })
+    } else {
+        error
     }
 }
 
@@ -922,11 +961,19 @@ impl ClassifyOperatorFailure for WebSearchExecutorError {
             Self::ArgumentValidationDrift | Self::EvidenceEncoding => {
                 OperatorFailureClass::CallerOrHubBug
             }
-            Self::DispatchUnknown | Self::CredentialDiagnosticCollision(_) => {
-                OperatorFailureClass::Infrastructure {
-                    commit_ambiguous: true,
+            Self::DispatchUnknown => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            Self::CredentialDiagnosticCollision(diagnostic) => match diagnostic.failure_class {
+                WebSearchCredentialDiagnosticClass::CallerOrHubBug => {
+                    OperatorFailureClass::CallerOrHubBug
                 }
-            }
+                WebSearchCredentialDiagnosticClass::InfrastructureCommitAmbiguous => {
+                    OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: true,
+                    }
+                }
+            },
         }
     }
 }
@@ -957,35 +1004,41 @@ where
                 detail: Some(self.credential_unavailable_detail.clone()),
             });
         };
-        Ok(match self.transport.search(request, &credential).await {
-            Ok(response) => success_evidence(response, &scrubber)?,
+        let outcome = match self.transport.search(request, &credential).await {
+            Ok(response) => success_evidence(response, &scrubber),
             Err(WebSearchTransportFailure::InvalidCredential) => {
-                known_failure_evidence(self.credential_unavailable_detail.clone(), &scrubber)?
+                known_failure_evidence(self.credential_unavailable_detail.clone(), &scrubber)
             }
             Err(WebSearchTransportFailure::CredentialDiagnosticCollision(diagnostic)) => {
-                if diagnostic.dispatch_unknown {
-                    return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
-                        diagnostic,
-                    ));
+                match diagnostic.failure_class {
+                    WebSearchCredentialDiagnosticClass::CallerOrHubBug => known_failure_evidence(
+                        self.credential_unavailable_detail.clone(),
+                        &scrubber,
+                    ),
+                    WebSearchCredentialDiagnosticClass::InfrastructureCommitAmbiguous => Err(
+                        WebSearchExecutorError::CredentialDiagnosticCollision(diagnostic),
+                    ),
                 }
-                known_failure_evidence(self.credential_unavailable_detail.clone(), &scrubber)?
             }
             Err(WebSearchTransportFailure::RequestFailed) => {
-                known_failure_evidence(self.request_failed_detail.clone(), &scrubber)?
+                known_failure_evidence(self.request_failed_detail.clone(), &scrubber)
             }
             Err(WebSearchTransportFailure::ProviderRejected(error)) => {
-                ToolExecutorEvidence::KnownFailed {
-                    detail: Some(provider_error_detail(error, &scrubber)?),
-                }
+                provider_error_detail(error, &scrubber).map(|detail| {
+                    ToolExecutorEvidence::KnownFailed {
+                        detail: Some(detail),
+                    }
+                })
             }
             Err(
                 WebSearchTransportFailure::InvalidResponse
                 | WebSearchTransportFailure::ResponseTooLarge,
-            ) => known_failure_evidence(self.invalid_response_detail.clone(), &scrubber)?,
+            ) => known_failure_evidence(self.invalid_response_detail.clone(), &scrubber),
             Err(WebSearchTransportFailure::DispatchUnknown) => {
-                return Err(WebSearchExecutorError::DispatchUnknown);
+                Err(WebSearchExecutorError::DispatchUnknown)
             }
-        })
+        };
+        outcome.map_err(|error| credential_safe_executor_error(error, &credential))
     }
 }
 
@@ -1241,6 +1294,57 @@ mod tests {
         }
     }
 
+    struct StaticCredentials {
+        value: &'static str,
+    }
+
+    impl CredentialAccess for StaticCredentials {
+        async fn resolve(
+            &self,
+            _reference: &CredentialReference,
+        ) -> Result<CredentialValue, CredentialAccessError> {
+            Ok(CredentialValue::new(self.value.as_bytes().to_vec()))
+        }
+    }
+
+    struct SanitizedDispatchUnknownTransport;
+
+    impl WebSearchTransport for SanitizedDispatchUnknownTransport {
+        async fn search(
+            &mut self,
+            _request: WebSearchRequest,
+            credential: &CredentialValue,
+        ) -> Result<WebSearchResponse, WebSearchTransportFailure> {
+            Err(credential_safe_transport_failure(
+                WebSearchTransportFailure::DispatchUnknown,
+                credential,
+            ))
+        }
+    }
+
+    struct ReflectedTitleTransport;
+
+    impl WebSearchTransport for ReflectedTitleTransport {
+        async fn search(
+            &mut self,
+            _request: WebSearchRequest,
+            credential: &CredentialValue,
+        ) -> Result<WebSearchResponse, WebSearchTransportFailure> {
+            let title = String::from_utf8(credential.expose_bytes().to_vec())
+                .expect("fixture credential is UTF-8");
+            let reflected = WebSearchResult::try_new(WebSearchResultFields {
+                title,
+                url: String::from(FIXTURE_RESULT_URL),
+                snippet: String::from(FIXTURE_RESULT_SNIPPET),
+            })
+            .expect("fixture reflected result is admitted");
+            Ok(
+                WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+                    .expect("fixture response is admitted"),
+            )
+        }
+    }
+
     fn arguments(value: &str) -> NormalizedToolArguments {
         NormalizedToolArguments::try_from_provider_text(value.to_owned())
             .expect("fixture arguments are admitted")
@@ -1248,6 +1352,13 @@ mod tests {
 
     fn configuration() -> WebSearchConfiguration {
         WebSearchConfiguration::new(WebSearchProvider::Brave)
+    }
+
+    fn request() -> WebSearchRequest {
+        WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(FIXTURE_QUERY),
+        }
     }
 
     fn result(title: impl Into<String>) -> WebSearchResult {
@@ -1270,17 +1381,6 @@ mod tests {
     fn scrubber() -> CredentialScrubber {
         CredentialScrubber::try_new(&CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec()))
             .expect("fixture credential is usable")
-    }
-
-    fn collision_executor_error(failure: WebSearchTransportFailure) -> WebSearchExecutorError {
-        match failure {
-            WebSearchTransportFailure::CredentialDiagnosticCollision(diagnostic)
-                if diagnostic.dispatch_unknown =>
-            {
-                WebSearchExecutorError::CredentialDiagnosticCollision(diagnostic)
-            }
-            other => panic!("fixture expected a dispatch-unknown collision, got {other:?}"),
-        }
     }
 
     fn build_brave_request(
@@ -1841,19 +1941,23 @@ mod tests {
 
     /// INV-035: sanitizing a dispatch-unknown diagnostic preserves its
     /// commit-ambiguous classification through a credential-safe executor error.
-    #[test]
-    fn web_search_sanitized_dispatch_unknown_stays_commit_ambiguous() {
+    #[tokio::test]
+    async fn web_search_sanitized_dispatch_unknown_stays_commit_ambiguous() {
         const UNKNOWN_PROSE_COLLISION_KEY: &str = "unknown";
-        let credential = CredentialValue::new(UNKNOWN_PROSE_COLLISION_KEY.as_bytes().to_vec());
-        let failure = credential_safe_transport_failure(
-            WebSearchTransportFailure::DispatchUnknown,
-            &credential,
-        );
-
-        assert!(!format!("{failure:?}").contains(UNKNOWN_PROSE_COLLISION_KEY));
-        assert!(!failure.to_string().contains(UNKNOWN_PROSE_COLLISION_KEY));
-
-        let executor_error = collision_executor_error(failure);
+        let credentials = StaticCredentials {
+            value: UNKNOWN_PROSE_COLLISION_KEY,
+        };
+        let (_catalog, mut executor) = WebSearchTool::try_new(
+            credentials,
+            SanitizedDispatchUnknownTransport,
+            configuration(),
+        )
+        .expect("fixture web_search tool compiles")
+        .into_parts();
+        let executor_error = executor
+            .execute_request(request())
+            .await
+            .expect_err("dispatch remains ambiguous");
 
         assert!(!format!("{executor_error:?}").contains(UNKNOWN_PROSE_COLLISION_KEY));
         assert!(
@@ -1866,6 +1970,35 @@ mod tests {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true
             }
+        );
+    }
+
+    /// INV-035: an evidence-encoding error arising after credential resolution
+    /// is rendered through a request-scoped safe executor diagnostic.
+    #[tokio::test]
+    async fn web_search_sanitizes_credential_dependent_evidence_error() {
+        const EVIDENCE_ERROR_COLLISION_KEY: &str = "encoding";
+        let credentials = StaticCredentials {
+            value: EVIDENCE_ERROR_COLLISION_KEY,
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, ReflectedTitleTransport, configuration())
+                .expect("fixture web_search tool compiles")
+                .into_parts();
+        let executor_error = executor
+            .execute_request(request())
+            .await
+            .expect_err("credential removal invalidates the result title");
+
+        assert!(!format!("{executor_error:?}").contains(EVIDENCE_ERROR_COLLISION_KEY));
+        assert!(
+            !executor_error
+                .to_string()
+                .contains(EVIDENCE_ERROR_COLLISION_KEY)
+        );
+        assert_eq!(
+            executor_error.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
         );
     }
 
