@@ -35,6 +35,96 @@ impl fmt::Display for JsonFailure {
 
 impl Error for JsonFailure {}
 
+/// Content-silent reason physical JSONL records could not be enumerated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JsonlRecordSplitFailure {
+    /// A one-based physical line number could not be represented.
+    PositionExhausted,
+}
+
+impl fmt::Display for JsonlRecordSplitFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSONL record splitting failed")
+    }
+}
+
+impl Error for JsonlRecordSplitFailure {}
+
+/// One physical JSONL record and its one-based source line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JsonlRecord<'source> {
+    line: u64,
+    bytes: &'source [u8],
+}
+
+impl<'source> JsonlRecord<'source> {
+    /// Returns the one-based physical source line.
+    pub const fn line(self) -> u64 {
+        self.line
+    }
+
+    /// Borrows the exact record bytes without its line delimiter.
+    pub const fn bytes(self) -> &'source [u8] {
+        self.bytes
+    }
+}
+
+/// Converts a zero-based collection index to its checked one-based ordinal.
+pub fn one_based_ordinal(index: usize) -> Option<u64> {
+    u64::try_from(index)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+}
+
+/// Enumerates physical JSONL records without interpreting their contents.
+///
+/// LF terminates a record and is excluded. One immediately preceding CR is
+/// also excluded. A trailing delimiter creates no extra record, while every
+/// other empty physical record remains present so a caller can report it
+/// without losing later records.
+pub fn split_jsonl_records(source: &[u8]) -> Result<Vec<JsonlRecord<'_>>, JsonlRecordSplitFailure> {
+    let mut records = Vec::new();
+    let mut start = 0_usize;
+    let mut line_index = 0_usize;
+    while start < source.len() {
+        let remaining = source
+            .get(start..)
+            .ok_or(JsonlRecordSplitFailure::PositionExhausted)?;
+        let newline = remaining.iter().position(|byte| *byte == b'\n');
+        let (end, terminal) = match newline {
+            Some(offset) => (
+                start
+                    .checked_add(offset)
+                    .ok_or(JsonlRecordSplitFailure::PositionExhausted)?,
+                false,
+            ),
+            None => (source.len(), true),
+        };
+        let record_end = if !terminal && end > start && source.get(end - 1) == Some(&b'\r') {
+            end - 1
+        } else {
+            end
+        };
+        records.push(JsonlRecord {
+            line: one_based_ordinal(line_index)
+                .ok_or(JsonlRecordSplitFailure::PositionExhausted)?,
+            bytes: source
+                .get(start..record_end)
+                .ok_or(JsonlRecordSplitFailure::PositionExhausted)?,
+        });
+        if terminal {
+            break;
+        }
+        start = end
+            .checked_add(1)
+            .ok_or(JsonlRecordSplitFailure::PositionExhausted)?;
+        line_index = line_index
+            .checked_add(1)
+            .ok_or(JsonlRecordSplitFailure::PositionExhausted)?;
+    }
+    Ok(records)
+}
+
 /// Parses one complete JSON record without discarding source structure.
 pub fn parse_record(source: &[u8]) -> Result<ImportedStructuredValue, JsonFailure> {
     let source = str::from_utf8(source).map_err(|_| JsonFailure::InvalidUtf8)?;
@@ -250,7 +340,12 @@ impl Parser<'_> {
 mod tests {
     use signalbox_domain::{ImportedStructuredValue, ImportedText};
 
-    use super::{JsonFailure, parse_record};
+    use super::{
+        JsonFailure, JsonlRecordSplitFailure, one_based_ordinal, parse_record, split_jsonl_records,
+    };
+
+    const FIRST_RECORD: &[u8] = b"first";
+    const FINAL_RECORD: &[u8] = b"last";
 
     #[test]
     fn s28_inv038_preserves_object_member_order() {
@@ -308,6 +403,76 @@ mod tests {
         assert_eq!(
             parse_record(rejected.as_bytes()),
             Err(JsonFailure::DepthExceeded)
+        );
+    }
+
+    #[test]
+    fn preserves_blank_record_for_reporting() {
+        let records = split_jsonl_records(b"\nlast")
+            .expect("the bounded synthetic JSONL positions are representable");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].line(), 1);
+        assert!(records[0].bytes().is_empty());
+        assert_eq!(records[1].bytes(), FINAL_RECORD);
+    }
+
+    #[test]
+    fn strips_crlf_delimiter_from_record_bytes() {
+        let records = split_jsonl_records(b"first\r\n")
+            .expect("the bounded synthetic JSONL positions are representable");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].line(), 1);
+        assert_eq!(records[0].bytes(), FIRST_RECORD);
+    }
+
+    #[test]
+    fn preserves_unterminated_final_record() {
+        let records = split_jsonl_records(b"first\nlast")
+            .expect("the bounded synthetic JSONL positions are representable");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].line(), 2);
+        assert_eq!(records[1].bytes(), FINAL_RECORD);
+    }
+
+    #[test]
+    fn converts_zero_based_index_to_one_based_ordinal() {
+        assert_eq!(one_based_ordinal(0), Some(1));
+    }
+
+    #[test]
+    fn terminal_delimiter_does_not_create_an_extra_record() {
+        let records = split_jsonl_records(b"first\n")
+            .expect("the bounded synthetic JSONL positions are representable");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].bytes(), FIRST_RECORD);
+    }
+
+    #[test]
+    fn empty_source_contains_no_records() {
+        let records =
+            split_jsonl_records(b"").expect("the empty source requires no representable position");
+
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn split_failure_display_is_content_silent() {
+        assert_eq!(
+            JsonlRecordSplitFailure::PositionExhausted.to_string(),
+            "JSONL record splitting failed"
+        );
+    }
+
+    #[test]
+    fn distinguishes_invalid_utf8_from_truncated_json() {
+        assert_eq!(parse_record(b"\xff"), Err(JsonFailure::InvalidUtf8));
+        assert_eq!(
+            parse_record(br#"{"type":"event""#),
+            Err(JsonFailure::Syntax)
         );
     }
 }

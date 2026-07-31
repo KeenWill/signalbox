@@ -7,7 +7,9 @@
 use std::{error::Error, fmt};
 
 use signalbox_application::ImportedConversationConverter;
-use signalbox_conversation_import_json::{JsonFailure, parse_record};
+use signalbox_conversation_import_json::{
+    JsonFailure, one_based_ordinal, parse_record, split_jsonl_records,
+};
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedMediaSource, ImportedMessageContentAbsence,
@@ -143,11 +145,22 @@ impl ImportedConversationConverter for ClaudeCodeJsonlConverter {
     where
         NextEntryId: FnMut() -> ImportedTranscriptEntryId,
     {
-        let records = split_records(source)?;
+        let records = split_jsonl_records(source).map_err(|_| position_error())?;
+        if records.is_empty() {
+            return Err(conversion_error(
+                ClaudeCodeJsonlConversionFailure::EmptySource,
+            ));
+        }
+        if let Some(blank) = records.iter().find(|record| record.bytes().is_empty()) {
+            return Err(conversion_error(
+                ClaudeCodeJsonlConversionFailure::BlankLine { line: blank.line() },
+            ));
+        }
         let mut raws = Vec::with_capacity(records.len());
         let mut pending_records = Vec::with_capacity(records.len());
-        for (index, bytes) in records.into_iter().enumerate() {
-            let line = ordinal(index)?;
+        for record in records {
+            let line = record.line();
+            let bytes = record.bytes();
             let normalized = parse_record(bytes).map_err(|failure| json_error(line, failure))?;
             let pending = normalize_record(&normalized, line)?;
             raws.push(ImportedRawSourceRecord::from_converted(
@@ -205,10 +218,7 @@ fn position_error() -> ClaudeCodeJsonlConversionError {
 }
 
 fn ordinal(index: usize) -> Result<u64, ClaudeCodeJsonlConversionError> {
-    u64::try_from(index)
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or_else(position_error)
+    one_based_ordinal(index).ok_or_else(position_error)
 }
 
 fn json_error(line: u64, failure: JsonFailure) -> ClaudeCodeJsonlConversionError {
@@ -222,47 +232,6 @@ fn json_error(line: u64, failure: JsonFailure) -> ClaudeCodeJsonlConversionError
 
 fn conversion_error(failure: ClaudeCodeJsonlConversionFailure) -> ClaudeCodeJsonlConversionError {
     ClaudeCodeJsonlConversionError { failure }
-}
-
-fn split_records(source: &[u8]) -> Result<Vec<&[u8]>, ClaudeCodeJsonlConversionError> {
-    if source.is_empty() {
-        return Err(conversion_error(
-            ClaudeCodeJsonlConversionFailure::EmptySource,
-        ));
-    }
-    let mut records = Vec::new();
-    let mut start = 0_usize;
-    let mut line_index = 0_usize;
-    loop {
-        let remaining = source.get(start..).ok_or_else(position_error)?;
-        let newline = remaining.iter().position(|byte| *byte == b'\n');
-        let (end, terminal) = match newline {
-            Some(offset) => (start.checked_add(offset).ok_or_else(position_error)?, false),
-            None => (source.len(), true),
-        };
-        let record_end = if !terminal && end > start && source.get(end - 1) == Some(&b'\r') {
-            end - 1
-        } else {
-            end
-        };
-        if record_end == start {
-            return Err(conversion_error(
-                ClaudeCodeJsonlConversionFailure::BlankLine {
-                    line: ordinal(line_index)?,
-                },
-            ));
-        }
-        records.push(source.get(start..record_end).ok_or_else(position_error)?);
-        line_index = line_index.checked_add(1).ok_or_else(position_error)?;
-        if terminal {
-            break;
-        }
-        start = end.checked_add(1).ok_or_else(position_error)?;
-        if start == source.len() {
-            break;
-        }
-    }
-    Ok(records)
 }
 
 struct PendingEntry {
