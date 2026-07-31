@@ -702,6 +702,8 @@ impl fmt::Display for InvalidGitHubArguments {
     }
 }
 
+impl Error for InvalidGitHubArguments {}
+
 #[derive(Clone, Debug)]
 struct GitHubArgumentValidator {
     kind: ToolKind,
@@ -772,6 +774,31 @@ impl GitHubTransportFailure {
         }
     }
 }
+
+impl fmt::Display for GitHubTransportFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCredential => formatter.write_str("invalid GitHub credential"),
+            Self::Rejected { status, detail: _ } => {
+                write!(
+                    formatter,
+                    "GitHub rejected the request with HTTP status {status}"
+                )
+            }
+            Self::InvalidResponse { detail: _ } => {
+                formatter.write_str("GitHub returned an invalid response")
+            }
+            Self::ResponseTooLarge => formatter.write_str("GitHub response exceeded the byte cap"),
+            Self::RevisionChanged => {
+                formatter.write_str("GitHub pull-request revision changed during the read")
+            }
+            Self::DispatchUnknown => formatter.write_str("GitHub request outcome is unknown"),
+            Self::EgressRejected => formatter.write_str("GitHub request destination was rejected"),
+        }
+    }
+}
+
+impl Error for GitHubTransportFailure {}
 
 /// Result category crossing the injected transport boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2613,6 +2640,14 @@ mod tests {
     }
 
     #[test]
+    fn public_failures_implement_standard_error() {
+        fn require_error<Failure: Error>() {}
+
+        require_error::<InvalidGitHubArguments>();
+        require_error::<GitHubTransportFailure>();
+    }
+
+    #[test]
     fn provider_status_distinguishes_rejection_from_infrastructure() {
         let client_status =
             StatusCode::from_u16(CLIENT_ERROR_STATUS).expect("fixture status is valid");
@@ -2633,7 +2668,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_response_text_never_enters_durable_error_detail() {
+    fn inv_035_provider_response_text_never_enters_durable_error_detail() {
         let executor = GitHubTools::try_new(
             SyntheticCredentials,
             SyntheticTransport,
@@ -2749,7 +2784,7 @@ mod tests {
     }
 
     #[test]
-    fn error_body_redaction_precedes_truncation() {
+    fn inv_035_error_body_redaction_precedes_truncation() {
         let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let prefix = "x".repeat(
@@ -2768,7 +2803,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_error_source_redacts_trailing_token_prefix() {
+    fn inv_035_truncated_error_source_redacts_trailing_token_prefix() {
         let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let token_prefix = &SYNTHETIC_TOKEN[..SYNTHETIC_TOKEN.len() - 3];
@@ -2781,7 +2816,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_error_source_handles_unicode_token_prefix() {
+    fn inv_035_truncated_error_source_handles_unicode_token_prefix() {
         let credential = CredentialValue::new(SYNTHETIC_UNICODE_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let body = format!("{ERROR_BODY_PREFIX}{SYNTHETIC_UNICODE_PREFIX}");
@@ -2793,7 +2828,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_error_source_discards_partial_unicode_before_redaction() {
+    fn inv_035_truncated_error_source_discards_partial_unicode_before_redaction() {
         let credential = CredentialValue::new(SYNTHETIC_UNICODE_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let partial_prefix_end = SYNTHETIC_UNICODE_PREFIX.len() + 1;
@@ -2808,7 +2843,7 @@ mod tests {
     }
 
     #[test]
-    fn result_debug_never_formats_provider_content() {
+    fn inv_035_result_debug_never_formats_provider_content() {
         let result = GitHubResult::metadata(serde_json::json!({"body": SYNTHETIC_TOKEN}));
 
         let diagnostic = format!("{result:?}");
