@@ -10,7 +10,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat, renameat_with, unlinkat};
+use rustix::fs::{
+    AtFlags, Mode, OFlags, RenameFlags, fchmod, openat, renameat, renameat_with, unlinkat,
+};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -24,6 +26,7 @@ use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
 
+use crate::patch::overlapping_match_starts;
 use crate::{
     LocalWorkspaceFileSystem, PatchApplyError, PatchParseError, PatchParseErrorKind,
     PlannedPatchOperation, WorkspaceFileSystem, WorkspacePatch, WorkspacePathRejection,
@@ -773,7 +776,11 @@ impl<FileSystem: WorkspaceMutationFileSystem> WorkspaceMutationExecutor<FileSyst
             .content(&path)
             .and_then(Option::as_deref)
             .ok_or(MutationFailure::EditMatch)?;
-        let matches = source.match_indices(old_string).count();
+        let matches = if replace_all {
+            source.match_indices(old_string).count()
+        } else {
+            overlapping_match_starts(source, old_string).len()
+        };
         if matches == 0 || !replace_all && matches != 1 {
             return Err(MutationFailure::EditMatch);
         }
@@ -1132,12 +1139,15 @@ fn write_staged_file(
         parent,
         name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_bits_retain(mode),
+        Mode::RUSR | Mode::WUSR,
     )
     .map_err(|error| commit_errno(path, error))?;
     let mut file = File::from(descriptor);
     let result = file
         .write_all(content.as_bytes())
+        .and_then(|()| {
+            fchmod(&file, Mode::from_bits_retain(mode & 0o7777)).map_err(std::io::Error::from)
+        })
         .and_then(|()| file.sync_all());
     drop(file);
     if result.is_ok() {
@@ -1468,7 +1478,7 @@ mod tests {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
         const PATH: &str = "script.sh";
-        const ORIGINAL_MODE: u32 = 0o751;
+        const ORIGINAL_MODE: u32 = 0o674;
 
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
         std::fs::OpenOptions::new()
@@ -1761,6 +1771,25 @@ mod tests {
             filesystem.files().get(PATH).map(String::as_str),
             Some(EXPECTED)
         );
+    }
+
+    #[test]
+    fn edit_file_rejects_overlapping_matches_by_default() {
+        const PATH: &str = "file.txt";
+        const CONTENT: &str = "aaa";
+
+        let filesystem = FakeFileSystem::with_files([(PATH, CONTENT)]);
+        let executor = executor(filesystem.clone());
+        let original = filesystem.files();
+        let result = executor.edit_file(
+            WorkspaceMutationPath::try_new(PATH).expect("fixture path is valid"),
+            "aa",
+            "new",
+            false,
+        );
+
+        assert_eq!(result, Err(MutationFailure::EditMatch));
+        assert_eq!(filesystem.files(), original);
     }
 
     #[test]

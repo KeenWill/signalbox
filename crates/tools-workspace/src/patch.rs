@@ -847,9 +847,8 @@ fn locate_hunk(
     hunk_number: usize,
     path: &str,
 ) -> Result<LocatedHunk, PatchApplyError> {
-    let starts = source
-        .match_indices(&hunk.before)
-        .map(|(start, _)| start)
+    let starts = overlapping_match_starts(source, &hunk.before)
+        .into_iter()
         .filter(|start| *start == 0 || source.as_bytes()[start - 1] == b'\n')
         .collect::<Vec<_>>();
     let start = match starts.as_slice() {
@@ -879,6 +878,26 @@ fn locate_hunk(
         end: start + hunk.before.len(),
         replacement: hunk.after.clone(),
     })
+}
+
+pub(crate) fn overlapping_match_starts(source: &str, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut starts = Vec::new();
+    let mut next = 0;
+    while next <= source.len() {
+        let Some(relative) = source[next..].find(needle) else {
+            break;
+        };
+        let start = next + relative;
+        starts.push(start);
+        next = start + 1;
+        while !source.is_char_boundary(next) {
+            next += 1;
+        }
+    }
+    starts
 }
 
 fn reject_overlapping_hunks(
@@ -1166,6 +1185,33 @@ mod tests {
         )]);
 
         let error = plan_patch(&patch, &contents).expect_err("ambiguous context rejects");
+
+        assert_eq!(
+            error,
+            PatchApplyError {
+                operation: 1,
+                hunk: Some(1),
+                path: String::from("file.txt"),
+                kind: PatchApplyErrorKind::ContextAmbiguous { matches: 2 },
+            }
+        );
+    }
+
+    #[test]
+    fn self_overlapping_context_is_typed_ambiguity() {
+        let patch = parse_patch(
+            "*** Begin Patch\n\
+             *** Update File: file.txt\n\
+             @@\n\
+             \x20a\n\
+             -a\n\
+             +b\n\
+             *** End Patch",
+        )
+        .expect("structured patch parses");
+        let contents = BTreeMap::from([(String::from("file.txt"), String::from("a\na\na\n"))]);
+
+        let error = plan_patch(&patch, &contents).expect_err("overlapping context rejects");
 
         assert_eq!(
             error,
