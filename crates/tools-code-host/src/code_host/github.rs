@@ -14,7 +14,7 @@ use signalbox_tools_basic::{
     PublicDestinationClientError, has_more_response_bytes, public_destination_client,
 };
 
-use super::arguments::valid_revision;
+use super::arguments::{MAX_FILE_PATH_BYTES, valid_revision};
 use super::repository_result::{
     MAX_OBSERVED_DIRECTORY_ENTRIES, MAX_REPOSITORY_FILE_CONTENT_BYTES,
     MAX_REPOSITORY_FILE_SCAN_BYTES, is_immediate_repository_child,
@@ -46,7 +46,11 @@ const USER_AGENT_VALUE: &str = "signalboxd";
 const API_VERSION: &str = "2026-03-10";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
-const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
+const MAX_REPOSITORY_CONTENTS_ENTRY_OVERHEAD_BYTES: usize = 256;
+const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
+    * (MAX_FILE_PATH_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
+        + MAX_REPOSITORY_CONTENTS_ENTRY_OVERHEAD_BYTES);
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
@@ -1713,17 +1717,18 @@ fn ensure_repository_response_path(
 fn parse_repository_object_kind(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<RepositoryObjectKind, CodeHostTransportFailure> {
-    match object.get("submodule_git_url") {
-        Some(serde_json::Value::String(_)) => return Ok(RepositoryObjectKind::Submodule),
-        None | Some(serde_json::Value::Null) => {}
+    let object_type = required_string(object, "type")?;
+    let has_submodule_marker = match object.get("submodule_git_url") {
+        Some(serde_json::Value::String(_)) => true,
+        None | Some(serde_json::Value::Null) => false,
         Some(_) => return Err(CodeHostTransportFailure::InvalidResponse),
-    }
-    match required_string(object, "type")?.as_str() {
-        "file" => Ok(RepositoryObjectKind::File),
-        "dir" => Ok(RepositoryObjectKind::Directory),
-        "symlink" => Ok(RepositoryObjectKind::Symlink),
-        "submodule" => Ok(RepositoryObjectKind::Submodule),
-        _ => Err(CodeHostTransportFailure::InvalidResponse),
+    };
+    match (object_type.as_str(), has_submodule_marker) {
+        ("file" | "submodule", true) | ("submodule", false) => Ok(RepositoryObjectKind::Submodule),
+        ("file", false) => Ok(RepositoryObjectKind::File),
+        ("dir", false) => Ok(RepositoryObjectKind::Directory),
+        ("symlink", false) => Ok(RepositoryObjectKind::Symlink),
+        ("dir" | "symlink", true) | (_, _) => Err(CodeHostTransportFailure::InvalidResponse),
     }
 }
 
@@ -3277,6 +3282,87 @@ mod tests {
         );
     }
 
+    /// A legacy submodule marker cannot override a contradictory or absent
+    /// base object discriminator.
+    #[test]
+    fn repository_submodule_marker_requires_a_compatible_base_type() {
+        let directory = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "https://example.test/dependency.git",
+            "type": "dir",
+        });
+        let missing_type = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "https://example.test/dependency.git",
+        });
+        let unknown_type = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "https://example.test/dependency.git",
+            "type": "future-kind",
+        });
+
+        assert_eq!(
+            parse_repository_path_lookup(
+                &directory,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+        assert_eq!(
+            parse_repository_path_lookup(
+                &missing_type,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+        assert_eq!(
+            parse_repository_path_lookup(
+                &unknown_type,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// Contract-valid escaped directory paths can reach bounded projection
+    /// even when their encoded contents response exceeds the former 8 MiB cap.
+    #[tokio::test]
+    async fn repository_directory_ingress_admits_escaped_path_bound() {
+        const OBSERVED_ENTRIES: usize = 350;
+        let (transport, listener) = repository_test_transport().await;
+        let directory = repository_directory_value(
+            "src",
+            repository_escaping_directory_values(OBSERVED_ENTRIES),
+        )
+        .to_string();
+        let encoded_bytes = directory.len();
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: directory.as_bytes(),
+                },
+            )
+            .await
+        });
+        let result = transport
+            .repository_list_directory(repository_list_arguments("src"), &test_credential())
+            .await
+            .expect("escaped contract-valid paths reach bounded projection")
+            .into_json_value();
+        let request = repository_server_result(server).await;
+
+        assert!(encoded_bytes > 8 * 1024 * 1024);
+        assert_eq!(result["outcome"], "entries");
+        assert_eq!(result["observed_entries"], OBSERVED_ENTRIES);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(request, contents_request("src"));
+    }
+
     /// A directory larger than the result item bound reports both the observed
     /// and returned counts instead of discarding the truncation signal.
     #[tokio::test]
@@ -3388,6 +3474,19 @@ mod tests {
                     None,
                 )
                 .expect("fixture directory entry is admitted")
+            })
+            .collect()
+    }
+
+    fn repository_escaping_directory_values(count: usize) -> Vec<serde_json::Value> {
+        let entry_name = "\u{1}".repeat(super::super::arguments::MAX_FILE_PATH_BYTES - 7);
+        (0..count)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("src/{entry_name}{index:03}"),
+                    "size": index,
+                    "type": "file",
+                })
             })
             .collect()
     }

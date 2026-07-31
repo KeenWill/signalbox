@@ -139,8 +139,20 @@ const CODE_HOST_REJECTED_DETAIL: &str =
 const CHANGED_FILE_NOT_FOUND_DETAIL: &str =
     "requested changed file was not found in the change request";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CodeHostToolKind {
+macro_rules! define_code_host_tool_kinds {
+    ($( $(#[$attribute:meta])* $variant:ident),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum CodeHostToolKind {
+            $($(#[$attribute])* $variant),+
+        }
+
+        impl CodeHostToolKind {
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+define_code_host_tool_kinds! {
     /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`
     /// because the code host observes the authenticated request.
     Summary,
@@ -177,25 +189,6 @@ enum CodeHostToolKind {
 }
 
 impl CodeHostToolKind {
-    const ALL: [Self; 16] = [
-        Self::Summary,
-        Self::ChangedFiles,
-        Self::FilePatch,
-        Self::ListDirectory,
-        Self::ReadFile,
-        Self::ChecksStatus,
-        Self::Comment,
-        Self::ConvergenceState,
-        Self::ReviewThreads,
-        Self::StackState,
-        Self::ThreadInventory,
-        Self::ThreadReply,
-        Self::ThreadResolve,
-        Self::CiJobLog,
-        Self::RerunFailedJobs,
-        Self::ReviewGateCheck,
-    ];
-
     const fn name(self) -> &'static str {
         match self {
             Self::Summary => change_request_summary::NAME,
@@ -366,7 +359,8 @@ impl CodeHostToolKind {
 
 fn kind_for_name(name: &str) -> Option<CodeHostToolKind> {
     CodeHostToolKind::ALL
-        .into_iter()
+        .iter()
+        .copied()
         .find(|kind| kind.name() == name)
 }
 
@@ -589,7 +583,7 @@ impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
             ToolExecutionErrorDetail::try_new(String::from(CHANGED_FILE_NOT_FOUND_DETAIL))
                 .map_err(|_| CodeHostToolsConstructionError::ErrorDetail)?;
         let mut compiled = Vec::with_capacity(CodeHostToolKind::ALL.len());
-        for kind in CodeHostToolKind::ALL {
+        for &kind in CodeHostToolKind::ALL {
             let definition = kind.definition().map_err(|error| match error {
                 ToolContractCompileError::Name => CodeHostToolsConstructionError::Name,
                 ToolContractCompileError::Schema => CodeHostToolsConstructionError::Schema,

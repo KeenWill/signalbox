@@ -24,7 +24,10 @@ pub enum CodeHostResultCompleteness {
 
 impl CodeHostResultCompleteness {
     pub(super) const fn is_truncated(self) -> bool {
-        matches!(self, Self::Truncated)
+        match self {
+            Self::Complete => false,
+            Self::Truncated => true,
+        }
     }
 }
 
