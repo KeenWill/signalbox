@@ -584,6 +584,33 @@ impl Error for WebSearchTransportFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebSearchTransportFailureClass {
+    InvalidCredential,
+    CredentialDiagnosticCollision,
+    RequestFailed,
+    ProviderRejected,
+    InvalidResponse,
+    ResponseTooLarge,
+    DispatchUnknown,
+}
+
+impl WebSearchTransportFailure {
+    const fn class(&self) -> WebSearchTransportFailureClass {
+        match self {
+            Self::InvalidCredential => WebSearchTransportFailureClass::InvalidCredential,
+            Self::CredentialDiagnosticCollision(_) => {
+                WebSearchTransportFailureClass::CredentialDiagnosticCollision
+            }
+            Self::RequestFailed => WebSearchTransportFailureClass::RequestFailed,
+            Self::ProviderRejected(_) => WebSearchTransportFailureClass::ProviderRejected,
+            Self::InvalidResponse => WebSearchTransportFailureClass::InvalidResponse,
+            Self::ResponseTooLarge => WebSearchTransportFailureClass::ResponseTooLarge,
+            Self::DispatchUnknown => WebSearchTransportFailureClass::DispatchUnknown,
+        }
+    }
+}
+
 /// Credential-sanitized result of one injected transport request.
 pub struct WebSearchTransportOutcome {
     result: Result<WebSearchResponse, WebSearchTransportFailure>,
@@ -1104,6 +1131,14 @@ where
             .search(request, &credential)
             .await
             .into_result();
+        if let Err(failure) = &transport_result
+            && let Err(error) = report_transport_failure(failure, correlation, &credential)
+        {
+            return WebSearchRequestOutcome::Error {
+                error: credential_safe_executor_error(error, &credential),
+                credential,
+            };
+        }
         let outcome = match transport_result {
             Ok(response) => success_evidence(response, &scrubber),
             Err(WebSearchTransportFailure::InvalidCredential) => {
@@ -1302,6 +1337,48 @@ fn report_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation)
     );
 }
 
+fn report_transport_failure(
+    failure: &WebSearchTransportFailure,
+    correlation: &ToolAttemptDispatchCorrelation,
+    credential: &CredentialValue,
+) -> Result<(), WebSearchExecutorError> {
+    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    let controlled_event = format!(
+        "WARN signalbox_tools_basic_web_search: web search transport failed failure={:?} session_id={} turn_id={}",
+        failure.class(),
+        correlation.session().as_uuid(),
+        correlation.turn().as_uuid()
+    );
+    if credential_text.is_empty()
+        || compact_formatter_metadata_may_contain(credential_text)
+        || controlled_event.contains(credential_text)
+    {
+        return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+            WebSearchCredentialDiagnostic {
+                rendered: safe_collision_diagnostic(credential_text),
+                failure_class: transport_failure_diagnostic_class(failure),
+            },
+        ));
+    }
+    tracing::event!(
+        target: "signalbox_tools_basic_web_search",
+        parent: None,
+        tracing::Level::WARN,
+        failure = ?failure.class(),
+        session_id = %correlation.session().as_uuid(),
+        turn_id = %correlation.turn().as_uuid(),
+        "web search transport failed"
+    );
+    Ok(())
+}
+
+fn compact_formatter_metadata_may_contain(credential: &str) -> bool {
+    const TIMESTAMP_AND_ANSI_CHARACTERS: &str = "0123456789-:+.TZ \u{1b}[;m";
+    credential
+        .chars()
+        .all(|character| TIMESTAMP_AND_ANSI_CHARACTERS.contains(character))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InvalidWebSearchArguments;
 
@@ -1489,6 +1566,11 @@ impl CredentialScrubber {
         if let Some(result_host) = parse_ip_literal(host) {
             return parse_ip_literal(&self.exact).is_some_and(|key| key == result_host);
         }
+        if idna::domain_to_ascii(&self.exact)
+            .is_ok_and(|credential_host| credential_host.eq_ignore_ascii_case(host))
+        {
+            return true;
+        }
         let (unicode_host, decoding) = idna::domain_to_unicode(host);
         decoding.is_err() || self.contains_credential(&unicode_host)
     }
@@ -1616,13 +1698,16 @@ mod tests {
     const URL_FORM_COLLISION_VALUE: &str = "secret+key";
     const URL_IDNA_COLLISION_KEY: &str = "bücher";
     const URL_IDNA_COLLISION_VALUE: &str = "https://bücher.example/";
+    const URL_HOST_CASE_COLLISION_KEY: &str = "EXAMPLE.COM";
     const URL_IPV6_COLLISION_KEY: &str = "2001:0db8:0:0:0:0:0:1";
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
+    const TIMESTAMP_COLLISION_KEY: &str = "2026";
     const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
+    const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
     const SESSION_IDENTITY: u128 = 1;
     const TURN_IDENTITY: u128 = 2;
     const ISSUING_ATTEMPT_IDENTITY: u128 = 3;
@@ -1991,6 +2076,22 @@ mod tests {
             report_credential_value_failure(correlation);
         });
         output.text()
+    }
+
+    fn capture_transport_failure(
+        failure: &WebSearchTransportFailure,
+        correlation: &ToolAttemptDispatchCorrelation,
+        credential: &CredentialValue,
+    ) -> (String, Result<(), WebSearchExecutorError>) {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_writer(output.clone())
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            report_transport_failure(failure, correlation, credential)
+        });
+        (output.text(), result)
     }
 
     fn result(title: impl Into<String>) -> WebSearchResult {
@@ -2464,6 +2565,29 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_IDNA_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: case-insensitive domain canonicalization cannot conceal a
+    /// credential reflected in a provider result host.
+    #[test]
+    fn web_search_rejects_case_normalized_credential_in_result_host() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_ORIGIN_ONLY_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("domain fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_HOST_CASE_COLLISION_KEY.as_bytes().to_vec(),
         ))
         .expect("fixture credential is usable");
 
@@ -2951,6 +3075,37 @@ mod tests {
         assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(CREDENTIAL_VALUE_FAILURE_CLASSIFICATION));
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
+    #[test]
+    fn transport_failure_diagnostic_preserves_safe_classification() {
+        let correlation = dispatch_correlation();
+        let failure = WebSearchTransportFailure::RequestFailed;
+        let credential = CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec());
+
+        let (diagnostic, result) = capture_transport_failure(&failure, &correlation, &credential);
+
+        result.expect("safe transport diagnostic is emitted");
+        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TRANSPORT_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
+    /// INV-035: compact formatter timestamps and ANSI metadata are accounted
+    /// for before a post-credential transport event can be emitted.
+    #[test]
+    fn web_search_transport_event_omits_timestamp_credential_collision() {
+        let correlation = dispatch_correlation();
+        let failure = WebSearchTransportFailure::RequestFailed;
+        let credential = CredentialValue::new(TIMESTAMP_COLLISION_KEY.as_bytes().to_vec());
+
+        let (diagnostic, result) = capture_transport_failure(&failure, &correlation, &credential);
+
+        let error = result.expect_err("timestamp-shaped credential suppresses the event");
+        assert!(!diagnostic.contains(TIMESTAMP_COLLISION_KEY));
+        assert!(!format!("{error:?}").contains(TIMESTAMP_COLLISION_KEY));
+        assert!(!error.to_string().contains(TIMESTAMP_COLLISION_KEY));
     }
 
     /// INV-035: generating a safe transport diagnostic fails closed when the
