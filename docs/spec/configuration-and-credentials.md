@@ -56,8 +56,9 @@ the process environment at startup and also consults `HOME`:
   [process protocol](process-protocol.md), which owns its binding and trust
   semantics.
 - `SIGNALBOX_RUNNER_SOCKET_PATH` — optional distinct local Unix-socket path for
-  the runner wire. When absent, signalboxd replaces the process socket's
-  extension with `.runner.sock`. An explicit value uses the same private-node
+  the runner wire. When absent, signalboxd replaces the process socket's final
+  extension with `.runner.sock`. An explicit value equal to the process socket
+  is a typed configuration failure. Otherwise it uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 
 `DATABASE_URL` is the whole database configuration channel. The SQLx driver
@@ -352,13 +353,13 @@ otherwise name-generic: adding another credential shape is a configuration
 entry, not a runner code branch. The runner advertises the exact configured
 credential names, and each configured repository key paired with the optional
 profile name its own entry carries, as availability. The registration-only
-daemon catalog admits exactly `github-runner` with an empty approval policy;
-another otherwise-valid configured profile is therefore rejected by daemon
-registration until an owner-approved daemon policy declares it. Reserved
-model-provider profile and environment names are rejected. Because arbitrary
-secret bytes have no self-describing type, file contents cannot be classified as
-a provider key; the runner has no model-provider config field or daemon path
-that supplies one.
+daemon admission follows the
+[advertised catalog and daemon authority](runner-protocol.md#advertised-catalogs-and-daemon-authority);
+another otherwise-valid configured profile is rejected until that authority
+admits it. Reserved model-provider profile and environment names are rejected.
+Because arbitrary secret bytes have no self-describing type, file contents
+cannot be classified as a provider key; the runner has no model-provider config
+field or daemon path that supplies one.
 
 Startup opens or creates `runner_root` as an effective-user-owned real `0700`
 directory without following its final component, retains its identity, takes the

@@ -692,8 +692,60 @@ impl Error for RunnerRegistrationFailure {}
 /// Dedicated local runner listener and its durable registration service.
 #[derive(Debug)]
 pub struct RunnerProtocolRuntime<S> {
-    listener: LocalProcessListener,
-    service: S,
+    listener: Option<LocalProcessListener>,
+    service: Option<S>,
+}
+
+struct RunnerListenerGuard {
+    listener: Option<LocalProcessListener>,
+}
+
+impl RunnerListenerGuard {
+    const fn new(listener: LocalProcessListener) -> Self {
+        Self {
+            listener: Some(listener),
+        }
+    }
+
+    fn listener(&self) -> Result<&LocalProcessListener, RunnerProtocolRuntimeError> {
+        self.listener
+            .as_ref()
+            .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)
+    }
+
+    fn cleanup(mut self) -> Result<(), RunnerProtocolRuntimeError> {
+        self.listener
+            .take()
+            .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?
+            .cleanup()
+            .map_err(RunnerProtocolRuntimeError::Cleanup)
+    }
+}
+
+impl Drop for RunnerListenerGuard {
+    fn drop(&mut self) {
+        if let Some(listener) = self.listener.take()
+            && let Err(error) = listener.cleanup()
+        {
+            tracing::error!(
+                error = %error,
+                "cancelled runner runtime listener cleanup failed"
+            );
+        }
+    }
+}
+
+impl<S> Drop for RunnerProtocolRuntime<S> {
+    fn drop(&mut self) {
+        if let Some(listener) = self.listener.take()
+            && let Err(error) = listener.cleanup()
+        {
+            tracing::error!(
+                error = %error,
+                "unpolled runner runtime listener cleanup failed"
+            );
+        }
+    }
 }
 
 impl<S> RunnerProtocolRuntime<S>
@@ -702,19 +754,28 @@ where
 {
     /// Composes the dedicated guarded listener with durable runner authority.
     pub const fn new(listener: LocalProcessListener, service: S) -> Self {
-        Self { listener, service }
+        Self {
+            listener: Some(listener),
+            service: Some(service),
+        }
     }
 
     /// Accepts runner connections until shutdown; each connection is serial.
     pub async fn run(
-        self,
+        mut self,
         shutdown: watch::Receiver<bool>,
     ) -> Result<(), RunnerProtocolRuntimeError> {
-        let Self { listener, service } = self;
-        let outcome = run_connections(&listener, service, shutdown).await;
-        let cleanup = listener
-            .cleanup()
-            .map_err(RunnerProtocolRuntimeError::Cleanup);
+        let listener = self
+            .listener
+            .take()
+            .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
+        let service = self
+            .service
+            .take()
+            .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
+        let listener = RunnerListenerGuard::new(listener);
+        let outcome = run_connections(listener.listener()?, service, shutdown).await;
+        let cleanup = listener.cleanup();
         match (outcome, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(error),
@@ -992,14 +1053,7 @@ where
                         write_decode_rejected(&mut writer, &error).await?;
                         return Ok(());
                     }
-                    Err(error) => {
-                        transition_is_current(
-                            &service,
-                            context,
-                            RunnerConnectionTransition::ProtocolFailure,
-                        ).await?;
-                        return Err(error);
-                    }
+                    Err(error) => return Err(error),
                 };
                 match frame.message {
                     Message::Advertise(request) => {
@@ -1019,7 +1073,17 @@ where
                                 write_message(&mut writer, Message::Registered(response)).await?;
                             }
                             Err(failure) => {
-                                write_rejected(&mut writer, failure).await?;
+                                let transition = rejection_terminal_transition(failure.cause());
+                                if transition_is_current(&service, context, transition).await? {
+                                    write_rejected(&mut writer, failure).await?;
+                                } else {
+                                    write_stale_epoch(
+                                        &mut writer,
+                                        RunnerInboundFrameKind::Advertise,
+                                        context.epoch,
+                                    )
+                                    .await?;
+                                }
                                 return Ok(());
                             }
                         }
@@ -1108,11 +1172,7 @@ where
                     }
                     HeartbeatTick::Missed(misses)
                         if misses >= HEARTBEAT_MISSES_BEFORE_LOSS => {
-                        transition_is_current(
-                            &service,
-                            context,
-                            RunnerConnectionTransition::HeartbeatTimeout,
-                        ).await?;
+                        terminalize_heartbeat_timeout(&service, context, &mut writer).await?;
                         return Ok(());
                     }
                     HeartbeatTick::Missed(_) => {}
@@ -1152,7 +1212,21 @@ const fn connection_failure_transition(
         | RunnerProtocolRuntimeError::Cleanup(_)
         | RunnerProtocolRuntimeError::ConnectionTask(_)
         | RunnerProtocolRuntimeError::HandshakeTimeout
+        | RunnerProtocolRuntimeError::OwnershipUnavailable
         | RunnerProtocolRuntimeError::Lifecycle(_) => None,
+    }
+}
+
+const fn rejection_terminal_transition(
+    cause: RunnerRegistrationFailureCause,
+) -> RunnerConnectionTransition {
+    match cause {
+        RunnerRegistrationFailureCause::PeerInput
+        | RunnerRegistrationFailureCause::EnrollmentAuthority
+        | RunnerRegistrationFailureCause::Policy => RunnerConnectionTransition::ProtocolFailure,
+        RunnerRegistrationFailureCause::Database
+        | RunnerRegistrationFailureCause::CommitAmbiguous
+        | RunnerRegistrationFailureCause::Corruption => RunnerConnectionTransition::TransportClosed,
     }
 }
 
@@ -1172,6 +1246,26 @@ where
         RunnerConnectionTransitionOutcome::Current(_) => Ok(true),
         RunnerConnectionTransitionOutcome::Stale { .. } => Ok(false),
     }
+}
+
+async fn terminalize_heartbeat_timeout<S>(
+    service: &S,
+    context: ConnectionContext,
+    writer: &mut OwnedWriteHalf,
+) -> Result<(), RunnerProtocolRuntimeError>
+where
+    S: RunnerRegistrationService,
+{
+    if !transition_is_current(
+        service,
+        context,
+        RunnerConnectionTransition::HeartbeatTimeout,
+    )
+    .await?
+    {
+        write_stale_epoch(writer, RunnerInboundFrameKind::Heartbeat, context.epoch).await?;
+    }
+    Ok(())
 }
 
 async fn write_stale_epoch(
@@ -1418,6 +1512,7 @@ pub enum RunnerProtocolRuntimeError {
     Encode(FrameError),
     Closed,
     HandshakeTimeout,
+    OwnershipUnavailable,
     HeartbeatSequenceExhausted,
     ConnectionTask(JoinError),
     Lifecycle(RunnerRegistrationFailure),
@@ -1434,6 +1529,9 @@ impl fmt::Display for RunnerProtocolRuntimeError {
             Self::Encode(_) => formatter.write_str("runner frame encoding failed"),
             Self::Closed => formatter.write_str("runner connection closed"),
             Self::HandshakeTimeout => formatter.write_str("runner handshake timed out"),
+            Self::OwnershipUnavailable => {
+                formatter.write_str("runner runtime ownership was unavailable")
+            }
             Self::HeartbeatSequenceExhausted => {
                 formatter.write_str("runner heartbeat sequence exhausted")
             }
@@ -1451,7 +1549,10 @@ impl Error for RunnerProtocolRuntimeError {
             Self::Decode(error) | Self::Encode(error) => Some(error),
             Self::Lifecycle(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
-            Self::Closed | Self::HandshakeTimeout | Self::HeartbeatSequenceExhausted => None,
+            Self::Closed
+            | Self::HandshakeTimeout
+            | Self::OwnershipUnavailable
+            | Self::HeartbeatSequenceExhausted => None,
         }
     }
 }
@@ -1750,6 +1851,83 @@ mod tests {
         let (server, _client) = UnixStream::pair().expect("a local runner stream pair exists");
 
         verify_runner_peer(&server).expect("the same-process peer passes same-user admission");
+    }
+
+    #[tokio::test]
+    async fn listener_guard_drop_removes_the_owned_public_socket() {
+        let directory = private_tempdir();
+        let path = directory.path().join("runner.sock");
+        let listener = LocalProcessListener::bind(&path).expect("the runner listener binds");
+        let guard = RunnerListenerGuard::new(listener);
+
+        drop(guard);
+
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn unpolled_runtime_future_removes_the_owned_public_socket() {
+        let directory = private_tempdir();
+        let path = directory.path().join("runner.sock");
+        let listener = LocalProcessListener::bind(&path).expect("the runner listener binds");
+        let request_id = identity(1);
+        let advertisement = empty_advertisement();
+        let response = enrolled_response(request_id, &advertisement);
+        let service = EnrollmentService { response };
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let future = RunnerProtocolRuntime::new(listener, service).run(shutdown);
+
+        drop(future);
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejection_causes_select_honest_terminal_transitions() {
+        assert_eq!(
+            rejection_terminal_transition(RunnerRegistrationFailureCause::PeerInput),
+            RunnerConnectionTransition::ProtocolFailure,
+        );
+        assert_eq!(
+            rejection_terminal_transition(RunnerRegistrationFailureCause::Database),
+            RunnerConnectionTransition::TransportClosed,
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_heartbeat_timeout_receives_epoch_evidence() {
+        let request_id = identity(1);
+        let advertisement = empty_advertisement();
+        let response = enrolled_response(request_id, &advertisement);
+        let context = ConnectionContext {
+            enrollment: response.enrollment_id,
+            epoch: response.connection_epoch,
+        };
+        let service = EnrollmentService { response };
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_server_reader, mut server_writer) = server.into_split();
+        let (client_reader, _client_writer) = client.into_split();
+        let mut client_reader = BufReader::new(client_reader);
+
+        let terminalized = terminalize_heartbeat_timeout(&service, context, &mut server_writer);
+        let received = read_frame(&mut client_reader);
+        let (terminalized, received) = tokio::join!(terminalized, received);
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Heartbeat,
+                AvailableCorrelation::ConnectionEpoch(context.epoch),
+                RejectionCode::StaleConnection,
+            )
+            .into_rejected(),
+        );
+
+        terminalized.expect("the stale timeout writes its rejection");
+        assert_eq!(
+            received
+                .expect("the stale timeout rejection is received")
+                .message,
+            expected,
+        );
     }
 
     #[tokio::test]
@@ -2390,6 +2568,77 @@ mod tests {
             registration.revision().get(),
             enrolled.registration_revision.get()
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn rejected_advertisement_terminalizes_the_established_connection() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let advertisement = empty_advertisement();
+        let request_id = identity(1);
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Enroll(Enroll {
+                    request_id,
+                    digest_version: DIGEST_VERSION,
+                    advertisement: advertisement.clone(),
+                }),
+            )
+            .await
+            .expect("the enrollment request is sent");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment response is received")
+                .message
+            else {
+                panic!("the durable service returns an enrolled receipt");
+            };
+            write_message(
+                &mut writer,
+                Message::Advertise(Advertise {
+                    enrollment_id: identity(99),
+                    runner_id: enrolled.runner_id,
+                    authentication_id: enrolled.authentication_id,
+                    registration_revision: enrolled.registration_revision,
+                    advertisement,
+                }),
+            )
+            .await
+            .expect("the foreign advertisement is sent");
+            let rejected = read_frame(&mut reader)
+                .await
+                .expect("the advertisement rejection is received")
+                .message;
+            (enrolled, rejected)
+        };
+
+        let (served, (enrolled, rejected)) = tokio::join!(server, client);
+        let enrollment_id = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+        let connection = store
+            .load_connection(enrollment_id)
+            .await
+            .expect("the terminal connection loads")
+            .expect("the connection lifecycle exists");
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Advertise,
+                AvailableCorrelation::Registration(enrolled.registration_revision),
+                RejectionCode::CorrelationMismatch,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the rejected connection closes after terminalization");
+        assert_eq!(rejected, expected);
+        assert_eq!(connection.state(), RunnerConnectionState::Lost);
+        assert_eq!(connection.cause(), RunnerConnectionCause::ProtocolFailure);
     }
 
     #[tokio::test]

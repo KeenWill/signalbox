@@ -123,6 +123,7 @@ enum RequiredSettingFailure {
     Missing,
     NotUnicode,
     Empty,
+    Conflicts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +144,7 @@ impl fmt::Display for HubConfigurationError {
             RequiredSettingFailure::Missing => "is missing",
             RequiredSettingFailure::NotUnicode => "is not valid Unicode",
             RequiredSettingFailure::Empty => "is empty",
+            RequiredSettingFailure::Conflicts => "conflicts with another setting",
         };
         write!(formatter, "required setting {} {failure}", self.setting)
     }
@@ -217,6 +219,12 @@ impl HubConfiguration {
             Some(value) => required_path(RUNNER_SOCKET_PATH_ENVIRONMENT, Some(value))?,
             None => process_socket_path.with_extension("runner.sock"),
         };
+        if runner_socket_path == process_socket_path {
+            return Err(HubConfigurationError::new(
+                RUNNER_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Conflicts,
+            ));
+        }
 
         Ok(Self {
             database_url,
@@ -617,6 +625,7 @@ fn runner_runtime_failure_class(error: &RunnerProtocolRuntimeError) -> OperatorF
         RunnerProtocolRuntimeError::Decode(_)
         | RunnerProtocolRuntimeError::Encode(_)
         | RunnerProtocolRuntimeError::HandshakeTimeout
+        | RunnerProtocolRuntimeError::OwnershipUnavailable
         | RunnerProtocolRuntimeError::HeartbeatSequenceExhausted
         | RunnerProtocolRuntimeError::ConnectionTask(_) => OperatorFailureClass::CallerOrHubBug,
     }
@@ -1843,6 +1852,48 @@ mod tests {
         assert_eq!(
             configuration.runner_socket_path(),
             std::path::Path::new("/tmp/signalbox-runner.sock")
+        );
+    }
+
+    #[test]
+    fn default_runner_socket_replaces_only_the_final_extension() {
+        let process_socket = OsString::from("/tmp/signalbox.runner.sock");
+        let expected_runner_socket = std::path::Path::new("/tmp/signalbox.runner.runner.sock");
+        let configuration = HubConfiguration::from_values(
+            Some(OsString::from("postgres://secret")),
+            Some(OsString::from("models.toml")),
+            Some(OsString::from("templates.toml")),
+            Some(OsString::from("key")),
+            Some(OsString::from("github-token")),
+            Some(process_socket),
+            None,
+        )
+        .expect("the derived runner socket remains a distinct sibling");
+
+        assert_eq!(configuration.runner_socket_path(), expected_runner_socket);
+    }
+
+    #[test]
+    fn explicit_runner_socket_cannot_equal_the_process_socket() {
+        let shared_socket = OsString::from("/tmp/signalbox.sock");
+        let error = HubConfiguration::from_values(
+            Some(OsString::from("postgres://secret")),
+            Some(OsString::from("models.toml")),
+            Some(OsString::from("templates.toml")),
+            Some(OsString::from("key")),
+            Some(OsString::from("github-token")),
+            Some(shared_socket.clone()),
+            Some(shared_socket),
+        )
+        .err()
+        .expect("the two listeners cannot share a filesystem path");
+
+        assert_eq!(
+            error,
+            HubConfigurationError::new(
+                RUNNER_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Conflicts,
+            )
         );
     }
 

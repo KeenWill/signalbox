@@ -496,6 +496,14 @@ startup, every prior-process connection left `connected` or `suspect` is marked
 the epoch, within-epoch ordinal, closed state, and typed cause, so a dead runner
 does not remain observable as healthy after disconnect or restart.
 
+Before closing an established stream for a rejected advertisement, the daemon
+records peer, authority, and policy rejection as `protocol_failure`, or durable
+availability and corruption rejection as `transport_closed`. An operating-system
+read failure is likewise `transport_closed`, never `protocol_failure`. If the
+third-miss timeout discovers that its epoch is stale, the daemon returns
+`stale_connection` with that epoch before closing instead of inviting the old
+runner to resume and fence the successor.
+
 Enrollment revocation terminalizes a still-`connected` or `suspect` epoch as
 `lost` with cause `enrollment_revoked` in the same transaction before the
 enrollment becomes revoked. A terminal connection remains unchanged. Startup
