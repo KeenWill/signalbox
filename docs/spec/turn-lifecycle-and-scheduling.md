@@ -716,12 +716,13 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 ## Daemon runtime: startup order and shutdown
 
-signalboxd is the composition root. It reads the seven required values
-`DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming
-provider targets, selections, and aliases), `SIGNALBOX_TEMPLATE_CONFIG_FILE`,
-`ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, `SIGNALBOX_SOCKET_PATH`, and
-`SIGNALBOX_RUNNER_SOCKET_PATH` from the process environment, plus `HOME` as
-specified by
+signalboxd is the composition root. It reads the six unconditionally required
+values `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML
+naming provider targets, selections, and aliases),
+`SIGNALBOX_TEMPLATE_CONFIG_FILE`, `GITHUB_TOKEN_FILE`, `SIGNALBOX_SOCKET_PATH`,
+and `SIGNALBOX_RUNNER_SOCKET_PATH` from the process environment, plus `HOME` as
+specified below. It additionally requires `ANTHROPIC_API_KEY_FILE` when at least
+one static model mapping selects the Anthropic adapter, as specified by
 [configuration and credentials](configuration-and-credentials.md#process-configuration).
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against

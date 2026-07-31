@@ -94,6 +94,9 @@ use signalbox_persistence::{
     },
     scheduler::PostgresEligibilitySweep,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
+    session_credentials::{
+        SessionCredentialPin, SessionModelCredential, current_session_credential,
+    },
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
         StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
@@ -119,8 +122,290 @@ const DATABASE_NAME: &str = "signalbox_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
+fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
+    signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new(
+            "test-model-family",
+            "test-model-primary",
+        ),
+    ])
+    .expect("test credential pin is valid")
+}
+
 fn model_credential_reference() -> ModelCallCredentialReference {
     ModelCallCredentialReference::new("fixture-provider-primary")
+}
+
+/// The creation pin is event 1, equal replay never rereads a changed pin, and
+/// current credentials are selected only by append-and-head advancement.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_model_credentials_are_an_append_only_creation_snapshot()
+-> Result<(), Box<dyn Error>> {
+    const ANTHROPIC_FAMILY: &str = "anthropic";
+    const CODEX_FAMILY: &str = "codex";
+    const FIRST_ANTHROPIC: &str = "anthropic-first";
+    const FIRST_CODEX: &str = "codex-first";
+    const SECOND_CODEX: &str = "codex-second";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xce01));
+    let session = SessionId::from_uuid(Uuid::from_u128(0xce02));
+    let replay_candidate = SessionId::from_uuid(Uuid::from_u128(0xce03));
+    let request = CreateSessionRequest::try_new(
+        command_id,
+        SessionConfigurationDefaults::new(direct(0xce04)),
+    )?;
+    let first_pin = SessionCredentialPin::try_new(vec![
+        SessionModelCredential::new(ANTHROPIC_FAMILY, FIRST_ANTHROPIC),
+        SessionModelCredential::new(CODEX_FAMILY, FIRST_CODEX),
+    ])
+    .expect("fixture credential snapshot is valid");
+    let mut first = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone(), first_pin),
+    );
+
+    let CreateSessionOutcome::Applied(first_result) = first.execute(request.clone()).await? else {
+        panic!("first handling applies the fixture creation");
+    };
+    assert_eq!(first_result.session(), session);
+    let first_snapshot: Vec<(String, String)> = sqlx::query_as(
+        "SELECT model_family, credential_reference
+           FROM session_model_credential_entry
+          WHERE session_id = $1 AND event_ordinal = 1
+          ORDER BY model_family",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        first_snapshot,
+        vec![
+            (ANTHROPIC_FAMILY.to_owned(), FIRST_ANTHROPIC.to_owned()),
+            (CODEX_FAMILY.to_owned(), FIRST_CODEX.to_owned()),
+        ]
+    );
+
+    let changed_pin = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        CODEX_FAMILY,
+        SECOND_CODEX,
+    )])
+    .expect("changed fixture credential snapshot is valid");
+    let mut replay = CreateSessionService::new(
+        FixedSessionIds::new([replay_candidate]),
+        CreateSessionRepository::new(pool.clone(), changed_pin),
+    );
+    let CreateSessionOutcome::Applied(replay_result) = replay.execute(request).await? else {
+        panic!("equal replay returns the applied fixture creation");
+    };
+    assert_eq!(replay_result.session(), session);
+    let replay_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM session_model_credential_record WHERE session_id = $1),
+            (SELECT count(*) FROM session_model_credential_entry WHERE session_id = $1),
+            (SELECT current_event_ordinal::bigint
+               FROM session_current_model_credentials WHERE session_id = $1)",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(replay_counts, (1, 2, 1));
+    let late_entry_error = sqlx::query(
+        "INSERT INTO session_model_credential_entry
+            (session_id, event_ordinal, model_family, credential_reference)
+         VALUES ($1, 1, 'late-family', 'late-reference')",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a published credential snapshot rejects late entries");
+    let late_entry_database_error = late_entry_error
+        .as_database_error()
+        .expect("the snapshot guard returns a database error");
+    assert_eq!(late_entry_database_error.code(), Some("P0001".into()));
+    assert_eq!(
+        late_entry_database_error.message(),
+        "published session model credential snapshots are immutable"
+    );
+
+    sqlx::query(
+        "INSERT INTO session_model_credential_record
+            (session_id, event_ordinal, event_kind, provenance_kind,
+             provenance_command_id, recorded_at)
+         VALUES ($1, 2, 'updated', 'credential_update', $2, transaction_timestamp())",
+    )
+    .bind(session.into_uuid())
+    .bind(command_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_model_credential_entry
+            (session_id, event_ordinal, model_family, credential_reference)
+         VALUES ($1, 2, $2, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(CODEX_FAMILY)
+    .bind(SECOND_CODEX)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_model_credentials
+            SET current_event_ordinal = 2
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(
+        current_session_credential(&pool, session, CODEX_FAMILY)
+            .await?
+            .as_str(),
+        SECOND_CODEX
+    );
+    let rewrite_error = sqlx::query(
+        "UPDATE session_model_credential_entry
+            SET credential_reference = 'rewrite'
+          WHERE session_id = $1 AND event_ordinal = 1 AND model_family = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(CODEX_FAMILY)
+    .execute(&pool)
+    .await
+    .expect_err("historical credential entries reject rewrites");
+    let rewrite_database_error = rewrite_error
+        .as_database_error()
+        .expect("the history guard returns a database error");
+    assert_eq!(rewrite_database_error.code(), Some("P0001".into()));
+    assert_eq!(
+        rewrite_database_error.message(),
+        "session model credential history is append-only"
+    );
+    let delete_head_error = sqlx::query(
+        "DELETE FROM session_current_model_credentials
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("the current credential projection rejects deletion");
+    let delete_head_database_error = delete_head_error
+        .as_database_error()
+        .expect("the current projection guard returns a database error");
+    assert_eq!(delete_head_database_error.code(), Some("P0001".into()));
+    assert_eq!(
+        delete_head_database_error.message(),
+        "session model credential head is not deletable"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Snapshot publication serializes with entry insertion, so a concurrent late
+/// family cannot pass an earlier MVCC visibility check and mutate the new head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_model_credential_publication_rejects_a_concurrent_late_entry()
+-> Result<(), Box<dyn Error>> {
+    const FIRST_FAMILY: &str = "first-family";
+    const FIRST_REFERENCE: &str = "first-reference";
+    const CURRENT_FAMILY: &str = "current-family";
+    const CURRENT_REFERENCE: &str = "current-reference";
+    const LATE_FAMILY: &str = "late-family";
+    const LATE_REFERENCE: &str = "late-reference";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xce11));
+    let session = SessionId::from_uuid(Uuid::from_u128(0xce12));
+    let request = CreateSessionRequest::try_new(
+        command_id,
+        SessionConfigurationDefaults::new(direct(0xce13)),
+    )?;
+    let pin = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        FIRST_FAMILY,
+        FIRST_REFERENCE,
+    )])
+    .expect("fixture credential snapshot is valid");
+    let mut service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone(), pin),
+    );
+    let CreateSessionOutcome::Applied(created) = service.execute(request).await? else {
+        panic!("fixture session creation applies");
+    };
+    assert_eq!(created.session(), session);
+
+    sqlx::query(
+        "INSERT INTO session_model_credential_record
+            (session_id, event_ordinal, event_kind, provenance_kind,
+             provenance_command_id, recorded_at)
+         VALUES ($1, 2, 'updated', 'credential_update', $2, transaction_timestamp())",
+    )
+    .bind(session.into_uuid())
+    .bind(command_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_model_credential_entry
+            (session_id, event_ordinal, model_family, credential_reference)
+         VALUES ($1, 2, $2, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(CURRENT_FAMILY)
+    .bind(CURRENT_REFERENCE)
+    .execute(&pool)
+    .await?;
+
+    let mut publication = pool.begin().await?;
+    sqlx::query(
+        "UPDATE session_current_model_credentials
+            SET current_event_ordinal = 2
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *publication)
+    .await?;
+    let late_pool = pool.clone();
+    let late_insert = tokio::spawn(async move {
+        sqlx::query(
+            "INSERT INTO session_model_credential_entry
+                (session_id, event_ordinal, model_family, credential_reference)
+             VALUES ($1, 2, $2, $3)",
+        )
+        .bind(session.into_uuid())
+        .bind(LATE_FAMILY)
+        .bind(LATE_REFERENCE)
+        .execute(&late_pool)
+        .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the late entry must block on the publication's session-row lock"
+    );
+    publication.commit().await?;
+    late_insert
+        .await?
+        .expect_err("publication makes the concurrent late entry invalid");
+    let current_snapshot: Vec<(String, String)> = sqlx::query_as(
+        "SELECT model_family, credential_reference
+           FROM session_model_credential_entry
+          WHERE session_id = $1 AND event_ordinal = 2
+          ORDER BY model_family",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        current_snapshot,
+        vec![(CURRENT_FAMILY.to_owned(), CURRENT_REFERENCE.to_owned())]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 async fn complete_text_turn(
@@ -1454,7 +1739,7 @@ async fn checkpoint_restart_model_call(
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
     let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
 
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
             seed + 7,
             seed + 1,
@@ -2455,7 +2740,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     assert!(matches!(ended.end(), ToolAttemptEnd::Completed { .. }));
 
     let unrelated_session = Uuid::from_u128(seed + 80);
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(seed + 81, seed + 80, direct(seed + 82)))
         .await?;
     for (entry, payload_kind, request_reference, attempt_reference) in [
@@ -6864,7 +7149,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce1));
     let mut create_service = CreateSessionService::new(
         FixedSessionIds::new([session]),
-        CreateSessionRepository::new(pool.clone()),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     let CreateSessionOutcome::Applied(_) = create_service
         .execute(CreateSessionRequest::try_new(
@@ -7296,7 +7581,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x18e1));
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0x1ce1));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
             0x14e1,
             0x18e1,
@@ -8459,7 +8744,7 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e4));
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce4));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
             0x4e4,
             0x8e4,
@@ -8701,7 +8986,7 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
         signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xcf1));
     let mut create_service = CreateSessionService::new(
         FixedSessionIds::new([session]),
-        CreateSessionRepository::new(pool.clone()),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     let CreateSessionOutcome::Applied(_) = create_service
         .execute(CreateSessionRequest::try_new(
@@ -9044,7 +9329,7 @@ async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adap
     let winner = SessionId::from_uuid(Uuid::from_u128(0x701));
     let replay_candidate = SessionId::from_uuid(Uuid::from_u128(0x702));
     let conflicting_candidate = SessionId::from_uuid(Uuid::from_u128(0x703));
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let mut service = CreateSessionService::new(
         FixedSessionIds::new([winner, replay_candidate, conflicting_candidate]),
         repository,
@@ -9158,7 +9443,7 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
     )?;
     let mut service = CreateSessionService::new(
         FixedSessionIds::new([winner, replay_candidate]),
-        CreateSessionRepository::new(pool.clone()),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
 
     let first = service.execute(original_request).await?;
@@ -9285,10 +9570,11 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
     .bind(command_id.into_uuid())
     .execute(&pool)
     .await?;
-    let promptless_reader = CreateSessionRepository::new(pool.clone())
-        .load(command_id)
-        .await
-        .expect_err("promptless template provenance must fail closed");
+    let promptless_reader =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+            .load(command_id)
+            .await
+            .expect_err("promptless template provenance must fail closed");
     assert!(matches!(
         promptless_reader,
         CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(
@@ -9324,10 +9610,11 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
     .execute(&mut *pre_version_four)
     .await?;
     pre_version_four.commit().await?;
-    let pre_version_four = CreateSessionRepository::new(pool.clone())
-        .load(command_id)
-        .await
-        .expect_err("pre-version-four template provenance must fail closed");
+    let pre_version_four =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+            .load(command_id)
+            .await
+            .expect_err("pre-version-four template provenance must fail closed");
     assert!(matches!(
         pre_version_four,
         CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(
@@ -9773,7 +10060,7 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let first = prepared(0x101, 0x701, direct(0x801));
 
     assert_eq!(
@@ -9832,7 +10119,8 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
         .max_connections(2)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
-    let restarted = CreateSessionRepository::new(restarted_pool.clone());
+    let restarted =
+        CreateSessionRepository::new(restarted_pool.clone(), test_session_credential_pin());
     let reconstituted = restarted
         .load(first.command().command_id())
         .await?
@@ -9854,7 +10142,7 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
 async fn s01_inv012_concurrent_duplicates_converge_on_the_committed_winner()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
 
     let equal_left = prepared(0x111, 0x711, direct(0x811));
     let equal_right = prepared(0x111, 0x712, direct(0x811));
@@ -9932,7 +10220,7 @@ async fn s01_inv012_concurrent_duplicates_converge_on_the_committed_winner()
 async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let existing = prepared(0x121, 0x721, direct(0x821));
     repository.handle(existing).await?;
 
@@ -10004,7 +10292,7 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
     .execute(&pool)
     .await?;
 
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let missing_id =
         DurableCommandId::from_uuid(Uuid::parse_str("10000000-0000-4000-8000-000000000131")?);
     let missing = repository
@@ -10315,7 +10603,8 @@ async fn inv002_inv008_inv012_defaults_schema_enforces_typed_receipts() -> Resul
 async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let mut defaults_service =
         ReplaceSessionDefaultsService::new(ReplaceSessionDefaultsRepository::new(pool.clone()));
     let load_service = LoadSessionService::new(SessionRepository::new(pool.clone()));
@@ -10440,7 +10729,7 @@ async fn s33_inv008_inv015_inv046_mid_session_model_switch_is_forward_only()
     let second_target = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x834));
     let first_credential = ModelCallCredentialReference::new("fixture-provider-first");
     let second_credential = ModelCallCredentialReference::new("fixture-provider-second");
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
             0x231,
             0x731,
@@ -10709,7 +10998,7 @@ async fn compact_session_command_id_reuse_is_a_client_conflict() -> Result<(), B
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = Uuid::from_u128(0xc051);
     let command = Uuid::from_u128(0xc052);
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0xc053, 0xc051, direct(0xc054)))
         .await?;
     insert_pending_compact_command(
@@ -10753,8 +11042,10 @@ async fn compact_session_command_id_reuse_is_a_client_conflict() -> Result<(), B
 async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
-    let imported_repository = ImportedSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    let imported_repository =
+        ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
     let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
     let input_repository = SubmitInputRepository::new(pool.clone());
     let creation = prepared(0x221, 0x721, direct(0x821));
@@ -10867,7 +11158,8 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
 async fn inv008_inv012_concurrent_defaults_replacements_have_one_winner()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository
         .handle(prepared(0x231, 0x731, direct(0x831)))
         .await?;
@@ -10940,7 +11232,8 @@ async fn inv008_inv012_concurrent_defaults_replacements_have_one_winner()
 async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
     create_repository
         .handle(prepared(0x241, 0x741, direct(0x841)))
@@ -11029,7 +11322,8 @@ async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result
 async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain_distinct()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let session_repository = SessionRepository::new(pool.clone());
     let direct_creation = prepared(0x501, 0x901, direct(0x801));
     let alias_creation = prepared(0x502, 0x902, alias(0x802));
@@ -11156,7 +11450,8 @@ async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain
 async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let session_repository = SessionRepository::new(pool.clone());
     let missing_pointer = prepared(0x511, 0x911, direct(0x811));
     let invalid_pointer = prepared(0x512, 0x912, direct(0x812));
@@ -11438,7 +11733,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         Some("23514".into())
     );
 
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3fc, 0x7fc, direct(0x8fc)))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -11641,7 +11936,7 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
         "content rejected before typed-command construction claims no durable identifier"
     );
 
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x321, 0x721, direct(0x821)))
         .await?;
     let at_bound = "a".repeat(1_048_576);
@@ -11774,7 +12069,7 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
 async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and_restart()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x301, 0x701, direct(0x801)))
         .await?;
     let exact = " \tline one\r\ncafe\u{301}\n ";
@@ -11919,7 +12214,7 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
 async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x381, 0x781, direct(0x881)))
         .await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x781));
@@ -12052,10 +12347,10 @@ async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
 async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x389, 0x789, direct(0x889)))
         .await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x38a, 0x78a, direct(0x88a)))
         .await?;
     let queued_session = SessionId::from_uuid(Uuid::from_u128(0x789));
@@ -12149,7 +12444,7 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
 async fn s01_inv009_concurrent_start_eligible_turn_passes_activate_once()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x391, 0x791, direct(0x891)))
         .await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x791));
@@ -12244,7 +12539,7 @@ async fn blocked_backends_poll_reports_zero_for_an_idle_database() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn blocked_backends_poll_detects_one_scheduler_row_waiter() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x4e1, 0x8e1, direct(0xce1)))
         .await?;
     let mut holder = pool.begin().await?;
@@ -12278,7 +12573,7 @@ async fn blocked_backends_poll_detects_one_scheduler_row_waiter() -> Result<(), 
 async fn blocked_backends_poll_reports_when_expected_count_never_forms()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x4e2, 0x8e2, direct(0xce2)))
         .await?;
     let mut holder = pool.begin().await?;
@@ -12315,7 +12610,7 @@ async fn blocked_backends_poll_reports_when_expected_count_never_forms()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn blocked_backends_poll_returns_to_zero_after_release() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x4e3, 0x8e3, direct(0xce3)))
         .await?;
     let mut holder = pool.begin().await?;
@@ -12368,7 +12663,7 @@ async fn blocked_backends_poll_returns_to_zero_after_release() -> Result<(), Box
 async fn inv007_inv008_inv009_inv012_submit_and_activation_interleave_without_deadlock()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x4b1, 0x8b1, direct(0xcb1)))
         .await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8b1));
@@ -12525,7 +12820,7 @@ async fn inv007_inv008_inv009_inv012_submit_and_activation_interleave_without_de
 async fn inv007_inv008_inv009_inv012_submit_queued_ahead_of_activation_interleaves()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x4d1, 0x8d1, direct(0xcd1)))
         .await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8d1));
@@ -12674,7 +12969,7 @@ async fn s03_inv009_start_eligible_turn_false_wakeups_are_noops() -> Result<(), 
     let (container, pool, _database_url) = migrated_postgres().await?;
     let missing = SessionId::from_uuid(Uuid::from_u128(0x7a0));
     let empty = SessionId::from_uuid(Uuid::from_u128(0x7a1));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3a1, 0x7a1, direct(0x8a1)))
         .await?;
 
@@ -12727,7 +13022,7 @@ async fn s03_inv009_start_eligible_turn_false_wakeups_are_noops() -> Result<(), 
 async fn s01_inv009_start_eligible_turn_zero_row_guard_is_inconsistent()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3a2, 0x7a2, direct(0x8a2)))
         .await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x7a2));
@@ -12820,7 +13115,7 @@ async fn s01_inv009_start_eligible_turn_zero_row_guard_is_inconsistent()
 async fn inv001_inv009_start_eligible_turn_identity_collisions_roll_back()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3b1, 0x7b1, direct(0x8b1)))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -12876,7 +13171,7 @@ async fn inv001_inv009_start_eligible_turn_identity_collisions_roll_back()
         let session_uuid = Uuid::from_u128(0x7b0 + offset);
         let session = SessionId::from_uuid(session_uuid);
         let turn = TurnId::from_uuid(Uuid::from_u128(0xab0 + offset));
-        CreateSessionRepository::new(pool.clone())
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
             .handle(prepared(
                 0x3b0 + offset * 2,
                 0x7b0 + offset,
@@ -12946,7 +13241,7 @@ async fn inv001_inv009_start_eligible_turn_identity_collisions_roll_back()
 async fn inv002_inv009_start_eligible_turn_corrupt_projection_fails_closed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3c1, 0x7c1, direct(0x8c1)))
         .await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x7c1));
@@ -13025,7 +13320,7 @@ async fn inv002_inv009_start_eligible_turn_corrupt_projection_fails_closed()
 async fn s09_inv009_inv015_start_eligible_turn_preserves_failed_predecessor_prefix()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3d1, 0x7d1, direct(0x8d1)))
         .await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x7d1));
@@ -13177,7 +13472,7 @@ async fn s09_inv009_inv015_start_eligible_turn_preserves_failed_predecessor_pref
 async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x401, 0x801, direct(0xc01)))
         .await?;
     let submit = SubmitInputRepository::new(pool.clone());
@@ -13752,7 +14047,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
 async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x431, 0x831, direct(0xc31)))
         .await?;
     let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x931));
@@ -14024,7 +14319,7 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
     let session = SessionId::from_uuid(Uuid::from_u128(0x8a1));
     let mut create_service = CreateSessionService::new(
         FixedSessionIds::new([session]),
-        CreateSessionRepository::new(pool.clone()),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     let CreateSessionOutcome::Applied(created) = create_service
         .execute(CreateSessionRequest::try_new(
@@ -14230,7 +14525,7 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
     let session = SessionId::from_uuid(Uuid::from_u128(0x8c1));
     let mut create_service = CreateSessionService::new(
         FixedSessionIds::new([session]),
-        CreateSessionRepository::new(pool.clone()),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     let CreateSessionOutcome::Applied(created) = create_service
         .execute(CreateSessionRequest::try_new(
@@ -14517,7 +14812,7 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
 async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x451, 0x851, direct(0xc51)))
         .await?;
     let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x951));
@@ -14605,7 +14900,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
                )"
     ));
 
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x461, 0x861, direct(0xc61)))
         .await?;
     let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x961));
@@ -14778,7 +15073,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
         )
         .await?;
 
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x46b, 0x86b, direct(0xc6b)))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -15030,7 +15325,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
 async fn inv016_pending_steering_and_source_terminalization_serialize() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x471, 0x871, direct(0xc71)))
         .await?;
     let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x971));
@@ -15185,7 +15480,7 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
     let first_turn_uuid = Uuid::from_u128(0xab1);
     let second_turn_uuid = Uuid::from_u128(0xab2);
     let attempt_uuid = Uuid::from_u128(0xbb1);
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3b0, 0x7b1, direct(0x8b1)))
         .await?;
     let inputs = SubmitInputRepository::new(pool.clone());
@@ -15408,7 +15703,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7d1);
     let turn_uuid = Uuid::from_u128(0xad1);
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3d0, 0x7d1, direct(0x8d1)))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -15544,7 +15839,7 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
     let session_uuid = Uuid::from_u128(0x7c1);
     let turn_uuid = Uuid::from_u128(0xac1);
     let attempt_uuid = Uuid::from_u128(0xbc1);
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3c0, 0x7c1, direct(0x8c1)))
         .await?;
     let inputs = SubmitInputRepository::new(pool.clone());
@@ -15698,7 +15993,7 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
 async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x441, 0x841, direct(0xc41)))
         .await?;
     let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x941));
@@ -16166,7 +16461,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
 async fn inv007_inv009_inv015_malformed_atomic_start_rolls_back_every_fact()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x411, 0x811, direct(0xc11)))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -16259,7 +16554,7 @@ async fn inv007_inv009_inv015_malformed_atomic_start_rolls_back_every_fact()
 async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlated()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x421, 0x821, direct(0xc21)))
         .await?;
     let submit = SubmitInputRepository::new(pool.clone());
@@ -16688,7 +16983,7 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
     .await?;
     assert_eq!(index_inventory, (1, 1));
 
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x424, 0x822, direct(0xc24)))
         .await?;
     submit
@@ -16899,7 +17194,7 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
 async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x451, 0x851, direct(0xc51)))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -17069,7 +17364,7 @@ async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let create = CreateSessionRepository::new(pool.clone());
+    let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create.handle(prepared(0x311, 0x711, direct(0x811))).await?;
     create.handle(prepared(0x312, 0x712, alias(0x812))).await?;
     let repository = SubmitInputRepository::new(pool.clone());
@@ -17249,7 +17544,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
 async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failures()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x321, 0x721, direct(0x821)))
         .await?;
     let repository = SubmitInputRepository::new(pool.clone());
@@ -17398,7 +17693,7 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
 async fn inv007_inv008_inv012_submit_and_defaults_replacement_interleave_without_deadlock()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x341, 0x751, direct(0x851)))
         .await?;
 
@@ -17501,7 +17796,7 @@ async fn inv007_inv008_inv012_submit_and_defaults_replacement_interleave_without
 async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_closed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x331, 0x731, direct(0x831)))
         .await?;
     let repository = SubmitInputRepository::new(pool.clone());
@@ -17823,7 +18118,7 @@ async fn s24_process_session_summary_sequence_matches_repeatable_projection()
     let earlier_session = insert_outbox_session_fixture(&pool, 0xe31).await?;
     let later_session = Uuid::from_u128(0xe32);
     let alias = ModelAlias::from_uuid(Uuid::from_u128(0xae32));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x4e32, 0xe32, ModelSelectionRequest::Alias(alias)))
         .await?;
 
@@ -17866,7 +18161,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e41));
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xce41));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
             0x4e41,
             0x8e41,
@@ -18436,7 +18731,7 @@ async fn s24_inv032_dispatcher_rejects_crosswired_terminal_correlations()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = Uuid::from_u128(0x7e1);
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3e0, 0x7e1, direct(0x8e1)))
         .await?;
     let inputs = SubmitInputRepository::new(pool.clone());
@@ -18796,7 +19091,7 @@ async fn s01_inv032_create_session_and_outbox_commit_or_roll_back_together()
     .execute(&pool)
     .await?;
 
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let creation = prepared(0xe31, 0xe41, direct(0xe51));
     let command_id = creation.command().command_id().into_uuid();
     let session_id = creation.applied_result().session().into_uuid();
@@ -18879,7 +19174,7 @@ async fn s01_inv032_create_session_and_outbox_commit_or_roll_back_together()
 async fn s01_inv012_inv032_create_session_first_handling_appends_exactly_once()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let creation = prepared(0xe32, 0xe42, direct(0xe52));
 
     assert_eq!(
@@ -18937,7 +19232,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe62));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xe63));
     let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xe64));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
             0xe60,
             0xe61,
@@ -19072,7 +19367,7 @@ async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
     let session = SessionId::from_uuid(Uuid::from_u128(0xe81));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xe82));
     let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xe83));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0xe80, 0xe81, direct(0xe84)))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -19544,7 +19839,7 @@ async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe72));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xe73));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0xe70, 0xe71, direct(0xe74)))
         .await?;
     SubmitInputRepository::new(pool.clone())
@@ -19632,7 +19927,8 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     )
     .prepare(session)
     .expect("owner-initiated creation without ancestry is preparable");
-    let create_repository = CreateSessionRepository::new(pool.clone());
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation.clone()).await?;
 
     assert_eq!(
@@ -19998,7 +20294,7 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     let session = SessionId::from_uuid(Uuid::from_u128(0xcd01));
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcd02));
     let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xcd03));
-    CreateSessionRepository::new(pool.clone())
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
             0xcd04,
             0xcd01,
@@ -20137,7 +20433,7 @@ async fn s03_inv015_context_compaction_constraints_use_projected_successor_order
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcc02));
     let mut create_service = CreateSessionService::new(
         FixedSessionIds::new([session]),
-        CreateSessionRepository::new(pool.clone()),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     create_service
         .execute(CreateSessionRequest::try_new(

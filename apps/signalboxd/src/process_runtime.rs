@@ -142,6 +142,7 @@ use crate::{
         ReviewOrchestrationInternalCause, ReviewOrchestrationRuntimeError,
         execute_review_orchestration_request, read_review_orchestration_request,
     },
+    usage_limits::context_compaction_usage_exceeds_configured_limits,
 };
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -186,7 +187,6 @@ struct ConnectionServices {
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: Arc<HubModelConfiguration>,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
-    context_compaction_credential_reference: Option<Arc<str>>,
     template_configuration: Arc<SessionTemplateConfiguration>,
     fanouts: ProcessFanouts,
     inbound_frame_budget: Arc<Semaphore>,
@@ -206,7 +206,6 @@ pub struct ProcessRuntime {
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
-    context_compaction_credential_reference: Option<Arc<str>>,
     template_configuration: SessionTemplateConfiguration,
     fanouts: ProcessFanouts,
     metrics: Option<TelemetryMetrics>,
@@ -256,7 +255,6 @@ impl ProcessRuntime {
             tool_dispatch_gate,
             model_configuration,
             context_compaction_model: Arc::new(UnavailableContextCompactionModel),
-            context_compaction_credential_reference: None,
             template_configuration,
             metrics: None,
             fanouts: ProcessFanouts {
@@ -272,10 +270,8 @@ impl ProcessRuntime {
     pub fn with_context_compaction_model(
         mut self,
         model: impl ContextCompactionModel + 'static,
-        credential_reference: impl Into<Arc<str>>,
     ) -> Self {
         self.context_compaction_model = Arc::new(model);
-        self.context_compaction_credential_reference = Some(credential_reference.into());
         self
     }
 
@@ -314,7 +310,6 @@ impl ProcessRuntime {
             tool_dispatch_gate: self.tool_dispatch_gate,
             model_configuration: self.model_configuration,
             context_compaction_model: self.context_compaction_model,
-            context_compaction_credential_reference: self.context_compaction_credential_reference,
             template_configuration: self.template_configuration,
             fanouts: fanouts.clone(),
         };
@@ -450,7 +445,6 @@ struct ConnectionDependencies {
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
     context_compaction_model: Arc<dyn ContextCompactionModel>,
-    context_compaction_credential_reference: Option<Arc<str>>,
     template_configuration: SessionTemplateConfiguration,
     fanouts: ProcessFanouts,
 }
@@ -470,8 +464,6 @@ async fn serve_connections(
         tool_dispatch_gate: dependencies.tool_dispatch_gate,
         model_configuration: Arc::new(dependencies.model_configuration),
         context_compaction_model: dependencies.context_compaction_model,
-        context_compaction_credential_reference: dependencies
-            .context_compaction_credential_reference,
         template_configuration: Arc::new(dependencies.template_configuration),
         fanouts: dependencies.fanouts,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
@@ -892,7 +884,7 @@ where
                 command_id.into_uuid(),
                 initial_model_selection,
                 system_prompt,
-                &services.pool,
+                services,
             )
             .await
         }
@@ -906,8 +898,7 @@ where
                 request_id,
                 command_id.into_uuid(),
                 template_name,
-                &services.pool,
-                services.template_configuration.as_ref(),
+                services,
             )
             .await
         }
@@ -930,6 +921,7 @@ where
                     initial_model_selection,
                 },
                 &services.pool,
+                services.model_configuration.as_ref(),
             )
             .await
         }
@@ -3693,6 +3685,7 @@ async fn handle_create_session_from_imported_frontier<Writer>(
     request_id: RequestId,
     wire_request: WireImportedContinuationRequest,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -3700,11 +3693,11 @@ where
     let command_id = DurableCommandId::from_uuid(wire_request.command_uuid);
     let conversation_id = ImportedConversationId::from_uuid(wire_request.conversation.into_uuid());
     let relationship = domain_imported_relationship(wire_request.relationship);
-    let defaults = SessionConfigurationDefaults::new(domain_model_selection(
-        wire_request.initial_model_selection,
-    ));
+    let model_selection = domain_model_selection(wire_request.initial_model_selection);
+    let defaults = SessionConfigurationDefaults::new(model_selection);
     let through_position = wire_request.through_position;
-    let repository = ImportedSessionRepository::new(pool.clone());
+    let repository =
+        ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
 
     match repository.load(command_id).await {
         Ok(Some(recorded)) => {
@@ -3775,6 +3768,19 @@ where
             )
             .await;
         }
+    }
+
+    if model_configuration
+        .resolve_session_model(model_selection)
+        .is_err()
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
     }
 
     let Some(position) = ImportedTranscriptPosition::try_from_u64(through_position.value()) else {
@@ -3995,19 +4001,6 @@ where
             .await;
         }
     }
-    let Some(credential_reference) = services
-        .context_compaction_credential_reference
-        .as_ref()
-        .map(|value| value.to_string())
-    else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::Unavailable),
-        )
-        .await;
-    };
     let defaults = match ProcessReadRepository::new(services.pool.clone())
         .read_session_defaults(session, None)
         .await
@@ -4056,6 +4049,47 @@ where
             definition.selected()
         }
     };
+    let Some(route) = services.model_configuration.resolve_direct_model(selection) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    };
+    let credential_reference =
+        match signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
+            &services.pool,
+            session,
+            route.model_family(),
+            route.migration_credential_family(),
+        )
+        .await
+        {
+            Ok(reference) => reference.as_str().to_owned(),
+            Err(sqlx::Error::RowNotFound) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    internal_protocol_error(
+                        Some(session.into_uuid()),
+                        InternalDiagnostic::SessionModelCredentialMissing,
+                    ),
+                )
+                .await;
+            }
+            Err(_) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::Unavailable),
+                )
+                .await;
+            }
+        };
     let target = match services
         .model_configuration
         .target_catalog()
@@ -4217,6 +4251,45 @@ where
         .with_output_tokens(result.usage.output_tokens)
         .with_cache_creation_input_tokens(result.usage.cache_creation_input_tokens)
         .with_cache_read_input_tokens(result.usage.cache_read_input_tokens);
+    let exceeds_limits = context_compaction_usage_exceeds_configured_limits(
+        &services.model_configuration,
+        prepared.target(),
+        result.usage,
+    )
+    .unwrap_or_else(|| {
+        record_internal_diagnostic(
+            Some(session.into_uuid()),
+            InternalDiagnostic::ContextCompactionUnconfiguredTarget,
+        );
+        true
+    });
+    if exceeds_limits {
+        if let Err(repository_error) = fail_context_compaction_with_usage_until_resolved(
+            &repository,
+            &prepared,
+            FailedContextCompactionDisposition::KnownFailed,
+            usage,
+        )
+        .await
+        {
+            return write_context_compaction_repository_error(
+                writer,
+                version,
+                request_id,
+                session,
+                services.recovery_reporter.as_ref(),
+                repository_error,
+            )
+            .await;
+        }
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    }
     let applied = match complete_context_compaction_until_resolved(
         &repository,
         &prepared,
@@ -4831,6 +4904,27 @@ async fn fail_context_compaction_until_resolved(
     }
 }
 
+async fn fail_context_compaction_with_usage_until_resolved(
+    repository: &ContextCompactionRepository,
+    prepared: &PreparedContextCompaction,
+    disposition: FailedContextCompactionDisposition,
+    usage: ContextCompactionTokenUsage,
+) -> Result<(), ContextCompactionRepositoryError> {
+    loop {
+        match repository
+            .fail_with_usage(prepared, disposition, usage)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(
+                ContextCompactionRepositoryError::Database(_)
+                | ContextCompactionRepositoryError::CommitAmbiguous(_),
+            ) => sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 const fn context_compaction_failure_disposition(
     error: ContextCompactionModelError,
 ) -> FailedContextCompactionDisposition {
@@ -5263,7 +5357,7 @@ async fn handle_create_session<Writer>(
     command_id: uuid::Uuid,
     initial_model_selection: WireModelSelection,
     system_prompt: SystemPromptMember,
-    pool: &PgPool,
+    services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -5277,10 +5371,11 @@ where
         )
         .await;
     };
+    let model_selection = domain_model_selection(initial_model_selection);
     let request = CreateSessionRequest::try_new(
         DurableCommandId::from_uuid(command_id),
         SessionConfigurationDefaults::complete(
-            domain_model_selection(initial_model_selection),
+            model_selection,
             DangerousToolAutoApproval::Disabled,
             system_prompt,
         ),
@@ -5294,7 +5389,15 @@ where
         )
         .await;
     };
-    execute_create_session_request(writer, version, request_id, request, pool).await
+    execute_create_session_request(
+        writer,
+        version,
+        request_id,
+        request,
+        &services.pool,
+        services.model_configuration.as_ref(),
+    )
+    .await
 }
 
 async fn handle_create_session_from_template<Writer>(
@@ -5303,8 +5406,7 @@ async fn handle_create_session_from_template<Writer>(
     request_id: RequestId,
     command_id: uuid::Uuid,
     template_name: String,
-    pool: &PgPool,
-    templates: &SessionTemplateConfiguration,
+    services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -5319,7 +5421,10 @@ where
         .await;
     };
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = CreateSessionRepository::new(pool.clone());
+    let repository = CreateSessionRepository::new(
+        services.pool.clone(),
+        services.model_configuration.session_credential_pin(),
+    );
     match repository.load(command_id).await {
         Ok(Some(recorded)) => {
             let recorded_name = recorded
@@ -5387,7 +5492,7 @@ where
         }
     }
 
-    let Some(template) = templates.resolve(&template_name) else {
+    let Some(template) = services.template_configuration.resolve(&template_name) else {
         return write_error(
             writer,
             version,
@@ -5410,7 +5515,15 @@ where
         )
         .await;
     };
-    execute_create_session_request(writer, version, request_id, request, pool).await
+    execute_create_session_request(
+        writer,
+        version,
+        request_id,
+        request,
+        &services.pool,
+        services.model_configuration.as_ref(),
+    )
+    .await
 }
 
 async fn handle_list_templates<Writer>(
@@ -5460,14 +5573,93 @@ async fn execute_create_session_request<Writer>(
     request_id: RequestId,
     request: CreateSessionRequest,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let mut service = CreateSessionService::new(
-        UuidV7SessionIdGenerator,
-        CreateSessionRepository::new(pool.clone()),
-    );
+    let repository =
+        CreateSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
+    match repository.load(request.command_id()).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
+            if command.initial_configuration_defaults() == request.initial_configuration_defaults()
+                && command.template_provenance() == request.template_provenance()
+            {
+                return write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCreated {
+                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                    },
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(CreateSessionRepositoryError::DifferentCommandKind { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::CommitAmbiguous(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    None,
+                    InternalDiagnostic::TemplateSessionCreationCorruption,
+                ),
+            )
+            .await;
+        }
+    }
+
+    if model_configuration
+        .resolve_session_model(request.initial_configuration_defaults().model())
+        .is_err()
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    }
+
+    let mut service = CreateSessionService::new(UuidV7SessionIdGenerator, repository);
     match service.execute(request).await {
         Ok(CreateSessionOutcome::Applied(result)) => {
             write_message(
@@ -8657,7 +8849,9 @@ enum InternalDiagnostic {
     ImportedConversationIdentityCollision,
     ImportedConversationCorruption,
     SessionDefaultsVersionMissing,
+    SessionModelCredentialMissing,
     ContextCompactionRangeCorruption,
+    ContextCompactionUnconfiguredTarget,
     ContextCompactionIdentityCollision,
     ContextCompactionRepositoryCorruption,
     ContextCompactionReadCorruption,
@@ -8716,6 +8910,7 @@ impl InternalDiagnostic {
             | Self::SessionCreationCommandKindMismatch
             | Self::SessionMetadataCommandKindMismatch
             | Self::SessionDefaultsCommandKindMismatch
+            | Self::ContextCompactionUnconfiguredTarget
             | Self::SystemPromptMemberMissing
             | Self::SubmitInputCommandKindMismatch
             | Self::SubmitInputModelExecutionNoLiveExecution
@@ -8734,6 +8929,7 @@ impl InternalDiagnostic {
             | Self::ImportedSessionCorruption
             | Self::ImportedConversationCorruption
             | Self::SessionDefaultsVersionMissing
+            | Self::SessionModelCredentialMissing
             | Self::ContextCompactionRangeCorruption
             | Self::ContextCompactionRepositoryCorruption
             | Self::ContextCompactionReadCorruption
@@ -8773,7 +8969,9 @@ impl InternalDiagnostic {
             }
             Self::ImportedConversationCorruption => "imported_conversation_corruption",
             Self::SessionDefaultsVersionMissing => "session_defaults_version_missing",
+            Self::SessionModelCredentialMissing => "session_model_credential_missing",
             Self::ContextCompactionRangeCorruption => "context_compaction_range_corruption",
+            Self::ContextCompactionUnconfiguredTarget => "context_compaction_unconfigured_target",
             Self::ContextCompactionIdentityCollision => {
                 "context_compaction_repository_identity_collision"
             }
@@ -8819,16 +9017,13 @@ impl InternalDiagnostic {
     }
 }
 
-/// Records a fail-closed Internal response before returning its wire shape.
+/// Records one typed internal diagnostic without choosing a wire response.
 ///
-/// Every Internal construction routes through this function. Present session
-/// identities use the same canonical UUID display as surrounding spans; absent
-/// identities leave an empty field. Typed evidence contains only closed labels,
-/// so request content, credentials, tool arguments, and nested prose stay out.
-fn internal_protocol_error(
-    session_id: Option<uuid::Uuid>,
-    diagnostic: InternalDiagnostic,
-) -> ProtocolError {
+/// Present session identities use the same canonical UUID display as surrounding
+/// spans; absent identities leave an empty field. Typed evidence contains only
+/// closed labels, so request content, credentials, tool arguments, and nested
+/// prose stay out.
+fn record_internal_diagnostic(session_id: Option<uuid::Uuid>, diagnostic: InternalDiagnostic) {
     let failure_class = diagnostic.failure_class();
     let cause_code = diagnostic.cause_code();
     match session_id {
@@ -8845,6 +9040,16 @@ fn internal_protocol_error(
             "request failed an internal integrity check"
         ),
     }
+}
+
+/// Records a fail-closed Internal response before returning its wire shape.
+///
+/// Every Internal construction routes through this function.
+fn internal_protocol_error(
+    session_id: Option<uuid::Uuid>,
+    diagnostic: InternalDiagnostic,
+) -> ProtocolError {
+    record_internal_diagnostic(session_id, diagnostic);
     ProtocolError::without_detail(ErrorCode::Internal)
 }
 
@@ -9857,6 +10062,14 @@ mod tests {
             "context_compaction_repository_corruption"
         );
         assert_eq!(
+            InternalDiagnostic::ContextCompactionUnconfiguredTarget.cause_code(),
+            "context_compaction_unconfigured_target"
+        );
+        assert_eq!(
+            InternalDiagnostic::SessionModelCredentialMissing.cause_code(),
+            "session_model_credential_missing"
+        );
+        assert_eq!(
             InternalDiagnostic::ToolLoopIdentityCollision.cause_code(),
             "tool_loop_identity_collision"
         );
@@ -10318,13 +10531,18 @@ mod tests {
             r#"
 version = 1
 
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000002"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "still-current"
 max_output_tokens = 256
 context_window_tokens = 200000
