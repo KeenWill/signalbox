@@ -15,7 +15,7 @@ use signalbox_tools_basic::{
 };
 
 use super::arguments::valid_revision;
-use super::repository_result::MAX_REPOSITORY_FILE_CONTENT_BYTES;
+use super::repository_result::{MAX_REPOSITORY_FILE_CONTENT_BYTES, MAX_REPOSITORY_FILE_SCAN_BYTES};
 use super::result::{MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, absolute_https_url};
 use super::review_slog::{
     ReviewerActivity, author_class, authorized_association, disposition_class, finding_title,
@@ -327,41 +327,56 @@ impl GitHubCodeHostTransport {
         let revision = arguments.revision().as_str().to_owned();
         let result = match lookup {
             RepositoryPathLookup::File { blob, source_bytes } => {
-                let body = self
-                    .repository_file_blob(
-                        arguments.repository(),
-                        blob.as_str(),
-                        arguments.line_range(),
-                        credential,
-                    )
-                    .await?;
-                if body.observed_source_bytes > source_bytes
-                    || (body.source_exhausted && body.observed_source_bytes != source_bytes)
+                let scan_limit_bytes = u64::try_from(MAX_REPOSITORY_FILE_SCAN_BYTES)
+                    .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+                if let Some(line_range) = arguments
+                    .line_range()
+                    .filter(|_| source_bytes > scan_limit_bytes)
                 {
-                    return Err(CodeHostTransportFailure::InvalidResponse);
-                }
-                match body.kind {
-                    RepositoryFileBodyKind::Text(selection) => {
-                        RepositoryReadFileResult::try_content(RepositoryFileContentFields {
-                            path,
-                            revision,
-                            source_bytes,
-                            requested_start_line: arguments
-                                .line_range()
-                                .map(RepositoryLineRange::start),
-                            requested_end_line: arguments
-                                .line_range()
-                                .map(RepositoryLineRange::end),
-                            start_line: selection.start_line,
-                            end_line: selection.end_line,
-                            returned_lines: selection.returned_lines,
-                            last_line_complete: selection.last_line_complete,
-                            content: selection.content,
-                            completeness: selection.completeness,
-                        })
+                    RepositoryReadFileResult::try_line_range_unavailable(
+                        path,
+                        revision,
+                        source_bytes,
+                        line_range.start(),
+                        line_range.end(),
+                    )
+                } else {
+                    let body = self
+                        .repository_file_blob(
+                            arguments.repository(),
+                            blob.as_str(),
+                            arguments.line_range(),
+                            credential,
+                        )
+                        .await?;
+                    if body.observed_source_bytes > source_bytes
+                        || (body.source_exhausted && body.observed_source_bytes != source_bytes)
+                    {
+                        return Err(CodeHostTransportFailure::InvalidResponse);
                     }
-                    RepositoryFileBodyKind::Binary => {
-                        RepositoryReadFileResult::try_binary(path, revision, source_bytes)
+                    match body.kind {
+                        RepositoryFileBodyKind::Text(selection) => {
+                            RepositoryReadFileResult::try_content(RepositoryFileContentFields {
+                                path,
+                                revision,
+                                source_bytes,
+                                requested_start_line: arguments
+                                    .line_range()
+                                    .map(RepositoryLineRange::start),
+                                requested_end_line: arguments
+                                    .line_range()
+                                    .map(RepositoryLineRange::end),
+                                start_line: selection.start_line,
+                                end_line: selection.end_line,
+                                returned_lines: selection.returned_lines,
+                                last_line_complete: selection.last_line_complete,
+                                content: selection.content,
+                                completeness: selection.completeness,
+                            })
+                        }
+                        RepositoryFileBodyKind::Binary => {
+                            RepositoryReadFileResult::try_binary(path, revision, source_bytes)
+                        }
                     }
                 }
             }
@@ -485,7 +500,17 @@ impl GitHubCodeHostTransport {
             .await?;
         match response.status() {
             StatusCode::OK => Ok(RepositoryPathLookup::PathNotFound),
-            StatusCode::NOT_FOUND => Ok(RepositoryPathLookup::RevisionNotFound),
+            StatusCode::NOT_FOUND => {
+                let url = self.repository_url(repository, &[], None)?;
+                let response = self
+                    .send_authenticated(Method::GET, url, None, credential)
+                    .await?;
+                match response.status() {
+                    StatusCode::OK => Ok(RepositoryPathLookup::RevisionNotFound),
+                    status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
+                    _ => Err(CodeHostTransportFailure::DispatchUnknown),
+                }
+            }
             status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
             _ => Err(CodeHostTransportFailure::DispatchUnknown),
         }
@@ -1747,6 +1772,7 @@ where
     let requested_end = line_range.map(RepositoryLineRange::end);
     let mut current_line = 1_u32;
     let mut retained = Vec::new();
+    let mut validated = Vec::new();
     let mut observed_source_bytes = 0_u64;
     let mut completeness = CodeHostResultCompleteness::Complete;
     let mut source_exhausted = true;
@@ -1754,34 +1780,46 @@ where
     'source: while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
         for byte in chunk.as_ref() {
-            if requested_end.is_some_and(|end| current_line > end) {
-                source_exhausted = false;
-                break 'source;
-            }
             observed_source_bytes = observed_source_bytes
                 .checked_add(1)
                 .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-            if current_line >= requested_start {
+            if line_range.is_some() {
+                if validated.len() == MAX_REPOSITORY_FILE_SCAN_BYTES {
+                    return Err(CodeHostTransportFailure::ResponseTooLarge);
+                }
+                validated.push(*byte);
+            }
+            if current_line >= requested_start
+                && requested_end.is_none_or(|end| current_line <= end)
+            {
                 if retained.len() == MAX_REPOSITORY_FILE_CONTENT_BYTES {
                     completeness = CodeHostResultCompleteness::Truncated;
-                    source_exhausted = false;
-                    break 'source;
+                    if line_range.is_none() {
+                        source_exhausted = false;
+                        break 'source;
+                    }
+                } else {
+                    retained.push(*byte);
                 }
-                retained.push(*byte);
             }
             if *byte == b'\n' {
                 current_line = current_line
                     .checked_add(1)
                     .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-                if requested_end.is_some_and(|end| current_line > end) {
-                    source_exhausted = false;
-                    break 'source;
-                }
             }
         }
     }
 
-    let kind = repository_file_body_kind(retained, requested_start, completeness)?;
+    if line_range.is_none() {
+        validated.clone_from(&retained);
+    }
+    let kind = repository_file_body_kind(
+        &validated,
+        retained,
+        requested_start,
+        completeness,
+        line_range.is_some(),
+    )?;
     Ok(RepositoryFileBody {
         kind,
         observed_source_bytes,
@@ -1790,11 +1828,15 @@ where
 }
 
 fn repository_file_body_kind(
+    validated: &[u8],
     mut retained: Vec<u8>,
     requested_start: u32,
     completeness: CodeHostResultCompleteness,
+    validate_entire_source: bool,
 ) -> Result<RepositoryFileBodyKind, CodeHostTransportFailure> {
-    if retained.contains(&b'\0') {
+    if validated.contains(&b'\0')
+        || (validate_entire_source && std::str::from_utf8(validated).is_err())
+    {
         return Ok(RepositoryFileBodyKind::Binary);
     }
     let content = match std::str::from_utf8(&retained) {
@@ -2695,7 +2737,15 @@ mod tests {
                 },
             )
             .await;
-            [path_request, revision_request]
+            let repository_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: b"{}",
+                },
+            )
+            .await;
+            [path_request, revision_request, repository_request]
         });
         let result = transport
             .repository_read_file(
@@ -2715,7 +2765,53 @@ mod tests {
                 "truncated": false,
             })
         );
-        assert_eq!(requests, missing_path_requests("src/lib.rs"));
+        assert_eq!(requests, missing_revision_requests("src/lib.rs"));
+    }
+
+    /// GitHub deliberately shares 404 across missing and inaccessible
+    /// repositories, so it cannot prove a revision absent without repository
+    /// visibility.
+    #[tokio::test]
+    async fn repository_inaccessible_request_is_not_a_missing_revision_result() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            let revision_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            let repository_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "404 Not Found",
+                    body: b"{}",
+                },
+            )
+            .await;
+            [path_request, revision_request, repository_request]
+        });
+        let failure = transport
+            .repository_read_file(
+                repository_read_arguments("src/lib.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect_err("an inaccessible repository cannot prove revision absence");
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::Rejected);
+        assert_eq!(requests, missing_revision_requests("src/lib.rs"));
     }
 
     /// A definitive host rejection remains failed execution rather than being
@@ -2890,6 +2986,116 @@ mod tests {
             })
         );
         assert_eq!(requests, file_read_requests("src/lines.rs"));
+    }
+
+    /// Ranged text classification scans the complete bounded blob so binary
+    /// bytes outside the selected lines cannot be hidden by a text prefix.
+    #[tokio::test]
+    async fn repository_file_line_range_validates_the_whole_blob_as_binary() {
+        const REQUESTED_START: u32 = 1;
+        const REQUESTED_END: u32 = 1;
+        let source = b"first\nsecond\nthird\xff".to_vec();
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value("src/mixed.rs", source.len()).to_string();
+        let source_for_server = source.clone();
+        let server = tokio::spawn(async move {
+            let path_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await;
+            let blob_request = serve_test_response(
+                &listener,
+                TestHttpResponse::Raw {
+                    body: &source_for_server,
+                },
+            )
+            .await;
+            [path_request, blob_request]
+        });
+        let result = transport
+            .repository_read_file(
+                repository_read_arguments(
+                    "src/mixed.rs",
+                    Some(serde_json::json!({
+                        "end": REQUESTED_END,
+                        "start": REQUESTED_START,
+                    })),
+                ),
+                &test_credential(),
+            )
+            .await
+            .expect("binary content outside the selection is still typed")
+            .into_json_value();
+        let requests = repository_server_result(server).await;
+
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "outcome": "binary_file",
+                "path": "src/mixed.rs",
+                "revision": REPOSITORY_REVISION,
+                "source_bytes": source.len(),
+                "truncated": false,
+            })
+        );
+        assert_eq!(requests, file_read_requests("src/mixed.rs"));
+    }
+
+    /// GitHub cannot serve line-addressed blob ranges, so an auto-approved
+    /// request refuses oversized ingress before issuing the blob request.
+    #[tokio::test]
+    async fn repository_file_oversized_line_range_is_typed_without_blob_download() {
+        const REQUESTED_START: u32 = 10;
+        const REQUESTED_END: u32 = 10;
+        const SOURCE_BYTES: usize = MAX_REPOSITORY_FILE_SCAN_BYTES + 1;
+        let (transport, listener) = repository_test_transport().await;
+        let metadata = repository_file_value("src/huge.rs", SOURCE_BYTES).to_string();
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "200 OK",
+                    body: metadata.as_bytes(),
+                },
+            )
+            .await
+        });
+        let result = transport
+            .repository_read_file(
+                repository_read_arguments(
+                    "src/huge.rs",
+                    Some(serde_json::json!({
+                        "end": REQUESTED_END,
+                        "start": REQUESTED_START,
+                    })),
+                ),
+                &test_credential(),
+            )
+            .await
+            .expect("oversized ranged ingress is an honest typed outcome")
+            .into_json_value();
+        let request = repository_server_result(server).await;
+
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "outcome": "line_range_unavailable",
+                "path": "src/huge.rs",
+                "requested_line_range": {
+                    "end": REQUESTED_END,
+                    "start": REQUESTED_START,
+                },
+                "revision": REPOSITORY_REVISION,
+                "scan_limit_bytes": MAX_REPOSITORY_FILE_SCAN_BYTES,
+                "source_bytes": SOURCE_BYTES,
+                "truncated": true,
+            })
+        );
+        assert_eq!(request, contents_request("src/huge.rs"));
     }
 
     /// A source larger than the retained text bound exposes every count and the
@@ -3144,6 +3350,16 @@ mod tests {
             format!(
                 "GET /repos/{FILE_PATCH_REPOSITORY}/git/commits/{REPOSITORY_REVISION} HTTP/1.1"
             ),
+        ]
+    }
+
+    fn missing_revision_requests(path: &str) -> [String; 3] {
+        [
+            contents_request(path),
+            format!(
+                "GET /repos/{FILE_PATCH_REPOSITORY}/git/commits/{REPOSITORY_REVISION} HTTP/1.1"
+            ),
+            format!("GET /repos/{FILE_PATCH_REPOSITORY} HTTP/1.1"),
         ]
     }
 

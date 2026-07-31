@@ -869,10 +869,21 @@ The declarations and compact result objects are:
   inclusive `end` members with `start` no greater than `end`. A content outcome
   returns at most 64 KiB of exact UTF-8 text together with source and returned
   byte counts, requested and returned line bounds, returned line count,
-  final-line completeness, and `truncated`. `path_not_found`,
+  final-line completeness, and `truncated`. The returned byte count describes
+  the emitted content after credential scrubbing. GitHub cannot address a raw
+  blob by line, so a ranged read inspects the complete blob only when its
+  reported source size is at most 1 MiB; a larger blob produces the distinct
+  `line_range_unavailable` outcome with the requested range, source bytes, scan
+  limit, and `truncated: true` without fetching the blob. Complete bounded
+  ranged inspection classifies a NUL-bearing or non-UTF-8 blob as binary even
+  when those bytes lie outside the selected lines. `path_not_found`,
   `revision_not_found`, `not_a_file` with the observed repository-object type,
   and `binary_file` with source bytes are separate non-content outcomes; every
-  file outcome carries `truncated`.
+  file outcome carries `truncated`. A contents 404 becomes `path_not_found` only
+  after the exact commit is visible, and becomes `revision_not_found` only after
+  the repository itself is also visible. Host rejection, including an
+  inaccessible repository that shares GitHub's 404 posture, remains failed
+  execution rather than absence evidence.
 - `repository_list_directory` accepts `repository`, one repository-relative
   directory `path`, and the same required exact commit `revision`. An entries
   outcome retains at most 100 immediate children with path, repository-object

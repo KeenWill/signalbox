@@ -17,8 +17,7 @@ use super::{
 /// Registry declaration effect posture: read-only, `Auto`, and
 /// `ExternalEffect` because GitHub observes the authenticated request.
 pub(super) const NAME: &str = "repository_read_file";
-pub(super) const DESCRIPTION: &str =
-    "Reads bounded text from one repository file at a required exact revision.";
+pub(super) const DESCRIPTION: &str = "Reads up to 64 KiB of UTF-8 text from one repository file at a required exact revision. Ranged reads inspect at most 1 MiB and report when that bound makes the range unavailable.";
 
 /// One inclusive, positive line range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema)]

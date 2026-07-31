@@ -651,7 +651,7 @@ where
             }
         };
         let mut value = result.into_json_value();
-        scrubber.redact_value(&mut value);
+        scrub_result_value(kind, &scrubber, &mut value).ok_or_else(caller_bug)?;
         let content = serde_json::to_string(&value).map_err(|_| caller_bug())?;
         if content.len() > result::MAX_ENCODED_RESULT_BYTES {
             if kind.mutates() {
@@ -772,6 +772,25 @@ impl CredentialScrubber {
             }
         }
     }
+}
+
+fn scrub_result_value(
+    kind: CodeHostToolKind,
+    scrubber: &CredentialScrubber,
+    value: &mut serde_json::Value,
+) -> Option<()> {
+    scrubber.redact_value(value);
+    if kind != CodeHostToolKind::ReadFile
+        || value.get("outcome").and_then(serde_json::Value::as_str) != Some("content")
+    {
+        return Some(());
+    }
+    let returned_bytes = value.get("content")?.as_str()?.len();
+    value.as_object_mut()?.insert(
+        String::from("returned_bytes"),
+        serde_json::Value::from(returned_bytes),
+    );
+    Some(())
 }
 
 #[cfg(test)]
@@ -1005,7 +1024,7 @@ mod tests {
                       "description": "Exact repository-relative changed path.",
                       "maxLength": 4096,
                       "minLength": 1,
-                      "pattern": "^(?:\\.|[^/\\u0000]+(?:/[^/\\u0000]+)*)$",
+                      "pattern": "^(?:\\.|(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+)(?:/(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+))*)$",
                       "type": "string"
                     },
                     "repository": {
@@ -1038,7 +1057,7 @@ mod tests {
                       "description": "Exact repository-relative directory path; `.` lists the repository root.",
                       "maxLength": 4096,
                       "minLength": 1,
-                      "pattern": "^(?:\\.|[^/\\u0000]+(?:/[^/\\u0000]+)*)$",
+                      "pattern": "^(?:\\.|(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+)(?:/(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+))*)$",
                       "type": "string"
                     },
                     "repository": {
@@ -1114,7 +1133,7 @@ mod tests {
                       "description": "Exact repository-relative path; `.` addresses the repository root.",
                       "maxLength": 4096,
                       "minLength": 1,
-                      "pattern": "^(?:\\.|[^/\\u0000]+(?:/[^/\\u0000]+)*)$",
+                      "pattern": "^(?:\\.|(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+)(?:/(?:[^./\\u0000][^/\\u0000]*|\\.[^./\\u0000][^/\\u0000]*|\\.\\.[^/\\u0000]+))*)$",
                       "type": "string"
                     },
                     "repository": {
@@ -1649,6 +1668,17 @@ mod tests {
         );
     }
 
+    /// Dot-prefixed names remain canonical components even though the aliases
+    /// `.` and `..` are rejected away from the documented bare-dot root.
+    #[test]
+    fn repository_read_file_typed_decode_accepts_dot_prefixed_components() {
+        assert_valid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":".git/objects/...","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
     /// File-read arguments retain one inclusive line range at an exact revision.
     #[test]
     fn repository_read_file_typed_decode_accepts_line_range() {
@@ -1812,6 +1842,44 @@ mod tests {
                 "nested": ["[redacted]"],
             })
         );
+    }
+
+    /// File byte counts describe emitted scrubbed content rather than the
+    /// credential-bearing source retained before evidence redaction.
+    #[test]
+    fn repository_file_returned_bytes_are_counted_after_credential_scrubbing() {
+        const CREDENTIAL: &str = "github_pat_synthetic_1234567890abcdefghijklmnopqrstuvwxyz";
+        const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let source_content = format!("before {CREDENTIAL} after\n");
+        let source_bytes =
+            u64::try_from(source_content.len()).expect("fixture source size fits u64");
+        let result = RepositoryReadFileResult::try_content(RepositoryFileContentFields {
+            path: String::from("src/lib.rs"),
+            revision: String::from(REVISION),
+            source_bytes,
+            requested_start_line: None,
+            requested_end_line: None,
+            start_line: Some(1),
+            end_line: Some(1),
+            returned_lines: 1,
+            last_line_complete: true,
+            content: source_content,
+            completeness: CodeHostResultCompleteness::Complete,
+        })
+        .expect("fixture file result is admitted");
+        let mut value = CodeHostResult::ReadFile(result).into_json_value();
+
+        scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value)
+            .expect("typed file result remains shaped after scrubbing");
+
+        let emitted_content = "before [redacted] after\n";
+        assert_eq!(value["content"], emitted_content);
+        assert_eq!(value["returned_bytes"], emitted_content.len());
+        assert_eq!(value["source_bytes"], source_bytes);
+        assert!(!value.to_string().contains(CREDENTIAL));
     }
 
     /// A malformed acknowledgement after a mutation is fail-closed as

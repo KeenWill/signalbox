@@ -330,7 +330,7 @@ impl JsonSchema for CodeHostFilePath {
             "type": "string",
             "minLength": 1,
             "maxLength": MAX_FILE_PATH_BYTES,
-            "pattern": r"^(?:\.|[^/\u0000]+(?:/[^/\u0000]+)*)$",
+            "pattern": r"^(?:\.|(?:[^./\u0000][^/\u0000]*|\.[^./\u0000][^/\u0000]*|\.\.[^/\u0000]+)(?:/(?:[^./\u0000][^/\u0000]*|\.[^./\u0000][^/\u0000]*|\.\.[^/\u0000]+))*)$",
         })
     }
 

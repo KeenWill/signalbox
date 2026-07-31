@@ -9,6 +9,8 @@ use super::result::{
 
 /// Maximum retained UTF-8 content from one repository file read.
 pub(super) const MAX_REPOSITORY_FILE_CONTENT_BYTES: usize = MAX_RESULT_TEXT_BYTES;
+/// Maximum source bytes inspected to serve one requested line range.
+pub(super) const MAX_REPOSITORY_FILE_SCAN_BYTES: usize = 1024 * 1024;
 
 /// Kind of one repository path observed through GitHub's contents endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,7 +81,14 @@ enum RepositoryFileOutcome {
     PathNotFound,
     RevisionNotFound,
     NotAFile(RepositoryObjectKind),
-    Binary { source_bytes: u64 },
+    Binary {
+        source_bytes: u64,
+    },
+    LineRangeUnavailable {
+        source_bytes: u64,
+        requested_start_line: u32,
+        requested_end_line: u32,
+    },
 }
 
 /// Typed result of `repository_read_file`.
@@ -179,6 +188,29 @@ impl RepositoryReadFileResult {
         })
     }
 
+    /// Records that bounded transport cannot inspect enough source to select
+    /// the requested lines without downloading the whole oversized blob.
+    pub fn try_line_range_unavailable(
+        path: String,
+        revision: String,
+        source_bytes: u64,
+        requested_start_line: u32,
+        requested_end_line: u32,
+    ) -> Option<Self> {
+        let scan_limit_bytes = u64::try_from(MAX_REPOSITORY_FILE_SCAN_BYTES).ok()?;
+        (requested_start_line > 0
+            && requested_start_line <= requested_end_line
+            && source_bytes > scan_limit_bytes)
+            .then_some(Self {
+                identity: RepositoryObjectIdentity::try_new(path, revision)?,
+                outcome: RepositoryFileOutcome::LineRangeUnavailable {
+                    source_bytes,
+                    requested_start_line,
+                    requested_end_line,
+                },
+            })
+    }
+
     pub(super) fn into_value(self) -> Value {
         let path = self.identity.path;
         let revision = self.identity.revision;
@@ -224,6 +256,22 @@ impl RepositoryReadFileResult {
                 "revision": revision,
                 "source_bytes": source_bytes,
                 "truncated": false,
+            }),
+            RepositoryFileOutcome::LineRangeUnavailable {
+                source_bytes,
+                requested_start_line,
+                requested_end_line,
+            } => json!({
+                "outcome": "line_range_unavailable",
+                "path": path,
+                "requested_line_range": {
+                    "end": requested_end_line,
+                    "start": requested_start_line,
+                },
+                "revision": revision,
+                "scan_limit_bytes": MAX_REPOSITORY_FILE_SCAN_BYTES,
+                "source_bytes": source_bytes,
+                "truncated": true,
             }),
         }
     }
