@@ -420,16 +420,18 @@ four implemented tool families in the same closed-table style as
 - `conversations` selects adapter `application` and has no credential, egress,
   or filesystem field.
 
-The `[[tool_mappings]]` array may be absent when the configuration value is used
-only as a model catalog, but production startup rejects that absence. When the
-array is present it must already be complete: an unknown, missing, or duplicate
-family; an unknown field; any fixed value with another spelling; a relative
-workspace root; or a dependency field on the wrong family is a sanitized
-configuration failure. The root is opened once during tool construction and its
-pinned authority is cloned into both workspace suites, so a nonexistent,
-non-directory, or final-symlink root also fails startup. The GitHub policy
-admits exactly `https://api.github.com:443`; neither GitHub-backed suite can
-widen it from a model argument.
+The `[[tool_mappings]]` array may be absent for compatibility with deployments
+that have not enabled the configured composition. In that case production
+preserves the base catalog, including the code-host suite, without constructing
+pull-request, workspace, or conversation dependencies. When the array is present
+it must already be complete: an unknown, missing, or duplicate family; an
+unknown field; any fixed value with another spelling; a relative workspace root;
+or a dependency field on the wrong family is a sanitized configuration failure.
+The root is opened once during tool construction and its pinned authority is
+cloned into both workspace suites, so a nonexistent, non-directory, or
+final-symlink root also fails startup. The GitHub policy admits exactly
+`https://api.github.com:443`; neither GitHub-backed suite can widen it from a
+model argument.
 
 Composition preserves each compiled declaration's permission default and feeds
 it unchanged into the existing durable approval flow. Exact-revision code-host

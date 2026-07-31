@@ -129,10 +129,10 @@ struct ComposedToolFamilies<
     web_fetch: WebFetchTool<Transport>,
     status: SessionStatusTool<Writer>,
     code_host: CodeHostTools<Credentials, HostTransport>,
-    github: GitHubTools<Credentials, GitHubTransportType>,
-    workspace_read: WorkspaceReadTools<FileSystem>,
-    workspace_mutation: WorkspaceMutationTools<FileSystem>,
-    conversations: ConversationTools<Port>,
+    github: Option<GitHubTools<Credentials, GitHubTransportType>>,
+    workspace_read: Option<WorkspaceReadTools<FileSystem>>,
+    workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
+    conversations: Option<ConversationTools<Port>>,
 }
 
 /// The complete daemon-local declarations and their matching dispatch executor.
@@ -204,10 +204,39 @@ impl<Clock>
                 web_fetch,
                 status,
                 code_host,
-                github,
-                workspace_read,
-                workspace_mutation,
-                conversations,
+                github: Some(github),
+                workspace_read: Some(workspace_read),
+                workspace_mutation: Some(workspace_mutation),
+                conversations: Some(conversations),
+            },
+        )
+    }
+
+    /// Composes the base production catalog without constructing any dependency
+    /// owned by an unconfigured tool family.
+    pub fn try_new_without_tool_mappings(
+        clock: Clock,
+        pool: PgPool,
+        credentials: FileCredentialAccess,
+        code_host_transport: GitHubCodeHostTransport,
+        web_fetch_egress_policy: WebFetchEgressPolicy,
+    ) -> Result<Self, DaemonToolsConstructionError> {
+        let web_fetch = WebFetchTool::try_new_production(web_fetch_egress_policy)
+            .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
+        let status = SessionStatusTool::try_new_postgres(pool)
+            .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
+        let code_host = CodeHostTools::try_new(credentials, code_host_transport)
+            .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        Self::try_new_with_tools(
+            clock,
+            ComposedToolFamilies {
+                web_fetch,
+                status,
+                code_host,
+                github: None,
+                workspace_read: None,
+                workspace_mutation: None,
+                conversations: None,
             },
         )
     }
@@ -264,10 +293,10 @@ where
                 web_fetch,
                 status,
                 code_host,
-                github,
-                workspace_read,
-                workspace_mutation,
-                conversations,
+                github: Some(github),
+                workspace_read: Some(workspace_read),
+                workspace_mutation: Some(workspace_mutation),
+                conversations: Some(conversations),
             },
         )
     }
@@ -302,22 +331,27 @@ where
         let (web_fetch_catalog, web_fetch) = web_fetch.into_parts();
         let (status_catalog, session_status) = status.into_parts();
         let (code_host_catalog, code_host) = code_host.into_parts();
-        let (github_catalog, github) = github.into_parts();
-        let (workspace_read_catalog, workspace_read) = workspace_read.into_parts();
-        let (workspace_mutation_catalog, workspace_mutation) = workspace_mutation.into_parts();
-        let (conversation_catalog, conversations) = conversations.into_parts();
-        let catalog = DaemonToolCatalog::try_new([
+        let github = github.map(GitHubTools::into_parts);
+        let workspace_read = workspace_read.map(WorkspaceReadTools::into_parts);
+        let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
+        let conversations = conversations.map(ConversationTools::into_parts);
+        let mut catalogs = vec![
             current_time_catalog,
             echo_catalog,
             web_fetch_catalog,
             status_catalog,
             code_host_catalog,
-            github_catalog,
-            workspace_read_catalog,
-            workspace_mutation_catalog,
-            conversation_catalog,
-        ])
-        .map_err(|_| DaemonToolsConstructionError::Duplicate)?;
+        ];
+        catalogs.extend(github.as_ref().map(|(catalog, _)| catalog.clone()));
+        catalogs.extend(workspace_read.as_ref().map(|(catalog, _)| catalog.clone()));
+        catalogs.extend(
+            workspace_mutation
+                .as_ref()
+                .map(|(catalog, _)| catalog.clone()),
+        );
+        catalogs.extend(conversations.as_ref().map(|(catalog, _)| catalog.clone()));
+        let catalog = DaemonToolCatalog::try_new(catalogs)
+            .map_err(|_| DaemonToolsConstructionError::Duplicate)?;
         Ok(Self {
             catalog,
             executor: DaemonToolExecutor {
@@ -326,10 +360,11 @@ where
                 web_fetch,
                 session_status,
                 code_host,
-                github,
-                workspace_read,
-                workspace_mutation: SharedToolExecutor::new(workspace_mutation),
-                conversations,
+                github: github.map(|(_, executor)| executor),
+                workspace_read: workspace_read.map(|(_, executor)| executor),
+                workspace_mutation: workspace_mutation
+                    .map(|(_, executor)| SharedToolExecutor::new(executor)),
+                conversations: conversations.map(|(_, executor)| executor),
             },
         })
     }
@@ -525,10 +560,10 @@ pub struct DaemonToolExecutor<
     web_fetch: WebFetchExecutor<Transport>,
     session_status: SessionStatusExecutor<Writer>,
     code_host: CodeHostExecutor<Credentials, HostTransport>,
-    github: GitHubExecutor<Credentials, GitHubTransportType>,
-    workspace_read: WorkspaceReadExecutor<FileSystem>,
-    workspace_mutation: SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>,
-    conversations: ConversationExecutor<Port>,
+    github: Option<GitHubExecutor<Credentials, GitHubTransportType>>,
+    workspace_read: Option<WorkspaceReadExecutor<FileSystem>>,
+    workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
+    conversations: Option<ConversationExecutor<Port>>,
 }
 
 /// Sanitized aggregate executor failure.
@@ -621,21 +656,29 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if GITHUB_TOOL_NAMES.contains(&name) => self
                 .github
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if WORKSPACE_READ_TOOL_NAMES.contains(&name) => self
                 .workspace_read
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if WORKSPACE_MUTATION_TOOL_NAMES.contains(&name) => self
                 .workspace_mutation
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if CONVERSATION_TOOL_NAMES.contains(&name) => self
                 .conversations
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
@@ -835,6 +878,61 @@ mod tests {
         assert_eq!(
             snapshot.content(&mutation_path),
             Some(&expected_snapshot_content)
+        );
+    }
+
+    /// An absent mapping table preserves the base catalog and does not expose
+    /// the families whose deployment dependencies were not injected.
+    #[test]
+    fn daemon_catalog_without_mappings_contains_only_base_families() {
+        let web_fetch = WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::deny_all())
+            .expect("offline web fetch tool compiles");
+        let status =
+            SessionStatusTool::try_new(OfflineWriter).expect("offline status tool compiles");
+        let code_host = CodeHostTools::try_new(OfflineCredentials, OfflineCodeHostTransport)
+            .expect("offline code-host tools compile");
+        let (catalog, _executor) = DaemonTools::try_new_with_tools(
+            || SystemTime::UNIX_EPOCH,
+            ComposedToolFamilies {
+                web_fetch,
+                status,
+                code_host,
+                github: None::<GitHubTools<OfflineCredentials, OfflineGitHubTransport>>,
+                workspace_read: None::<WorkspaceReadTools<LocalWorkspaceFileSystem>>,
+                workspace_mutation: None::<WorkspaceMutationTools<LocalWorkspaceFileSystem>>,
+                conversations: None::<ConversationTools<OfflineConversationPort>>,
+            },
+        )
+        .expect("base daemon tools compile")
+        .into_parts();
+
+        let definitions = catalog.definitions();
+        let names = definition_names(&definitions);
+
+        assert_eq!(
+            names,
+            [
+                CHANGE_REQUEST_CHANGED_FILES_NAME,
+                CHANGE_REQUEST_CHECKS_STATUS_NAME,
+                CHANGE_REQUEST_CI_JOB_LOG_NAME,
+                CHANGE_REQUEST_COMMENT_NAME,
+                CHANGE_REQUEST_CONVERGENCE_STATE_NAME,
+                CHANGE_REQUEST_FILE_PATCH_NAME,
+                CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME,
+                CHANGE_REQUEST_REVIEW_THREADS_NAME,
+                CHANGE_REQUEST_STACK_STATE_NAME,
+                CHANGE_REQUEST_SUMMARY_NAME,
+                CHANGE_REQUEST_THREAD_INVENTORY_NAME,
+                CHANGE_REQUEST_THREAD_REPLY_NAME,
+                CHANGE_REQUEST_THREAD_RESOLVE_NAME,
+                CURRENT_TIME_NAME,
+                ECHO_NAME,
+                REPOSITORY_LIST_DIRECTORY_NAME,
+                REPOSITORY_READ_FILE_NAME,
+                REVIEW_GATE_CHECK_NAME,
+                SESSION_STATUS_UPDATE_NAME,
+                WEB_FETCH_NAME,
+            ]
         );
     }
 

@@ -540,11 +540,9 @@ impl HubModelConfiguration {
         self.web_fetch_egress_policy.clone()
     }
 
-    /// Returns the complete deployment-owned daemon tool dependencies.
-    pub fn daemon_tools(&self) -> Result<&DaemonToolConfiguration, HubModelConfigurationError> {
-        self.daemon_tools
-            .as_ref()
-            .ok_or(HubModelConfigurationError::MissingToolMappings)
+    /// Returns explicitly configured daemon tool dependencies, when present.
+    pub const fn daemon_tools(&self) -> Option<&DaemonToolConfiguration> {
+        self.daemon_tools.as_ref()
     }
 
     /// Reports whether the configuration contains one direct selection key.
@@ -719,8 +717,6 @@ pub enum HubModelConfigurationError {
     MissingModels,
     /// No nonempty static adapter mapping table exists.
     MissingAdapterMappings,
-    /// Production composition requested no complete daemon tool mapping table.
-    MissingToolMappings,
     /// The daemon tool mapping registry was incomplete or malformed.
     InvalidToolMappings,
     /// One daemon tool family appeared more than once.
@@ -791,7 +787,6 @@ impl fmt::Display for HubModelConfigurationError {
             Self::UnsupportedVersion => "model configuration version is unsupported",
             Self::MissingModels => "model configuration has no model definitions",
             Self::MissingAdapterMappings => "model configuration has no adapter mappings",
-            Self::MissingToolMappings => "model configuration has no daemon tool mappings",
             Self::InvalidToolMappings => {
                 "model configuration contains invalid daemon tool mappings"
             }
@@ -1087,14 +1082,11 @@ working_directory = "{}"
     }
 
     #[test]
-    fn production_tool_dependencies_require_the_complete_mapping_registry() {
+    fn absent_tool_mappings_preserve_the_base_daemon_catalog() {
         let configuration = HubModelConfiguration::parse(&configuration_without_tool_mappings())
-            .expect("library-only model configuration remains parseable");
+            .expect("model configuration without tool mappings remains parseable");
 
-        assert_eq!(
-            configuration.daemon_tools().err(),
-            Some(HubModelConfigurationError::MissingToolMappings)
-        );
+        assert_eq!(configuration.daemon_tools(), None);
     }
 
     #[test]
