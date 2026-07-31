@@ -1102,7 +1102,7 @@ where
         &mut self,
         request: WebSearchRequest,
         correlation: &ToolAttemptDispatchCorrelation,
-    ) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
+    ) -> Result<WebSearchRequestEvidence, WebSearchExecutorError> {
         let credential = match self
             .credentials
             .resolve(&self.configuration.credential_reference)
@@ -1111,16 +1111,20 @@ where
             Ok(credential) => credential,
             Err(error) => {
                 report_credential_access_failure(&error, correlation);
-                return Ok(ToolExecutorEvidence::KnownFailed {
-                    detail: Some(self.credential_unavailable_detail.clone()),
-                });
+                return Ok(WebSearchRequestEvidence::Uncredentialed(
+                    ToolExecutorEvidence::KnownFailed {
+                        detail: Some(self.credential_unavailable_detail.clone()),
+                    },
+                ));
             }
         };
         let Some(scrubber) = CredentialScrubber::try_new(&credential) else {
             report_credential_value_failure(correlation);
-            return Ok(ToolExecutorEvidence::KnownFailed {
-                detail: Some(self.credential_unavailable_detail.clone()),
-            });
+            return Ok(WebSearchRequestEvidence::Uncredentialed(
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(self.credential_unavailable_detail.clone()),
+                },
+            ));
         };
         let transport_result = self
             .transport
@@ -1166,8 +1170,68 @@ where
                 Err(WebSearchExecutorError::DispatchUnknown)
             }
         };
-        outcome.map_err(|error| credential_safe_executor_error(error, &credential))
+        let evidence =
+            outcome.map_err(|error| credential_safe_executor_error(error, &credential))?;
+        Ok(WebSearchRequestEvidence::Credentialed {
+            evidence,
+            credential,
+        })
     }
+}
+
+enum WebSearchRequestEvidence {
+    Uncredentialed(ToolExecutorEvidence),
+    Credentialed {
+        evidence: ToolExecutorEvidence,
+        credential: CredentialValue,
+    },
+}
+
+impl fmt::Debug for WebSearchRequestEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uncredentialed(evidence) | Self::Credentialed { evidence, .. } => {
+                fmt::Debug::fmt(evidence, formatter)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl WebSearchRequestEvidence {
+    fn into_evidence(self) -> ToolExecutorEvidence {
+        match self {
+            Self::Uncredentialed(evidence) | Self::Credentialed { evidence, .. } => evidence,
+        }
+    }
+}
+
+fn bind_request_evidence(
+    invocation: ToolExecutionInvocation,
+    outcome: WebSearchRequestEvidence,
+) -> Result<CorrelatedToolExecutorEvidence, WebSearchExecutorError> {
+    let (evidence, credential) = match outcome {
+        WebSearchRequestEvidence::Uncredentialed(evidence) => (evidence, None),
+        WebSearchRequestEvidence::Credentialed {
+            evidence,
+            credential,
+        } => (evidence, Some(credential)),
+    };
+    let bound = invocation.bind(evidence);
+    let Some(credential) = credential else {
+        return Ok(bound);
+    };
+    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    let rendered_result = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&bound));
+    if credential_text.is_empty() || rendered_result.contains(credential_text) {
+        return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+            WebSearchCredentialDiagnostic {
+                rendered: safe_collision_diagnostic(credential_text),
+                failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+            },
+        ));
+    }
+    Ok(bound)
 }
 
 impl<Credentials, Transport> ToolExecutor for WebSearchExecutor<Credentials, Transport>
@@ -1188,7 +1252,7 @@ where
         .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)?;
         let correlation = invocation.correlation();
         let evidence = self.execute_request(request, &correlation).await?;
-        Ok(invocation.bind(evidence))
+        bind_request_evidence(invocation, evidence)
     }
 }
 
@@ -1227,7 +1291,7 @@ fn report_transport_failure(
 ) -> Result<(), WebSearchExecutorError> {
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let controlled_event = format!(
-        "WARN signalbox_tools_basic_web_search: web search transport failed failure={:?} session_id={} turn_id={}",
+        "WARN turn_work: signalbox_tools_basic_web_search: web search transport failed failure={:?} session_id={} turn_id={}",
         failure.class(),
         correlation.session().as_uuid(),
         correlation.turn().as_uuid()
@@ -1240,8 +1304,10 @@ fn report_transport_failure(
             },
         ));
     }
-    tracing::warn!(
+    tracing::event!(
         target: "signalbox_tools_basic_web_search",
+        parent: None,
+        tracing::Level::WARN,
         failure = ?failure.class(),
         session_id = %correlation.session().as_uuid(),
         turn_id = %correlation.turn().as_uuid(),
@@ -1434,6 +1500,13 @@ impl CredentialScrubber {
         let Some(host) = url.host_str() else {
             return false;
         };
+        let unbracketed = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        if unbracketed.parse::<std::net::IpAddr>().is_ok() {
+            return false;
+        }
         let (unicode_host, decoding) = idna::domain_to_unicode(host);
         decoding.is_err() || self.contains_credential(&unicode_host)
     }
@@ -1514,10 +1587,22 @@ mod tests {
         },
     };
 
-    use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
+    use signalbox_application::{
+        InProcessToolDispatchGate, PrepareToolContinuationOutcome,
+        RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus, ToolCatalog,
+        ToolCatalogValidationFailure, ToolContinuationIdentities, ToolCrashClosureIdentities,
+        ToolExecutionService, ToolExecutionTransaction, UuidV7ToolLoopIdGenerator,
+    };
     use signalbox_domain::{
-        SessionId, ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-        ToolDispatchGeneration, ToolRequestId, TurnAttemptId, TurnId,
+        AcceptedInputId, AuthorizedToolAttempt, ContextFrontierId,
+        CorrelatedToolAttemptObservation, CurrentToolAttempt, EndedToolAttempt, ModelCallId,
+        ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId, SessionId,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
+        ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
+        ToolExecutionError, ToolName, ToolRequestId, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
     };
     use signalbox_model_runtime::{CredentialAccessError, CredentialAccessFailure};
 
@@ -1527,6 +1612,7 @@ mod tests {
     const FIXTURE_QUERY: &str = "bounded rust search";
     const FIXTURE_RESULT_TITLE: &str = "Synthetic result";
     const FIXTURE_RESULT_URL: &str = "https://example.com/result";
+    const FIXTURE_IPV6_RESULT_URL: &str = "https://[2001:db8::1]/result";
     const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
     const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
     const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";
@@ -1542,6 +1628,8 @@ mod tests {
     const URL_IDNA_COLLISION_VALUE: &str = "https://bücher.example/";
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
+    const TURN_SPAN_COLLISION_KEY: &str = "turn_work";
+    const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
     const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
@@ -1550,6 +1638,8 @@ mod tests {
     const ISSUING_ATTEMPT_IDENTITY: u128 = 3;
     const REQUEST_IDENTITY: u128 = 4;
     const ATTEMPT_IDENTITY: u128 = 5;
+    const PRODUCING_CALL_IDENTITY: u128 = 6;
+    const FRONTIER_IDENTITY: u128 = 7;
     const SESSION_ID_DIAGNOSTIC: &str = "session_id=00000000-0000-0000-0000-000000000001";
     const TURN_ID_DIAGNOSTIC: &str = "turn_id=00000000-0000-0000-0000-000000000002";
     const PROVIDER_REJECTION_STATUS: u16 = 429;
@@ -1672,6 +1762,181 @@ mod tests {
         }
     }
 
+    struct FormattingExecutor<Executor> {
+        inner: Executor,
+        diagnostic: Arc<Mutex<String>>,
+    }
+
+    impl<Executor> ToolExecutor for FormattingExecutor<Executor>
+    where
+        Executor: ToolExecutor<Error = WebSearchExecutorError> + Send,
+    {
+        type Error = WebSearchExecutorError;
+
+        async fn execute(
+            &mut self,
+            invocation: ToolExecutionInvocation,
+        ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+            let result = self.inner.execute(invocation).await;
+            *self
+                .diagnostic
+                .lock()
+                .expect("captured executor diagnostic lock is available") = format!("{result:?}");
+            result
+        }
+    }
+
+    struct ExecutorFixtureTransaction {
+        batch: signalbox_domain::ToolBatch,
+    }
+
+    impl ToolExecutionTransaction for ExecutorFixtureTransaction {
+        type Error = WebSearchExecutorError;
+
+        async fn load_active_batch(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+        ) -> Result<Option<signalbox_domain::ToolBatch>, Self::Error> {
+            Ok(Some(self.batch.clone()))
+        }
+
+        async fn prepare_next_attempt(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+            _attempt: ToolAttemptId,
+            _effect_class: ToolEffectClass,
+        ) -> Result<Option<CurrentToolAttempt>, Self::Error> {
+            panic!("fixture begins with one prepared attempt")
+        }
+
+        async fn authorize_attempt(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+            attempt: ToolAttemptId,
+        ) -> Result<AuthorizedToolAttempt, Self::Error> {
+            self.batch
+                .authorize_attempt(attempt)
+                .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)
+        }
+
+        async fn reread_ambiguous_authorization(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+            _attempt: ToolAttemptId,
+        ) -> Result<ToolAttemptAuthorizationStatus, Self::Error> {
+            panic!("fixture authorization is unambiguous")
+        }
+
+        async fn commit_preflight_error(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+            _attempt: ToolAttemptId,
+            _error: ToolExecutionError,
+        ) -> Result<EndedToolAttempt, Self::Error> {
+            panic!("fixture arguments pass preflight")
+        }
+
+        async fn commit_observation(
+            &mut self,
+            _observation: CorrelatedToolAttemptObservation,
+        ) -> Result<EndedToolAttempt, Self::Error> {
+            panic!("credential collision prevents an observation")
+        }
+
+        async fn reread_observation(
+            &mut self,
+            _observation: &CorrelatedToolAttemptObservation,
+        ) -> Result<RetainedToolAttemptObservationStatus, Self::Error> {
+            panic!("credential collision prevents an observation")
+        }
+
+        async fn classify_crash_loss<NextTurn>(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+            _attempt: ToolAttemptId,
+            _identities: ToolCrashClosureIdentities,
+            _next_turn: NextTurn,
+        ) -> Result<ToolAttemptCrashOutcome, Self::Error>
+        where
+            NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        {
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        }
+
+        async fn prepare_continuation<NextSteering>(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+            _producing_call: ModelCallId,
+            _identities: ToolContinuationIdentities,
+            _next_steering: NextSteering,
+        ) -> Result<PrepareToolContinuationOutcome, Self::Error>
+        where
+            NextSteering: FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send,
+        {
+            panic!("fixture has one prepared attempt")
+        }
+    }
+
+    fn prepared_web_search_batch() -> signalbox_domain::ToolBatch {
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(SESSION_IDENTITY));
+        let turn = TurnId::from_uuid(uuid::Uuid::from_u128(TURN_IDENTITY));
+        let producing_call = ModelCallId::from_uuid(uuid::Uuid::from_u128(PRODUCING_CALL_IDENTITY));
+        let request = ToolRequestReconstitutionInput::new(
+            ToolRequestId::from_uuid(uuid::Uuid::from_u128(REQUEST_IDENTITY)),
+            session,
+            turn,
+            producing_call,
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from(WEB_SEARCH_NAME)).expect("fixture name is valid"),
+            arguments(&serde_json::json!({"query": FIXTURE_QUERY}).to_string()),
+        )
+        .into_request();
+        let turn_attempt =
+            TurnAttemptId::from_uuid(uuid::Uuid::from_u128(ISSUING_ATTEMPT_IDENTITY));
+        let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
+            .reconstitute()
+            .expect("policy approval fixture is valid");
+        let attempt = ToolAttemptReconstitutionInput::new(
+            ToolAttemptId::from_uuid(uuid::Uuid::from_u128(ATTEMPT_IDENTITY)),
+            request.id(),
+            session,
+            turn,
+            turn_attempt,
+            ToolEffectClass::ExternalEffect,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Prepared,
+        )
+        .reconstitute()
+        .expect("prepared attempt fixture is valid");
+        let frontier = ResolvedContextFrontierReconstitutionInput::new(
+            session,
+            ContextFrontierId::from_uuid(uuid::Uuid::from_u128(FRONTIER_IDENTITY)),
+            Vec::new(),
+        )
+        .reconstitute()
+        .expect("empty frontier fixture is valid");
+
+        ToolBatchReconstitutionInput::new(
+            session,
+            turn,
+            producing_call,
+            frontier,
+            vec![request],
+            vec![approval],
+            vec![attempt],
+            ToolBatchPhaseReconstitutionInput::Executing { turn_attempt },
+        )
+        .reconstitute()
+        .expect("web_search batch fixture is valid")
+    }
+
     fn arguments(value: &str) -> NormalizedToolArguments {
         NormalizedToolArguments::try_from_provider_text(value.to_owned())
             .expect("fixture arguments are admitted")
@@ -1739,11 +2004,18 @@ mod tests {
     ) -> (String, Result<(), WebSearchExecutorError>) {
         let output = CapturedTelemetry::default();
         let subscriber = tracing_subscriber::fmt()
+            .compact()
             .without_time()
             .with_ansi(false)
             .with_writer(output.clone())
             .finish();
         let result = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                "turn_work",
+                session_id = %correlation.session().as_uuid(),
+                turn_id = %correlation.turn().as_uuid(),
+            );
+            let _entered = span.enter();
             report_transport_failure(failure, correlation, credential)
         });
         (output.text(), result)
@@ -1870,11 +2142,51 @@ mod tests {
         let evidence = executor
             .execute_request(request, &correlation)
             .await
-            .expect("synthetic transport completes");
+            .expect("synthetic transport completes")
+            .into_evidence();
 
         assert!(matches!(evidence, ToolExecutorEvidence::CompletedText(_)));
         assert_eq!(resolutions.load(Ordering::Relaxed), 1);
         assert_eq!(searches.load(Ordering::Relaxed), 1);
+    }
+
+    /// INV-035: the actual `ToolExecutor::execute` result fails closed before
+    /// its bound evidence diagnostic can reproduce the request credential.
+    #[tokio::test]
+    async fn web_search_bound_executor_result_omits_credential_collision() {
+        let diagnostic = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&diagnostic);
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: EXECUTOR_OUTCOME_COLLISION_KEY,
+        };
+        let transport = CountingTransport { searches };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("static web_search tool compiles")
+            .into_parts();
+        let executor = FormattingExecutor {
+            inner: executor,
+            diagnostic: captured,
+        };
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let rendered = diagnostic
+            .lock()
+            .expect("captured executor diagnostic lock is available")
+            .clone();
+
+        assert!(result.is_err());
+        assert!(!rendered.contains(EXECUTOR_OUTCOME_COLLISION_KEY));
     }
 
     /// The rendered schema is the exact query-only wire artifact.
@@ -2149,6 +2461,22 @@ mod tests {
             success_evidence(response, &scrubber),
             Err(WebSearchExecutorError::EvidenceEncoding)
         );
+    }
+
+    /// IP-literal result hosts bypass domain-only IDNA decoding and remain
+    /// valid structured search evidence.
+    #[test]
+    fn web_search_preserves_ipv6_literal_result_host() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("IPv6 fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+
+        assert!(success_evidence(response, &scrubber()).is_ok());
     }
 
     #[test]
@@ -2644,6 +2972,25 @@ mod tests {
         assert!(!diagnostic.contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
         assert!(!format!("{error:?}").contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
         assert!(!error.to_string().contains(DIAGNOSTIC_REDACTION_OVERLAP_KEY));
+    }
+
+    /// INV-035: transport events account for the production turn span so a
+    /// contextual-name collision suppresses the event before emission.
+    #[test]
+    fn web_search_transport_event_omits_colliding_turn_span_context() {
+        let credential = CredentialValue::new(TURN_SPAN_COLLISION_KEY.as_bytes().to_vec());
+        let failure = WebSearchTransportFailure::RequestFailed;
+        let correlation = dispatch_correlation();
+
+        let (diagnostic, result) = capture_transport_failure(&failure, &correlation, &credential);
+
+        let error = result.expect_err("colliding turn context suppresses the event");
+        assert!(
+            !diagnostic.contains(TURN_SPAN_COLLISION_KEY),
+            "root-scoped event unexpectedly retained span context: {diagnostic}"
+        );
+        assert!(!format!("{error:?}").contains(TURN_SPAN_COLLISION_KEY));
+        assert!(!error.to_string().contains(TURN_SPAN_COLLISION_KEY));
     }
 
     /// INV-035: provider response and error diagnostics never render
