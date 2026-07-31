@@ -799,13 +799,11 @@ where
         Ok(match self.transport.search(request, &credential).await {
             Ok(response) => success_evidence(response, &scrubber)?,
             Err(WebSearchTransportFailure::InvalidCredential) => {
-                ToolExecutorEvidence::KnownFailed {
-                    detail: Some(self.credential_unavailable_detail.clone()),
-                }
+                known_failure_evidence(self.credential_unavailable_detail.clone(), &scrubber)?
             }
-            Err(WebSearchTransportFailure::RequestFailed) => ToolExecutorEvidence::KnownFailed {
-                detail: Some(self.request_failed_detail.clone()),
-            },
+            Err(WebSearchTransportFailure::RequestFailed) => {
+                known_failure_evidence(self.request_failed_detail.clone(), &scrubber)?
+            }
             Err(WebSearchTransportFailure::ProviderRejected(error)) => {
                 ToolExecutorEvidence::KnownFailed {
                     detail: Some(provider_error_detail(error, &scrubber)?),
@@ -814,9 +812,7 @@ where
             Err(
                 WebSearchTransportFailure::InvalidResponse
                 | WebSearchTransportFailure::ResponseTooLarge,
-            ) => ToolExecutorEvidence::KnownFailed {
-                detail: Some(self.invalid_response_detail.clone()),
-            },
+            ) => known_failure_evidence(self.invalid_response_detail.clone(), &scrubber)?,
             Err(WebSearchTransportFailure::DispatchUnknown) => {
                 return Err(WebSearchExecutorError::DispatchUnknown);
             }
@@ -901,7 +897,22 @@ fn success_evidence(
         "truncated": truncated,
     }))
     .map_err(|_| WebSearchExecutorError::EvidenceEncoding)?;
+    if scrubber.contains_credential(&content) {
+        return Err(WebSearchExecutorError::EvidenceEncoding);
+    }
     Ok(ToolExecutorEvidence::CompletedText(content))
+}
+
+fn known_failure_evidence(
+    detail: ToolExecutionErrorDetail,
+    scrubber: &CredentialScrubber,
+) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
+    if scrubber.contains_credential(detail.as_str()) {
+        return Err(WebSearchExecutorError::EvidenceEncoding);
+    }
+    Ok(ToolExecutorEvidence::KnownFailed {
+        detail: Some(detail),
+    })
 }
 
 fn provider_error_detail(
@@ -932,6 +943,9 @@ fn provider_error_detail(
         )
     };
     let bounded = truncate_after_redaction(detail);
+    if scrubber.contains_credential(&bounded) {
+        return Err(WebSearchExecutorError::EvidenceEncoding);
+    }
     ToolExecutionErrorDetail::try_new(bounded).map_err(|_| WebSearchExecutorError::EvidenceEncoding)
 }
 
@@ -969,9 +983,13 @@ impl CredentialScrubber {
     }
 
     fn redact_text(&self, text: &str) -> String {
-        let exact_redacted = text.replace(&self.exact, "");
-        let escaped_redacted = exact_redacted.replace(&self.json_escaped, "");
-        redact_text(&escaped_redacted)
+        let generically_redacted = redact_text(text);
+        let exact_redacted = generically_redacted.replace(&self.exact, "");
+        exact_redacted.replace(&self.json_escaped, "")
+    }
+
+    fn contains_credential(&self, text: &str) -> bool {
+        text.contains(&self.exact) || text.contains(&self.json_escaped)
     }
 
     fn redact_body(&self, body: &[u8]) -> String {
@@ -1295,10 +1313,11 @@ mod tests {
     #[test]
     fn web_search_redaction_sentinel_cannot_reproduce_credential() {
         const SENTINEL_OVERLAPPING_KEY: &str = "red";
+        const SHAPED_SECRET: &str = "SYNTHETIC-SHAPED-SECRET";
         let reflected = WebSearchResult::try_new(WebSearchResultFields {
             title: format!("x{SENTINEL_OVERLAPPING_KEY}x"),
             url: format!("{FIXTURE_RESULT_URL}?q={SENTINEL_OVERLAPPING_KEY}"),
-            snippet: format!("y{SENTINEL_OVERLAPPING_KEY}y"),
+            snippet: format!("y{SENTINEL_OVERLAPPING_KEY}y api_key={SHAPED_SECRET}"),
         })
         .expect("reflected fixture result is admitted");
         let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
@@ -1313,6 +1332,23 @@ mod tests {
         };
 
         assert!(!content.contains(SENTINEL_OVERLAPPING_KEY));
+        assert!(!content.contains(SHAPED_SECRET));
+    }
+
+    /// INV-035: fixed JSON member names cannot collide with the credential in
+    /// completed evidence, even when provider fields contain no credential.
+    #[test]
+    fn web_search_final_success_payload_rejects_credential_collision() {
+        const RENDERED_MEMBER_COLLISION_KEY: &str = "results";
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            RENDERED_MEMBER_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response_with_result_count(1), &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
     }
 
     /// INV-035: JSON-aware error sanitization decodes an escaped credential
@@ -1343,6 +1379,27 @@ mod tests {
 
         assert!(!detail.as_str().contains(SYNTHETIC_KEY));
         assert!(detail.as_str().ends_with(TRUNCATION_SUFFIX));
+    }
+
+    /// INV-035: fixed provider-error prose cannot collide with the credential
+    /// after the provider body has been sanitized.
+    #[test]
+    fn web_search_final_error_detail_rejects_credential_collision() {
+        const ERROR_PREFIX_COLLISION_KEY: &str = "provider";
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            ERROR_PREFIX_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+        let error = WebSearchProviderError::new(
+            PROVIDER_REJECTION_STATUS,
+            br#"{"message":"synthetic rejection"}"#.to_vec(),
+        )
+        .expect("fixture error body is bounded");
+
+        assert_eq!(
+            provider_error_detail(error, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
     }
 
     /// The Brave provider mapping owns the exact endpoint and bounded web-only
