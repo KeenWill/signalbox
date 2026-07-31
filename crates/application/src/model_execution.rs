@@ -944,15 +944,6 @@ pub enum ModelCallExecutionOutcome {
     Checkpointed(ModelCallId),
     /// Target resolution failed before call creation.
     TargetUnavailable(Box<FailedModelCallTurn>),
-    /// Compatibility-only result retained for existing exhaustive callers.
-    ///
-    /// Atomic steering consumption means this execution service no longer
-    /// produces the variant; callers must not treat it as a reachable
-    /// preparation-blocked state.
-    PendingSteering {
-        /// The earliest accepted input proving that steering remains pending.
-        accepted_input: AcceptedInputId,
-    },
     /// A trustworthy local capability failure closed the prepared call.
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
     /// A retained capability failure's earlier commit was proven to have landed.

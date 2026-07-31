@@ -861,7 +861,6 @@ where
                     ModelCallExecutionOutcome::Checkpointed(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
-                    | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
@@ -994,7 +993,6 @@ where
                 match model_outcome {
                     ModelCallExecutionOutcome::Checkpointed(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
-                    | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_) => {
                         return Ok(());
@@ -1144,7 +1142,6 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     ModelCallExecutionOutcome::Checkpointed(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
-                    | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
