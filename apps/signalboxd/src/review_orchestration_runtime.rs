@@ -3,9 +3,9 @@
 use std::{fmt::Write as _, future::Future};
 
 use signalbox_application::{
-    OperatorFailureClass, ReviewConcernOutcome, ReviewConcernSuccess, ReviewConcernWork,
-    ReviewImportOutcome, ReviewImportedContextEvidence, ReviewJudgmentEffectOutcome,
-    ReviewJudgmentEffectSuccess, ReviewJudgmentEffectWork, ReviewJudgmentPlan,
+    ReviewConcernOutcome, ReviewConcernSuccess, ReviewConcernWork, ReviewImportOutcome,
+    ReviewImportedContextEvidence, ReviewJudgmentEffectOutcome, ReviewJudgmentEffectSuccess,
+    ReviewJudgmentEffectWork, ReviewJudgmentPlan,
     ReviewJudgmentPlanMember as ApplicationPlanMember, ReviewOrchestrationAttempt,
     ReviewOrchestrationAttemptId, ReviewOrchestrationAttemptStore, ReviewOrchestrationOutcome,
     ReviewOrchestrationPassRunner, ReviewOrchestrationService, ReviewOrchestrationServiceError,
@@ -15,15 +15,16 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     DurableCommandId, ReviewExternalLinkId, ReviewFinding, ReviewFindingEvent, ReviewFindingId,
-    ReviewFindingRef, ReviewKey, ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewRunEvidence,
-    ReviewTargetId, ReviewText, SessionId, SessionTemplateName,
+    ReviewFindingRef, ReviewKey, ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
+    ReviewPassState, ReviewRunEvidence, ReviewRunState, ReviewTargetId, ReviewText,
+    ReviewWorkflowKind, SessionId, SessionTemplateName,
 };
 use signalbox_persistence::{
     review_orchestration::{
         PostgresReviewOrchestrationStore, ReviewOrchestrationCommand,
         ReviewOrchestrationCommandClaim, ReviewOrchestrationCommandKind,
         ReviewOrchestrationCommandResult, ReviewOrchestrationCurrentStage,
-        ReviewOrchestrationStage, ReviewOrchestrationStoreError,
+        ReviewOrchestrationSnapshotFacts, ReviewOrchestrationStage, ReviewOrchestrationStoreError,
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
     session::{SessionRepository, SessionRepositoryError},
@@ -69,40 +70,20 @@ pub(crate) enum ReviewOrchestrationInternalCause {
     ServiceContract,
 }
 
-impl ReviewOrchestrationInternalCause {
-    pub(crate) const fn failure_class(self) -> OperatorFailureClass {
-        match self {
-            Self::StoreCorruption | Self::WorkflowCorruption | Self::SessionCorruption => {
-                OperatorFailureClass::FailClosedCorruption
-            }
-            Self::ServiceContract => OperatorFailureClass::CallerOrHubBug,
-        }
-    }
-
-    pub(crate) const fn cause_code(self) -> &'static str {
-        match self {
-            Self::StoreCorruption => "review_orchestration_store_corruption",
-            Self::WorkflowCorruption => "review_orchestration_workflow_corruption",
-            Self::SessionCorruption => "review_orchestration_session_corruption",
-            Self::ServiceContract => "review_orchestration_service_contract",
-        }
-    }
-}
-
 pub(crate) async fn execute_review_orchestration_request(
     request: ClientRequest,
     semantic_digest: [u8; 32],
     pool: PgPool,
     templates: &SessionTemplateConfiguration,
 ) -> Result<ServerMessage, ReviewOrchestrationRuntimeError> {
-    let prepared = prepare_mutation(request, &pool, templates).await?;
-    let store = PostgresReviewOrchestrationStore::new(pool);
+    let (command_id, attempt_id, kind) = mutation_identity(&request)?;
+    let store = PostgresReviewOrchestrationStore::new(pool.clone());
     let claim = store
         .begin_command(ReviewOrchestrationCommand {
-            command_id: prepared.command_id,
+            command_id,
             semantic_digest,
-            attempt: prepared.attempt.id(),
-            kind: prepared.kind,
+            attempt: attempt_id,
+            kind,
         })
         .await
         .map_err(map_store_error)?;
@@ -115,6 +96,14 @@ pub(crate) async fn execute_review_orchestration_request(
         }
         ReviewOrchestrationCommandClaim::New(guard) => guard,
     };
+
+    let prepared = prepare_mutation(request, &pool, templates).await?;
+    if prepared.command_id != command_id
+        || prepared.attempt.id() != attempt_id
+        || prepared.kind != kind
+    {
+        return Err(internal(ReviewOrchestrationInternalCause::ServiceContract));
+    }
     if let Some(current) = prepared.current {
         prevalidate_stage(prepared.kind, current)?;
     }
@@ -134,14 +123,14 @@ pub(crate) async fn execute_review_orchestration_request(
             store
                 .current_stage(prepared.attempt.id())
                 .await
-                .map_err(map_store_error)?
+                .map_err(map_post_effect_store_error)?
                 .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?,
         )
     };
     let progress = store
         .load_progress(prepared.attempt.id())
         .await
-        .map_err(map_store_error)?
+        .map_err(map_post_effect_store_error)?
         .ok_or(internal(ReviewOrchestrationInternalCause::StoreCorruption))?;
     let result = guard
         .record(ReviewOrchestrationCommandResult {
@@ -150,7 +139,7 @@ pub(crate) async fn execute_review_orchestration_request(
             progress,
         })
         .await
-        .map_err(map_store_error)?;
+        .map_err(map_post_effect_store_error)?;
     Ok(message_from_recorded(result))
 }
 
@@ -164,15 +153,15 @@ pub(crate) async fn read_review_orchestration_request(
         return Err(ReviewOrchestrationRuntimeError::InvalidRequest);
     };
     let store = PostgresReviewOrchestrationStore::new(pool);
-    let attempt = store
-        .load_attempt(ReviewOrchestrationAttemptId::from_uuid(
+    let facts = store
+        .load_snapshot(ReviewOrchestrationAttemptId::from_uuid(
             attempt_id.into_uuid(),
         ))
         .await
         .map_err(map_store_error)?
         .ok_or(ReviewOrchestrationRuntimeError::NotFound)?;
     Ok(ServerMessage::ReviewOrchestration {
-        snapshot: build_snapshot(&store, &attempt).await?,
+        snapshot: build_snapshot(&facts)?,
     })
 }
 
@@ -357,11 +346,13 @@ async fn prepare_mutation(
         .await
         .map_err(map_store_error)?
         .ok_or(ReviewOrchestrationRuntimeError::NotFound)?;
+    authenticate_frozen_attempt_templates(templates, &attempt)?;
     let current = store
         .current_stage(attempt_id)
         .await
         .map_err(map_store_error)?
         .ok_or(ReviewOrchestrationRuntimeError::NotFound)?;
+    prevalidate_submission(&store, &attempt, &request).await?;
     let submission = build_submission(request, pool, templates, &attempt).await?;
     Ok(PreparedMutation {
         command_id,
@@ -383,6 +374,15 @@ fn mutation_identity(
     ReviewOrchestrationRuntimeError,
 > {
     let (command, attempt, kind) = match request {
+        ClientRequest::StartReviewOrchestration {
+            command_id,
+            attempt_id,
+            ..
+        } => (
+            *command_id,
+            *attempt_id,
+            ReviewOrchestrationCommandKind::Start,
+        ),
         ClientRequest::RecordReviewImportOutcome {
             command_id,
             attempt_id,
@@ -446,6 +446,66 @@ fn mutation_identity(
     ))
 }
 
+async fn prevalidate_submission(
+    store: &PostgresReviewOrchestrationStore,
+    attempt: &ReviewOrchestrationAttempt,
+    request: &ClientRequest,
+) -> Result<(), ReviewOrchestrationRuntimeError> {
+    match request {
+        ClientRequest::RecordReviewConcernOutcome { concern, .. } => {
+            let concern = ReviewKey::try_new(concern.clone())
+                .map_err(|_| ReviewOrchestrationRuntimeError::InvalidRequest)?;
+            if !attempt
+                .concerns()
+                .iter()
+                .any(|expected| expected.key() == &concern)
+            {
+                return Err(ReviewOrchestrationRuntimeError::Rejected);
+            }
+            let claims = store
+                .load_concern_claims(attempt.id())
+                .await
+                .map_err(map_store_error)?;
+            if claims
+                .iter()
+                .find(|claim| claim.concern() == &concern)
+                .is_some_and(|claim| {
+                    !matches!(claim.outcome(), ReviewConcernOutcome::Failed { .. })
+                })
+            {
+                return Err(ReviewOrchestrationRuntimeError::Rejected);
+            }
+        }
+        ClientRequest::RecordReviewJudgmentEffect { finding_id, .. } => {
+            let plan = store
+                .load_judgment_plan(attempt.id())
+                .await
+                .map_err(map_store_error)?
+                .ok_or(ReviewOrchestrationRuntimeError::Rejected)?;
+            let applied = store
+                .load_applied_judgment_effects(attempt.id())
+                .await
+                .map_err(map_store_error)?;
+            if applied.len() > plan.members().len()
+                || !applied.iter().zip(plan.members()).all(|(actual, member)| {
+                    actual.attempt() == attempt.id() && actual.finding() == member.finding()
+                })
+            {
+                return Err(internal(ReviewOrchestrationInternalCause::StoreCorruption));
+            }
+            let expected = plan
+                .members()
+                .get(applied.len())
+                .ok_or(ReviewOrchestrationRuntimeError::Rejected)?;
+            if expected.finding().finding().into_uuid() != finding_id.into_uuid() {
+                return Err(ReviewOrchestrationRuntimeError::Rejected);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn prevalidate_stage(
     kind: ReviewOrchestrationCommandKind,
     current: ReviewOrchestrationCurrentStage,
@@ -478,6 +538,47 @@ fn prevalidate_stage(
     admitted
         .then_some(())
         .ok_or(ReviewOrchestrationRuntimeError::Rejected)
+}
+
+fn authenticate_frozen_attempt_templates(
+    templates: &SessionTemplateConfiguration,
+    attempt: &ReviewOrchestrationAttempt,
+) -> Result<(), ReviewOrchestrationRuntimeError> {
+    let selection = ReviewLibrarySelection {
+        concern_set_version: attempt.concern_set_version().clone(),
+        stages: ReviewStageTemplateSelection {
+            import: configured_template_name(REVIEW_IMPORT_TEMPLATE_NAME)?,
+            judgment: configured_template_name(REVIEW_JUDGMENT_TEMPLATE_NAME)?,
+            repair: configured_template_name(REVIEW_REPAIR_TEMPLATE_NAME)?,
+            publication: configured_template_name(REVIEW_PUBLICATION_TEMPLATE_NAME)?,
+        },
+        concerns: REVIEW_CONCERNS
+            .iter()
+            .map(|(key, template)| {
+                Ok(ReviewConcernTemplateSelection {
+                    key: ReviewKey::try_new((*key).to_owned())
+                        .map_err(|_| internal(ReviewOrchestrationInternalCause::ServiceContract))?,
+                    template: configured_template_name(template)?,
+                })
+            })
+            .collect::<Result<_, ReviewOrchestrationRuntimeError>>()?,
+    };
+    let current = templates
+        .resolve_review_attempt(attempt.id(), attempt.target(), &selection)
+        .map_err(|_| ReviewOrchestrationRuntimeError::Rejected)?;
+    if current.stage_templates() != attempt.stage_templates()
+        || current.concerns() != attempt.concerns()
+    {
+        return Err(ReviewOrchestrationRuntimeError::Rejected);
+    }
+    Ok(())
+}
+
+fn configured_template_name(
+    value: &str,
+) -> Result<SessionTemplateName, ReviewOrchestrationRuntimeError> {
+    SessionTemplateName::try_new(value.to_owned())
+        .map_err(|_| internal(ReviewOrchestrationInternalCause::ServiceContract))
 }
 
 async fn build_submission(
@@ -580,6 +681,11 @@ async fn build_submission(
                 ),
                 None => None,
             };
+            if let Some((pass, run)) = &pass
+                && outcome != ReviewConcernTerminalOutcome::Succeeded
+            {
+                validate_incomplete_concern_evidence(attempt, pass, *run, outcome)?;
+            }
             let value = match outcome {
                 ReviewConcernTerminalOutcome::Succeeded => {
                     let (pass, run) =
@@ -737,6 +843,50 @@ async fn build_submission(
         }
         _ => Err(ReviewOrchestrationRuntimeError::InvalidRequest),
     }
+}
+
+fn validate_incomplete_concern_evidence(
+    attempt: &ReviewOrchestrationAttempt,
+    pass: &ReviewPassEvidence,
+    run: ReviewRunEvidence,
+    outcome: ReviewConcernTerminalOutcome,
+) -> Result<(), ReviewOrchestrationRuntimeError> {
+    let pass_reference = pass.reference();
+    let canonical_ancestry = pass_reference.target() == attempt.target()
+        && run.reference().target() == attempt.target()
+        && pass_reference.run() == run.reference()
+        && pass.policy() == attempt.policy()
+        && run.policy() == attempt.policy()
+        && pass.kind() == ReviewPassKind::ReadOnlyReview
+        && run.workflow() == ReviewWorkflowKind::ReadOnlyReview;
+    let matching_terminal_state = match outcome {
+        ReviewConcernTerminalOutcome::Failed => {
+            matches!(pass.state(), ReviewPassState::Failed { .. })
+                && run.state()
+                    == (ReviewRunState::Failed {
+                        failed_pass: pass_reference,
+                    })
+        }
+        ReviewConcernTerminalOutcome::Blocked => {
+            matches!(pass.state(), ReviewPassState::Blocked { .. })
+                && run.state()
+                    == (ReviewRunState::Blocked {
+                        blocking_pass: pass_reference,
+                    })
+        }
+        ReviewConcernTerminalOutcome::Cancelled => {
+            matches!(pass.state(), ReviewPassState::Cancelled { .. })
+                && run.state()
+                    == (ReviewRunState::Cancelled {
+                        last_pass: Some(pass_reference),
+                    })
+        }
+        ReviewConcernTerminalOutcome::Succeeded => false,
+    };
+    if !canonical_ancestry || !matching_terminal_state {
+        return Err(ReviewOrchestrationRuntimeError::Rejected);
+    }
+    Ok(())
 }
 
 async fn build_repair_outcome(
@@ -935,35 +1085,16 @@ fn find_event(
     Ok(event)
 }
 
-async fn build_snapshot(
-    store: &PostgresReviewOrchestrationStore,
-    attempt: &ReviewOrchestrationAttempt,
+fn build_snapshot(
+    facts: &ReviewOrchestrationSnapshotFacts,
 ) -> Result<ReviewOrchestrationSnapshot, ReviewOrchestrationRuntimeError> {
-    let current = store
-        .current_stage(attempt.id())
-        .await
-        .map_err(map_store_error)?
-        .ok_or(ReviewOrchestrationRuntimeError::NotFound)?;
-    let claims = store
-        .load_concern_claims(attempt.id())
-        .await
-        .map_err(map_store_error)?;
-    let plan = store
-        .load_judgment_plan(attempt.id())
-        .await
-        .map_err(map_store_error)?;
-    let effects = store
-        .load_applied_judgment_effects(attempt.id())
-        .await
-        .map_err(map_store_error)?;
-    let repairs = store
-        .load_repair_outcomes(attempt.id())
-        .await
-        .map_err(map_store_error)?;
-    let publications = store
-        .load_publication_outcomes(attempt.id())
-        .await
-        .map_err(map_store_error)?;
+    let attempt = &facts.attempt;
+    let current = facts.current_stage;
+    let claims = &facts.concern_claims;
+    let plan = &facts.judgment_plan;
+    let effects = &facts.applied_judgment_effects;
+    let repairs = &facts.repair_outcomes;
+    let publications = &facts.publication_outcomes;
     let concerns = attempt
         .concerns()
         .iter()
@@ -1216,6 +1347,36 @@ fn map_store_error(error: ReviewOrchestrationStoreError) -> ReviewOrchestrationR
     }
 }
 
+fn map_post_effect_store_error(
+    error: ReviewOrchestrationStoreError,
+) -> ReviewOrchestrationRuntimeError {
+    match error {
+        ReviewOrchestrationStoreError::Database(_)
+        | ReviewOrchestrationStoreError::CommitAmbiguous(_) => {
+            ReviewOrchestrationRuntimeError::Unavailable {
+                commit_ambiguous: true,
+            }
+        }
+        ReviewOrchestrationStoreError::Workflow(error) => map_post_effect_workflow_error(error),
+        ReviewOrchestrationStoreError::Corruption(_) => {
+            internal(ReviewOrchestrationInternalCause::StoreCorruption)
+        }
+    }
+}
+
+fn map_post_effect_workflow_error(
+    error: ReviewWorkflowStoreError,
+) -> ReviewOrchestrationRuntimeError {
+    match error {
+        ReviewWorkflowStoreError::Database(_) | ReviewWorkflowStoreError::CommitAmbiguous(_) => {
+            ReviewOrchestrationRuntimeError::Unavailable {
+                commit_ambiguous: true,
+            }
+        }
+        error => map_workflow_error(error),
+    }
+}
+
 fn map_workflow_error(error: ReviewWorkflowStoreError) -> ReviewOrchestrationRuntimeError {
     match error {
         ReviewWorkflowStoreError::Database(_) => ReviewOrchestrationRuntimeError::Unavailable {
@@ -1259,7 +1420,7 @@ fn map_service_error(
     error: ReviewOrchestrationServiceError<ReviewOrchestrationStoreError, RunnerError>,
 ) -> ReviewOrchestrationRuntimeError {
     match error {
-        ReviewOrchestrationServiceError::Store(error) => map_store_error(error),
+        ReviewOrchestrationServiceError::Store(error) => map_post_effect_store_error(error),
         ReviewOrchestrationServiceError::DurableConflict => {
             ReviewOrchestrationRuntimeError::ConflictingReuse
         }
