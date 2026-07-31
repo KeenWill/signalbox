@@ -3,7 +3,7 @@
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface at commit `763df266`. This page is the normative boundary between a
+surface at commit `4ab5807d`. This page is the normative boundary between a
 local client process and `signalboxd`; domain values, PostgreSQL records, and
 wire messages remain distinct representations.
 
@@ -311,13 +311,19 @@ admits either. The required counts are `finding_count`, `judgment_member_count`,
 `publication_published_count`. Each is at most 1,024; judgment members cannot
 exceed findings, and applied, fixed, or published counts cannot exceed judgment
 members. The snapshot repeats the same nonempty unique one-through-32 concern
-inventory and checked concern-set key; impossible server projections are
-malformed. Snapshot construction consumes two units from the shared
-pool-capacity budget, leaving two connections reserved for non-snapshot work; a
-pool with fewer than four configured connections cannot start the process
-listener. The database-global snapshot admission loser rolls back its
-transaction before an exponential retry wait that begins at 10 ms and is capped
-at 100 ms.
+inventory and checked concern-set key. Before import every concern is pending.
+Awaiting concerns requires a pending member; fan-out incomplete requires a
+complete inventory with at least one non-success; every state from awaiting
+judgment onward requires every concern to have succeeded. Judgment-effect states
+require strictly fewer applied effects than plan members, while repair and later
+states require equality. Counts belonging to a later barrier must remain zero
+until that barrier can exist. Any state, status, or count combination violating
+those relations is an impossible server projection and is malformed. Snapshot
+construction consumes two units from the shared pool-capacity budget, leaving
+two connections reserved for non-snapshot work; a pool with fewer than four
+configured connections cannot start the process listener. The database-global
+snapshot admission loser rolls back its transaction before an exponential retry
+wait that begins at 10 ms and is capped at 100 ms.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the
@@ -410,22 +416,22 @@ and file content. Equality is the closed operation kind plus SHA-256 of the
 validated semantic request object; frame version and request identity are
 excluded. Before hashing, the daemon canonicalizes a complete
 `record_review_findings` request into finding-identity order, so array order
-does not distinguish the same semantic inventory. The typed append-only receipt
-stores the complete stable success response. A recorded receipt is inspected
-before mutable aggregate-state preconditions, so an equal retry returns that
-response even after the operation changed the aggregate state. A recorded start
-receipt admits only its original command identity. If the immutable attempt
-committed but that receipt did not, a semantically equal start reconstructs
-`review_orchestration_started`; a different frozen attempt fails closed. Each
-aggregate effect uses its owning store transaction. Fresh run admission creates
-its run and sole pass in one transaction; recovery also recognizes and completes
-a matching run-only intermediate committed by the earlier multi-transaction
-implementation. This atomicity is the run-admission contract. If an effect
-commits before the receipt and the process exits, an equal retry recognizes the
-exact complete effect, records the missing receipt, and returns the stable
-result. Reusing the command identity for a different digest, operation kind,
-aggregate payload, complete inventory, event, or attachment fails closed. This
-representation is the durable review-command contract.
+does not distinguish the same semantic inventory. An orchestration effect is
+followed, while the daemon still holds exclusive review-mutation admission, by
+an append-only recovery result containing the operation-derived stage and
+progress. Only then does the daemon commit the typed owner-global receipt. The
+two records constrain operation kind, stage, and constituent progress as one
+coherent shape. If receipt commit is lost, an equal retry materializes it from
+the recovery result and returns that original operation-stage response rather
+than the aggregate's later state. A recorded receipt is inspected before mutable
+aggregate-state preconditions. A semantically equal start similarly preserves
+`review_orchestration_started`; a different frozen attempt fails closed. Fresh
+run admission creates its run and sole pass in one transaction; recovery also
+recognizes and completes a matching run-only intermediate committed by the
+earlier multi-transaction implementation. Reusing a command identity for a
+different digest, operation kind, aggregate payload, complete inventory, event,
+or attachment fails closed. This representation is the durable review-command
+contract.
 
 The daemon admits one review mutation at a time and retains that admission
 through claim inspection, aggregate effect recovery, and receipt recording. A
@@ -672,9 +678,12 @@ The complete-pass receipt accepts only the terminal pass states `succeeded`,
 `failed`, `blocked`, and `cancelled`. Generic `succeeded` completion refuses a
 read-only-review pass; `record_review_findings` is its only success admission,
 including for an empty inventory. Finding-event status is the exact state
-derived from the submitted event. Every orchestration stage seal returns the
-same attempt identity and the resulting closed orchestration state; a client
-refuses a state outside the stages that operation can reach.
+derived from the submitted event. Every orchestration acknowledgement must name
+the same attempt and the exact state implied by the submitted facts: incomplete
+concerns cannot reach judgment, an incomplete judgment effect is
+`judgment_incomplete`, any blocked repair is `repair_incomplete`, and
+publication is `complete` exactly when every submitted member is published. The
+terminal refuses any contradictory acknowledgement.
 
 Single-aggregate reads return `review_target { target }`,
 `review_run { run, pass }`, `review_finding { finding }`, or
@@ -1690,12 +1699,13 @@ empty and seals the read-only pass exactly once; `record-finding` remains the
 one-finding convenience form. Every wrapper and nested protocol object denies
 unknown members; canonical UUID, decimal, digest, tag, nullable-member,
 uniqueness, and outcome-correlation rules remain those of the wire request. The
-terminal reads at most 8 MiB plus one byte, refuses an oversized or malformed
-file before printing a command identity, and then lets ordinary request
-validation enforce the 32-concern and 1,024-member bounds before connecting.
-Exact ambiguous retry therefore needs the same file bytes semantically decoded
-to the same closed inventory, as well as the same scalar arguments and printed
-command identity.
+terminal reads at most three quarters of the 8 MiB frame cap plus one byte and
+refuses a file reaching that extra byte before printing a command identity. The
+reserved quarter covers the request envelope and re-encoding overhead; exact
+frame encoding remains authoritative. Ordinary request validation then enforces
+the 32-concern and 1,024-member bounds before connecting. Exact ambiguous retry
+therefore needs the same file bytes semantically decoded to the same closed
+inventory, as well as the same scalar arguments and printed command identity.
 
 Orchestration reads validate the selected attempt and the protocol-level frozen
 inventory correlations before output. The first line reports attempt, target,

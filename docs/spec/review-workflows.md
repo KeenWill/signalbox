@@ -10,7 +10,7 @@ is verified through PR #343 (`agent/review-orchestrator`). The current
 implementation also provides the closed concern library, relational
 orchestration attempt and command-receipt store, client-fed daemon adapter, and
 process and terminal surfaces described below, verified against commit
-`763df266`. This page owns review targets, workflow runs, session-backed passes,
+`4ab5807d`. This page owns review targets, workflow runs, session-backed passes,
 findings, external links, their relational store, and application orchestration.
 Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
@@ -692,6 +692,9 @@ absent-to-bound result, change atomically under row lock, and database checks
 close every nullable shape. Immutable content and history tables reject update
 and delete. Every workflow table rejects `TRUNCATE`.
 
+The coherent snapshot lock inventory follows writer acquisition order: every
+orchestration parent or seal precedes the member or outcome rows it owns.
+
 Store loaders read a complete aggregate projection. The adapter decodes closed
 discriminators and assembles domain reconstitution inputs; the domain validates
 ownership, state shape, event order, and transitions. A missing referenced
@@ -710,10 +713,15 @@ rather than an inferred partial result.
 
 Each orchestration mutation also uses an owner-global durable command receipt
 that binds command identity to the semantic request digest, closed operation
-kind, and attempt. The recorded result retains the resulting stage and progress
-counts. Equal replay returns that result, distinct reuse conflicts, and a retry
-after aggregate state committed but before its receipt was recorded recognizes
-the exact completed effect before recording the missing receipt.
+kind, and attempt. After the aggregate effect commits, the adapter appends a
+recovery result containing the operation-derived stage and progress before it
+attempts the owner-global receipt. Serial review-mutation admission prevents a
+later stage from beginning before that recovery result exists. The receipt and
+recovery record have database constraints relating operation kind, stage, and
+constituent progress; a contradictory record is refused. Equal replay returns
+the recorded result, distinct reuse conflicts, and a retry whose receipt was
+lost materializes that receipt from the recovery result rather than deriving an
+answer from later aggregate state.
 
 The review-workflow store creates and loads complete aggregates, idempotently
 reserves external links, attaches external identifiers, appends external
@@ -755,17 +763,16 @@ a domain-reconstitutable aggregate; a process crash cannot expose a state that
 the store's own loaders classify as corruption.
 
 Every review mutation carries an owner-global command identity. The daemon binds
-that identity to the digest and closed kind of the validated semantic request
-and records an append-only typed receipt. Aggregate effects may commit before
-the receipt; an equal retry recognizes the exact complete effect, records a
-missing receipt, and returns the stable result. Once recorded, the receipt is
-inspected before mutable aggregate-state validation and carries every fact
-needed to return the original response, so a later aggregate state cannot turn
-an equal retry into a rejection. When a receipt is absent after the immutable
-attempt committed, only a semantically equal start can reconstruct the original
-`Started` answer; a different frozen attempt conflicts. Distinct
-command-identity reuse with a recorded receipt fails closed. This representation
-is the durable review-command contract.
+that identity to the digest and closed kind of the validated semantic request.
+The operation answer is derived from the submitted outcome and its completed
+barrier facts, then stored in an append-only recovery record before the typed
+owner-global receipt. Because the daemon retains exclusive review-mutation
+admission through both writes, a later stage cannot overtake the recovery
+record. An equal retry with a lost receipt materializes the receipt from that
+record and returns the original operation-stage answer even after the aggregate
+later advances. Recorded receipts are inspected before mutable aggregate-state
+validation; distinct command-identity reuse fails closed. This representation is
+the durable review-command contract.
 
 The terminal client exposes target creation, run admission and activation,
 single-finding read-only completion, finding listing, target, run, and finding
