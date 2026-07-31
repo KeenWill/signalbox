@@ -430,6 +430,40 @@ impl JsonSchema for FilePath {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(try_from = "u32")]
+struct PositiveInlineLine(u32);
+
+impl PositiveInlineLine {
+    const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for PositiveInlineLine {
+    type Error = InvalidGitHubArguments;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        (value >= MIN_INLINE_COMMENT_LINE)
+            .then_some(Self(value))
+            .ok_or(InvalidGitHubArguments)
+    }
+}
+
+impl JsonSchema for PositiveInlineLine {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("PositiveInlineLine")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type": "integer", "minimum": MIN_INLINE_COMMENT_LINE})
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// Optional inline comment in a review.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -437,8 +471,7 @@ pub struct InlineReviewComment {
     /// Repository-relative path.
     path: FilePath,
     /// Positive diff line.
-    #[schemars(range(min = MIN_INLINE_COMMENT_LINE))]
-    line: u32,
+    line: PositiveInlineLine,
     /// Diff side.
     side: DiffSide,
     /// Comment text.
@@ -453,7 +486,7 @@ impl InlineReviewComment {
 
     /// Returns the line.
     pub const fn line(&self) -> u32 {
-        self.line
+        self.line.get()
     }
 
     /// Returns the side.
@@ -525,10 +558,6 @@ impl PublishReviewArguments {
                 PublishReviewEvent::Comment => self.body.is_some(),
                 PublishReviewEvent::RequestChanges => self.body.is_some(),
             }
-            && self
-                .comments
-                .iter()
-                .all(|comment| comment.line >= MIN_INLINE_COMMENT_LINE)
     }
 }
 
@@ -1148,7 +1177,7 @@ fn truncate_review_threads_result(
     let mut remaining = MAX_RESULT_BYTES
         .checked_sub(empty_size)
         .ok_or(InvalidGitHubArguments)?;
-    let mut retained_threads = Vec::new();
+    let mut reserved_threads = Vec::new();
     for mut thread in threads {
         let (comments, comments_were_truncated) = {
             let thread_object = thread.as_object_mut().ok_or(InvalidGitHubArguments)?;
@@ -1169,7 +1198,7 @@ fn truncate_review_threads_result(
             );
             (comments, comments_were_truncated)
         };
-        let thread_separator = usize::from(!retained_threads.is_empty());
+        let thread_separator = usize::from(!reserved_threads.is_empty());
         let thread_size = serde_json::to_vec(&thread)
             .map_err(|_| InvalidGitHubArguments)?
             .len();
@@ -1177,6 +1206,10 @@ fn truncate_review_threads_result(
             break;
         }
         remaining -= thread_separator + thread_size;
+        reserved_threads.push((thread, comments, comments_were_truncated));
+    }
+    let mut retained_threads = Vec::with_capacity(reserved_threads.len());
+    for (mut thread, comments, comments_were_truncated) in reserved_threads {
         let total_comments = comments.len();
         let mut retained_comments = Vec::new();
         for comment in comments {
@@ -2386,6 +2419,9 @@ mod tests {
     const DIFF_FILES_FOR_RESULT_OVERFLOW: usize = 64;
     const LAST_OVERFLOW_FILE_INDEX: usize = DIFF_FILES_FOR_RESULT_OVERFLOW - 1;
     const COMMENTS_FOR_RESULT_OVERFLOW: usize = 16;
+    const THREADS_FOR_RESULT_OVERFLOW: usize = PAGE_SIZE;
+    const COMMENT_BODY_FOR_RESERVATION_BYTES: usize = MAX_TEXT_BYTES / 8;
+    const ZERO_INLINE_COMMENT_LINE: u32 = MIN_INLINE_COMMENT_LINE - 1;
     const AGGREGATE_PATCH_BYTES: usize = MAX_TEXT_BYTES / 4;
     const ITEMS_BEYOND_PAGE_BOUND: usize = PAGE_SIZE + 1;
     const OPAQUE_ID_BYTES_BEYOND_BOUND: usize = MAX_OPAQUE_ID_BYTES + 1;
@@ -2528,6 +2564,18 @@ mod tests {
         assert!(!policy.admits(&subdomain));
         assert!(!policy.admits(&plaintext));
         assert!(!policy.admits(&other_port));
+    }
+
+    #[test]
+    fn inline_comment_deserialization_rejects_zero_line() {
+        let value = serde_json::json!({
+            "path": FILE_PATH,
+            "line": ZERO_INLINE_COMMENT_LINE,
+            "side": "right",
+            "body": REVIEW_COMMENT_BODY
+        });
+
+        assert!(serde_json::from_value::<InlineReviewComment>(value).is_err());
     }
 
     #[test]
@@ -2776,6 +2824,39 @@ mod tests {
         );
         assert!(!retained_comments.is_empty());
         assert!(retained_comments.len() < COMMENTS_FOR_RESULT_OVERFLOW);
+    }
+
+    #[test]
+    fn review_thread_truncation_reserves_later_thread_metadata() {
+        let mut result = normalize_threads(&threads_response()).expect("recording normalizes");
+        let mut first_thread = result["threads"][0].clone();
+        let mut comment = first_thread["comments"][0].clone();
+        comment["body"] =
+            serde_json::Value::String(PATCH_FILLER.repeat(COMMENT_BODY_FOR_RESERVATION_BYTES));
+        first_thread["comments"] =
+            serde_json::Value::Array(vec![comment; THREADS_FOR_RESULT_OVERFLOW]);
+        let mut metadata_only_thread = first_thread.clone();
+        metadata_only_thread["comments"] = serde_json::Value::Array(Vec::new());
+        let mut threads = vec![metadata_only_thread; THREADS_FOR_RESULT_OVERFLOW];
+        threads[0] = first_thread;
+        result["threads"] = serde_json::Value::Array(threads);
+
+        assert!(
+            serde_json::to_vec(&result)
+                .expect("fixture serializes")
+                .len()
+                > MAX_RESULT_BYTES
+        );
+        truncate_review_threads_result(&mut result).expect("thread result can be bounded");
+
+        assert_eq!(
+            result["threads"].as_array().map(Vec::len),
+            Some(THREADS_FOR_RESULT_OVERFLOW)
+        );
+        assert_eq!(
+            result["threads"][0]["comments_truncated"],
+            serde_json::Value::Bool(true)
+        );
     }
 
     #[test]
