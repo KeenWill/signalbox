@@ -23,9 +23,11 @@ mod tool_loop;
 mod tool_loop_ports;
 
 pub use conversation_import::{
-    ImportConversationError, ImportConversationOutcome, ImportConversationService,
-    ImportedConversationConverter, ImportedConversationIdGenerator, ImportedConversationStore,
-    ImportedConversationStoreOutcome, UuidV7ImportedConversationIdGenerator,
+    ImportConversationError, ImportConversationOutcome, ImportConversationReport,
+    ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,
+    ImportedConversationIdGenerator, ImportedConversationSkippedRecord, ImportedConversationStore,
+    ImportedConversationStoreOutcome, ResilientImportedConversationConverter,
+    UuidV7ImportedConversationIdGenerator,
 };
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,

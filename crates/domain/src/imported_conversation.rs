@@ -2177,21 +2177,7 @@ fn normalized_record_type(
     let ImportedStructuredValue::Object(members) = normalized else {
         return Err(());
     };
-    let mut matches = members
-        .iter()
-        .filter(|member| member.name().as_str() == "type");
-    let value = matches.next();
-    if matches.next().is_some() {
-        return Err(());
-    }
-    match value.map(ImportedStructuredObjectMember::value) {
-        None => Ok(ImportedSourceAttestation::NotAttested),
-        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
-        Some(ImportedStructuredValue::String(value)) => {
-            Ok(ImportedSourceAttestation::Attested(value.clone()))
-        }
-        Some(_) => Err(()),
-    }
+    imported_text_attestation(members, "type").map_err(|_| ())
 }
 
 fn normalized_record_speaker(
@@ -3117,57 +3103,122 @@ fn projected_source_metadata(
     ))
 }
 
-fn projected_text_attestation(
+/// Content-silent failure to read one consulted imported structured field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImportedStructuredFieldError;
+
+impl fmt::Display for ImportedStructuredFieldError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("imported structured field was duplicated or had an invalid shape")
+    }
+}
+
+impl Error for ImportedStructuredFieldError {}
+
+fn structured_field_error() -> ImportedStructuredFieldError {
+    ImportedStructuredFieldError
+}
+
+/// Selects at most one exact-name member, rejecting a consulted duplicate.
+pub fn unique_imported_structured_field<'members>(
+    members: &'members [ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<Option<&'members ImportedStructuredValue>, ImportedStructuredFieldError> {
+    let mut found = None;
+    for member in members {
+        if member.name().as_str() == name {
+            if found.is_some() {
+                return Err(structured_field_error());
+            }
+            found = Some(member.value());
+        }
+    }
+    Ok(found)
+}
+
+/// Reads omitted, null, or string field evidence without collapsing absence.
+pub fn imported_text_attestation(
     members: &[ImportedStructuredObjectMember],
     name: &str,
-) -> Result<ImportedSourceAttestation<ImportedText>, ()> {
-    match unique_structured_field(members, name)? {
+) -> Result<ImportedSourceAttestation<ImportedText>, ImportedStructuredFieldError> {
+    match unique_imported_structured_field(members, name)? {
         None => Ok(ImportedSourceAttestation::NotAttested),
         Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
         Some(ImportedStructuredValue::String(value)) => {
             Ok(ImportedSourceAttestation::Attested(value.clone()))
         }
-        Some(_) => Err(()),
+        Some(_) => Err(structured_field_error()),
     }
 }
 
-fn projected_bool_attestation(
+/// Reads omitted, null, or Boolean field evidence without collapsing absence.
+pub fn imported_bool_attestation(
     members: &[ImportedStructuredObjectMember],
     name: &str,
-) -> Result<ImportedSourceAttestation<bool>, ()> {
-    match unique_structured_field(members, name)? {
+) -> Result<ImportedSourceAttestation<bool>, ImportedStructuredFieldError> {
+    match unique_imported_structured_field(members, name)? {
         None => Ok(ImportedSourceAttestation::NotAttested),
         Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
         Some(ImportedStructuredValue::Boolean(value)) => {
             Ok(ImportedSourceAttestation::Attested(*value))
         }
-        Some(_) => Err(()),
+        Some(_) => Err(structured_field_error()),
     }
 }
 
-fn projected_structured_attestation(
+/// Reads omitted, null, or arbitrary structured field evidence.
+pub fn imported_structured_attestation(
     members: &[ImportedStructuredObjectMember],
     name: &str,
-) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
-    match unique_structured_field(members, name)? {
+) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ImportedStructuredFieldError> {
+    match unique_imported_structured_field(members, name)? {
         None => Ok(ImportedSourceAttestation::NotAttested),
         Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
         Some(value) => Ok(ImportedSourceAttestation::Attested(value.clone())),
     }
 }
 
-fn projected_string_structured_attestation(
+/// Reads structured field evidence whose attested value must be a string.
+pub fn imported_string_structured_attestation(
     members: &[ImportedStructuredObjectMember],
     name: &str,
-) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
-    match unique_structured_field(members, name)? {
+) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ImportedStructuredFieldError> {
+    match unique_imported_structured_field(members, name)? {
         None => Ok(ImportedSourceAttestation::NotAttested),
         Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
         Some(value @ ImportedStructuredValue::String(_)) => {
             Ok(ImportedSourceAttestation::Attested(value.clone()))
         }
-        Some(_) => Err(()),
+        Some(_) => Err(structured_field_error()),
     }
+}
+
+fn projected_text_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedText>, ()> {
+    imported_text_attestation(members, name).map_err(|_| ())
+}
+
+fn projected_bool_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<bool>, ()> {
+    imported_bool_attestation(members, name).map_err(|_| ())
+}
+
+fn projected_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
+    imported_structured_attestation(members, name).map_err(|_| ())
+}
+
+fn projected_string_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
+    imported_string_structured_attestation(members, name).map_err(|_| ())
 }
 
 fn projected_media_source_attestation(
@@ -3192,16 +3243,7 @@ fn unique_structured_field<'members>(
     members: &'members [ImportedStructuredObjectMember],
     name: &str,
 ) -> Result<Option<&'members ImportedStructuredValue>, ()> {
-    let mut found = None;
-    for member in members {
-        if member.name().as_str() == name {
-            if found.is_some() {
-                return Err(());
-            }
-            found = Some(member.value());
-        }
-    }
-    Ok(found)
+    unique_imported_structured_field(members, name).map_err(|_| ())
 }
 
 fn build_conversation(input: ImportedConversationReconstitutionInput) -> ImportedConversation {
