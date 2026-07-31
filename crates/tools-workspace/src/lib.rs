@@ -1,5 +1,6 @@
 //! Bounded tools for an injected local workspace.
 
+mod mutation;
 mod patch;
 mod path;
 mod read;
@@ -11,6 +12,15 @@ pub use patch::{
     PlannedPatchOperation, WorkspacePatch, apply_patch_to_contents, parse_patch, plan_patch,
 };
 
+pub use mutation::{
+    APPLY_PATCH_NAME, ApplyPatchArguments, ApplyPatchResult, EDIT_FILE_NAME, EditFileArguments,
+    EditFileResult, MAX_WORKSPACE_MUTATION_FILE_BYTES, WORKSPACE_MUTATION_TOOL_NAMES,
+    WRITE_FILE_NAME, WorkspaceFileMutation, WorkspaceFileSnapshot, WorkspaceMutationCommitError,
+    WorkspaceMutationExecutor, WorkspaceMutationExecutorError, WorkspaceMutationFileSystem,
+    WorkspaceMutationPath, WorkspaceMutationSnapshot, WorkspaceMutationSnapshotError,
+    WorkspaceMutationSnapshotErrorKind, WorkspaceMutationToolConstructionError,
+    WorkspaceMutationTools, WriteFileArguments, WriteFileResult,
+};
 pub use path::{
     LocalWorkspaceFileSystem, WorkspaceDirectoryEntry, WorkspaceDirectoryRead, WorkspaceEntryKind,
     WorkspaceFileBytes, WorkspaceFileSystem, WorkspacePathRejection, WorkspaceResolveError,
