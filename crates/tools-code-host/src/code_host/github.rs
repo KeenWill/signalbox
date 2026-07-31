@@ -15,7 +15,10 @@ use signalbox_tools_basic::{
 };
 
 use super::arguments::valid_revision;
-use super::repository_result::{MAX_REPOSITORY_FILE_CONTENT_BYTES, MAX_REPOSITORY_FILE_SCAN_BYTES};
+use super::repository_result::{
+    MAX_REPOSITORY_FILE_CONTENT_BYTES, MAX_REPOSITORY_FILE_SCAN_BYTES,
+    is_immediate_repository_child,
+};
 use super::result::{MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, absolute_https_url};
 use super::review_slog::{
     ReviewerActivity, author_class, authorized_association, disposition_class, finding_title,
@@ -1580,6 +1583,12 @@ struct RepositoryFileSelection {
     completeness: CodeHostResultCompleteness,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryFileValidationMode {
+    RetainedContentOnly,
+    EntireSource,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RepositoryFileBodyKind {
     Text(RepositoryFileSelection),
@@ -1750,16 +1759,6 @@ fn parse_repository_directory_entry(
     .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
-fn is_immediate_repository_child(parent: &str, child: &str) -> bool {
-    if parent == "." {
-        return !child.is_empty() && !child.contains('/');
-    }
-    child
-        .strip_prefix(parent)
-        .and_then(|suffix| suffix.strip_prefix('/'))
-        .is_some_and(|name| !name.is_empty() && !name.contains('/'))
-}
-
 async fn select_repository_file_content<S, B, E>(
     mut stream: S,
     line_range: Option<RepositoryLineRange>,
@@ -1813,12 +1812,16 @@ where
     if line_range.is_none() {
         validated.clone_from(&retained);
     }
+    let validation_mode = match line_range {
+        Some(_) => RepositoryFileValidationMode::EntireSource,
+        None => RepositoryFileValidationMode::RetainedContentOnly,
+    };
     let kind = repository_file_body_kind(
         &validated,
         retained,
         requested_start,
         completeness,
-        line_range.is_some(),
+        validation_mode,
     )?;
     Ok(RepositoryFileBody {
         kind,
@@ -1832,11 +1835,15 @@ fn repository_file_body_kind(
     mut retained: Vec<u8>,
     requested_start: u32,
     completeness: CodeHostResultCompleteness,
-    validate_entire_source: bool,
+    validation_mode: RepositoryFileValidationMode,
 ) -> Result<RepositoryFileBodyKind, CodeHostTransportFailure> {
-    if validated.contains(&b'\0')
-        || (validate_entire_source && std::str::from_utf8(validated).is_err())
-    {
+    let validated_as_binary = match validation_mode {
+        RepositoryFileValidationMode::RetainedContentOnly => validated.contains(&b'\0'),
+        RepositoryFileValidationMode::EntireSource => {
+            validated.contains(&b'\0') || std::str::from_utf8(validated).is_err()
+        }
+    };
+    if validated_as_binary {
         return Ok(RepositoryFileBodyKind::Binary);
     }
     let content = match std::str::from_utf8(&retained) {
@@ -2694,11 +2701,9 @@ mod tests {
             .await;
             [path_request, revision_request]
         });
+        let arguments = repository_read_arguments("src/lib.rs", None);
         let result = transport
-            .repository_read_file(
-                repository_read_arguments("src/lib.rs", None),
-                &test_credential(),
-            )
+            .repository_read_file(arguments.clone(), &test_credential())
             .await
             .expect("an absent exact-revision path is a typed result");
         let requests = repository_server_result(server).await;
@@ -2707,12 +2712,12 @@ mod tests {
             result.into_json_value(),
             serde_json::json!({
                 "outcome": "path_not_found",
-                "path": "src/lib.rs",
+                "path": arguments.path().as_str(),
                 "revision": REPOSITORY_REVISION,
                 "truncated": false,
             })
         );
-        assert_eq!(requests, missing_path_requests("src/lib.rs"));
+        assert_eq!(requests, missing_path_requests(arguments.path().as_str()));
     }
 
     /// A revision the host does not recognize is distinct from a path absent at

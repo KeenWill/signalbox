@@ -126,7 +126,7 @@ impl RepositoryReadFileResult {
             fields.end_line,
         ) {
             (Some(requested_start), Some(requested_end), Some(start), Some(end)) => {
-                start >= requested_start && end <= requested_end
+                start == requested_start && end <= requested_end
             }
             (Some(_), Some(_), None, None) => true,
             (None, None, Some(start), Some(_)) => start == 1,
@@ -134,6 +134,15 @@ impl RepositoryReadFileResult {
             _ => false,
         };
         let returned_bytes = u64::try_from(fields.content.len()).ok()?;
+        let source_bytes_consistent = match (fields.requested_start_line, fields.requested_end_line)
+        {
+            (None, None) => match fields.completeness {
+                CodeHostResultCompleteness::Complete => fields.source_bytes == returned_bytes,
+                CodeHostResultCompleteness::Truncated => fields.source_bytes >= returned_bytes,
+            },
+            (Some(_), Some(_)) => fields.source_bytes >= returned_bytes,
+            (None, Some(_)) | (Some(_), None) => false,
+        };
         let completeness_consistent = fields.completeness == CodeHostResultCompleteness::Truncated
             || fields.last_line_complete;
         (requested_range_valid
@@ -141,7 +150,7 @@ impl RepositoryReadFileResult {
             && returned_within_request
             && valid_text(&fields.content)
             && fields.content.len() <= MAX_REPOSITORY_FILE_CONTENT_BYTES
-            && fields.source_bytes >= returned_bytes
+            && source_bytes_consistent
             && completeness_consistent)
             .then_some(Self {
                 identity,
@@ -317,6 +326,16 @@ impl RepositoryDirectoryEntry {
     }
 }
 
+pub(super) fn is_immediate_repository_child(parent: &str, child: &str) -> bool {
+    if parent == "." {
+        return !child.is_empty() && !child.contains('/');
+    }
+    child
+        .strip_prefix(parent)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+        .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RepositoryDirectoryOutcome {
     Entries {
@@ -350,14 +369,18 @@ impl RepositoryListDirectoryResult {
             CodeHostResultCompleteness::Truncated => observed_entries >= entries.len(),
         };
         let identity = RepositoryObjectIdentity::try_new(path, revision)?;
-        (entries.len() <= MAX_RESULT_ITEMS && count_consistent).then_some(Self {
-            identity,
-            outcome: RepositoryDirectoryOutcome::Entries {
-                entries,
-                observed_entries,
-                completeness,
-            },
-        })
+        let entries_belong_to_directory = entries
+            .iter()
+            .all(|entry| is_immediate_repository_child(&identity.path, &entry.path));
+        (entries.len() <= MAX_RESULT_ITEMS && count_consistent && entries_belong_to_directory)
+            .then_some(Self {
+                identity,
+                outcome: RepositoryDirectoryOutcome::Entries {
+                    entries,
+                    observed_entries,
+                    completeness,
+                },
+            })
     }
 
     /// Records that the requested path was absent at the exact revision.
@@ -437,5 +460,87 @@ impl RepositoryListDirectoryResult {
                 "truncated": false,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A nonempty ranged result cannot silently omit leading requested lines.
+    #[test]
+    fn ranged_content_rejects_a_start_after_the_requested_start() {
+        const REQUESTED_START: u32 = 2;
+        const REQUESTED_END: u32 = 4;
+        const RETURNED_START: u32 = 3;
+        const RETURNED_END: u32 = 4;
+        const RETURNED_LINES: u32 = 2;
+        const SOURCE: &str = "first\nsecond\nthird\nfourth\n";
+        const RETURNED_CONTENT: &str = "third\nfourth\n";
+        let source_bytes = u64::try_from(SOURCE.len()).expect("fixture source size fits u64");
+        let result = RepositoryReadFileResult::try_content(RepositoryFileContentFields {
+            path: String::from("src/lib.rs"),
+            revision: String::from(REVISION),
+            source_bytes,
+            requested_start_line: Some(REQUESTED_START),
+            requested_end_line: Some(REQUESTED_END),
+            start_line: Some(RETURNED_START),
+            end_line: Some(RETURNED_END),
+            returned_lines: RETURNED_LINES,
+            last_line_complete: true,
+            content: String::from(RETURNED_CONTENT),
+            completeness: CodeHostResultCompleteness::Complete,
+        });
+
+        assert!(result.is_none());
+    }
+
+    /// A complete whole-file result contains every byte reported by its source
+    /// metadata before evidence scrubbing changes the emitted byte count.
+    #[test]
+    fn complete_whole_file_rejects_a_shorter_content_body() {
+        const SOURCE: &str = "partial\nremaining\n";
+        const RETURNED_CONTENT: &str = "partial\n";
+        let source_bytes = u64::try_from(SOURCE.len()).expect("fixture source size fits u64");
+        let result = RepositoryReadFileResult::try_content(RepositoryFileContentFields {
+            path: String::from("src/lib.rs"),
+            revision: String::from(REVISION),
+            source_bytes,
+            requested_start_line: None,
+            requested_end_line: None,
+            start_line: Some(1),
+            end_line: Some(1),
+            returned_lines: 1,
+            last_line_complete: true,
+            content: String::from(RETURNED_CONTENT),
+            completeness: CodeHostResultCompleteness::Complete,
+        });
+
+        assert!(result.is_none());
+    }
+
+    /// A typed listing cannot attribute an entry from another directory to the
+    /// requested directory.
+    #[test]
+    fn directory_entries_reject_a_path_outside_the_requested_directory() {
+        let entry = RepositoryDirectoryEntry::try_new(
+            String::from("other/file.rs"),
+            RepositoryObjectKind::File,
+            None,
+        )
+        .expect("fixture entry path is admitted");
+        let entries = vec![entry];
+        let observed_entries = entries.len();
+        let result = RepositoryListDirectoryResult::try_entries(
+            String::from("src"),
+            String::from(REVISION),
+            entries,
+            observed_entries,
+            CodeHostResultCompleteness::Complete,
+        );
+
+        assert!(result.is_none());
     }
 }
