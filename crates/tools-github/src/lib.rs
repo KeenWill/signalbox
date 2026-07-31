@@ -26,7 +26,8 @@ use signalbox_application::{
     ToolExecutor, ToolExecutorEvidence,
 };
 use signalbox_domain::{
-    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
+    NormalizedToolArguments, ToolAttemptDispatchCorrelation, ToolEffectClass,
+    ToolExecutionErrorDetail, ToolPermissionDefault,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
@@ -503,7 +504,7 @@ impl InlineReviewComment {
 }
 
 /// Arguments for publishing a review against an exact head.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublishReviewArguments {
     /// Exact owner/repository spelling.
@@ -520,6 +521,42 @@ pub struct PublishReviewArguments {
     #[serde(default)]
     #[schemars(length(max = MAX_INLINE_COMMENTS))]
     comments: Vec<InlineReviewComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishReviewArgumentsWire {
+    repository: GitHubRepository,
+    number: PullRequestNumber,
+    commit_id: GitHubRevision,
+    event: PublishReviewEvent,
+    body: Option<BoundedText>,
+    #[serde(default)]
+    comments: Vec<InlineReviewComment>,
+}
+
+impl<'de> Deserialize<'de> for PublishReviewArguments {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let wire = PublishReviewArgumentsWire::deserialize(deserializer)?;
+        let arguments = Self {
+            repository: wire.repository,
+            number: wire.number,
+            commit_id: wire.commit_id,
+            event: wire.event,
+            body: wire.body,
+            comments: wire.comments,
+        };
+        if arguments.valid_combination() {
+            Ok(arguments)
+        } else {
+            Err(<Deserializer::Error as serde::de::Error>::custom(
+                "invalid publish review combination",
+            ))
+        }
+    }
 }
 
 impl PublishReviewArguments {
@@ -1062,7 +1099,8 @@ where
         let credential = match self.credentials.resolve(&self.credential_reference).await {
             Ok(value) => value,
             Err(error) => {
-                report_credential_access_failure(&error);
+                let correlation = invocation.correlation();
+                report_credential_access_failure(&error, &correlation);
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                     detail: Some(self.credential_detail.clone()),
                 }));
@@ -1298,10 +1336,15 @@ impl<Credentials, Transport> GitHubExecutor<Credentials, Transport> {
     }
 }
 
-fn report_credential_access_failure(error: &CredentialAccessError) {
+fn report_credential_access_failure(
+    error: &CredentialAccessError,
+    correlation: &ToolAttemptDispatchCorrelation,
+) {
     tracing::warn!(
         target: "signalbox_tools_github",
         failure = ?error.failure,
+        session_id = %correlation.session().as_uuid(),
+        turn_id = %correlation.turn().as_uuid(),
         "GitHub credential resolution failed"
     );
 }
@@ -1717,11 +1760,6 @@ impl GitHubApiTransport {
         credential: &CredentialValue,
         policy: &GitHubEgressPolicy,
     ) -> Result<GitHubResult, GitHubTransportFailure> {
-        if !arguments.valid_combination() {
-            return Err(GitHubTransportFailure::rejected(
-                StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
-            ));
-        }
         let number = arguments.number().get().to_string();
         let url =
             self.repository_url(arguments.repository(), &["pulls", &number, "reviews"], None)?;
@@ -2449,7 +2487,10 @@ mod tests {
     };
 
     use signalbox_application::ToolCatalog;
-    use signalbox_domain::ToolName;
+    use signalbox_domain::{
+        SessionId, ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+        ToolDispatchGeneration, ToolName, ToolRequestId, TurnAttemptId, TurnId,
+    };
     use signalbox_model_runtime::CredentialAccessFailure;
 
     use super::*;
@@ -2497,6 +2538,13 @@ mod tests {
     const CONTROLLED_OPAQUE_ID: &str = "PRRC_fixture\n";
     const OTHER_THREAD_ID: &str = "PRRT_fixture_other";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
+    const SESSION_IDENTITY: u128 = 1;
+    const TURN_IDENTITY: u128 = 2;
+    const ISSUING_ATTEMPT_IDENTITY: u128 = 3;
+    const REQUEST_IDENTITY: u128 = 4;
+    const ATTEMPT_IDENTITY: u128 = 5;
+    const SESSION_ID_DIAGNOSTIC: &str = "session_id=00000000-0000-0000-0000-000000000001";
+    const TURN_ID_DIAGNOSTIC: &str = "turn_id=00000000-0000-0000-0000-000000000002";
 
     struct SyntheticCredentials;
     struct SyntheticTransport;
@@ -2538,7 +2586,25 @@ mod tests {
         }
     }
 
-    fn capture_credential_failure(error: &CredentialAccessError) -> String {
+    fn dispatch_correlation() -> ToolAttemptDispatchCorrelation {
+        ToolAttemptDispatchCorrelation::reconstitute(
+            ToolAttemptDispatchCorrelationReconstitutionInput {
+                session: SessionId::from_uuid(uuid::Uuid::from_u128(SESSION_IDENTITY)),
+                turn: TurnId::from_uuid(uuid::Uuid::from_u128(TURN_IDENTITY)),
+                issuing_attempt: TurnAttemptId::from_uuid(uuid::Uuid::from_u128(
+                    ISSUING_ATTEMPT_IDENTITY,
+                )),
+                request: ToolRequestId::from_uuid(uuid::Uuid::from_u128(REQUEST_IDENTITY)),
+                attempt: ToolAttemptId::from_uuid(uuid::Uuid::from_u128(ATTEMPT_IDENTITY)),
+                generation: ToolDispatchGeneration::first(),
+            },
+        )
+    }
+
+    fn capture_credential_failure(
+        error: &CredentialAccessError,
+        correlation: &ToolAttemptDispatchCorrelation,
+    ) -> String {
         let output = CapturedTelemetry::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
@@ -2546,7 +2612,7 @@ mod tests {
             .with_writer(output.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || {
-            report_credential_access_failure(error);
+            report_credential_access_failure(error, correlation);
         });
         output.text()
     }
@@ -2569,20 +2635,6 @@ mod tests {
 
     fn publish_arguments(value: serde_json::Value) -> PublishReviewArguments {
         serde_json::from_value(value).expect("publish fixture is admitted")
-    }
-
-    async fn execute_publish(
-        arguments: PublishReviewArguments,
-    ) -> Result<GitHubResult, GitHubTransportFailure> {
-        let mut transport = GitHubApiTransport::try_new().expect("fixed transport constructs");
-        let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
-        transport
-            .execute(
-                GitHubOperation::PublishReview(arguments),
-                &credential,
-                &GitHubEgressPolicy::github_api_only(),
-            )
-            .await
     }
 
     fn definition(catalog: &CompiledToolCatalog, name: &str) -> ToolDefinition {
@@ -2649,7 +2701,10 @@ mod tests {
             CredentialAccessFailure::Unmapped,
         );
 
-        let diagnostic = capture_credential_failure(&error);
+        let correlation = dispatch_correlation();
+        let diagnostic = capture_credential_failure(&error, &correlation);
+        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
 
         assert!(diagnostic.contains(CREDENTIAL_FAILURE_CLASSIFICATION));
         assert!(!diagnostic.contains(SYNTHETIC_TOKEN));
@@ -2752,50 +2807,41 @@ mod tests {
         assert_eq!(catalog.validate_arguments(&name, &approval), Ok(()));
     }
 
-    #[tokio::test]
-    async fn public_transport_rejects_inline_only_comment_before_dispatch() {
-        let arguments = publish_arguments(serde_json::json!({
+    #[test]
+    fn deserialization_rejects_inline_only_comment() {
+        let value = serde_json::json!({
             "repository": "KeenWill/signalbox", "number": 1,
             "commit_id": HEAD_REVISION, "event": "comment",
             "comments": [{
                 "path": FILE_PATH, "line": 1, "side": "right", "body": REVIEW_COMMENT_BODY
             }]
-        }));
+        });
 
-        assert_eq!(
-            execute_publish(arguments).await,
-            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
-        );
+        assert!(serde_json::from_value::<PublishReviewArguments>(value).is_err());
     }
 
-    #[tokio::test]
-    async fn public_transport_rejects_bodyless_change_request_before_dispatch() {
-        let arguments = publish_arguments(serde_json::json!({
+    #[test]
+    fn deserialization_rejects_bodyless_change_request() {
+        let value = serde_json::json!({
             "repository": "KeenWill/signalbox", "number": 1,
             "commit_id": HEAD_REVISION, "event": "request_changes"
-        }));
+        });
 
-        assert_eq!(
-            execute_publish(arguments).await,
-            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
-        );
+        assert!(serde_json::from_value::<PublishReviewArguments>(value).is_err());
     }
 
-    #[tokio::test]
-    async fn public_transport_rejects_too_many_comments_before_dispatch() {
+    #[test]
+    fn deserialization_rejects_too_many_comments() {
         let comment = serde_json::json!({
             "path": FILE_PATH, "line": 1, "side": "right", "body": REVIEW_COMMENT_BODY
         });
-        let arguments = publish_arguments(serde_json::json!({
+        let value = serde_json::json!({
             "repository": "KeenWill/signalbox", "number": 1,
             "commit_id": HEAD_REVISION, "event": "approve",
             "comments": vec![comment; INLINE_COMMENTS_BEYOND_MAX]
-        }));
+        });
 
-        assert_eq!(
-            execute_publish(arguments).await,
-            Err(GitHubTransportFailure::rejected(CLIENT_ERROR_STATUS))
-        );
+        assert!(serde_json::from_value::<PublishReviewArguments>(value).is_err());
     }
 
     #[test]
