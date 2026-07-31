@@ -9,7 +9,7 @@ use tokio::process::{Child, Command};
 
 use crate::{
     CancellationSignal, LossCause, Observation, ObservationFact, ObservationSink,
-    ProvenUnsentEvidence, RedactingSink, TerminalEvidence, TransportFacts, UnsentCause,
+    ProvenUnsentEvidence, REDACTED, RedactingSink, TerminalEvidence, TransportFacts, UnsentCause,
 };
 
 const TRUNCATION_SUFFIX: &str = "… [truncated]";
@@ -220,6 +220,15 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
             cause: UnsentCause::CancelledBeforeSend,
         });
+    }
+    if request.event_limit == 0 {
+        return invalid_process_request(request.labels, "event limit must be nonzero");
+    }
+    if request.stderr_limit == 0 {
+        return invalid_process_request(request.labels, "stderr limit must be nonzero");
+    }
+    if request.interrupt_grace.is_zero() {
+        return invalid_process_request(request.labels, "interrupt grace must be nonzero");
     }
     // Establish the usable deadline before command conversion, environment
     // access, SendCommenced, or spawn. `CliProcessRequest` is public and may
@@ -1207,7 +1216,22 @@ fn truncate_text(text: &str, limit: usize, force_suffix: bool) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
+    if let Some(marker_start) = text[..end].rfind('[')
+        && marker_start + REDACTED.len() > end
+        && text[marker_start..].starts_with(REDACTED)
+    {
+        end = marker_start;
+    }
     format!("{}{TRUNCATION_SUFFIX}", &text[..end])
+}
+
+fn invalid_process_request(labels: CliProcessLabels, reason: &str) -> TerminalEvidence {
+    TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+        cause: UnsentCause::ConnectFailed(TransportFacts::new(format!(
+            "{} {reason}",
+            labels.process
+        ))),
+    })
 }
 
 async fn interrupt_then_kill(child: &mut SupervisedChild, grace: Duration) {
@@ -1583,6 +1607,90 @@ mod tests {
         assert!(observed.is_empty());
     }
 
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "cygwin",
+            target_os = "horizon",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "wasi"
+        ))
+    ))]
+    #[tokio::test]
+    async fn zero_public_event_limit_is_rejected_before_send_or_spawn() {
+        let mut request = direct_request(std::time::Duration::from_secs(1));
+        request.event_limit = 0;
+        let mut observed = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = execute_cli_process(request, &mut observed, &mut cancellation).await;
+
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(_),
+            })
+        ));
+        assert!(observed.is_empty());
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "cygwin",
+            target_os = "horizon",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "wasi"
+        ))
+    ))]
+    #[tokio::test]
+    async fn zero_public_stderr_limit_is_rejected_before_send_or_spawn() {
+        let mut request = direct_request(std::time::Duration::from_secs(1));
+        request.stderr_limit = 0;
+        let mut observed = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = execute_cli_process(request, &mut observed, &mut cancellation).await;
+
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(_),
+            })
+        ));
+        assert!(observed.is_empty());
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "cygwin",
+            target_os = "horizon",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "wasi"
+        ))
+    ))]
+    #[tokio::test]
+    async fn zero_public_interrupt_grace_is_rejected_before_send_or_spawn() {
+        let mut request = direct_request(std::time::Duration::from_secs(1));
+        request.interrupt_grace = std::time::Duration::ZERO;
+        let mut observed = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = execute_cli_process(request, &mut observed, &mut cancellation).await;
+
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(_),
+            })
+        ));
+        assert!(observed.is_empty());
+    }
+
     #[test]
     fn stderr_is_sanitized_before_the_evidence_limit_is_applied() {
         const SYNTHETIC_CREDENTIAL_PREFIX: &str = "SYNTHETIC-SECRET-STDERR-";
@@ -1628,6 +1736,22 @@ mod tests {
 
         assert_eq!(sanitized, format!("api_key={REDACTED}{TRUNCATION_SUFFIX}"));
         assert!(!sanitized.contains(SYNTHETIC_CREDENTIAL));
+    }
+
+    #[test]
+    fn post_sanitization_truncation_keeps_the_redaction_marker_atomic() {
+        const EVIDENCE_LIMIT: usize = 12;
+        let stderr = BoundedOutput {
+            text: "api_key=x".to_string(),
+            classification: String::new(),
+            evidence_truncated: false,
+        };
+        let mut observed: Vec<crate::Observation<u8>> = Vec::new();
+        let sink = RedactingSink::new(&mut observed);
+
+        let sanitized = sanitized_stderr(&sink, &stderr, EVIDENCE_LIMIT);
+
+        assert_eq!(sanitized, format!("api_key={TRUNCATION_SUFFIX}"));
     }
 
     #[tokio::test]
