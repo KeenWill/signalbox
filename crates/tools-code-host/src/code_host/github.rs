@@ -49,15 +49,18 @@ const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
 // A standard contents entry can repeat a path in `name`, `path`, four URL
 // fields, and the three `_links` fields. A symlink `target` is blob material,
-// so admit and budget it separately instead of treating it as a path.
+// and `submodule_git_url` is only a legacy kind marker; admit and budget both
+// separately instead of treating either as a path.
 const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 9;
 const MAX_REPOSITORY_SYMLINK_TARGET_BYTES: usize = 4 * 1024;
+const MAX_REPOSITORY_SUBMODULE_URL_BYTES: usize = 8 * 1024;
 const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
 const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
     * (MAX_FILE_PATH_BYTES
         * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
         * MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY
         + MAX_REPOSITORY_SYMLINK_TARGET_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
+        + MAX_REPOSITORY_SUBMODULE_URL_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
         + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const COMMIT_SHA_ACCEPT: &str = "application/vnd.github.sha";
@@ -1826,7 +1829,12 @@ fn parse_repository_object_kind(
 ) -> Result<RepositoryObjectKind, CodeHostTransportFailure> {
     let object_type = required_string(object, "type")?;
     let has_submodule_marker = match object.get("submodule_git_url") {
-        Some(serde_json::Value::String(_)) => true,
+        Some(serde_json::Value::String(url)) if url.len() <= MAX_REPOSITORY_SUBMODULE_URL_BYTES => {
+            true
+        }
+        Some(serde_json::Value::String(_)) => {
+            return Err(CodeHostTransportFailure::InvalidResponse);
+        }
         None | Some(serde_json::Value::Null) => false,
         Some(_) => return Err(CodeHostTransportFailure::InvalidResponse),
     };
@@ -3508,6 +3516,41 @@ mod tests {
         assert_eq!(
             parse_repository_path_lookup(
                 &value,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A submodule URL marker is admitted under its own byte bound so every
+    /// valid directory entry remains covered by the aggregate ingress cap.
+    #[test]
+    fn repository_entry_bounds_the_submodule_url_marker() {
+        let admitted = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "x".repeat(MAX_REPOSITORY_SUBMODULE_URL_BYTES),
+            "type": "file",
+        });
+        let rejected = serde_json::json!({
+            "path": "vendor/dependency",
+            "submodule_git_url": "x".repeat(MAX_REPOSITORY_SUBMODULE_URL_BYTES + 1),
+            "type": "file",
+        });
+
+        assert_eq!(
+            parse_repository_path_lookup(
+                &admitted,
+                "vendor/dependency",
+                CodeHostResultCompleteness::Complete,
+            ),
+            Ok(RepositoryPathLookup::Other {
+                kind: RepositoryObjectKind::Submodule,
+            })
+        );
+        assert_eq!(
+            parse_repository_path_lookup(
+                &rejected,
                 "vendor/dependency",
                 CodeHostResultCompleteness::Complete,
             ),
