@@ -12,6 +12,8 @@ the closed provider-failure/native transcript projections in PR #330
 surface in PR #349 (`agent/review-orchestrator-wiring`). This page is the
 normative boundary between a local client process and `signalboxd`; domain
 values, PostgreSQL records, and wire messages remain distinct representations.
+The path-scoped session-placement wire and terminal-client surface were verified
+through `agent/scoped-visibility-wiring`.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -190,9 +192,10 @@ that variant.
 
 | Type                                    | Additional required members                                                                                                                                                                                                                                              | Meaning                                                                                                                                                                                                                                                                                                                                                                         |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `create_session`                        | `command_id` (canonical UUID string), `initial_model_selection` (selection object), `system_prompt` (string or null), `runner_placement` (proposed; placement object or null)                                                                                            | Create a user-initiated session with no ancestry and establish defaults version one.                                                                                                                                                                                                                                                                                            |
-| `create_session_from_template`          | `command_id` (canonical UUID string), `template_name` (template-name string), `runner_placement` (proposed; placement object or null)                                                                                                                                    | Resolve one daemon-held template and copy its complete bundle into a user-initiated session's defaults version one.                                                                                                                                                                                                                                                             |
+| `create_session`                        | `command_id` (canonical UUID string), `initial_model_selection` (selection object), `system_prompt` (string or null), optional `placement` (session-placement object; omission means pathless), `runner_placement` (proposed; runner-placement object or null)           | Create a user-initiated session with no ancestry and establish defaults version one.                                                                                                                                                                                                                                                                                            |
+| `create_session_from_template`          | `command_id` (canonical UUID string), `template_name` (template-name string), optional `placement` (session-placement object; omission means pathless), `runner_placement` (proposed; runner-placement object or null)                                                   | Resolve one daemon-held template and copy its complete bundle into a user-initiated session's defaults version one.                                                                                                                                                                                                                                                             |
 | `list_sessions`                         | none                                                                                                                                                                                                                                                                     | Read all current sessions as basic summaries, ordered by session identity.                                                                                                                                                                                                                                                                                                      |
+| `update_session_placement`              | `command_id` and `session_id` (canonical UUID strings), `expected_placement_version` (positive canonical decimal string), `replacement` (session-placement object)                                                                                                       | Append one immutable placement event conditional on the exact current placement version.                                                                                                                                                                                                                                                                                        |
 | `list_templates`                        | none                                                                                                                                                                                                                                                                     | Read every available template's name and version in name order.                                                                                                                                                                                                                                                                                                                 |
 | `attach_goal`                           | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Attach the first immutable commissioned statement and begin pursuing it.                                                                                                                                                                                                                                                                                                        |
 | `read_goal`                             | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read the current goal projection and complete ordered lineage.                                                                                                                                                                                                                                                                                                                  |
@@ -232,6 +235,15 @@ turn the client observed; an idle slot or a changed turn is a typed rejection
 rather than a retarget. Unknown delivery tags or members, explicit JSON null in
 place of a delivery object, and every other correlation of delivery with the
 nullable defaults member are malformed.
+
+The session-placement object is exactly `pathless {}`, `scoped { path }`, or
+`root_global_read { path, intent: "acknowledged" }`. A path is one through 64
+nonempty dot-separated ASCII label segments; each segment is at most 64 bytes
+and admits only letters, digits, hyphen, and underscore. `scoped` requires at
+least two segments. A one-segment root path is legal only in the loud
+`root_global_read` variant: its explicit intent records that the session gains
+global conversation read. Creation defaults an omitted object to `pathless`;
+updates always carry the complete replacement object.
 
 The review-workflow requests have these shapes. Every `*_id` is a canonical UUID
 string, ordinal and count values are canonical decimal strings, and every
@@ -650,10 +662,12 @@ that variant. Every accepted non-review mutation request — `create_session`,
 `create_session_from_template`, `create_session_from_imported_frontier`,
 `submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
 `replace_session_metadata`, `replace_session_defaults`, `compact_session`,
-`import_conversation`, `replace_lost_runner`, `abandon_lost_runner`, or
-`promote_pending_runner` — produces exactly one of:
+`update_session_placement`, `import_conversation`, `replace_lost_runner`,
+`abandon_lost_runner`, or `promote_pending_runner` — produces exactly one of:
 
 - `session_created` with `session_id`;
+- `session_placement_updated` with `session_id`, the positive successor
+  `placement_version`, and the complete recorded `placement` object;
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`; a queued submit names the ordinary
   origin turn held behind its expected active turn, and a `stop_turn` acceptance
@@ -850,12 +864,13 @@ In the server shapes below, notation such as `queued` or
 `terminal { disposition }` means a closed JSON object with `"type":"queued"` or
 `"type":"terminal"` plus exactly the named members.
 
-A session summary contains `session_id`, `defaults_version`, and
-`model_selection`. Every proposed runner-aware native-session listing projection
-adds the same required `runner` member, either null or a complete object
-carrying selector, the current or lost exact runner id when the state names one,
-placement revision, sandbox profile, credential-profile name, repository key,
-working directory, and state (`unpinned`, `pinned`, `runner_lost_before_pin`,
+A session summary contains `session_id`, `defaults_version`, `model_selection`,
+positive `placement_version`, and the complete current session `placement`.
+Every proposed runner-aware native-session listing projection adds the same
+required `runner` member, either null or a complete object carrying selector,
+the current or lost exact runner id when the state names one, placement
+revision, sandbox profile, credential-profile name, repository key, working
+directory, and state (`unpinned`, `pinned`, `runner_lost_before_pin`,
 `runner_lost`, or `runner_abandoned`). The credential-profile name, repository
 key, and working directory are each present or JSON null independently, because
 the composition axes they project are independent
@@ -1051,6 +1066,14 @@ as
 [sessions-and-transcript](sessions-and-transcript.md#create-from-an-imported-frontier)
 states — so the same command identity remains available for a corrected
 conversation or position rather than becoming a conflicting reuse.
+
+An `update_session_placement` rejection is one of
+`session_not_found { session_id }`,
+`session_placement_current_version_mismatch { session_id, expected_placement_version, current_placement_version }`,
+or
+`session_placement_version_exhausted { session_id, current_placement_version }`.
+Each is the durable typed result of handling the exact update command; equal
+replay returns the same result and conflicting command reuse remains distinct.
 
 The proposed `replace_lost_runner` rejection admits
 `session_not_found { session_id }`, `runner_placement_not_found { session_id }`,
@@ -1571,7 +1594,8 @@ terminal-client UX, while the paginated metadata list is the `search` verb
 below. The client accepts a global `--socket <path>` override or reads
 `SIGNALBOX_SOCKET_PATH`, and provides:
 
-- `create ((--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] | --template <name>) [--runner <uuid> | --runner-class <name>] [--working-directory <path>] [--repository <key>] [--credential-profile <name>] [--sandbox-profile <workspace-restricted|ambient>] [--tool-auto <name>]... [--tool-confirm <name>]... [--command-id <uuid>]`;
+- `create ((--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] | --template <name>) [--placement <dotted-path> [--root-global-read]] [--runner <uuid> | --runner-class <name>] [--working-directory <path>] [--repository <key>] [--credential-profile <name>] [--sandbox-profile <workspace-restricted|ambient>] [--tool-auto <name>]... [--tool-confirm <name>]... [--command-id <uuid>]`;
+- `place <session-uuid> (--placement <dotted-path> [--root-global-read] | --pathless) --expected-placement-version <positive-decimal> [--command-id <uuid>]`;
 - `continue <imported-conversation-uuid> --through-position <positive-decimal|latest> --relationship <resume|fork> (--model <selection-uuid> | --alias <alias-uuid>) [--runner <uuid> | --runner-class <name>] [--working-directory <path>] [--repository <key>] [--credential-profile <name>] [--sandbox-profile <workspace-restricted|ambient>] [--tool-auto <name>]... [--tool-confirm <name>]... [--command-id <uuid>]`;
 - `imported <imported-conversation-uuid>`;
 - `list`;
@@ -1820,18 +1844,28 @@ no-successor, receipt-only completion semantics explicit; queueing remains a
 turn.
 
 `create --template NAME` sends the name, the command identity, and the selected
-placement, and validates the ordinary `session_created` receipt. Clap rejects
+session path placement, and validates the ordinary `session_created` receipt.
+The optional `--placement` is admitted only as a validated non-root path unless
+`--root-global-read` explicitly acknowledges a one-segment global-read root.
+Without it, creation sends the pathless compatibility value. Clap rejects
 combining it with `--model`, `--alias`, or `--system-prompt-file` before socket
 I/O; explicit flags never override template values. The choice keeps one
 invocation's complete creation defaults under either client control or daemon
 configuration, not both. The runner flags are deliberately outside that
 alternative and remain admissible with `--template`, because a template supplies
-defaults and never a placement: the two choices compose, and a selected
-placement is carried into the request rather than dropped. The `templates` verb
-sends one `list_templates` request, validates strict name order and the terminal
-count, and prints one `name=<name> version=<decimal>` line per summary. Template
-prompt text, model selection, approval posture, and digest do not cross this
-listing surface.
+defaults and neither placement axis: the choices compose, and a selected session
+path or runner placement is carried into the request rather than dropped. The
+`templates` verb sends one `list_templates` request, validates strict name order
+and the terminal count, and prints one `name=<name> version=<decimal>` line per
+summary. Template prompt text, model selection, approval posture, and digest do
+not cross this listing surface.
+
+`place` sends the exact caller-observed positive placement version and one
+complete replacement. Its receipt prints the successor version and replacement;
+`list` prints those same current facts for every session. `--pathless` restores
+legacy unrestricted reads explicitly. Root placement again requires the loud
+`--root-global-read` acknowledgement, so no client syntax can silently turn a
+one-segment path into global read.
 
 `--system-prompt-file` likewise carries a path, never prompt content in a
 process argument: the client reads one bounded file snapshot before socket I/O

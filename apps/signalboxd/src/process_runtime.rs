@@ -25,7 +25,8 @@ use signalbox_application::{
     ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
     ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
     SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UuidV7CreateSessionFromImportedFrontierIdGenerator,
+    SubmitInputTransaction, UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest,
+    UpdateSessionPlacementService, UuidV7CreateSessionFromImportedFrontierIdGenerator,
     UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
 };
@@ -58,9 +59,11 @@ use signalbox_domain::{
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
     ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionTemplateName,
-    SessionTemplateProvenance, SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UserContent,
+    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionPlacement as DomainSessionPlacement,
+    SessionPlacementPath, SessionPlacementVersion, SessionTemplateName, SessionTemplateProvenance,
+    SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UpdateSessionPlacementRejection,
+    UpdateSessionPlacementResult, UserContent,
 };
 use signalbox_model_provider_runtime::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
@@ -100,6 +103,7 @@ use signalbox_persistence::{
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
     session_metadata::{SessionMetadataRepository, SessionMetadataRepositoryError},
+    session_placement::{SessionPlacementRepository, SessionPlacementRepositoryError},
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
@@ -124,9 +128,10 @@ use signalbox_process_protocol::{
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
-    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
+    SessionPlacement as WireSessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments,
+    decode_client_line, encode_server_line, recover_bounded_client_protocol_version,
+    recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -883,14 +888,18 @@ where
             command_id,
             initial_model_selection,
             system_prompt,
+            placement,
         } => {
             handle_create_session(
                 writer,
                 version,
                 request_id,
-                command_id.into_uuid(),
-                initial_model_selection,
-                system_prompt,
+                WireCreateSessionRequest {
+                    command_id: command_id.into_uuid(),
+                    initial_model_selection,
+                    system_prompt,
+                    placement,
+                },
                 services,
             )
             .await
@@ -898,6 +907,7 @@ where
         ClientRequest::CreateSessionFromTemplate {
             command_id,
             template_name,
+            placement,
         } => {
             handle_create_session_from_template(
                 writer,
@@ -905,6 +915,7 @@ where
                 request_id,
                 command_id.into_uuid(),
                 template_name,
+                placement,
                 services,
             )
             .await
@@ -979,6 +990,26 @@ where
                 return Ok(());
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
+        }
+        ClientRequest::UpdateSessionPlacement {
+            command_id,
+            session_id,
+            expected_placement_version,
+            replacement,
+        } => {
+            handle_update_session_placement(
+                writer,
+                version,
+                request_id,
+                WireSessionPlacementUpdateRequest {
+                    command_id,
+                    session_id,
+                    expected_version: expected_placement_version,
+                    replacement,
+                },
+                &services.pool,
+            )
+            .await
         }
         ClientRequest::AttachGoal {
             command_id,
@@ -5466,19 +5497,39 @@ const fn wire_imported_speaker_attestation(
     }
 }
 
+struct WireCreateSessionRequest {
+    command_id: uuid::Uuid,
+    initial_model_selection: WireModelSelection,
+    system_prompt: SystemPromptMember,
+    placement: WireSessionPlacement,
+}
+
 async fn handle_create_session<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    command_id: uuid::Uuid,
-    initial_model_selection: WireModelSelection,
-    system_prompt: SystemPromptMember,
+    request: WireCreateSessionRequest,
     services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    let WireCreateSessionRequest {
+        command_id,
+        initial_model_selection,
+        system_prompt,
+        placement,
+    } = request;
     let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let Ok(placement) = domain_session_placement(placement) else {
         return write_error(
             writer,
             version,
@@ -5496,7 +5547,7 @@ where
             system_prompt,
         ),
     );
-    let Ok(request) = request else {
+    let Ok(request) = request.map(|request| request.with_placement(placement)) else {
         return write_error(
             writer,
             version,
@@ -5522,12 +5573,22 @@ async fn handle_create_session_from_template<Writer>(
     request_id: RequestId,
     command_id: uuid::Uuid,
     template_name: String,
+    placement: WireSessionPlacement,
     services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let Ok(template_name) = SessionTemplateName::try_new(template_name) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let Ok(placement) = domain_session_placement(placement) else {
         return write_error(
             writer,
             version,
@@ -5547,7 +5608,8 @@ where
                 .command()
                 .template_provenance()
                 .map(SessionTemplateProvenance::name);
-            if recorded_name == Some(&template_name) {
+            if recorded_name == Some(&template_name) && recorded.command().placement() == &placement
+            {
                 return write_message(
                     writer,
                     version,
@@ -5622,7 +5684,7 @@ where
         template.provenance().clone(),
         template.defaults().clone(),
     );
-    let Ok(request) = request else {
+    let Ok(request) = request.map(|request| request.with_placement(placement)) else {
         return write_error(
             writer,
             version,
@@ -5640,6 +5702,139 @@ where
         services.model_configuration.as_ref(),
     )
     .await
+}
+
+struct WireSessionPlacementUpdateRequest {
+    command_id: signalbox_process_protocol::CommandId,
+    session_id: CanonicalUuid,
+    expected_version: CanonicalU64,
+    replacement: WireSessionPlacement,
+}
+
+async fn handle_update_session_placement<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: WireSessionPlacementUpdateRequest,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let WireSessionPlacementUpdateRequest {
+        command_id,
+        session_id,
+        expected_version,
+        replacement,
+    } = request;
+    let Some(expected_version) = SessionPlacementVersion::try_from_u64(expected_version.value())
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let Ok(replacement) = domain_session_placement(replacement) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let request = UpdateSessionPlacementRequest::new(
+        DurableCommandId::from_uuid(command_id.into_uuid()),
+        session,
+        expected_version,
+        replacement,
+    );
+    let mut service =
+        UpdateSessionPlacementService::new(SessionPlacementRepository::new(pool.clone()));
+    match service.execute(request).await {
+        Ok(UpdateSessionPlacementOutcome::Recorded(UpdateSessionPlacementResult::Applied(
+            event,
+        ))) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionPlacementUpdated {
+                    session_id,
+                    placement_version: CanonicalU64::new(event.placement().version().as_u64()),
+                    placement: wire_session_placement(event.placement().placement()),
+                },
+            )
+            .await
+        }
+        Ok(UpdateSessionPlacementOutcome::Recorded(UpdateSessionPlacementResult::Rejected(
+            rejected,
+        ))) => {
+            let detail = match rejected {
+                UpdateSessionPlacementRejection::SessionNotFound { session } => {
+                    RejectionDetail::SessionNotFound {
+                        session_id: wire_uuid(session.into_uuid()),
+                    }
+                }
+                UpdateSessionPlacementRejection::CurrentVersionMismatch {
+                    session,
+                    expected,
+                    current,
+                } => RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                    session_id: wire_uuid(session.into_uuid()),
+                    expected_placement_version: CanonicalU64::new(expected.as_u64()),
+                    current_placement_version: CanonicalU64::new(current.as_u64()),
+                },
+                UpdateSessionPlacementRejection::VersionExhausted { session, current } => {
+                    RejectionDetail::SessionPlacementVersionExhausted {
+                        session_id: wire_uuid(session.into_uuid()),
+                        current_placement_version: CanonicalU64::new(current.as_u64()),
+                    }
+                }
+            };
+            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        }
+        Ok(UpdateSessionPlacementOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(SessionPlacementRepositoryError::Database(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
+        Err(SessionPlacementRepositoryError::CommitAmbiguous(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
+        }
+        Err(SessionPlacementRepositoryError::Corruption(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::ProcessReadCorruption),
+            )
+            .await
+        }
+    }
 }
 
 async fn handle_list_templates<Writer>(
@@ -5701,6 +5896,7 @@ where
             let command = recorded.command();
             if command.initial_configuration_defaults() == request.initial_configuration_defaults()
                 && command.template_provenance() == request.template_provenance()
+                && command.placement() == request.placement()
             {
                 return write_message(
                     writer,
@@ -5998,6 +6194,8 @@ async fn spool_session_summaries(
                 session_id: wire_uuid(summary.session().into_uuid()),
                 defaults_version: CanonicalU64::new(summary.defaults_version()),
                 model_selection: wire_model_selection(summary.model_selection()),
+                placement_version: CanonicalU64::new(summary.placement().version().as_u64()),
+                placement: wire_session_placement(summary.placement().placement()),
             },
         )
         .await
@@ -8655,6 +8853,38 @@ fn domain_model_selection(selection: WireModelSelection) -> ModelSelectionReques
         }
         WireModelSelection::Alias { alias_id } => {
             ModelSelectionRequest::Alias(ModelAlias::from_uuid(alias_id.into_uuid()))
+        }
+    }
+}
+
+fn domain_session_placement(placement: WireSessionPlacement) -> Result<DomainSessionPlacement, ()> {
+    match placement {
+        WireSessionPlacement::Pathless {} => Ok(DomainSessionPlacement::Pathless),
+        WireSessionPlacement::Scoped { path } => {
+            DomainSessionPlacement::scoped(SessionPlacementPath::try_new(path).map_err(|_| ())?)
+                .map_err(|_| ())
+        }
+        WireSessionPlacement::RootGlobalRead { path, .. } => {
+            DomainSessionPlacement::root_global_read(
+                SessionPlacementPath::try_new(path).map_err(|_| ())?,
+                signalbox_domain::RootPlacementGlobalReadIntent::Acknowledged,
+            )
+            .map_err(|_| ())
+        }
+    }
+}
+
+fn wire_session_placement(placement: &DomainSessionPlacement) -> WireSessionPlacement {
+    match placement {
+        DomainSessionPlacement::Pathless => WireSessionPlacement::Pathless {},
+        DomainSessionPlacement::Scoped(path) => WireSessionPlacement::Scoped {
+            path: path.as_str().to_owned(),
+        },
+        DomainSessionPlacement::RootGlobalRead { path, .. } => {
+            WireSessionPlacement::RootGlobalRead {
+                path: path.as_str().to_owned(),
+                intent: signalbox_process_protocol::RootPlacementGlobalReadIntent::Acknowledged,
+            }
         }
     }
 }

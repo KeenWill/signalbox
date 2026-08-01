@@ -649,10 +649,25 @@ impl<'a> Output<'a> {
         session_id: CanonicalUuid,
         defaults_version: u64,
         selection: &str,
+        placement_version: u64,
+        placement: &str,
     ) -> io::Result<()> {
         writeln!(
             self.stdout,
-            "{session_id} defaults_version={defaults_version} {selection}"
+            "{session_id} defaults_version={defaults_version} {selection} \
+             placement_version={placement_version} {placement}"
+        )
+    }
+
+    pub(crate) fn session_placement_updated(
+        &mut self,
+        session_id: CanonicalUuid,
+        placement_version: u64,
+        placement: &str,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "session={session_id} placement_version={placement_version} {placement}"
         )
     }
 

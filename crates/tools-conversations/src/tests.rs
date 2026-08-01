@@ -100,7 +100,7 @@ impl ClassifyOperatorFailure for FakeError {
 #[derive(Debug)]
 struct FakePort {
     list_result: Option<ConversationListPage>,
-    native_result: Option<Option<TranscriptPage>>,
+    native_result: Option<ConversationTranscriptRead>,
     imported_result: Option<Option<TranscriptPage>>,
     list_requests: Vec<ConversationListRequest>,
     native_requests: Vec<ConversationTranscriptRequest>,
@@ -120,9 +120,24 @@ impl FakePort {
     }
 
     fn reading_native(page: Option<TranscriptPage>) -> Self {
+        let read = match page {
+            Some(page) => ConversationTranscriptRead::Read(page),
+            None => ConversationTranscriptRead::NotFound,
+        };
         Self {
             list_result: None,
-            native_result: Some(page),
+            native_result: Some(read),
+            imported_result: None,
+            list_requests: Vec::new(),
+            native_requests: Vec::new(),
+            imported_requests: Vec::new(),
+        }
+    }
+
+    fn refusing_native(refusal: SessionReadScopeRefusal) -> Self {
+        Self {
+            list_result: None,
+            native_result: Some(ConversationTranscriptRead::Refused(refusal)),
             imported_result: None,
             list_requests: Vec::new(),
             native_requests: Vec::new(),
@@ -159,7 +174,7 @@ impl ConversationIntrospectionPort for FakePort {
     fn read_conversation(
         &mut self,
         request: ConversationTranscriptRequest,
-    ) -> impl Future<Output = Result<Option<TranscriptPage>, Self::Error>> + Send {
+    ) -> impl Future<Output = Result<ConversationTranscriptRead, Self::Error>> + Send {
         self.native_requests.push(request);
         ready(Ok(self
             .native_result
@@ -274,7 +289,8 @@ fn own_read_uses_only_the_trusted_invoking_session() {
         panic!("one native request is observed")
     };
 
-    assert_eq!(observed.session(), invoking);
+    assert_eq!(observed.requesting_session(), invoking);
+    assert_eq!(observed.target_session(), invoking);
     assert_eq!(observed.after_position(), Some(position(3)));
     assert_eq!(observed.max_entries(), 1);
     assert_eq!(observed.max_bytes(), VISIBLE_CONTENT.len());
@@ -302,7 +318,55 @@ fn selected_native_read_forwards_the_model_named_target() {
         panic!("one native request is observed")
     };
 
-    assert_eq!(observed.session(), selected);
+    assert_eq!(observed.requesting_session(), invoking);
+    assert_eq!(observed.target_session(), selected);
+}
+
+#[test]
+fn selected_native_read_returns_typed_out_of_scope_evidence() {
+    let invoking = session(11);
+    let selected = session(22);
+    let requester = signalbox_domain::SessionPlacement::scoped(
+        signalbox_domain::SessionPlacementPath::try_new(String::from("projects.foo.reviews.pr123"))
+            .expect("fixture path is admitted"),
+    )
+    .expect("fixture path is non-root");
+    let target = signalbox_domain::SessionPlacement::scoped(
+        signalbox_domain::SessionPlacementPath::try_new(String::from("projects.bar.session"))
+            .expect("fixture path is admitted"),
+    )
+    .expect("fixture path is non-root");
+    let signalbox_domain::SessionReadScopeDecision::Refused(refusal) =
+        requester.decide_cross_session_read(&target)
+    else {
+        panic!("fixture placements are disjoint")
+    };
+    let expected_directory = refusal.requesting_directory().as_str().to_owned();
+    let port = FakePort::refusing_native(refusal);
+    let (_catalog, mut executor) = ConversationTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_operation(
+        ConversationToolKind::ReadOther,
+        &selected_transcript_arguments(selected),
+    )
+    .expect("bounded selected-read arguments are valid");
+
+    let evidence = run_ready(executor.execute_operation(invoking, operation))
+        .expect("typed refusal is a trusted tool outcome");
+    let ToolExecutorEvidence::KnownFailed {
+        detail: Some(detail),
+    } = evidence
+    else {
+        panic!("scoped refusal is a known failure")
+    };
+
+    assert!(detail.as_str().contains(&expected_directory));
+    assert!(
+        detail
+            .as_str()
+            .contains("outside_requesting_directory_subtree")
+    );
 }
 
 #[test]
@@ -495,8 +559,12 @@ impl ConversationIntrospectionPort for RedactingPort {
     fn read_conversation(
         &mut self,
         _request: ConversationTranscriptRequest,
-    ) -> impl Future<Output = Result<Option<TranscriptPage>, Self::Error>> + Send {
-        ready(Ok(Some(one_entry_page(REDACTED_CONTENT, false, false))))
+    ) -> impl Future<Output = Result<ConversationTranscriptRead, Self::Error>> + Send {
+        ready(Ok(ConversationTranscriptRead::Read(one_entry_page(
+            REDACTED_CONTENT,
+            false,
+            false,
+        ))))
     }
 
     async fn read_imported_conversation(

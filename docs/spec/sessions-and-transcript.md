@@ -27,9 +27,8 @@ a law is cited as `INV-NNN`, the generated
 [invariant test index](../invariants.md) resolves it; where mechanics owned by
 another contract are summarized, the owning sibling page is linked inline.
 
-The path-scoped session-placement paragraphs are the foundation proposal at the
-bottom of their implementing stack and become verified only with its
-read-introspection and process-surface child pull request.
+The path-scoped session-placement and read-introspection surface was verified
+through `agent/scoped-visibility-wiring`.
 
 ## Session identity and creation provenance
 
@@ -160,10 +159,12 @@ prefix comparison against the target placement: siblings and descendants are
 allowed; ancestors, pathless targets, and disjoint subtrees are refused. A
 refusal is typed evidence containing that requesting directory and the closed
 reason `OutsideRequestingDirectorySubtree`, never an empty successful result.
-The child pull request enforces this decision where the conversation
-introspection adapter opens a selected native transcript. Conversation-list
-inventory is discovery rather than a selected transcript read, and imported
-conversations are not sessions; neither surface is filtered by this rule.
+The conversation-introspection adapter enforces this decision when it opens a
+selected native transcript. It loads requester and target placement and applies
+the prefix decision in the same repeatable-read transaction that opens the
+transcript cursor. Conversation-list inventory is discovery rather than a
+selected transcript read, and imported conversations are not sessions; neither
+surface is filtered by this rule.
 
 A one-segment placement sits in the root directory and therefore has global
 conversation read, including pathless sessions. It is legal only through the

@@ -35,9 +35,9 @@ use signalbox_process_protocol::{
     ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
     ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
-    ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SystemPromptMember,
-    SystemPromptText, ToolBatchState, ToolDecision, TurnState, decode_server_line,
-    encode_server_line,
+    ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
+    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
+    decode_server_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -282,6 +282,7 @@ async fn execute(
             ..
         } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::Create { .. }
+        | Command::Place { .. }
         | Command::Continue { .. }
         | Command::Compact { .. }
         | Command::Goal(_)
@@ -312,6 +313,7 @@ async fn execute(
             ..
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
+        | Command::Place { .. }
         | Command::Compact { .. }
         | Command::Goal(_)
         | Command::List
@@ -343,6 +345,7 @@ async fn execute(
             template,
             command_id,
             system_prompt_file: _,
+            placement,
         } => match (selection, template) {
             (Some(selection), None) => {
                 create(
@@ -351,16 +354,34 @@ async fn execute(
                     selection,
                     command_id,
                     system_prompt_text,
+                    placement,
                 )
                 .await
             }
             (None, Some(template)) => {
-                create_from_template(&mut client, &mut output, template, command_id).await
+                create_from_template(&mut client, &mut output, template, command_id, placement)
+                    .await
             }
             _ => Err(ClientError::Protocol(
                 "create source was internally invalid",
             )),
         },
+        Command::Place {
+            session_id,
+            expected_placement_version,
+            replacement,
+            command_id,
+        } => {
+            update_session_placement(
+                &mut client,
+                &mut output,
+                session_id,
+                expected_placement_version,
+                replacement,
+                command_id,
+            )
+            .await
+        }
         Command::Continue {
             imported_conversation_id,
             through_position,
@@ -733,6 +754,7 @@ async fn create(
     selection: ModelSelection,
     command_id: Option<CommandId>,
     system_prompt: Option<SystemPromptText>,
+    placement: SessionPlacement,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -746,6 +768,7 @@ async fn create(
             command_id,
             initial_model_selection: selection,
             system_prompt: SystemPromptMember::present(system_prompt),
+            placement,
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -767,6 +790,7 @@ async fn create_from_template(
     output: &mut Output<'_>,
     template_name: String,
     command_id: Option<CommandId>,
+    placement: SessionPlacement,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -779,6 +803,7 @@ async fn create_from_template(
         .mutation_request(ClientRequest::CreateSessionFromTemplate {
             command_id,
             template_name,
+            placement,
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -794,6 +819,51 @@ async fn create_from_template(
         _ => Err(
             ClientError::Protocol("template creation returned an unexpected response").mutation(),
         ),
+    }
+}
+
+async fn update_session_placement(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    expected_placement_version: CanonicalU64,
+    replacement: SessionPlacement,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::UpdateSessionPlacement {
+            command_id,
+            session_id,
+            expected_placement_version,
+            replacement,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionPlacementUpdated {
+            session_id,
+            placement_version,
+            placement,
+        } => {
+            output.session_placement_updated(
+                session_id,
+                placement_version.value(),
+                &placement_display(&placement),
+            )?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("place returned an unexpected response").mutation()),
     }
 }
 
@@ -1841,10 +1911,14 @@ async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(),
                 session_id,
                 defaults_version,
                 model_selection,
+                placement_version,
+                placement,
             } => output.session_summary(
                 *session_id,
                 defaults_version.value(),
                 &selection_display(*model_selection),
+                placement_version.value(),
+                &placement_display(placement),
             )?,
             _ => {
                 return Err(ClientError::Protocol(
@@ -3064,6 +3138,16 @@ async fn read_session_summaries(
                     "session list sequence or count was invalid",
                 ));
             }
+        }
+    }
+}
+
+fn placement_display(placement: &SessionPlacement) -> String {
+    match placement {
+        SessionPlacement::Pathless {} => String::from("placement=pathless"),
+        SessionPlacement::Scoped { path } => format!("placement={path}"),
+        SessionPlacement::RootGlobalRead { path, .. } => {
+            format!("placement={path} root_global_read=acknowledged")
         }
     }
 }
@@ -6026,6 +6110,7 @@ mod tests {
             },
             Some(CommandId::try_from_uuid(Uuid::from_u128(2))?),
             None,
+            super::SessionPlacement::Pathless {},
         )
         .await;
 

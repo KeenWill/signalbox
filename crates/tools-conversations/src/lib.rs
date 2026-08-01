@@ -8,8 +8,9 @@ use signalbox_application::{
     ToolExecutorEvidence,
 };
 use signalbox_domain::{
-    ImportedConversationId, NormalizedToolArguments, SessionId, ToolEffectClass,
-    ToolExecutionErrorDetail, ToolPermissionDefault, ToolResultText,
+    ImportedConversationId, NormalizedToolArguments, SessionId, SessionReadRefusalReason,
+    SessionReadScopeRefusal, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
+    ToolResultText,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -167,7 +168,8 @@ impl ConversationListPage {
 /// One native transcript read requested through the injected port.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConversationTranscriptRequest {
-    session: SessionId,
+    requesting_session: SessionId,
+    target_session: SessionId,
     after_position: Option<NonZeroU64>,
     max_entries: usize,
     max_bytes: usize,
@@ -176,22 +178,29 @@ pub struct ConversationTranscriptRequest {
 impl ConversationTranscriptRequest {
     /// Retains one exact native target, cursor, and pair of bounds.
     pub const fn new(
-        session: SessionId,
+        requesting_session: SessionId,
+        target_session: SessionId,
         after_position: Option<NonZeroU64>,
         max_entries: usize,
         max_bytes: usize,
     ) -> Self {
         Self {
-            session,
+            requesting_session,
+            target_session,
             after_position,
             max_entries,
             max_bytes,
         }
     }
 
-    /// Returns the selected native session.
-    pub const fn session(&self) -> SessionId {
-        self.session
+    /// Returns the trusted invoking session whose placement scopes this read.
+    pub const fn requesting_session(&self) -> SessionId {
+        self.requesting_session
+    }
+
+    /// Returns the selected native target session.
+    pub const fn target_session(&self) -> SessionId {
+        self.target_session
     }
 
     /// Returns the exclusive transcript position.
@@ -208,6 +217,17 @@ impl ConversationTranscriptRequest {
     pub const fn max_bytes(&self) -> usize {
         self.max_bytes
     }
+}
+
+/// Typed result of one path-scoped native transcript read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConversationTranscriptRead {
+    /// The checked target exists and yielded this bounded visible page.
+    Read(TranscriptPage),
+    /// The target does not exist.
+    NotFound,
+    /// The target lies outside the requester's readable directory subtree.
+    Refused(SessionReadScopeRefusal),
 }
 
 /// One imported transcript read requested through the injected port.
@@ -366,7 +386,7 @@ pub trait ConversationIntrospectionPort: Send {
     fn read_conversation(
         &mut self,
         request: ConversationTranscriptRequest,
-    ) -> impl Future<Output = Result<Option<TranscriptPage>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<ConversationTranscriptRead, Self::Error>> + Send;
 
     /// Reads one bounded visible imported transcript page.
     fn read_imported_conversation(
@@ -650,7 +670,10 @@ struct TranscriptBounds {
 enum ConversationOperation {
     List(ConversationListRequest),
     ReadOwn(TranscriptBounds),
-    ReadOther(ConversationTranscriptRequest),
+    ReadOther {
+        target_session: SessionId,
+        bounds: TranscriptBounds,
+    },
     ReadImported(ImportedTranscriptRequest),
 }
 
@@ -691,14 +714,10 @@ fn decode_operation(
                 decoded.max_bytes,
             )?;
             let session = SessionId::from_uuid(decode_uuid(&decoded.session_id)?);
-            Ok(ConversationOperation::ReadOther(
-                ConversationTranscriptRequest::new(
-                    session,
-                    bounds.after_position,
-                    bounds.max_entries,
-                    bounds.max_bytes,
-                ),
-            ))
+            Ok(ConversationOperation::ReadOther {
+                target_session: session,
+                bounds,
+            })
         }
         ConversationToolKind::ReadImported => {
             let decoded: ReadImportedConversationArguments =
@@ -903,13 +922,26 @@ where
             ConversationOperation::ReadOwn(bounds) => {
                 let request = ConversationTranscriptRequest::new(
                     requesting_session,
+                    requesting_session,
                     bounds.after_position,
                     bounds.max_entries,
                     bounds.max_bytes,
                 );
                 self.read_native(request).await
             }
-            ConversationOperation::ReadOther(request) => self.read_native(request).await,
+            ConversationOperation::ReadOther {
+                target_session,
+                bounds,
+            } => {
+                let request = ConversationTranscriptRequest::new(
+                    requesting_session,
+                    target_session,
+                    bounds.after_position,
+                    bounds.max_entries,
+                    bounds.max_bytes,
+                );
+                self.read_native(request).await
+            }
             ConversationOperation::ReadImported(request) => {
                 let page = self
                     .port
@@ -939,15 +971,34 @@ where
         &mut self,
         request: ConversationTranscriptRequest,
     ) -> Result<ToolExecutorEvidence, ConversationExecutorError<Port::Error>> {
-        let page = self
+        let read = self
             .port
             .read_conversation(request)
             .await
             .map_err(ConversationExecutorError::Port)?;
-        let Some(page) = page else {
-            return Ok(ToolExecutorEvidence::KnownFailed {
-                detail: Some(self.conversation_not_found_detail.clone()),
-            });
+        let page = match read {
+            ConversationTranscriptRead::Read(page) => page,
+            ConversationTranscriptRead::NotFound => {
+                return Ok(ToolExecutorEvidence::KnownFailed {
+                    detail: Some(self.conversation_not_found_detail.clone()),
+                });
+            }
+            ConversationTranscriptRead::Refused(refusal) => {
+                let reason = match refusal.reason() {
+                    SessionReadRefusalReason::OutsideRequestingDirectorySubtree => {
+                        "outside_requesting_directory_subtree"
+                    }
+                };
+                let value = format!(
+                    "conversation read refused: requesting_directory={:?}, reason={reason}",
+                    refusal.requesting_directory().as_str()
+                );
+                let detail = ToolExecutionErrorDetail::try_new(value)
+                    .map_err(|_| ConversationExecutorError::ResultEncoding)?;
+                return Ok(ToolExecutorEvidence::KnownFailed {
+                    detail: Some(detail),
+                });
+            }
         };
         validate_transcript_page(
             request.after_position(),
@@ -956,7 +1007,7 @@ where
             &page,
         )?;
         Ok(ToolExecutorEvidence::CompletedText(encode_native_page(
-            request.session(),
+            request.target_session(),
             page,
         )?))
     }

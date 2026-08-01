@@ -893,8 +893,9 @@ mod tests {
         async fn read_conversation(
             &mut self,
             _request: signalbox_tools_conversations::ConversationTranscriptRequest,
-        ) -> Result<Option<signalbox_tools_conversations::TranscriptPage>, Self::Error> {
-            Ok(None)
+        ) -> Result<signalbox_tools_conversations::ConversationTranscriptRead, Self::Error>
+        {
+            Ok(signalbox_tools_conversations::ConversationTranscriptRead::NotFound)
         }
 
         async fn read_imported_conversation(

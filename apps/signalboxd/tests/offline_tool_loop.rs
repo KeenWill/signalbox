@@ -67,10 +67,11 @@ use signalboxd::{
     CiJobLogResult, CodeHostOperation, CodeHostResult, CodeHostResultCompleteness,
     CodeHostTransport, CodeHostTransportFailure, ConvergenceStateFields, ConvergenceStateResult,
     ConversationIntrospectionPort, ConversationListPage, ConversationListRequest,
-    ConversationTranscriptRequest, DaemonTools, DaemonToolsConstructionError, FilePatchResult,
-    GitHubEgressPolicy, GitHubOperation, GitHubResult, GitHubTransport, GitHubTransportFailure,
-    HubModelConfiguration, ImportedTranscriptRequest, LocalProcessListener,
-    LocalWorkspaceFileSystem, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
+    ConversationTranscriptRead, ConversationTranscriptRequest, DaemonTools,
+    DaemonToolsConstructionError, FilePatchResult, GitHubEgressPolicy, GitHubOperation,
+    GitHubResult, GitHubTransport, GitHubTransportFailure, HubModelConfiguration,
+    ImportedTranscriptRequest, LocalProcessListener, LocalWorkspaceFileSystem,
+    PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
     PostgresConversationIntrospection, PostgresProviderModelExecution,
     PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
     REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass,
@@ -897,8 +898,8 @@ impl ConversationIntrospectionPort for UnusedConversationPort {
     async fn read_conversation(
         &mut self,
         _request: ConversationTranscriptRequest,
-    ) -> Result<Option<TranscriptPage>, Self::Error> {
-        Ok(None)
+    ) -> Result<ConversationTranscriptRead, Self::Error> {
+        Ok(ConversationTranscriptRead::NotFound)
     }
 
     async fn read_imported_conversation(

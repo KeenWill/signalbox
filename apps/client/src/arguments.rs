@@ -11,6 +11,7 @@ use signalbox_process_protocol::{
     ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
     ReviewFindingInput, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
     ReviewPassTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
+    SessionPlacement,
 };
 use uuid::Uuid;
 
@@ -44,6 +45,13 @@ pub(crate) enum Command {
         template: Option<String>,
         command_id: Option<CommandId>,
         system_prompt_file: Option<PathBuf>,
+        placement: SessionPlacement,
+    },
+    Place {
+        session_id: CanonicalUuid,
+        expected_placement_version: CanonicalU64,
+        replacement: SessionPlacement,
+        command_id: Option<CommandId>,
     },
     Continue {
         imported_conversation_id: CanonicalUuid,
@@ -345,6 +353,8 @@ struct Cli {
 enum CliCommand {
     /// Create a session.
     Create(CreateArguments),
+    /// Append an explicit immutable placement update.
+    Place(PlaceArguments),
     /// Create a live session from an imported conversation boundary.
     Continue(ContinueArguments),
     /// Compact model-visible session history without rewriting its transcript.
@@ -906,6 +916,66 @@ struct CreateArguments {
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
+    /// Dotted placement path; a one-segment root path requires
+    /// `--root-global-read`.
+    #[arg(long, value_name = "PATH")]
+    placement: Option<String>,
+    /// Explicitly acknowledge that the one-segment placement grants global read.
+    #[arg(long, requires = "placement")]
+    root_global_read: bool,
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("replacement")
+        .required(true)
+        .multiple(false)
+        .args(["placement", "pathless"])
+))]
+struct PlaceArguments {
+    /// Session whose placement history advances.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Caller-observed current positive placement version.
+    #[arg(long, value_name = "DECIMAL", value_parser = canonical_u64)]
+    expected_placement_version: CanonicalU64,
+    /// Replacement dotted placement path.
+    #[arg(long, value_name = "PATH")]
+    placement: Option<String>,
+    /// Replace the placement with legacy pathless behavior.
+    #[arg(long)]
+    pathless: bool,
+    /// Explicitly acknowledge that a one-segment replacement grants global read.
+    #[arg(long, requires = "placement")]
+    root_global_read: bool,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+fn placement_argument(
+    path: Option<String>,
+    root_global_read: bool,
+) -> Result<SessionPlacement, UsageError> {
+    match (path, root_global_read) {
+        (None, false) => Ok(SessionPlacement::Pathless {}),
+        (Some(path), false) => SessionPlacement::try_scoped(path).map_err(|_| {
+            UsageError(Cli::command().error(
+                ErrorKind::InvalidValue,
+                "placement must be a valid non-root dotted path; root placement requires --root-global-read",
+            ))
+        }),
+        (Some(path), true) => SessionPlacement::try_root_global_read(path).map_err(|_| {
+            UsageError(Cli::command().error(
+                ErrorKind::InvalidValue,
+                "--root-global-read requires a valid one-segment placement",
+            ))
+        }),
+        (None, true) => Err(UsageError(Cli::command().error(
+            ErrorKind::MissingRequiredArgument,
+            "--root-global-read requires --placement",
+        ))),
+    }
 }
 
 #[derive(Debug, ClapArgs)]
@@ -1338,6 +1408,17 @@ pub(crate) fn parse(
             template: arguments.template,
             command_id: arguments.command_id,
             system_prompt_file: arguments.system_prompt_file,
+            placement: placement_argument(arguments.placement, arguments.root_global_read)?,
+        },
+        CliCommand::Place(arguments) => Command::Place {
+            session_id: arguments.session_id,
+            expected_placement_version: arguments.expected_placement_version,
+            replacement: if arguments.pathless {
+                SessionPlacement::Pathless {}
+            } else {
+                placement_argument(arguments.placement, arguments.root_global_read)?
+            },
+            command_id: arguments.command_id,
         },
         CliCommand::Continue(arguments) => Command::Continue {
             imported_conversation_id: arguments.imported_conversation_id,
@@ -2103,7 +2184,7 @@ mod tests {
         CanonicalU64, CanonicalUuid, ConversationCursor, ConversationImportFormat,
         ConversationOrigin, ConversationOriginFilter, ImportedSessionRelationship,
         MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, SessionPlacement,
     };
     use uuid::Uuid;
 
@@ -3219,6 +3300,75 @@ mod tests {
             .is_err()
         );
         assert!(parse(["create"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn create_root_placement_requires_and_preserves_global_read_intent() {
+        let selection = "00000000-0000-0000-0000-000000000001";
+        let Ok(ParseOutcome::Run(arguments)) = parse(
+            [
+                "create",
+                "--model",
+                selection,
+                "--placement",
+                "operator",
+                "--root-global-read",
+            ]
+            .map(Into::into),
+        ) else {
+            panic!("explicit root placement parses")
+        };
+        let Command::Create { placement, .. } = arguments.command else {
+            panic!("creation command is retained")
+        };
+
+        assert_eq!(
+            placement,
+            SessionPlacement::RootGlobalRead {
+                path: String::from("operator"),
+                intent: signalbox_process_protocol::RootPlacementGlobalReadIntent::Acknowledged,
+            }
+        );
+        assert!(
+            parse(["create", "--model", selection, "--placement", "operator"].map(Into::into))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn place_binds_expected_version_and_complete_replacement() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let Ok(ParseOutcome::Run(arguments)) = parse(
+            [
+                "place",
+                session,
+                "--expected-placement-version",
+                "2",
+                "--placement",
+                "projects.foo.session",
+            ]
+            .map(Into::into),
+        ) else {
+            panic!("placement update parses")
+        };
+        let Command::Place {
+            session_id,
+            expected_placement_version,
+            replacement,
+            ..
+        } = arguments.command
+        else {
+            panic!("place command is retained")
+        };
+
+        assert_eq!(session_id.to_string(), session);
+        assert_eq!(expected_placement_version.value(), 2);
+        assert_eq!(
+            replacement,
+            SessionPlacement::Scoped {
+                path: String::from("projects.foo.session"),
+            }
+        );
     }
 
     #[test]

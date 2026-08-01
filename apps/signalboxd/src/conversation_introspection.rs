@@ -15,13 +15,14 @@ use signalbox_persistence::{
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     process_read::{
         ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
-        ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptItem,
+        ProcessReadRepository, ProcessScopedTranscriptRead, ProcessTranscriptEntry,
+        ProcessTranscriptItem,
     },
 };
 use signalbox_tools_conversations::{
     ConversationCursor, ConversationIntrospectionPort, ConversationListItem, ConversationListPage,
-    ConversationListRequest, ConversationTranscriptRequest, ImportedTranscriptRequest,
-    TranscriptEntry, TranscriptEntryKind, TranscriptPage,
+    ConversationListRequest, ConversationTranscriptRead, ConversationTranscriptRequest,
+    ImportedTranscriptRequest, TranscriptEntry, TranscriptEntryKind, TranscriptPage,
 };
 use sqlx::PgPool;
 
@@ -151,14 +152,20 @@ impl ConversationIntrospectionPort for PostgresConversationIntrospection {
     async fn read_conversation(
         &mut self,
         request: ConversationTranscriptRequest,
-    ) -> Result<Option<TranscriptPage>, Self::Error> {
+    ) -> Result<ConversationTranscriptRead, Self::Error> {
         let repository = ProcessReadRepository::new(self.pool.clone());
-        let Some(mut reader) = repository
-            .open_transcript(request.session())
+        let read = repository
+            .open_scoped_transcript(request.requesting_session(), request.target_session())
             .await
-            .map_err(ConversationIntrospectionError::from_process)?
-        else {
-            return Ok(None);
+            .map_err(ConversationIntrospectionError::from_process)?;
+        let mut reader = match read {
+            ProcessScopedTranscriptRead::Opened(reader) => reader,
+            ProcessScopedTranscriptRead::TargetNotFound => {
+                return Ok(ConversationTranscriptRead::NotFound);
+            }
+            ProcessScopedTranscriptRead::Refused(refusal) => {
+                return Ok(ConversationTranscriptRead::Refused(refusal));
+            }
         };
         let after = request.after_position().map_or(0, NonZeroU64::get);
         let mut builder = TranscriptPageBuilder::new(request.max_entries(), request.max_bytes());
@@ -175,10 +182,10 @@ impl ConversationIntrospectionPort for PostgresConversationIntrospection {
                 continue;
             }
             if !builder.push(visible) {
-                return Ok(Some(builder.finish(true)));
+                return Ok(ConversationTranscriptRead::Read(builder.finish(true)));
             }
         }
-        Ok(Some(builder.finish(false)))
+        Ok(ConversationTranscriptRead::Read(builder.finish(false)))
     }
 
     async fn read_imported_conversation(

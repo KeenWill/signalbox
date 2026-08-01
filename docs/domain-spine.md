@@ -4460,7 +4460,8 @@ impl CreateSessionRequest {
         template_provenance: SessionTemplateProvenance,
         resolved_configuration_defaults: SessionConfigurationDefaults,
     ) -> Result<Self, InvalidDurableCommandId>;
-    // accessors: command_id(), initial_configuration_defaults(), template_provenance()
+    pub fn with_placement(self, placement: SessionPlacement) -> Self;
+    // accessors: command_id(), initial_configuration_defaults(), template_provenance(), placement()
 }
 
 pub trait SessionIdGenerator {
@@ -4501,6 +4502,46 @@ impl<Generator: SessionIdGenerator, Transaction: CreateSessionTransaction>
         &mut self,
         request: CreateSessionRequest,
     ) -> Result<CreateSessionOutcome, CreateSessionError<Transaction::Error>>;
+}
+```
+
+## application: update_session_placement
+
+```rust
+pub struct UpdateSessionPlacementRequest { /* private */ }
+impl UpdateSessionPlacementRequest {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_version: SessionPlacementVersion,
+        replacement: SessionPlacement,
+    ) -> Self;
+}
+
+pub trait UpdateSessionPlacementTransaction {
+    type Error;
+    fn handle(
+        &mut self,
+        command: UpdateSessionPlacement,
+    ) -> impl Future<Output = Result<UpdateSessionPlacementOutcome, Self::Error>> + Send;
+}
+
+pub enum UpdateSessionPlacementOutcome {
+    Recorded(UpdateSessionPlacementResult),
+    ConflictingReuse { command_id: DurableCommandId },
+}
+
+pub struct UpdateSessionPlacementService<Transaction> { /* private */ }
+impl<Transaction> UpdateSessionPlacementService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: UpdateSessionPlacementTransaction>
+    UpdateSessionPlacementService<Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        request: UpdateSessionPlacementRequest,
+    ) -> Result<UpdateSessionPlacementOutcome, Transaction::Error>;
 }
 ```
 
@@ -8081,6 +8122,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | **signalbox-domain total**                         | **615 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
+| application: update_session_placement              | 4 (incl. 1 trait)    |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
 | application: list_conversations                    | 8 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
@@ -8097,4 +8139,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **200**              |
+| **signalbox-application total**                    | **204**              |

@@ -75,9 +75,9 @@ use signalbox_process_protocol::{
     ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
     ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
     ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
-    SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-    decode_server_line, encode_client_line,
+    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
+    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
@@ -602,6 +602,7 @@ async fn create_alias_session(
                     alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
                 },
                 system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
             },
         )
         .await?;
@@ -766,6 +767,7 @@ async fn create_session_rejects_a_model_absent_from_the_static_mapping()
                     selection_id: unknown_selection,
                 },
                 system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
             },
         )
         .await?;
@@ -1894,25 +1896,32 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
         .await?;
 
     let start = response_within(&mut connection).await?;
-    assert!(matches!(start.message(), ServerMessage::SessionsStart {}));
+    let ServerMessage::SessionsStart {} = start.message() else {
+        panic!("session listing starts explicitly")
+    };
     let summary = response_within(&mut connection).await?;
-    assert!(matches!(
-        summary.message(),
-        ServerMessage::SessionSummary {
-            session_id: listed,
-            defaults_version,
-            model_selection: ModelSelection::Alias {
-                alias_id: listed_alias
-            },
-        } if *listed == session_id
-            && defaults_version.value() == 1
-            && *listed_alias == alias_id
-    ));
+    let ServerMessage::SessionSummary {
+        session_id: listed,
+        defaults_version,
+        model_selection: ModelSelection::Alias {
+            alias_id: listed_alias,
+        },
+        placement_version,
+        placement,
+    } = summary.message()
+    else {
+        panic!("session listing carries one alias summary")
+    };
+    assert_eq!(*listed, session_id);
+    assert_eq!(defaults_version.value(), 1);
+    assert_eq!(*listed_alias, alias_id);
+    assert_eq!(placement_version.value(), 1);
+    assert_eq!(placement, &SessionPlacement::Pathless {});
     let end = response_within(&mut connection).await?;
-    assert!(matches!(
-        end.message(),
-        ServerMessage::SessionsEnd { session_count } if session_count.value() == 1
-    ));
+    let ServerMessage::SessionsEnd { session_count } = end.message() else {
+        panic!("session listing ends explicitly")
+    };
+    assert_eq!(session_count.value(), 1);
 
     drop(connection);
     runtime.stop().await
@@ -4863,6 +4872,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                     selection_id: selection,
                 },
                 system_prompt: SystemPromptMember::present(Some(prompt.clone())),
+                placement: SessionPlacement::Pathless {},
             },
         )
         .await?;
@@ -6410,6 +6420,7 @@ impl ReviewRuntimeDriver {
                 ClientRequest::CreateSessionFromTemplate {
                     command_id: command()?,
                     template_name: String::from(template_name),
+                    placement: SessionPlacement::Pathless {},
                 },
             )
             .await?;

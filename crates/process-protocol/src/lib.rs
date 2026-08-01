@@ -1029,6 +1029,8 @@ pub enum CanonicalValueError {
     /// A session system prompt was empty, contained U+0000, or exceeded its
     /// UTF-8 byte bound.
     SystemPrompt,
+    /// A dotted session placement or root-global-read decision was invalid.
+    Placement,
 }
 
 impl fmt::Display for CanonicalValueError {
@@ -1042,6 +1044,7 @@ impl fmt::Display for CanonicalValueError {
             Self::Metadata => "session metadata value is invalid",
             Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
             Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
+            Self::Placement => "session placement is invalid",
         })
     }
 }
@@ -1150,6 +1153,81 @@ pub enum ModelSelection {
         /// Exact configured alias identity.
         alias_id: CanonicalUuid,
     },
+}
+
+/// Explicit acknowledgement carried by a root-placement creation or update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootPlacementGlobalReadIntent {
+    /// The caller explicitly accepts that root placement grants global read.
+    Acknowledged,
+}
+
+/// One session's opt-in dotted placement decision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionPlacement {
+    /// Preserve legacy unrestricted conversation-read behavior.
+    Pathless {},
+    /// Place below root; the parent directory's subtree is readable.
+    Scoped { path: String },
+    /// Place at root with loud acknowledgement that this grants global read.
+    RootGlobalRead {
+        path: String,
+        intent: RootPlacementGlobalReadIntent,
+    },
+}
+
+impl SessionPlacement {
+    fn is_pathless(&self) -> bool {
+        matches!(self, Self::Pathless {})
+    }
+    /// Constructs and validates a non-root placement.
+    pub fn try_scoped(path: String) -> Result<Self, CanonicalValueError> {
+        let placement = Self::Scoped { path };
+        validate_session_placement(&placement).map_err(|_| CanonicalValueError::Placement)?;
+        Ok(placement)
+    }
+
+    /// Constructs and validates the loud root-global-read decision.
+    pub fn try_root_global_read(path: String) -> Result<Self, CanonicalValueError> {
+        let placement = Self::RootGlobalRead {
+            path,
+            intent: RootPlacementGlobalReadIntent::Acknowledged,
+        };
+        validate_session_placement(&placement).map_err(|_| CanonicalValueError::Placement)?;
+        Ok(placement)
+    }
+}
+
+impl Default for SessionPlacement {
+    fn default() -> Self {
+        Self::Pathless {}
+    }
+}
+
+fn validate_session_placement(placement: &SessionPlacement) -> Result<(), FrameValidationError> {
+    let (path, root) = match placement {
+        SessionPlacement::Pathless {} => return Ok(()),
+        SessionPlacement::Scoped { path } => (path, false),
+        SessionPlacement::RootGlobalRead { path, .. } => (path, true),
+    };
+    let segments = path.split('.').collect::<Vec<_>>();
+    let shape_valid = !path.is_empty()
+        && segments.len() <= 64
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= 64
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+        && (segments.len() == 1) == root;
+    if shape_valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::PlacementShape)
+    }
 }
 
 /// One exact complete session-metadata object.
@@ -2041,6 +2119,9 @@ pub enum ClientRequest {
         /// Optional initial system prompt; required null-or-text member.
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
+        /// Explicit opt-in placement, defaulting to legacy pathless behavior.
+        #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
+        placement: SessionPlacement,
     },
     /// Create a user-initiated session from one daemon-held template.
     CreateSessionFromTemplate {
@@ -2048,11 +2129,21 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Validated static template name.
         template_name: String,
+        /// Explicit opt-in placement, defaulting to legacy pathless behavior.
+        #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
+        placement: SessionPlacement,
     },
     /// List available static templates by name and version.
     ListTemplates {},
     /// List current sessions.
     ListSessions {},
+    /// Append one explicit immutable session-placement update event.
+    UpdateSessionPlacement {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        expected_placement_version: CanonicalU64,
+        replacement: SessionPlacement,
+    },
     /// Attach one immutable commissioned goal statement.
     AttachGoal {
         /// Durable mutation identity.
@@ -2469,6 +2560,7 @@ impl ClientRequest {
             | Self::CreateSessionFromTemplate { .. }
             | Self::ListTemplates {}
             | Self::ListSessions {}
+            | Self::UpdateSessionPlacement { .. }
             | Self::ReadGoal { .. }
             | Self::ResumeGoal { guidance: None, .. }
             | Self::StopGoal { .. }
@@ -2509,6 +2601,23 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. } => {}
+        }
+        match self {
+            Self::CreateSession { placement, .. }
+            | Self::CreateSessionFromTemplate { placement, .. }
+            | Self::UpdateSessionPlacement {
+                replacement: placement,
+                ..
+            } => validate_session_placement(placement)?,
+            _ => {}
+        }
+        if let Self::UpdateSessionPlacement {
+            expected_placement_version,
+            ..
+        } = self
+            && expected_placement_version.value() == 0
+        {
+            return Err(FrameValidationError::PlacementShape);
         }
         if let Self::SubmitInput {
             expected_defaults_version,
@@ -2892,6 +3001,17 @@ pub enum RejectionDetail {
     SessionNotFound {
         /// Absent target.
         session_id: CanonicalUuid,
+    },
+    /// The placement head advanced beyond the caller-observed version.
+    SessionPlacementCurrentVersionMismatch {
+        session_id: CanonicalUuid,
+        expected_placement_version: CanonicalU64,
+        current_placement_version: CanonicalU64,
+    },
+    /// The positive placement-version space was exhausted.
+    SessionPlacementVersionExhausted {
+        session_id: CanonicalUuid,
+        current_placement_version: CanonicalU64,
     },
     /// A durable goal command was rejected by current goal state.
     GoalCommandRejected {
@@ -3973,6 +4093,12 @@ pub enum ServerMessage {
         /// Created session.
         session_id: CanonicalUuid,
     },
+    /// One immutable placement update was appended or equally replayed.
+    SessionPlacementUpdated {
+        session_id: CanonicalUuid,
+        placement_version: CanonicalU64,
+        placement: SessionPlacement,
+    },
     /// Input acceptance receipt.
     InputSubmitted {
         /// Owning session.
@@ -4042,6 +4168,10 @@ pub enum ServerMessage {
         defaults_version: CanonicalU64,
         /// Current model-selection request.
         model_selection: ModelSelection,
+        /// Current immutable placement-history version.
+        placement_version: CanonicalU64,
+        /// Current opt-in placement decision.
+        placement: SessionPlacement,
     },
     /// Completes a session-summary sequence.
     SessionsEnd {
@@ -4526,6 +4656,21 @@ impl ServerMessage {
                     return Err(FrameValidationError::TemplateShape);
                 }
             }
+            Self::SessionSummary {
+                placement_version,
+                placement,
+                ..
+            }
+            | Self::SessionPlacementUpdated {
+                placement_version,
+                placement,
+                ..
+            } => {
+                if placement_version.value() == 0 {
+                    return Err(FrameValidationError::PlacementShape);
+                }
+                validate_session_placement(placement)?;
+            }
             Self::ConversationPageEnd {
                 conversation_count,
                 next_after,
@@ -4737,6 +4882,8 @@ pub enum FrameValidationError {
     ReviewShape,
     /// A goal request, state, or event carried an invalid shape.
     GoalShape,
+    /// A dotted placement or its root-global-read acknowledgement is invalid.
+    PlacementShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -4764,6 +4911,7 @@ impl fmt::Display for FrameValidationError {
             Self::TemplateShape => "session-template frame shape is inconsistent",
             Self::ReviewShape => "review workflow frame shape is inconsistent",
             Self::GoalShape => "commissioned-goal frame shape is inconsistent",
+            Self::PlacementShape => "session-placement frame shape is inconsistent",
         })
     }
 }
@@ -6219,9 +6367,19 @@ mod tests {
                 command_id: command(4)?,
                 initial_model_selection: model,
                 system_prompt: SystemPromptMember::present(None),
+                placement: super::SessionPlacement::Pathless {},
             },
         )?;
         assert_client_request_current_version(request(2)?, ClientRequest::ListSessions {})?;
+        assert_client_request_current_version(
+            request(80)?,
+            ClientRequest::UpdateSessionPlacement {
+                command_id: command(81)?,
+                session_id: uuid(82),
+                expected_placement_version: CanonicalU64::new(1),
+                replacement: super::SessionPlacement::Pathless {},
+            },
+        )?;
         assert_client_request_current_version(
             request(3)?,
             ClientRequest::SubmitInput {
@@ -7727,6 +7885,7 @@ mod tests {
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
             )?)),
+            placement: super::SessionPlacement::Pathless {},
         };
         let frame = ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, create)?;
         let encoded = encode_client_line(&frame)?;
@@ -7746,6 +7905,7 @@ mod tests {
                 selection_id: uuid(4),
             },
             system_prompt: SystemPromptMember::present(None),
+            placement: super::SessionPlacement::Pathless {},
         };
         let promptless_frame =
             ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, promptless_create)?;
@@ -7905,6 +8065,7 @@ mod tests {
             ClientRequest::CreateSessionFromTemplate {
                 command_id: command(2)?,
                 template_name: "reviewer".to_owned(),
+                placement: super::SessionPlacement::Pathless {},
             },
         )?;
         let encoded_create = encode_client_line(&create)?;
@@ -7948,6 +8109,45 @@ mod tests {
             },
             r#"{"type":"templates_end","template_count":"1"}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn root_placement_creation_and_update_frames_record_global_read_intent_loudly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = super::SessionPlacement::try_root_global_read(String::from("operator"))?;
+        let create = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(70)?,
+            ClientRequest::CreateSession {
+                command_id: command(71)?,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: uuid(72),
+                },
+                system_prompt: SystemPromptMember::present(None),
+                placement: root.clone(),
+            },
+        )?;
+        assert_eq!(
+            String::from_utf8(encode_client_line(&create)?)?,
+            r#"{"version":1,"request_id":"70","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"},"system_prompt":null,"placement":{"kind":"root_global_read","path":"operator","intent":"acknowledged"}}}
+"#
+        );
+        let update = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(73)?,
+            ClientRequest::UpdateSessionPlacement {
+                command_id: command(74)?,
+                session_id: uuid(75),
+                expected_placement_version: CanonicalU64::new(1),
+                replacement: root,
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&update)?)?, update);
+        assert_eq!(
+            super::SessionPlacement::try_scoped(String::from("operator")),
+            Err(super::CanonicalValueError::Placement)
+        );
         Ok(())
     }
 
@@ -9075,8 +9275,10 @@ mod tests {
                 session_id: uuid(1),
                 defaults_version: CanonicalU64::new(1),
                 model_selection: ModelSelection::Alias { alias_id: uuid(4) },
+                placement_version: CanonicalU64::new(1),
+                placement: super::SessionPlacement::Pathless {},
             },
-            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"}}"#,
+            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"},"placement_version":"1","placement":{"kind":"pathless"}}"#,
         )?;
         assert_server_message_round_trip(
             request(5)?,

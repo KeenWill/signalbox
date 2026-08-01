@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use signalbox_application::{UpdateSessionPlacementOutcome, UpdateSessionPlacementTransaction};
 use signalbox_domain::{
     DurableCommandId, RootPlacementGlobalReadIntent, SessionId, SessionPlacement,
     SessionPlacementEvent, SessionPlacementPath, SessionPlacementVersion, UpdateSessionPlacement,
@@ -206,6 +207,26 @@ impl SessionPlacementRepository {
     ) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
         let mut connection = self.pool.acquire().await?;
         load_current(&mut connection, session).await
+    }
+}
+
+impl UpdateSessionPlacementTransaction for SessionPlacementRepository {
+    type Error = SessionPlacementRepositoryError;
+
+    async fn handle(
+        &mut self,
+        command: UpdateSessionPlacement,
+    ) -> Result<UpdateSessionPlacementOutcome, Self::Error> {
+        Ok(
+            match SessionPlacementRepository::handle(self, command).await? {
+                SessionPlacementRepositoryOutcome::Recorded(result) => {
+                    UpdateSessionPlacementOutcome::Recorded(result)
+                }
+                SessionPlacementRepositoryOutcome::ConflictingReuse { command_id } => {
+                    UpdateSessionPlacementOutcome::ConflictingReuse { command_id }
+                }
+            },
+        )
     }
 }
 

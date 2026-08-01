@@ -17,6 +17,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
+    process_read::{ProcessReadRepository, ProcessScopedTranscriptRead},
     session::SessionRepository,
     session_placement::{SessionPlacementRepository, SessionPlacementRepositoryOutcome},
 };
@@ -50,6 +51,110 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .await?;
     migrate(&pool).await?;
     Ok((container, pool))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_transcript_open_enforces_the_single_prefix_rule_and_legacy_exceptions()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let requester = session(0x301);
+    let sibling = session(0x302);
+    let descendant = session(0x303);
+    let ancestor = session(0x304);
+    let disjoint = session(0x305);
+    let pathless = session(0x306);
+    let root_session = session(0x307);
+    let creation_repository = CreateSessionRepository::new(pool.clone(), credential_pin());
+    creation_repository
+        .handle(creation(
+            command(0x401),
+            requester,
+            scoped("projects.foo.reviews.pr123"),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x402),
+            sibling,
+            scoped("projects.foo.reviews.pr456"),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x403),
+            descendant,
+            scoped("projects.foo.reviews.pr456.followup"),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x404),
+            ancestor,
+            scoped("projects.foo.session"),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x405),
+            disjoint,
+            scoped("projects.bar.session"),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x406),
+            pathless,
+            SessionPlacement::Pathless,
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(command(0x407), root_session, root("operator")))
+        .await?;
+    let reads = ProcessReadRepository::new(pool.clone());
+
+    let ProcessScopedTranscriptRead::Opened(sibling_reader) =
+        reads.open_scoped_transcript(requester, sibling).await?
+    else {
+        panic!("sibling is readable")
+    };
+    drop(sibling_reader);
+    let ProcessScopedTranscriptRead::Opened(descendant_reader) =
+        reads.open_scoped_transcript(requester, descendant).await?
+    else {
+        panic!("descendant is readable")
+    };
+    drop(descendant_reader);
+    let ProcessScopedTranscriptRead::Refused(ancestor_refusal) =
+        reads.open_scoped_transcript(requester, ancestor).await?
+    else {
+        panic!("ancestor is refused")
+    };
+    let ProcessScopedTranscriptRead::Refused(disjoint_refusal) =
+        reads.open_scoped_transcript(requester, disjoint).await?
+    else {
+        panic!("disjoint subtree is refused")
+    };
+    assert_eq!(
+        ancestor_refusal.requesting_directory(),
+        disjoint_refusal.requesting_directory()
+    );
+    let ProcessScopedTranscriptRead::Opened(pathless_reader) =
+        reads.open_scoped_transcript(pathless, disjoint).await?
+    else {
+        panic!("pathless requester keeps legacy reads")
+    };
+    drop(pathless_reader);
+    let ProcessScopedTranscriptRead::Opened(root_reader) =
+        reads.open_scoped_transcript(root_session, pathless).await?
+    else {
+        panic!("root placement reads pathless targets globally")
+    };
+    drop(root_reader);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {

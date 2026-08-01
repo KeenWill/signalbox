@@ -103,8 +103,8 @@ pub use signalbox_tools_code_host::{
 pub use signalbox_tools_conversations::{
     CONVERSATION_TOOL_NAMES, ConversationExecutor, ConversationIntrospectionPort,
     ConversationListItem, ConversationListPage, ConversationListRequest, ConversationTools,
-    ConversationTranscriptRequest, ImportedTranscriptRequest, TranscriptEntry, TranscriptEntryKind,
-    TranscriptPage,
+    ConversationTranscriptRead, ConversationTranscriptRequest, ImportedTranscriptRequest,
+    TranscriptEntry, TranscriptEntryKind, TranscriptPage,
 };
 pub use signalbox_tools_github::{
     GITHUB_CREDENTIAL_REFERENCE, GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy,

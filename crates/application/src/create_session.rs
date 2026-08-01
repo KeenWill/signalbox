@@ -11,7 +11,7 @@ use signalbox_domain::{
     CreateSession as DomainCreateSession, CreateSessionAppliedResult,
     CreateSessionPreparationFailure, DurableCommandId, PreparedCreateSession,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionTemplateProvenance, TranscriptAncestry,
+    SessionPlacement, SessionTemplateProvenance, TranscriptAncestry,
 };
 
 /// Why a caller-supplied command identity cannot enter canonical construction.
@@ -49,6 +49,7 @@ pub struct CreateSessionRequest {
     command_id: DurableCommandId,
     initial_configuration_defaults: SessionConfigurationDefaults,
     template_provenance: Option<SessionTemplateProvenance>,
+    placement: SessionPlacement,
 }
 
 impl CreateSessionRequest {
@@ -68,6 +69,7 @@ impl CreateSessionRequest {
             command_id,
             initial_configuration_defaults,
             template_provenance: None,
+            placement: SessionPlacement::Pathless,
         })
     }
 
@@ -89,6 +91,7 @@ impl CreateSessionRequest {
             command_id,
             initial_configuration_defaults: resolved_configuration_defaults,
             template_provenance: Some(template_provenance),
+            placement: SessionPlacement::Pathless,
         })
     }
 
@@ -105,6 +108,17 @@ impl CreateSessionRequest {
     /// Borrows immutable template provenance for template-sourced creation.
     pub const fn template_provenance(&self) -> Option<&SessionTemplateProvenance> {
         self.template_provenance.as_ref()
+    }
+
+    /// Installs the explicit placement decision carried into creation history.
+    pub fn with_placement(mut self, placement: SessionPlacement) -> Self {
+        self.placement = placement;
+        self
+    }
+
+    /// Borrows the creation-time placement decision.
+    pub const fn placement(&self) -> &SessionPlacement {
+        &self.placement
     }
 }
 
@@ -237,21 +251,26 @@ where
             command_id,
             initial_configuration_defaults,
             template_provenance,
+            placement,
         } = request;
         let provenance = SessionCreationProvenance::new(
             SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         );
         let command = match template_provenance {
-            Some(template_provenance) => DomainCreateSession::new_from_template(
+            Some(template_provenance) => DomainCreateSession::new_from_template_with_placement(
                 command_id,
                 provenance,
                 template_provenance,
                 initial_configuration_defaults,
+                placement,
             ),
-            None => {
-                DomainCreateSession::new(command_id, provenance, initial_configuration_defaults)
-            }
+            None => DomainCreateSession::new_with_placement(
+                command_id,
+                provenance,
+                initial_configuration_defaults,
+                placement,
+            ),
         };
         let prepared = command
             .prepare(candidate_session)

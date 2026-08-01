@@ -39,8 +39,8 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    ModelSelection, ProtocolVersion, RequestId, ServerFrame, ServerMessage, SystemPromptMember,
-    ToolDecision, TurnState, decode_server_line, encode_client_line,
+    ModelSelection, ProtocolVersion, RequestId, ServerFrame, ServerMessage, SessionPlacement,
+    SystemPromptMember, ToolDecision, TurnState, decode_server_line, encode_client_line,
 };
 use signalbox_tools_basic::{SESSION_STATUS_UPDATE_NAME, WEB_FETCH_NAME};
 use signalbox_tools_conversations::{
@@ -1018,6 +1018,7 @@ async fn create_session(connection: &mut Connection) -> SmokeResult<CanonicalUui
                 alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(SMOKE_ALIAS)),
             },
             system_prompt: SystemPromptMember::present(None),
+            placement: SessionPlacement::Pathless {},
         })
         .await?;
     let response = connection.response_within().await?;

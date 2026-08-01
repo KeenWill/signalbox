@@ -286,6 +286,26 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
+            RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                session_id,
+                expected_placement_version,
+                current_placement_version,
+            } => write!(
+                formatter,
+                "session_placement_current_version_mismatch session={session_id} \
+                 expected_placement_version={} current_placement_version={}",
+                expected_placement_version.value(),
+                current_placement_version.value()
+            ),
+            RejectionDetail::SessionPlacementVersionExhausted {
+                session_id,
+                current_placement_version,
+            } => write!(
+                formatter,
+                "session_placement_version_exhausted session={session_id} \
+                 current_placement_version={}",
+                current_placement_version.value()
+            ),
             RejectionDetail::GoalCommandRejected { session_id, reason } => write!(
                 formatter,
                 "goal_command_rejected session={session_id} reason={}",

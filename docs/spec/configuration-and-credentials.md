@@ -469,10 +469,16 @@ immutable imported conversations. It exposes only persisted visible semantic
 content in tool results: source-attested imported text remains text, while
 unattested, non-text, thinking, redacted-thinking, document, and absent-content
 entries are content-silent typed markers. Native reads stream from the
-repeatable-read projection. Imported reads currently materialize the complete
-immutable aggregate, including its persisted raw source records, before the
-adapter projects normalized visible entries and enforces the tool page's entry
-and byte bounds; raw source records are never returned in the tool result.
+repeatable-read projection. A selected native read carries the trusted invoking
+session separately from the model-selected target. The adapter loads both
+current placement epochs before opening the transcript in that same snapshot; an
+out-of-directory target returns typed refusal evidence naming the requesting
+directory and `outside_requesting_directory_subtree`, never an empty page.
+Pathless requesters retain the pre-placement behavior and a loudly acknowledged
+root placement reads every target. Imported reads currently materialize the
+complete immutable aggregate, including its persisted raw source records, before
+the adapter projects normalized visible entries and enforces the tool page's
+entry and byte bounds; raw source records are never returned in the tool result.
 
 Each `[[models]]` entry defines one direct selection:
 
