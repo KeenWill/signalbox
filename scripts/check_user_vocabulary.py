@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject role-sense ``owner`` vocabulary outside reviewed homonyms."""
+"""Reject retired role vocabulary and ambiguous human/wire-role prose."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ OWNER = re.compile(
     r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
     r"\b[A-Za-z0-9_]+Owners?(?:[A-Z][A-Za-z0-9_]*)?"
 )
+BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+messages?\b)")
 
 @dataclass(frozen=True)
 class Allowance:
@@ -331,6 +332,10 @@ def violations(root: Path) -> list[str]:
             ):
                 continue
             failures.append(f"{relative}:{number}: {line.strip()}")
+        lines = text.splitlines()
+        for match in BARE_USER_MESSAGE.finditer(text):
+            number = text.count("\n", 0, match.start()) + 1
+            failures.append(f"{relative}:{number}: {lines[number - 1].strip()}")
     return failures
 
 def main() -> int:
@@ -348,10 +353,13 @@ def main() -> int:
         print(f"user-vocabulary check failed: {error}", file=sys.stderr)
         return 1
     if failures:
-        print("role-sense owner vocabulary is forbidden:")
+        print("retired or ambiguous role vocabulary is forbidden:")
         for failure in failures:
             print(f"  - {failure}")
-        print("Rename the human principal to user or extend the reviewed homonym allowlist.")
+        print(
+            "Rename the human principal to user, distinguish a user-role message "
+            "from a message from the user, or extend the reviewed homonym allowlist."
+        )
         return 1
     print("user-vocabulary check passed")
     return 0

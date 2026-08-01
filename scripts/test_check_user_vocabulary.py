@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove the user-vocabulary checker rejects role-sense ``owner`` prose."""
+"""Prove the user-vocabulary checker rejects retired and ambiguous prose."""
 
 from __future__ import annotations
 
@@ -78,6 +78,7 @@ def main() -> int:
             / "SessionSynchronization.swift"
         )
         violation = root / "docs" / "spec" / "example.md"
+        ambiguous_message = root / "docs" / "spec" / "user-message.md"
         reviewed_domain_path = root / "docs" / "spec" / "review-workflows.md"
         reviewed_github_path = root / "docs" / "spec" / "tool-loop.md"
         reviewed_identity_path = root / "docs" / "spec" / "identity-and-commands.md"
@@ -156,6 +157,12 @@ def main() -> int:
             'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
         )
         violation.write_text(fixture_text(violation_lines), encoding="utf-8")
+        ambiguous_message.write_text(
+            "The runtime sends a user message.\n"
+            "The runtime also sends a user\n"
+            "message after tool output.\n",
+            encoding="utf-8",
+        )
         mixed_storage_path.write_text(
             fixture_text(mixed_storage_lines), encoding="utf-8"
         )
@@ -190,6 +197,7 @@ def main() -> int:
             "crates/persistence/migrations/202608020009_user_vocabulary.sql",
             "clients/native/Sources/SignalboxClient/SessionSynchronization.swift",
             "docs/spec/example.md",
+            "docs/spec/user-message.md",
             "docs/spec/identity-and-commands.md",
             "docs/spec/process-protocol.md",
             "docs/spec/review-workflows.md",
@@ -206,6 +214,8 @@ def main() -> int:
         ]
         expected = [
             *expected_diagnostics("docs/spec/example.md", violation_lines),
+            "docs/spec/user-message.md:1: The runtime sends a user message.",
+            "docs/spec/user-message.md:2: The runtime also sends a user",
             *expected_diagnostics(
                 "docs/spec/process-protocol.md", reviewed_unix_lines
             ),
@@ -239,6 +249,11 @@ def main() -> int:
             f"reported diagnostics differ: {rejected.stdout}"
         )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
+        ambiguous_message.write_text(
+            "The runtime sends a user-role message.\n"
+            "The runtime also sends a message from the user.\n",
+            encoding="utf-8",
+        )
         reviewed_unix_path.write_text(
             "signalboxd binds a socket with owner-only `0600` permissions.\n",
             encoding="utf-8",
