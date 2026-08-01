@@ -1,5 +1,8 @@
 # Configuration and credentials
 
+The delegated tool-approval posture and judge-selection configuration was
+verified through PR #399 (`agent/approval-judge-config`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
