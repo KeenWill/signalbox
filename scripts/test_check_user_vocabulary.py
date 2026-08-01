@@ -49,12 +49,23 @@ def main() -> int:
             / "migrations"
             / "202608020009_user_vocabulary.sql"
         )
+        native_path = (
+            root
+            / "clients"
+            / "native"
+            / "Sources"
+            / "SignalboxClient"
+            / "SessionSynchronization.swift"
+        )
         violation = root / "docs" / "spec" / "example.md"
+        reviewed_domain_path = root / "docs" / "spec" / "review-workflows.md"
+        reviewed_github_path = root / "docs" / "spec" / "tool-loop.md"
         reviewed_unix_path = root / "docs" / "spec" / "process-protocol.md"
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
         mixed_storage_path.parent.mkdir(parents=True)
         frozen_migration.parent.mkdir(parents=True)
+        native_path.parent.mkdir(parents=True)
         violation.parent.mkdir(parents=True)
         allowed.write_text(
             'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
@@ -99,6 +110,16 @@ def main() -> int:
             "-- New owner actor\nCHECK (actor_kind = 'owner');\n",
             encoding="utf-8",
         )
+        native_path.write_text(
+            'let sessionOwner = "human who approves tools"\n', encoding="utf-8"
+        )
+        reviewed_domain_path.write_text(
+            "The foreign owner approves this tool.\n", encoding="utf-8"
+        )
+        reviewed_github_path.write_text(
+            "A request by an owner, member, or collaborator approves tools.\n",
+            encoding="utf-8",
+        )
         reviewed_unix_path.write_text(
             "The wrong owner approves this tool.\n", encoding="utf-8"
         )
@@ -124,8 +145,11 @@ def main() -> int:
             "apps/signalboxd/tests/offline_tool_loop.rs",
             "crates/persistence/migrations/202607180001_create_session.sql",
             "crates/persistence/migrations/202608020009_user_vocabulary.sql",
+            "clients/native/Sources/SignalboxClient/SessionSynchronization.swift",
             "docs/spec/example.md",
             "docs/spec/process-protocol.md",
+            "docs/spec/review-workflows.md",
+            "docs/spec/tool-loop.md",
         )
         rejected = run_checker(root)
         assert rejected.returncode == 1, (
@@ -191,6 +215,17 @@ def main() -> int:
         future_migration_encoding = (
             "crates/persistence/migrations/202608020009_user_vocabulary.sql:2: "
             "CHECK (actor_kind = 'owner');"
+        )
+        native_role_identifier = (
+            "clients/native/Sources/SignalboxClient/SessionSynchronization.swift:1: "
+            'let sessionOwner = "human who approves tools"'
+        )
+        domain_role_inside_reviewed_path = (
+            "docs/spec/review-workflows.md:1: The foreign owner approves this tool."
+        )
+        github_role_inside_reviewed_path = (
+            "docs/spec/tool-loop.md:1: "
+            "A request by an owner, member, or collaborator approves tools."
         )
         assert expected in rejected.stdout, (
             f"singular violation missing:\n{rejected.stdout}"
@@ -282,6 +317,15 @@ def main() -> int:
         assert future_migration_encoding in rejected.stdout, (
             f"future migration encoding violation missing:\n{rejected.stdout}"
         )
+        assert native_role_identifier in rejected.stdout, (
+            f"native role identifier violation missing:\n{rejected.stdout}"
+        )
+        assert domain_role_inside_reviewed_path in rejected.stdout, (
+            f"domain reviewed-path role violation missing:\n{rejected.stdout}"
+        )
+        assert github_role_inside_reviewed_path in rejected.stdout, (
+            f"GitHub reviewed-path role violation missing:\n{rejected.stdout}"
+        )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
         reviewed_unix_path.write_text(
             "signalboxd binds a socket with owner-only `0600` permissions.\n",
@@ -306,6 +350,18 @@ def main() -> int:
         )
         future_migration.write_text(
             "-- New user actor\nCHECK (actor_kind = 'user');\n",
+            encoding="utf-8",
+        )
+        native_path.write_text(
+            "private enum SignalboxSnapshotModelCallOwnership {}\n",
+            encoding="utf-8",
+        )
+        reviewed_domain_path.write_text(
+            "closed on a foreign owner, run-workflow or policy mismatch.\n",
+            encoding="utf-8",
+        )
+        reviewed_github_path.write_text(
+            "`@codex review` request by an owner, member, or collaborator.\n",
             encoding="utf-8",
         )
         accepted = run_checker(root)
