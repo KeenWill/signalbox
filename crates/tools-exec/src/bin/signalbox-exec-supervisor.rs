@@ -6,7 +6,7 @@ mod linux {
         collections::{BTreeMap, BTreeSet},
         ffi::OsString,
         io::{Read, Write},
-        os::unix::process::ExitStatusExt,
+        os::unix::process::{CommandExt, ExitStatusExt},
         process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
             Arc, Mutex, PoisonError,
@@ -128,7 +128,8 @@ mod linux {
             .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            .process_group(0);
         let mut child = command.spawn().map_err(|_| ())?;
         drop(pidfd_reservation);
         let Some(mut control) = child.stdin.take() else {

@@ -809,7 +809,10 @@ impl<Runner: ProcessRunner> CommandExecution for SandboxedCommandRunner<Runner> 
 #[derive(Clone, Debug)]
 pub struct UnsandboxedCommandRunner<Runner> {
     runner: Runner,
+    #[cfg(not(target_os = "linux"))]
     workspace_root: PathBuf,
+    #[cfg(target_os = "linux")]
+    workspace_identity: WorkspaceIdentity,
 }
 
 impl<Runner: ProcessRunner> UnsandboxedCommandRunner<Runner> {
@@ -818,16 +821,24 @@ impl<Runner: ProcessRunner> UnsandboxedCommandRunner<Runner> {
         runner: Runner,
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         Ok(Self {
             runner,
-            workspace_root: canonical_workspace_root(workspace_root.as_ref())?,
+            #[cfg(target_os = "linux")]
+            workspace_identity: WorkspaceIdentity::capture(&workspace_root)?,
+            #[cfg(not(target_os = "linux"))]
+            workspace_root,
         })
     }
 }
 
 impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner> {
     async fn execute(&mut self, arguments: ExecArguments) -> ExecResult {
-        let request = direct_request(&self.workspace_root, &arguments, EXEC_CAPTURE_BYTES);
+        #[cfg(target_os = "linux")]
+        let execution_root = &self.workspace_identity.bind_source;
+        #[cfg(not(target_os = "linux"))]
+        let execution_root = &self.workspace_root;
+        let request = direct_request(execution_root, &arguments, EXEC_CAPTURE_BYTES);
         process_result(
             ExecutionConfinement::Unsandboxed,
             self.runner.run(request).await,
@@ -2348,6 +2359,38 @@ mod tests {
         assert_eq!(result.outcome, expected_outcome);
         assert_eq!(result.stdout.text, String::new());
         assert_eq!(result.stderr.text, String::new());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unsandboxed_runner_uses_pinned_workspace_after_path_replacement()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_process(b"complete"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = UnsandboxedCommandRunner::try_new(runner, &workspace.path)?;
+        let pinned_root = command_runner.workspace_identity.bind_source.clone();
+        workspace.replace()?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+        let requests = observation.recorded_requests();
+        let request = requests
+            .first()
+            .ok_or_else(|| std::io::Error::other("one direct process request"))?;
+
+        assert_eq!(result.confinement, ExecutionConfinement::Unsandboxed);
+        assert_eq!(request.working_directory, pinned_root.join("."));
+        assert_ne!(request.working_directory, workspace.path);
         Ok(())
     }
 

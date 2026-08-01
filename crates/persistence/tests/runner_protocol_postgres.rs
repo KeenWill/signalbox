@@ -562,6 +562,36 @@ fn confirm_catalog() -> RunnerCatalog {
     .expect("the confirm fixture catalog is internally consistent")
 }
 
+fn always_confirm_catalog() -> RunnerCatalog {
+    let inspect = RunnerToolDeclaration::new(
+        tool("inspect"),
+        model_definition(),
+        ToolPermissionDefault::AlwaysConfirm,
+        RunnerToolEffectClass::Pure,
+        ToolAdmissibleLoci::RunnerOnly {
+            selector: RunnerSelector::CapabilityClass(class()),
+        },
+    );
+    let policy = CredentialProfilePolicy::try_new(
+        profile(),
+        [(tool("inspect"), CredentialToolApproval::SessionPolicy)],
+    )
+    .expect("the explicit-approval fixture profile references its declared tool");
+    let replacement_policy = CredentialProfilePolicy::try_new(
+        replacement_profile(),
+        [(tool("inspect"), CredentialToolApproval::SessionPolicy)],
+    )
+    .expect("the replacement profile references the explicit-approval tool");
+    RunnerCatalog::try_new(
+        [class()],
+        [inspect],
+        [policy, replacement_policy],
+        [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+    )
+    .expect("the explicit-approval fixture catalog is internally consistent")
+}
+
 fn idempotent_catalog() -> RunnerCatalog {
     let inspect = RunnerToolDeclaration::new(
         tool("inspect"),
@@ -1421,6 +1451,30 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
         .expect_err("durable revocation closes the exact caller-held enrollment fence");
     assert_eq!(revoked, RunnerDomainError::EnrollmentRevoked);
     drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn always_confirm_registration_persists_under_the_closed_constraint()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool, always_confirm_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+
+    let stored = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+
+    assert_eq!(
+        stored
+            .registration()
+            .tool(&tool("inspect"))
+            .expect("the registered explicit-approval tool is present")
+            .permission(),
+        ToolPermissionDefault::AlwaysConfirm
+    );
     Ok(())
 }
 
