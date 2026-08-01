@@ -792,7 +792,16 @@ mod linux {
                 {
                     process_tree_supported = false;
                 }
-                self.kill_tracked_descendants();
+                if self.kill_tracked_descendants(deadline).is_err() {
+                    self.kill_root();
+                    let _ = child.kill();
+                    let root_success = root_success
+                        .or_else(|| child.wait().ok().map(|status| status.success()))
+                        .unwrap_or(false);
+                    reap_all_children();
+                    self.armed = false;
+                    return CleanupStatus::Failed { root_success };
+                }
                 if root_success.is_none() {
                     root_success = child
                         .try_wait()
@@ -849,24 +858,12 @@ mod linux {
                 None,
                 Some(deadline),
             );
-            self.kill_tracked_descendants();
+            let _ = self.kill_tracked_descendants(deadline);
             self.kill_root();
         }
 
-        fn kill_tracked_descendants(&self) {
-            let descendants = self
-                .descendants
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            for (raw_pid, process) in descendants.iter() {
-                if *raw_pid == self.root {
-                    continue;
-                }
-                let _ = rustix::process::pidfd_send_signal(
-                    &process.pidfd,
-                    rustix::process::Signal::KILL,
-                );
-            }
+        fn kill_tracked_descendants(&self, deadline: Instant) -> Result<(), ()> {
+            kill_tracked_descendants_until(&self.descendants, self.root, deadline)
         }
 
         fn kill_root(&self) {
@@ -907,6 +904,25 @@ mod linux {
                 self.process_tree_supported.store(false, Ordering::Release);
             }
         }
+    }
+
+    fn kill_tracked_descendants_until(
+        descendants: &Arc<Mutex<BTreeMap<u32, TrackedProcess>>>,
+        root: u32,
+        deadline: Instant,
+    ) -> Result<(), ()> {
+        let descendants = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+        for (raw_pid, process) in descendants.iter() {
+            if Instant::now() >= deadline {
+                return Err(());
+            }
+            if *raw_pid == root {
+                continue;
+            }
+            let _ =
+                rustix::process::pidfd_send_signal(&process.pidfd, rustix::process::Signal::KILL);
+        }
+        (Instant::now() < deadline).then_some(()).ok_or(())
     }
 
     fn bounded_observation_deadline(started: Instant, timeout: Duration) -> Instant {
@@ -963,8 +979,9 @@ mod linux {
                     changed = true;
                     continue;
                 }
-                let children = match process_children(parent) {
+                let children = match process_children_until(parent, stop, deadline) {
                     Ok(children) => children,
+                    Err(ProcessChildrenError::Interrupted) => return Ok(changed),
                     Err(ProcessChildrenError::Gone) if parent != supervisor => {
                         if tracked.remove(&parent).is_some() {
                             known.remove(&parent);
@@ -1116,10 +1133,19 @@ mod linux {
     #[derive(Clone, Copy)]
     enum ProcessChildrenError {
         Gone,
+        Interrupted,
         Unsupported,
     }
 
     fn process_children(pid: u32) -> Result<Vec<u32>, ProcessChildrenError> {
+        process_children_until(pid, None, None)
+    }
+
+    fn process_children_until(
+        pid: u32,
+        stop: Option<&AtomicBool>,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<u32>, ProcessChildrenError> {
         let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).map_err(|error| {
             if process_gone(&error) {
                 ProcessChildrenError::Gone
@@ -1130,12 +1156,18 @@ mod linux {
         let mut children = Vec::new();
         let mut observed_task = false;
         for entry in tasks {
+            if descendant_observation_should_stop(stop, deadline) {
+                return Err(ProcessChildrenError::Interrupted);
+            }
             let entry = entry.map_err(|_| ProcessChildrenError::Unsupported)?;
             let task = entry
                 .file_name()
                 .to_string_lossy()
                 .parse::<u32>()
                 .map_err(|_| ProcessChildrenError::Unsupported)?;
+            if descendant_observation_should_stop(stop, deadline) {
+                return Err(ProcessChildrenError::Interrupted);
+            }
             match std::fs::read_to_string(format!("/proc/{pid}/task/{task}/children")) {
                 Ok(values) => {
                     observed_task = true;
@@ -1317,6 +1349,30 @@ mod linux {
                 observe_descendants(u32::MAX, u32::MAX, &tracked, None, Some(Instant::now())),
                 Ok(false)
             );
+        }
+
+        #[test]
+        fn thread_enumeration_honors_the_watcher_stop_signal() {
+            let stop = AtomicBool::new(true);
+
+            assert!(matches!(
+                process_children_until(std::process::id(), Some(&stop), None),
+                Err(ProcessChildrenError::Interrupted)
+            ));
+        }
+
+        #[test]
+        fn descendant_signaling_honors_an_elapsed_cleanup_deadline()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let process = pin_process(std::process::id())
+                .map_err(|()| std::io::Error::other("pin current process"))?
+                .ok_or_else(|| std::io::Error::other("current process disappeared"))?;
+            let descendants = Arc::new(Mutex::new(BTreeMap::from([(std::process::id(), process)])));
+
+            let result = kill_tracked_descendants_until(&descendants, u32::MAX, Instant::now());
+
+            assert_eq!(result, Err(()));
+            Ok(())
         }
 
         #[test]
