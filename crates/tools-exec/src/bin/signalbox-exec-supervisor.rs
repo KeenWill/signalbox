@@ -154,7 +154,14 @@ mod linux {
             }
         };
         control.write_all(&[1]).map_err(|_| ())?;
-        let cancelled = cancellation_signal();
+        let cancelled = match cancellation_signal() {
+            Ok(cancelled) => cancelled,
+            Err(()) => {
+                drop(control);
+                let _ = tree.finish(&mut child);
+                return Err(());
+            }
+        };
         loop {
             match outer_startup_state(
                 child.try_wait(),
@@ -308,21 +315,35 @@ mod linux {
         };
         let leader_exited = Arc::new(AtomicBool::new(false));
         let stdout_leader_exited = Arc::clone(&leader_exited);
-        let stdout_copy = std::thread::spawn(move || {
+        let stdout_copy = match spawn_helper_thread("signalbox-exec-target-stdout", move || {
             copy_until_leader_exit(
                 &mut target_stdout,
                 &mut std::io::stdout(),
                 &stdout_leader_exited,
             )
-        });
+        }) {
+            Ok(copy) => copy,
+            Err(()) => {
+                terminate_child(&mut child);
+                return Err(TargetFailure::Supervision);
+            }
+        };
         let stderr_leader_exited = Arc::clone(&leader_exited);
-        let stderr_copy = std::thread::spawn(move || {
+        let stderr_copy = match spawn_helper_thread("signalbox-exec-target-stderr", move || {
             copy_until_leader_exit(
                 &mut target_stderr,
                 &mut std::io::stderr(),
                 &stderr_leader_exited,
             )
-        });
+        }) {
+            Ok(copy) => copy,
+            Err(()) => {
+                terminate_child(&mut child);
+                leader_exited.store(true, Ordering::Release);
+                let _ = stdout_copy.join();
+                return Err(TargetFailure::Supervision);
+            }
+        };
         let status = match child.wait() {
             Ok(status) => status,
             Err(_) => {
@@ -456,7 +477,19 @@ mod linux {
                 stage: SupervisorFailureStage::Cleanup,
             };
         };
-        let launcher_reader = std::thread::spawn(move || read_launcher_stdout(launcher_stdout));
+        let launcher_reader =
+            match spawn_helper_thread("signalbox-exec-launcher-stdout", move || {
+                read_launcher_stdout(launcher_stdout)
+            }) {
+                Ok(reader) => reader,
+                Err(()) => {
+                    terminate_child(&mut child);
+                    cleanup_untracked_children(std::process::id());
+                    return SupervisorStatus::SupervisionFailed {
+                        stage: SupervisorFailureStage::Cleanup,
+                    };
+                }
+            };
         let mut tree = match ProcessTreeGuard::new(child.id(), std::process::id()) {
             Ok(tree) => tree,
             Err(()) => {
@@ -486,7 +519,19 @@ mod linux {
         }
         drop(launcher_control);
         let started = Instant::now();
-        let cancelled = cancellation_signal();
+        let cancelled = match cancellation_signal() {
+            Ok(cancelled) => cancelled,
+            Err(()) => {
+                let _ = tree.finish(&mut child);
+                let _ = emit_launcher_stdout(
+                    launcher_reader,
+                    LauncherOutputTrust::UntrustedTargetBytes,
+                );
+                return SupervisorStatus::SupervisionFailed {
+                    stage: SupervisorFailureStage::Cleanup,
+                };
+            }
+        };
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -682,15 +727,40 @@ mod linux {
         }
     }
 
-    fn cancellation_signal() -> Arc<AtomicBool> {
+    fn cancellation_signal() -> Result<Arc<AtomicBool>, ()> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let reader_cancelled = Arc::clone(&cancelled);
-        std::thread::spawn(move || {
+        spawn_helper_thread("signalbox-exec-cancellation", move || {
             let mut byte = [0_u8; 1];
             let _ = std::io::stdin().read(&mut byte);
             reader_cancelled.store(true, Ordering::Release);
-        });
-        cancelled
+        })?;
+        Ok(cancelled)
+    }
+
+    fn spawn_helper_thread<T, Task>(name: &str, task: Task) -> Result<JoinHandle<T>, ()>
+    where
+        T: Send + 'static,
+        Task: FnOnce() -> T + Send + 'static,
+    {
+        spawn_helper_thread_with(name, Box::new(task), |name, task| {
+            std::thread::Builder::new().name(name).spawn(task)
+        })
+    }
+
+    fn spawn_helper_thread_with<T, Spawn>(
+        name: &str,
+        task: Box<dyn FnOnce() -> T + Send + 'static>,
+        spawn: Spawn,
+    ) -> Result<JoinHandle<T>, ()>
+    where
+        T: Send + 'static,
+        Spawn: FnOnce(
+            String,
+            Box<dyn FnOnce() -> T + Send + 'static>,
+        ) -> std::io::Result<JoinHandle<T>>,
+    {
+        spawn(String::from(name), task).map_err(|_| ())
     }
 
     fn read_control_byte() -> Result<(), ()> {
@@ -1403,6 +1473,16 @@ mod linux {
                 assert!(result.is_err());
                 Ok(())
             })
+        }
+
+        #[test]
+        fn helper_thread_spawn_failure_is_returned_instead_of_panicking() {
+            let result =
+                spawn_helper_thread_with("signalbox-exec-fixture", Box::new(|| ()), |_, _| {
+                    Err(std::io::Error::other("forced helper-thread failure"))
+                });
+
+            assert!(result.is_err());
         }
 
         fn with_procfs_children_support<Test>(test: Test) -> Result<(), Box<dyn std::error::Error>>
