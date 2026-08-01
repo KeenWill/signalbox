@@ -1389,6 +1389,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
   private var modelCallIDs: Set<SignalboxCanonicalUUID> = []
   private var entryIDs: Set<SignalboxSnapshotEntryIdentity> = []
+  private var modelIdentityTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var priorAcceptancePosition: UInt64?
   private var priorModelCallTurnAcceptancePosition: UInt64?
   private var priorModelCallID: String?
@@ -1401,7 +1402,6 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   private var contentEntryIndex: UInt64?
   private var expectedFragmentIndex: UInt64 = 0
   private var retainedUTF8Bytes: UInt = 0
-
   init(
     boundary: SignalboxTranscriptSnapshotBoundary,
     capacity: SignalboxSynchronizationSnapshotCapacity
@@ -1518,7 +1518,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
             sourceSessionID: entry.sourceSessionID,
             entryID: entry.entryID
           )
-        ).inserted
+        ).inserted,
+        entry.entry.modelIdentityTurnIsUnique(in: &modelIdentityTurnIDs)
       else {
         return .invalid("Snapshot entry indices or source-qualified identities were invalid.")
       }
@@ -1623,7 +1624,6 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     return true
   }
 }
-
 extension SignalboxSynchronizationSnapshot.Record {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
@@ -1730,6 +1730,13 @@ extension SignalboxCurrentModelCallState {
 }
 
 extension SignalboxTranscriptEntry {
+  fileprivate var modelIdentityTurnID: SignalboxCanonicalUUID? {
+    if case .modelIdentityChanged(let turnID, _, _) = self {
+      return turnID
+    }
+    return nil
+  }
+
   fileprivate func modelIdentityTurnIsKnown(
     in turnAcceptancePositions: [SignalboxCanonicalUUID: UInt64]
   ) -> Bool {
@@ -1737,6 +1744,12 @@ extension SignalboxTranscriptEntry {
       return turnAcceptancePositions[turnID] != nil
     }
     return true
+  }
+
+  fileprivate func modelIdentityTurnIsUnique(
+    in turnIDs: inout Set<SignalboxCanonicalUUID>
+  ) -> Bool {
+    modelIdentityTurnID.map { turnIDs.insert($0).inserted } ?? true
   }
 
   fileprivate var hasMalformedStoredProjection: Bool {
