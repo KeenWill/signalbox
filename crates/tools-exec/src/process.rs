@@ -641,13 +641,18 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         runner: Runner,
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
+        #[cfg(target_os = "linux")]
+        let workspace_identity = WorkspaceIdentity::capture(workspace_root.as_ref())?;
+        #[cfg(target_os = "linux")]
+        let workspace_root = workspace_identity.canonical_path.clone();
+        #[cfg(not(target_os = "linux"))]
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         let sandbox_launcher = runner.sandbox_launcher_program().to_owned();
         Ok(Self {
             runner,
             sandbox_launcher,
             #[cfg(target_os = "linux")]
-            workspace_identity: WorkspaceIdentity::capture(&workspace_root)?,
+            workspace_identity,
             workspace_root,
         })
     }
@@ -783,6 +788,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
 struct WorkspaceIdentity {
     device: u64,
     inode: u64,
+    canonical_path: PathBuf,
     bind_source: PathBuf,
     _directory: Arc<rustix::fd::OwnedFd>,
 }
@@ -799,16 +805,23 @@ impl WorkspaceIdentity {
             path: path.to_owned(),
             source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
         })?;
+        Self::from_open_directory(path, directory)
+    }
+
+    fn from_open_directory(
+        supplied_path: &Path,
+        directory: rustix::fd::OwnedFd,
+    ) -> Result<Self, ExecToolConstructionError> {
         let directory =
             inherited_descriptor_above_standard_streams(directory).map_err(|source| {
                 ExecToolConstructionError::WorkspaceRoot {
-                    path: path.to_owned(),
+                    path: supplied_path.to_owned(),
                     source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
                 }
             })?;
         let pinned_metadata = rustix::fs::fstat(&directory).map_err(|source| {
             ExecToolConstructionError::WorkspaceRoot {
-                path: path.to_owned(),
+                path: supplied_path.to_owned(),
                 source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
             }
         })?;
@@ -816,9 +829,22 @@ impl WorkspaceIdentity {
             "/proc/self/fd/{}",
             rustix::fd::AsRawFd::as_raw_fd(&directory)
         ));
+        let canonical_path = bind_source.canonicalize().map_err(|source| {
+            ExecToolConstructionError::WorkspaceRoot {
+                path: supplied_path.to_owned(),
+                source: Some(source),
+            }
+        })?;
+        if !canonical_path.is_absolute() {
+            return Err(ExecToolConstructionError::WorkspaceRoot {
+                path: supplied_path.to_owned(),
+                source: None,
+            });
+        }
         Ok(Self {
             device: pinned_metadata.st_dev,
             inode: pinned_metadata.st_ino,
+            canonical_path,
             bind_source,
             _directory: Arc::new(directory),
         })
@@ -935,11 +961,14 @@ impl<Runner: ProcessRunner> UnsandboxedCommandRunner<Runner> {
         runner: Runner,
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
+        #[cfg(target_os = "linux")]
+        let workspace_identity = WorkspaceIdentity::capture(workspace_root.as_ref())?;
+        #[cfg(not(target_os = "linux"))]
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         Ok(Self {
             runner,
             #[cfg(target_os = "linux")]
-            workspace_identity: WorkspaceIdentity::capture(&workspace_root)?,
+            workspace_identity,
             #[cfg(not(target_os = "linux"))]
             workspace_root,
         })
@@ -985,6 +1014,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, ExecToolConstructionError> {
     let canonical =
         root.canonicalize()
@@ -1541,6 +1571,18 @@ enum OuterObservationStatus {
 #[cfg(target_os = "linux")]
 impl OuterProcessTreeGuard {
     fn new(root: u32) -> Result<Self, ()> {
+        Self::new_with_watcher(root, |watcher| {
+            std::thread::Builder::new()
+                .name(String::from("signalbox-exec-outer-watcher"))
+                .spawn(watcher)
+                .map_err(|_| ())
+        })
+    }
+
+    fn new_with_watcher<Spawn>(root: u32, spawn: Spawn) -> Result<Self, ()>
+    where
+        Spawn: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>, ()>,
+    {
         let root_process = outer_pin_process(root)?.ok_or(())?;
         let descendants = Arc::new(Mutex::new(BTreeMap::from([(root, root_process)])));
         let stop = Arc::new(AtomicBool::new(false));
@@ -1548,7 +1590,7 @@ impl OuterProcessTreeGuard {
         let watcher_stop = Arc::clone(&stop);
         let process_tree_supported = Arc::new(AtomicBool::new(true));
         let watcher_process_tree_supported = Arc::clone(&process_tree_supported);
-        let watcher = std::thread::spawn(move || {
+        let watcher = spawn(Box::new(move || {
             while !watcher_stop.load(Ordering::Acquire) {
                 if outer_observe_descendants(root, &watcher_descendants, Some(&watcher_stop), None)
                     .is_err()
@@ -1558,7 +1600,7 @@ impl OuterProcessTreeGuard {
                 }
                 std::thread::sleep(OUTER_PROCESS_POLL_INTERVAL);
             }
-        });
+        }))?;
         Ok(Self {
             root,
             descendants,
@@ -1601,13 +1643,17 @@ impl OuterProcessTreeGuard {
             if observation == Ok(OuterObservationStatus::Interrupted) {
                 return OuterCleanupStatus::Failed;
             }
-            if self.all_tracked_absent() {
-                self.armed = false;
-                return if self.process_tree_supported.load(Ordering::Acquire) {
-                    OuterCleanupStatus::Complete
-                } else {
-                    OuterCleanupStatus::ProcessTreeUnsupported
-                };
+            match self.all_tracked_absent(deadline) {
+                Ok(true) => {
+                    self.armed = false;
+                    return if self.process_tree_supported.load(Ordering::Acquire) {
+                        OuterCleanupStatus::Complete
+                    } else {
+                        OuterCleanupStatus::ProcessTreeUnsupported
+                    };
+                }
+                Ok(false) => {}
+                Err(()) => return OuterCleanupStatus::Failed,
             }
             if Instant::now() >= deadline {
                 return OuterCleanupStatus::Failed;
@@ -1627,21 +1673,8 @@ impl OuterProcessTreeGuard {
         }
     }
 
-    fn all_tracked_absent(&self) -> bool {
-        let snapshot = {
-            let descendants = self
-                .descendants
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            descendants
-                .iter()
-                .map(|(raw_pid, process)| (*raw_pid, process.start_time))
-                .collect::<Vec<_>>()
-        };
-        snapshot.into_iter().all(|(raw_pid, expected_start_time)| {
-            outer_process_start_time(raw_pid)
-                .is_ok_and(|start_time| start_time != Some(expected_start_time))
-        })
+    fn all_tracked_absent(&self, deadline: Instant) -> Result<bool, ()> {
+        outer_all_tracked_absent(&self.descendants, deadline)
     }
 
     fn stop_watcher(&mut self) {
@@ -1651,6 +1684,27 @@ impl OuterProcessTreeGuard {
         {
             self.process_tree_supported.store(false, Ordering::Release);
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn outer_all_tracked_absent(
+    descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
+    deadline: Instant,
+) -> Result<bool, ()> {
+    let descendants = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+    for (raw_pid, process) in descendants.iter() {
+        if Instant::now() >= deadline {
+            return Err(());
+        }
+        if outer_process_start_time(*raw_pid)? == Some(process.start_time) {
+            return Ok(false);
+        }
+    }
+    if Instant::now() >= deadline {
+        Err(())
+    } else {
+        Ok(true)
     }
 }
 
@@ -2387,6 +2441,58 @@ mod tests {
             std::fs::rename(&self.path, &self.retired)?;
             std::fs::create_dir(&self.path)
         }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn retired_path(&self) -> &Path {
+            &self.retired
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_identity_is_derived_from_the_open_directory_after_path_replacement()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let directory = rustix::fs::open(
+            workspace.path(),
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )?;
+        workspace.replace()?;
+
+        let identity = WorkspaceIdentity::from_open_directory(workspace.path(), directory)?;
+
+        assert_eq!(
+            identity.canonical_path,
+            workspace.retired_path().canonicalize()?
+        );
+        assert!(!identity.matches(workspace.path()));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn outer_watcher_spawn_failure_is_returned_instead_of_panicking() {
+        let result = OuterProcessTreeGuard::new_with_watcher(std::process::id(), |_| Err(()));
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn final_absence_scan_honors_an_elapsed_cleanup_deadline() -> Result<(), Box<dyn Error>> {
+        let process = outer_pin_process(std::process::id())
+            .map_err(|()| std::io::Error::other("pin current process"))?
+            .ok_or_else(|| std::io::Error::other("current process disappeared"))?;
+        let descendants = Arc::new(Mutex::new(BTreeMap::from([(std::process::id(), process)])));
+
+        let result = outer_all_tracked_absent(&descendants, Instant::now());
+
+        assert_eq!(result, Err(()));
+        Ok(())
     }
 
     impl Drop for ReplacementWorkspace {
