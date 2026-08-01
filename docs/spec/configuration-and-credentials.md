@@ -413,9 +413,10 @@ fail-closed:
 
 The conversation-import bound was verified against `agent/import-chunks`. The
 optional `[conversation_import]` table has exactly one `max_source_bytes`
-positive integer. It bounds the exact source bytes retained while one
+positive integer. It bounds both a single-shot source and the exact source bytes retained while one
 per-connection chunked import is assembled. An absent table uses 268,435,456
-bytes (256 MiB). Begin rejects a declaration above the configured value before
+bytes (256 MiB). Single-shot import rejects a source above the configured value
+before conversion. Begin rejects a declaration above the configured value before
 assembly, and commit rechecks the value against the actual appended byte count.
 
 The optional `[web_fetch]` table has exactly one `allowed_origins` array. It

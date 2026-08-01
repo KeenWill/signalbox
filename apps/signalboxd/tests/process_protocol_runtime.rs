@@ -1493,9 +1493,10 @@ async fn s28_inv038_single_shot_and_chunked_import_resolve_the_same_snapshot()
     runtime.stop().await
 }
 
+/// S28: disconnect discards per-connection partial import state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Error>> {
+async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut abandoned = Connection::connect(runtime.socket()).await?;
     abandoned
