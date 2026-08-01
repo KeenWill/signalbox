@@ -524,7 +524,10 @@ fn read_cargo_config_file(cargo_directory: &rustix::fd::OwnedFd, name: &str) -> 
     let descriptor = match rustix::fs::openat(
         cargo_directory,
         name,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     ) {
         Ok(descriptor) => descriptor,
@@ -812,7 +815,7 @@ fn structured_result_with_test_helper(
     result: ExecResult,
     test_helper_installed: bool,
 ) -> CargoDiagnosticsResult {
-    let source_truncated = result.stdout.completeness == CaptureCompleteness::Truncated;
+    let mut source_truncated = result.stdout.completeness == CaptureCompleteness::Truncated;
     let mut test_source_truncated = command == CargoDiagnosticsCommand::Test && source_truncated;
     let mut diagnostics = Vec::new();
     let mut tests = Vec::new();
@@ -820,7 +823,7 @@ fn structured_result_with_test_helper(
     let mut test_limit_reached = false;
     let mut expected_test_executables = BTreeSet::new();
     let mut completed_test_executables = BTreeSet::new();
-    let cargo_build_completed = parse_stream(
+    let cargo_build = parse_stream(
         &result.stdout.text,
         command,
         &mut diagnostics,
@@ -834,9 +837,12 @@ fn structured_result_with_test_helper(
             helper_installed: test_helper_installed,
         },
     );
+    if !cargo_build.finished {
+        source_truncated = true;
+    }
     if command == CargoDiagnosticsCommand::Test
         && (!test_helper_installed
-            || !cargo_build_completed
+            || !cargo_build.succeeded
             || !expected_test_executables.is_subset(&completed_test_executables))
     {
         test_source_truncated = true;
@@ -938,7 +944,7 @@ fn parse_stream(
     tests: &mut Vec<CargoTestResult>,
     test_limit_reached: &mut bool,
     test_source_evidence: TestSourceEvidence<'_>,
-) -> bool {
+) -> CargoBuildEvidence {
     let mut build_finished = false;
     let mut build_succeeded = false;
     for line in text.lines() {
@@ -958,9 +964,7 @@ fn parse_stream(
                 diagnostic_limit_reached,
             );
         }
-        if command == CargoDiagnosticsCommand::Test
-            && let Some(success) = cargo_build_finished(line)
-        {
+        if let Some(success) = cargo_build_finished(line) {
             build_finished = true;
             build_succeeded = success;
         }
@@ -981,7 +985,15 @@ fn parse_stream(
             }
         }
     }
-    build_finished && build_succeeded
+    CargoBuildEvidence {
+        finished: build_finished,
+        succeeded: build_finished && build_succeeded,
+    }
+}
+
+struct CargoBuildEvidence {
+    finished: bool,
+    succeeded: bool,
 }
 
 struct TestSourceEvidence<'a> {
@@ -1608,8 +1620,23 @@ mod tests {
     }
 
     #[test]
+    fn unfinished_check_marks_diagnostic_evidence_incomplete() {
+        let result = structured_result(
+            CargoDiagnosticsCommand::Check,
+            exited_exec_result(compiler_message()),
+        );
+
+        assert!(result.diagnostics.source_truncated);
+        assert!(!result.tests.source_truncated);
+    }
+
+    #[test]
     fn diagnostic_collection_reports_its_record_cap() {
-        let stdout = repeated_compiler_messages(MAX_DIAGNOSTICS + 1);
+        let stdout = format!(
+            "{}{}\n",
+            repeated_compiler_messages(MAX_DIAGNOSTICS + 1),
+            build_finished_message(),
+        );
         let result = structured_result(
             CargoDiagnosticsCommand::Check,
             ExecResult {
@@ -1696,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_failure_is_bounded_without_tainting_stdout_collections() {
+    fn cargo_failure_is_bounded_and_marks_unfinished_diagnostic_evidence() {
         let result = structured_result(
             CargoDiagnosticsCommand::Check,
             ExecResult {
@@ -1722,7 +1749,7 @@ mod tests {
 
         assert_eq!(failure.message, CARGO_FAILURE_MESSAGE);
         assert_eq!(failure.message_completeness, CaptureCompleteness::Truncated);
-        assert!(!result.diagnostics.source_truncated);
+        assert!(result.diagnostics.source_truncated);
         assert!(!result.tests.source_truncated);
     }
 
@@ -2053,6 +2080,24 @@ mod tests {
     {
         let fixture = CargoConfigFixture::new()?;
         fixture.symlink_external_cargo("")?;
+
+        let plan = workspace_test_runner_plan(&fixture.root, TEST_NATIVE_TARGET);
+
+        assert_eq!(plan.selected_target, TEST_NATIVE_TARGET);
+        assert!(plan.preserve_configured_runner);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cargo_config_fifo_is_opaque_without_blocking() -> Result<(), Box<dyn Error>> {
+        let fixture = CargoConfigFixture::new()?;
+        fixture.create_cargo_directory()?;
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            fixture.root.join(".cargo/config"),
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )?;
 
         let plan = workspace_test_runner_plan(&fixture.root, TEST_NATIVE_TARGET);
 

@@ -5,8 +5,7 @@ mod linux {
     use std::{
         collections::{BTreeMap, BTreeSet},
         ffi::OsString,
-        fs::{File, OpenOptions},
-        io::{Read, Seek, SeekFrom, Write},
+        io::{Read, Write},
         os::unix::process::CommandExt,
         process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
@@ -331,19 +330,23 @@ mod linux {
         }
         let program = arguments.remove(0);
         let executable = program.to_string_lossy().into_owned();
-        let Ok(mut test_log) = create_cargo_test_log() else {
-            return ExitCode::FAILURE;
-        };
-        let Ok(test_stdout) = test_log.try_clone() else {
-            return ExitCode::FAILURE;
-        };
         let mut command = Command::new(program);
         command
             .args(arguments)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(test_stdout))
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         let Ok(mut child) = command.spawn() else {
+            return ExitCode::FAILURE;
+        };
+        let Some(mut test_stdout) = child.stdout.take() else {
+            terminate_child(&mut child);
+            return ExitCode::FAILURE;
+        };
+        let Ok(output_reader) = spawn_helper_thread("signalbox-exec-test-output", move || {
+            read_cargo_test_output(&mut test_stdout)
+        }) else {
+            terminate_child(&mut child);
             return ExitCode::FAILURE;
         };
         let status = match child.wait() {
@@ -353,12 +356,10 @@ mod linux {
                 return ExitCode::FAILURE;
             }
         };
-        if test_log.seek(SeekFrom::Start(0)).is_err() {
-            return ExitCode::FAILURE;
-        };
-        let output = match read_cargo_test_output(&mut test_log) {
-            Ok(output) => output,
+        let output = match output_reader.join() {
+            Ok(Ok(output)) => output,
             Err(_) => return ExitCode::FAILURE,
+            Ok(Err(_)) => return ExitCode::FAILURE,
         };
         if emit_cargo_test_events(&output, &executable, &mut std::io::stdout().lock()).is_err() {
             return ExitCode::FAILURE;
@@ -376,24 +377,6 @@ mod linux {
                 .map(ExitCode::from)
                 .unwrap_or(ExitCode::FAILURE)
         }
-    }
-
-    fn create_cargo_test_log() -> std::io::Result<File> {
-        let identity = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(std::io::Error::other)?
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "signalbox-exec-test-log-{}-{identity}",
-            std::process::id()
-        ));
-        let log = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        std::fs::remove_file(path)?;
-        Ok(log)
     }
 
     fn read_cargo_test_output<Source: Read>(
