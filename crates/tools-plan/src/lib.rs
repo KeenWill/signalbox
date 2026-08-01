@@ -1223,8 +1223,10 @@ fn encode_admitted_read<PortError>(
         serde_json::to_string(&read_output(page)).map_err(|_| PlanExecutorError::ResultEncoding)?;
     match ToolResultText::try_new(encoded) {
         Ok(admitted) => Ok(Some(admitted.into_string())),
-        Err(error) if matches!(error.failure(), ToolResultTextFailure::TooLarge { .. }) => Ok(None),
-        Err(_) => Err(PlanExecutorError::ResultEncoding),
+        Err(error) => match error.failure() {
+            ToolResultTextFailure::TooLarge { .. } => Ok(None),
+            ToolResultTextFailure::ContainsNull => Err(PlanExecutorError::ResultEncoding),
+        },
     }
 }
 
