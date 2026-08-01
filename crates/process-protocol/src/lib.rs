@@ -4497,9 +4497,13 @@ fn validate_conversation_import_detail(
             declared_size_bytes,
             actual_size_bytes,
         } => declared_size_bytes != actual_size_bytes,
-        RejectionDetail::ConversationImportConversionFailed { record_ordinal, .. } => {
-            record_ordinal.is_none_or(|ordinal| ordinal.value() > 0)
-        }
+        RejectionDetail::ConversationImportConversionFailed {
+            class,
+            record_ordinal,
+        } => match class {
+            ConversationImportRejectionClass::EmptySource => record_ordinal.is_none(),
+            _ => record_ordinal.is_some_and(|ordinal| ordinal.value() > 0),
+        },
         _ => false,
     };
     if valid {
@@ -6331,6 +6335,42 @@ mod tests {
             },
             r#"{"type":"error","code":"invalid_request","message":"conversation import was rejected","detail":{"type":"conversation_import_conversion_failed","class":"empty_source","record_ordinal":null}}"#,
         )?;
+        let empty_source_with_ordinal = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("conversation import was rejected"),
+            detail: ErrorDetail::invalid_request(
+                RejectionDetail::ConversationImportConversionFailed {
+                    class: ConversationImportRejectionClass::EmptySource,
+                    record_ordinal: Some(CanonicalU64::new(1)),
+                },
+            ),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(5)?,
+                empty_source_with_ordinal,
+            ),
+            Err(FrameValidationError::ConversationImportShape)
+        );
+        let invalid_json_without_ordinal = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("conversation import was rejected"),
+            detail: ErrorDetail::invalid_request(
+                RejectionDetail::ConversationImportConversionFailed {
+                    class: ConversationImportRejectionClass::InvalidJson,
+                    record_ordinal: None,
+                },
+            ),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(6)?,
+                invalid_json_without_ordinal,
+            ),
+            Err(FrameValidationError::ConversationImportShape)
+        );
         Ok(())
     }
 

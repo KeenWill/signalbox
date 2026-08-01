@@ -1498,6 +1498,8 @@ async fn s28_inv038_single_shot_and_chunked_import_resolve_the_same_snapshot()
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
+    let chunk = vec![b'x'];
+    let declared_size_bytes = CanonicalU64::new(u64::try_from(chunk.len())?);
     let mut abandoned = Connection::connect(runtime.socket()).await?;
     abandoned
         .request_version(
@@ -1505,7 +1507,7 @@ async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dy
             1,
             ClientRequest::BeginConversationImport {
                 format: ConversationImportFormat::CodexRolloutJsonlV1,
-                declared_size_bytes: CanonicalU64::new(1),
+                declared_size_bytes,
             },
         )
         .await?;
@@ -1513,7 +1515,7 @@ async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dy
     assert_eq!(
         begun.message(),
         &ServerMessage::ConversationImportBegun {
-            declared_size_bytes: CanonicalU64::new(1),
+            declared_size_bytes,
         }
     );
     abandoned
@@ -1521,7 +1523,7 @@ async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dy
             ProtocolVersion::One,
             2,
             ClientRequest::AppendConversationImport {
-                chunk: ConversationImportSource::new(vec![b'x']),
+                chunk: ConversationImportSource::new(chunk.clone()),
             },
         )
         .await?;
@@ -1529,7 +1531,7 @@ async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dy
     assert_eq!(
         appended.message(),
         &ServerMessage::ConversationImportAppended {
-            assembled_size_bytes: CanonicalU64::new(1),
+            assembled_size_bytes: declared_size_bytes,
         }
     );
     drop(abandoned);
@@ -1541,7 +1543,7 @@ async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dy
             3,
             ClientRequest::BeginConversationImport {
                 format: ConversationImportFormat::CodexRolloutJsonlV1,
-                declared_size_bytes: CanonicalU64::new(1),
+                declared_size_bytes,
             },
         )
         .await?;
@@ -1549,7 +1551,7 @@ async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dy
     assert_eq!(
         replacement_begun.message(),
         &ServerMessage::ConversationImportBegun {
-            declared_size_bytes: CanonicalU64::new(1),
+            declared_size_bytes,
         }
     );
     replacement

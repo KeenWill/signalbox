@@ -120,9 +120,11 @@ one owned request rather than cloning its payload. Submitted text moves into
 application admission: rejection drops it before awaiting response output, and
 acceptance reuses the decoded allocation. Conversation-import source bytes
 likewise move directly into a dedicated import admission path. At most one
-in-progress or single-shot import holds the import permit. A
-`begin_conversation_import` waiting for that permit retains its small inbound
-frame inside the existing 64 MiB aggregate frame budget. Once admitted, each
+in-progress or single-shot import holds the import permit. An admitted
+`begin_conversation_import` that must wait for that permit releases its small
+decoded frame slot before waiting, preserving frame progress for the connection
+that owns the active chunked import. A source-bearing single-shot request
+retains its frame slot while waiting for the import permit. Once admitted, each
 append moves its decoded chunk from the inbound frame into the per-connection
 assembly and releases the frame slot; the configured total-source bound limits
 that assembly. Commit runs the existing whole-source conversion on the blocking
