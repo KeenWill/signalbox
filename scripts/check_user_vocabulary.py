@@ -379,18 +379,44 @@ ALLOWLIST = (
         ),
     ),
     Allowance(
-        "legacy PostgreSQL actor encodings",
+        "legacy PostgreSQL actor decoder fields",
         re.compile(
-            r"^(?:crates/persistence/src/(?:session_metadata|submit_input)[.]rs|"
-            r"crates/persistence/tests/(?:postgres_integration|"
-            r"session_metadata_postgres)[.]rs|"
-            r"docs/spec/identity-and-commands[.]md)$"
+            r"^crates/persistence/src/(?:session_metadata|submit_input)[.]rs$"
         ),
         re.compile(
-            r"\(\"owner\", (?:None|Some\(_\))(?:, None)?\)|"
-            r"\"owner\" \| \"model\"|"
-            r"expected_issuer\s*=\s*\(\"owner\"|"
-            r"\(`owner`/(?:`model`|`tool`)"
+            r'^\s*\("owner", None, None\) => Ok\(Actor::User\),\s*$|'
+            r'^\s*\("owner" \| "model" \| "recovery" \| "tool", _, _\) => \{\s*$'
+        ),
+        enclosing_functions={
+            "crates/persistence/src/session_metadata.rs": frozenset({"decode_actor"}),
+            "crates/persistence/src/submit_input.rs": frozenset({"decode_actor"}),
+        },
+    ),
+    Allowance(
+        "legacy PostgreSQL command issuer decoder fields",
+        re.compile(r"^crates/persistence/src/session_metadata[.]rs$"),
+        re.compile(
+            r'^\s*\("owner", None\) => ReplaceSessionMetadata::new\('
+            r"command_id, session, content\),\s*$|"
+            r'^\s*\("owner", Some\(_\)\) \| \("tool", None\) => \{\s*$'
+        ),
+        enclosing_functions={
+            "crates/persistence/src/session_metadata.rs": frozenset({"decode_command"})
+        },
+    ),
+    Allowance(
+        "legacy PostgreSQL actor encoding specification",
+        re.compile(r"^docs/spec/identity-and-commands[.]md$"),
+        re.compile(
+            r"^\(`owner`/`model`/`recovery`/`tool`\) plus `actor_turn_id` and$|"
+            r"^receipts additionally carry constructor-selected `issuer_kind` \(`owner`/`tool`\)$"
+        ),
+    ),
+    Allowance(
+        "legacy PostgreSQL actor fixture",
+        re.compile(r"^crates/persistence/tests/session_metadata_postgres[.]rs$"),
+        re.compile(
+            r'^\s*let expected_issuer = \("owner"[.]to_owned\(\), None\);\s*$'
         ),
     ),
     Allowance(

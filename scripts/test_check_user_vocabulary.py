@@ -198,6 +198,9 @@ def main() -> int:
         legacy_actor_lines = (
             'let human_principal = String::from("owner"); // approves tools',
             'let human = Principal { kind: "owner" }; // approves tools',
+            'let human = ("owner", None, None); // approves tools',
+            'let human = match role { "owner" | "model" => Human };',
+            'let human = ("owner", None); // approves tools',
         )
         application_import_lines = (
             "fn converted() {}",
@@ -450,8 +453,26 @@ def main() -> int:
             'let user_id = "human who approves tools";\n', encoding="utf-8"
         )
         legacy_actor.write_text(
-            "Actor::User => EncodedActor {\n"
-            '    kind: "owner",\n'
+            "fn encode_actor(actor: Actor) -> EncodedActor {\n"
+            "    match actor {\n"
+            "        Actor::User => EncodedActor {\n"
+            '            kind: "owner",\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "fn decode_actor() {\n"
+            "    match stored {\n"
+            '        ("owner", None, None) => Ok(Actor::User),\n'
+            '        ("owner" | "model" | "recovery" | "tool", _, _) => {\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "fn decode_command() {\n"
+            "    match stored {\n"
+            '        ("owner", None) => ReplaceSessionMetadata::new(command_id, session, content),\n'
+            '        ("owner", Some(_)) | ("tool", None) => {\n'
+            "        }\n"
+            "    }\n"
             "}\n",
             encoding="utf-8",
         )
