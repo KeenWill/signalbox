@@ -50,7 +50,7 @@ pub const GIT_BRANCH_CREATE_NAME: &str = "git_branch_create";
 /// Local branch switch tool name.
 pub const GIT_BRANCH_SWITCH_NAME: &str = "git_branch_switch";
 /// Configured-remote branch push tool name.
-pub const GIT_PUSH_NAME: &str = "git_push";
+pub const GIT_PUSH_CONFIGURED_NAME: &str = "git_push_configured";
 
 /// Fixed local-family catalog order.
 pub const LOCAL_GIT_TOOL_NAMES: [&str; 7] = [
@@ -355,7 +355,7 @@ impl ToolContract for BranchSwitchContract {
 struct PushContract;
 impl ToolContract for PushContract {
     type Arguments = GitPushArguments;
-    const NAME: &'static str = GIT_PUSH_NAME;
+    const NAME: &'static str = GIT_PUSH_CONFIGURED_NAME;
     const DESCRIPTION: &'static str =
         "Pushes one named local branch without force to the deployment-configured remote.";
 }
@@ -1601,7 +1601,7 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
-        if invocation.request().name().as_str() != GIT_PUSH_NAME {
+        if invocation.request().name().as_str() != GIT_PUSH_CONFIGURED_NAME {
             return Err(push_caller_bug());
         }
         let arguments =
@@ -1726,6 +1726,7 @@ mod tests {
     const INITIAL_MESSAGE: &str = "initial";
     const MODEL_MESSAGE: &str = "subject\n\nmodel data: $(not interpreted)\n";
     const FIX_BRANCH: &str = "agent/fix";
+    const FIX_REFSPEC: &str = "refs/heads/agent/fix:refs/heads/agent/fix";
     const TRACKED_PATH: &str = "tracked.txt";
     const INITIAL_CONTENT: &str = "before\n";
     const CHANGED_CONTENT: &str = "after\n";
@@ -2433,7 +2434,7 @@ mod tests {
     }
 
     #[test]
-    fn push_contract_requires_confirmation_and_has_no_destination_argument() {
+    fn push_contract_requires_confirmation() {
         let fixture = Fixture::new();
         let remote = ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL)
             .expect("configured remote is admitted");
@@ -2446,7 +2447,33 @@ mod tests {
         .expect("push suite constructs")
         .into_parts()
         .0;
-        let name = ToolName::try_new(GIT_PUSH_NAME.to_owned()).expect("fixture name is admitted");
+        let name = ToolName::try_new(GIT_PUSH_CONFIGURED_NAME.to_owned())
+            .expect("fixture name is admitted");
+        let definition = catalog.definition(&name).expect("push definition exists");
+
+        assert_eq!(
+            definition.permission_default(),
+            ToolPermissionDefault::Confirm
+        );
+        assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
+    }
+
+    #[test]
+    fn push_contract_has_no_destination_argument() {
+        let fixture = Fixture::new();
+        let remote = ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL)
+            .expect("configured remote is admitted");
+        let catalog = GitPushTools::try_new(
+            &LocalWorkspaceFileSystem,
+            fixture.root(),
+            remote,
+            RecordingPushTransport::default(),
+        )
+        .expect("push suite constructs")
+        .into_parts()
+        .0;
+        let name = ToolName::try_new(GIT_PUSH_CONFIGURED_NAME.to_owned())
+            .expect("fixture name is admitted");
         let definition = catalog.definition(&name).expect("push definition exists");
         let schema: serde_json::Value =
             serde_json::from_str(definition.input_schema().as_str()).expect("push schema is JSON");
@@ -2455,11 +2482,6 @@ mod tests {
         )
         .expect("provider JSON normalizes");
 
-        assert_eq!(
-            definition.permission_default(),
-            ToolPermissionDefault::Confirm
-        );
-        assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
         assert_eq!(schema["required"], serde_json::json!(["branch"]));
         assert_eq!(
             schema["additionalProperties"],
@@ -2472,12 +2494,13 @@ mod tests {
     fn push_resolves_real_branch_into_configured_synthetic_transport_request() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
-        let branch = repository
-            .head()
-            .expect("fixture head exists")
-            .shorthand()
-            .expect("fixture head is named")
-            .to_owned();
+        let initial = repository
+            .find_commit(fixture.initial)
+            .expect("fixture commit exists");
+        repository
+            .branch(FIX_BRANCH, &initial, false)
+            .expect("fixture push branch creates");
+        let branch = FIX_BRANCH.to_owned();
         let remote = ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL)
             .expect("configured remote is admitted");
         let transport = RecordingPushTransport::default();
@@ -2505,10 +2528,7 @@ mod tests {
         assert_eq!(request.remote().url(), REMOTE_URL);
         assert_eq!(request.branch(), branch);
         assert_eq!(request.commit(), fixture.initial.to_string());
-        assert_eq!(
-            request.refspec(),
-            format!("refs/heads/{0}:refs/heads/{0}", request.branch())
-        );
+        assert_eq!(request.refspec(), FIX_REFSPEC);
         assert_eq!(result["remote"], REMOTE_NAME);
         assert_eq!(result["branch"], request.branch());
         assert_eq!(result["commit"], fixture.initial.to_string());

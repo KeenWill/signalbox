@@ -3275,7 +3275,26 @@ mod tests {
     }
 
     #[test]
-    fn create_contract_is_confirmed_and_repository_is_not_a_model_argument() {
+    fn create_contract_requires_confirmation() {
+        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
+            .expect("configured repository is admitted");
+        let catalog = GitHubPullRequestCreateTools::try_new(
+            SyntheticCredentials,
+            RecordingCreateTransport::default(),
+            GitHubEgressPolicy::github_api_only(),
+            repository,
+        )
+        .expect("creation suite constructs")
+        .into_parts()
+        .0;
+        let create = definition(&catalog, PULL_REQUEST_CREATE_NAME);
+
+        assert_eq!(create.permission_default(), ToolPermissionDefault::Confirm);
+        assert_eq!(create.effect_class(), ToolEffectClass::ExternalEffect);
+    }
+
+    #[test]
+    fn create_contract_has_no_repository_argument() {
         let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
             .expect("configured repository is admitted");
         let catalog = GitHubPullRequestCreateTools::try_new(
@@ -3298,8 +3317,6 @@ mod tests {
             "repository": "attacker/exfiltration"
         }));
 
-        assert_eq!(create.permission_default(), ToolPermissionDefault::Confirm);
-        assert_eq!(create.effect_class(), ToolEffectClass::ExternalEffect);
         assert_eq!(
             schema["additionalProperties"],
             serde_json::Value::Bool(false)
@@ -3309,7 +3326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_transport_records_configured_repository_credentials_and_fixed_origin() {
+    async fn create_transport_records_exact_configured_request() {
         let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
             .expect("configured repository is admitted");
         let arguments = decode_create_pull_request(&normalized(serde_json::json!({
@@ -3345,7 +3362,7 @@ mod tests {
     }
 
     #[test]
-    fn create_body_and_response_are_exact_and_bounded() {
+    fn create_body_is_exact() {
         let arguments = decode_create_pull_request(&normalized(serde_json::json!({
             "title": CREATE_TITLE,
             "body": CREATE_BODY,
@@ -3355,6 +3372,22 @@ mod tests {
         .expect("creation arguments are admitted");
         let body = create_pull_request_body(&arguments).expect("creation body serializes");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("creation body is JSON");
+
+        assert_eq!(body["title"], CREATE_TITLE);
+        assert_eq!(body["body"], CREATE_BODY);
+        assert_eq!(body["head"], CREATE_HEAD);
+        assert_eq!(body["base"], CREATE_BASE);
+    }
+
+    #[test]
+    fn create_response_normalizes_exact_fields() {
+        let arguments = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": CREATE_HEAD,
+            "base": CREATE_BASE
+        })))
+        .expect("creation arguments are admitted");
         let response = serde_json::json!({
             "number": CREATED_PULL_REQUEST_NUMBER,
             "html_url": CREATED_PULL_REQUEST_URL
@@ -3363,10 +3396,6 @@ mod tests {
         let normalized =
             normalize_created_pull_request(&response, &arguments).expect("response normalizes");
 
-        assert_eq!(body["title"], CREATE_TITLE);
-        assert_eq!(body["body"], CREATE_BODY);
-        assert_eq!(body["head"], CREATE_HEAD);
-        assert_eq!(body["base"], CREATE_BASE);
         assert_eq!(normalized["number"], CREATED_PULL_REQUEST_NUMBER);
         assert_eq!(normalized["url"], CREATED_PULL_REQUEST_URL);
         assert_eq!(normalized["head"], CREATE_HEAD);
