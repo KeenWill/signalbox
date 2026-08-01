@@ -1931,6 +1931,10 @@ impl CredentialScrubber {
         self.contains_credential(text)
     }
 
+    fn reversible_variants(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.exact.as_str()).chain(self.decoded_variants.iter().map(String::as_str))
+    }
+
     fn url_contains_encoded_credential(&self, text: &str) -> bool {
         if self.contains_encoded_credential(text)
             || self.decoded_variants.iter().any(|variant| {
@@ -1940,33 +1944,42 @@ impl CredentialScrubber {
         {
             return true;
         }
-        let slash_normalized = self.exact.replace('\\', "/");
-        if slash_normalized != self.exact
-            && (text.contains(&slash_normalized)
-                || encoded_contains_credential(text, &slash_normalized))
-        {
+        if self.reversible_variants().any(|variant| {
+            let slash_normalized = variant.replace('\\', "/");
+            slash_normalized != variant
+                && (text.contains(&slash_normalized)
+                    || encoded_contains_credential(text, &slash_normalized))
+        }) {
             return true;
         }
         let Ok(url) = Url::parse(text) else {
             return true;
         };
-        if url.scheme().eq_ignore_ascii_case(&self.exact) {
+        if self
+            .reversible_variants()
+            .any(|variant| url.scheme().eq_ignore_ascii_case(variant))
+        {
             return true;
         }
         let Some(host) = url.host_str() else {
             return false;
         };
-        if canonicalized_url_host(&self.exact).is_some_and(|credential_host| {
-            unicode_case_insensitive_contains(host, &credential_host)
+        if self.reversible_variants().any(|variant| {
+            canonicalized_url_host(variant).is_some_and(|credential_host| {
+                unicode_case_insensitive_contains(host, &credential_host)
+            })
         }) {
             return true;
         }
         if let Some(result_host) = parse_ip_literal(host) {
-            return parse_ip_literal(&self.exact).is_some_and(|key| key == result_host);
+            return self
+                .reversible_variants()
+                .any(|variant| parse_ip_literal(variant).is_some_and(|key| key == result_host));
         }
-        if idna::domain_to_ascii(&self.exact)
-            .is_ok_and(|credential_host| credential_host.eq_ignore_ascii_case(host))
-        {
+        if self.reversible_variants().any(|variant| {
+            idna::domain_to_ascii(variant)
+                .is_ok_and(|credential_host| credential_host.eq_ignore_ascii_case(host))
+        }) {
             return true;
         }
         let (unicode_host, decoding) = idna::domain_to_unicode(host);
@@ -2388,6 +2401,7 @@ mod tests {
     const URL_IPV6_COLLISION_KEY: &str = "2001:0db8:0:0:0:0:0:1";
     const URL_LEGACY_IPV4_COLLISION_KEY: &str = "2130706433";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
+    const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
     const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
     const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
     const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
@@ -4334,6 +4348,29 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_BACKSLASH_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: URL backslash normalization is composed with reversible
+    /// credential decoding before completed evidence is retained.
+    #[test]
+    fn web_search_rejects_decoded_backslash_normalized_credential_in_result_url() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_BACKSLASH_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("decoded backslash fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_DECODED_BACKSLASH_COLLISION_KEY.as_bytes().to_vec(),
         ))
         .expect("fixture credential is usable");
 
