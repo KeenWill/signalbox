@@ -3,6 +3,7 @@ import Foundation
 public enum SignalboxTimelineItem: Identifiable, Equatable, Sendable {
     case message(SignalboxTimelineMessage)
     case tool(SignalboxToolCard)
+    case processEvidence(SignalboxProcessNoticeCard)
     case turnFailure(SignalboxTurnFailureCard)
     case unknown(SignalboxUnknownEventCard)
 
@@ -12,6 +13,8 @@ public enum SignalboxTimelineItem: Identifiable, Equatable, Sendable {
             return "message-\(message.eventID.rawValue)"
         case .tool(let tool):
             return "tool-\(tool.invocationID.rawValue)"
+        case .processEvidence(let notice):
+            return "notice-\(notice.eventID.rawValue)"
         case .turnFailure(let failure):
             return "failure-\(failure.eventID.rawValue)"
         case .unknown(let unknown):
@@ -27,6 +30,20 @@ public struct SignalboxTimelineMessage: Equatable, Sendable {
     public let thinkingText: String?
     public let isStreaming: Bool
     public let createdAt: Date?
+    public let label: String?
+    public let systemImage: String?
+}
+
+public struct SignalboxProcessNoticeDetail: Equatable, Sendable {
+    public let label: String
+    public let value: String
+}
+
+public struct SignalboxProcessNoticeCard: Equatable, Sendable {
+    public let eventID: SignalboxEventID
+    public let title: String
+    public let systemImage: String
+    public let details: [SignalboxProcessNoticeDetail]
 }
 
 public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
@@ -40,6 +57,11 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     public let decisionReason: String?
     public let childSessionID: SignalboxSessionID?
     public let decisionAvailable: Bool
+    public let presentationName: String?
+    public let presentationArgumentsLabel: String?
+    public let presentationArguments: String?
+    public let presentationOutputLabel: String?
+    public let presentationOutput: String?
 
     public init(
         eventID: SignalboxEventID,
@@ -51,7 +73,12 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         statusUpdates: [String],
         decisionReason: String?,
         childSessionID: SignalboxSessionID?,
-        decisionAvailable: Bool = true
+        decisionAvailable: Bool = true,
+        presentationName: String? = nil,
+        presentationArgumentsLabel: String? = nil,
+        presentationArguments: String? = nil,
+        presentationOutputLabel: String? = nil,
+        presentationOutput: String? = nil
     ) {
         self.eventID = eventID
         self.invocationID = invocationID
@@ -63,12 +90,24 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         self.decisionReason = decisionReason
         self.childSessionID = childSessionID
         self.decisionAvailable = decisionAvailable
+        self.presentationName = presentationName
+        self.presentationArgumentsLabel = presentationArgumentsLabel
+        self.presentationArguments = presentationArguments
+        self.presentationOutputLabel = presentationOutputLabel
+        self.presentationOutput = presentationOutput
     }
 
     public var id: SignalboxToolInvocationID { invocationID }
 
+    public var displayName: String { presentationName ?? toolName }
+
+    public var argumentsLabel: String { presentationArgumentsLabel ?? "Arguments" }
+
+    public var outputLabel: String { presentationOutputLabel ?? "Output" }
+
     public var compactArgumentSummary: String {
-        let trimmed = (arguments ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (presentationArguments ?? arguments ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return "No arguments"
         }
@@ -79,7 +118,8 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     }
 
     public var outputPreview: String {
-        let trimmed = (output ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (presentationOutput ?? output ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return "No output yet"
         }
@@ -217,10 +257,66 @@ public enum SignalboxEventNormalizer {
                     text: event.text,
                     thinkingText: nil,
                     isStreaming: false,
-                    createdAt: nil
+                    createdAt: nil,
+                    label: nil,
+                    systemImage: nil
                 )
             )
+        case .processContextSummary(let event):
+            return .message(
+                SignalboxTimelineMessage(
+                    eventID: record.eventID,
+                    role: .assistant,
+                    text: event.text,
+                    thinkingText: nil,
+                    isStreaming: false,
+                    createdAt: nil,
+                    label: "Context summary",
+                    systemImage: "doc.text"
+                )
+            )
+        case .processModelIdentity(let event):
+            return .processEvidence(
+                SignalboxProcessNoticeCard(
+                    eventID: record.eventID,
+                    title: "Model changed",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    details: [
+                        .init(label: "Selected model", value: event.selectedModelID.rawValue),
+                        .init(label: "Defaults version", value: event.defaultsVersion.rawValue.description),
+                    ]
+                )
+            )
+        case .processModelCallUsage(let event):
+            return .processEvidence(
+                SignalboxProcessNoticeCard(
+                    eventID: record.eventID,
+                    title: "Model usage",
+                    systemImage: "number.circle",
+                    details: [
+                        .init(label: "Turn", value: event.turnID.rawValue),
+                        .init(label: "Model call", value: event.modelCallID.rawValue),
+                        .init(label: "Input tokens", value: tokenLabel(event.inputTokens)),
+                        .init(label: "Output tokens", value: tokenLabel(event.outputTokens)),
+                        .init(
+                            label: "Cache creation input tokens",
+                            value: tokenLabel(event.cacheCreationInputTokens)
+                        ),
+                        .init(
+                            label: "Cache read input tokens",
+                            value: tokenLabel(event.cacheReadInputTokens)
+                        ),
+                    ]
+                )
+            )
+        case .processImportedContent(let event):
+            return .processEvidence(importedContentCard(record: record, event: event))
         case .processTool(let event):
+            let plan = planPresentation(
+                toolName: event.toolName,
+                arguments: event.arguments,
+                output: event.output
+            )
             return .tool(
                 SignalboxToolCard(
                     eventID: record.eventID,
@@ -232,7 +328,12 @@ public enum SignalboxEventNormalizer {
                     statusUpdates: [],
                     decisionReason: nil,
                     childSessionID: nil,
-                    decisionAvailable: true
+                    decisionAvailable: true,
+                    presentationName: plan?.name,
+                    presentationArgumentsLabel: plan?.argumentsLabel,
+                    presentationArguments: plan?.arguments,
+                    presentationOutputLabel: plan?.outputLabel,
+                    presentationOutput: plan?.output
                 )
             )
         case .processTurnFailure(let event):
@@ -286,6 +387,243 @@ public enum SignalboxEventNormalizer {
         }
     }
 
+    private struct PlanPresentation {
+        let name: String
+        let argumentsLabel: String
+        let arguments: String?
+        let outputLabel: String
+        let output: String?
+    }
+
+    private struct PlanReadArguments: Decodable {
+        let afterEntryID: UInt64?
+        let includeHistory: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case afterEntryID = "after_entry_id"
+            case includeHistory = "include_history"
+        }
+    }
+
+    private struct PlanReadOutput: Decodable {
+        let entries: [PlanEntry]
+        let nextAfterEntryID: UInt64?
+        let planTruncated: Bool
+        let history: [PlanEvent]?
+        let historyTruncated: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case entries
+            case nextAfterEntryID = "next_after_entry_id"
+            case planTruncated = "plan_truncated"
+            case history
+            case historyTruncated = "history_truncated"
+        }
+    }
+
+    private struct PlanEntry: Decodable {
+        let entryID: UInt64
+        let text: String
+        let status: String
+
+        private enum CodingKeys: String, CodingKey {
+            case entryID = "entry_id"
+            case text
+            case status
+        }
+    }
+
+    private struct PlanEvent: Decodable {
+        let ordinal: UInt64
+        let kind: String
+        let entryID: UInt64
+        let text: String?
+        let status: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case ordinal
+            case kind
+            case entryID = "entry_id"
+            case text
+            case status
+        }
+    }
+
+    private struct PlanWriteArguments: Decodable {
+        let kind: String
+        let entryID: UInt64?
+        let text: String?
+        let status: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case entryID = "entry_id"
+            case text
+            case status
+        }
+    }
+
+    private struct PlanWriteOutput: Decodable {
+        let event: PlanEvent
+    }
+
+    private static func planPresentation(
+        toolName: String,
+        arguments: String?,
+        output: String?
+    ) -> PlanPresentation? {
+        switch toolName {
+        case "plan_read":
+            return PlanPresentation(
+                name: "Plan read",
+                argumentsLabel: "Read request",
+                arguments: arguments.flatMap(formattedPlanReadArguments),
+                outputLabel: "Current plan",
+                output: output.flatMap(formattedPlanReadOutput)
+            )
+        case "plan_write":
+            return PlanPresentation(
+                name: "Plan update",
+                argumentsLabel: "Plan operation",
+                arguments: arguments.flatMap(formattedPlanWriteArguments),
+                outputLabel: "Appended event",
+                output: output.flatMap(formattedPlanWriteOutput)
+            )
+        default:
+            return nil
+        }
+    }
+
+    private static func formattedPlanReadArguments(_ json: String) -> String? {
+        guard let value = decode(PlanReadArguments.self, from: json) else {
+            return nil
+        }
+        return [
+            "After entry: \(value.afterEntryID?.description ?? "Beginning")",
+            "Include history: \(yesNo(value.includeHistory ?? false))",
+        ].joined(separator: "\n")
+    }
+
+    private static func formattedPlanReadOutput(_ json: String) -> String? {
+        guard let value = decode(PlanReadOutput.self, from: json) else {
+            return nil
+        }
+        let entries = value.entries.map {
+            "#\($0.entryID) [\(planStatusLabel($0.status))] \($0.text)"
+        }
+        let history = value.history?.map(formattedPlanEvent) ?? []
+        return (["Entries"] + (entries.isEmpty ? ["None"] : entries) + [
+            "Next entry: \(value.nextAfterEntryID?.description ?? "None")",
+            "Plan truncated: \(yesNo(value.planTruncated))",
+            "History",
+        ] + (history.isEmpty ? ["Not included"] : history) + [
+            "History truncated: \(yesNo(value.historyTruncated))"
+        ]).joined(separator: "\n")
+    }
+
+    private static func formattedPlanWriteArguments(_ json: String) -> String? {
+        guard let value = decode(PlanWriteArguments.self, from: json) else {
+            return nil
+        }
+        return formattedPlanOperation(
+            kind: value.kind,
+            entryID: value.entryID,
+            text: value.text,
+            status: value.status
+        )
+    }
+
+    private static func formattedPlanWriteOutput(_ json: String) -> String? {
+        guard let value = decode(PlanWriteOutput.self, from: json) else {
+            return nil
+        }
+        return formattedPlanEvent(value.event)
+    }
+
+    private static func formattedPlanEvent(_ event: PlanEvent) -> String {
+        "Event #\(event.ordinal): " + formattedPlanOperation(
+            kind: event.kind,
+            entryID: event.entryID,
+            text: event.text,
+            status: event.status
+        )
+    }
+
+    private static func formattedPlanOperation(
+        kind: String,
+        entryID: UInt64?,
+        text: String?,
+        status: String?
+    ) -> String {
+        switch kind {
+        case "create", "created":
+            return "Create entry\(entryID.map { " #\($0)" } ?? ""): \(text ?? "Text not reported")"
+        case "revise", "text_revised":
+            return "Revise entry #\(entryID?.description ?? "not reported"): \(text ?? "Text not reported")"
+        case "set_status", "status_changed":
+            let statusLabel = status.map(planStatusLabel) ?? "Status not reported"
+            return "Set entry #\(entryID?.description ?? "not reported") to \(statusLabel)"
+        default:
+            return "Unrecognized plan operation (\(kind))"
+        }
+    }
+
+    private static func planStatusLabel(_ status: String) -> String {
+        switch status {
+        case "pending": return "Pending"
+        case "in_progress": return "In progress"
+        case "completed": return "Completed"
+        case "abandoned": return "Abandoned"
+        default: return "Unrecognized status (\(status))"
+        }
+    }
+
+    private static func decode<Value: Decodable>(
+        _ type: Value.Type,
+        from json: String
+    ) -> Value? {
+        try? JSONDecoder().decode(type, from: Data(json.utf8))
+    }
+
+    private static func yesNo(_ value: Bool) -> String {
+        value ? "Yes" : "No"
+    }
+
+    private static func importedContentCard(
+        record: SignalboxStoredEvent,
+        event: SignalboxProcessImportedContentEvent
+    ) -> SignalboxProcessNoticeCard {
+        let presentation: (title: String, systemImage: String)
+        switch event.contentKind {
+        case .sourceEvent:
+            presentation = ("Imported source event", "doc.badge.gearshape")
+        case .sourceMessageBlock:
+            presentation = ("Imported message block", "text.bubble")
+        case .text:
+            presentation = ("Imported unattested text", "text.quote")
+        case .toolCall:
+            presentation = ("Imported tool call", "wrench.and.screwdriver")
+        case .toolResult:
+            presentation = ("Imported tool result", "checkmark.rectangle")
+        case .thinking:
+            presentation = ("Imported thinking", "brain")
+        case .redactedThinking:
+            presentation = ("Imported redacted thinking", "eye.slash")
+        case .document:
+            presentation = ("Imported document", "doc")
+        case .messageContentAbsent:
+            presentation = ("Imported message content absent", "rectangle.slash")
+        }
+        return SignalboxProcessNoticeCard(
+            eventID: record.eventID,
+            title: presentation.title,
+            systemImage: presentation.systemImage,
+            details: [
+                .init(label: "Source speaker", value: event.sourceSpeaker)
+            ]
+        )
+    }
+
     private static func normalizedMessage(
         record: SignalboxStoredEvent,
         event: SignalboxMessageEvent,
@@ -325,9 +663,15 @@ public enum SignalboxEventNormalizer {
                 text: text,
                 thinkingText: thinkingText.isEmpty ? nil : thinkingText,
                 isStreaming: event.isStreaming,
-                createdAt: event.createdAt
+                createdAt: event.createdAt,
+                label: nil,
+                systemImage: nil
             )
         )
+    }
+
+    private static func tokenLabel(_ value: SignalboxCanonicalUInt64?) -> String {
+        value?.rawValue.description ?? "Not reported"
     }
 
     private static func toolCard(
@@ -747,6 +1091,8 @@ public final class SignalboxIncrementalEventNormalizer {
             return message.eventID
         case .tool(let tool):
             return tool.eventID
+        case .processEvidence(let notice):
+            return notice.eventID
         case .turnFailure(let failure):
             return failure.eventID
         case .unknown(let unknown):

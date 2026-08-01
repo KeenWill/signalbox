@@ -24,6 +24,10 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
     case toolInvocation(SignalboxToolInvocationEvent)
     case turnFailed(SignalboxTurnFailedEvent)
     case processMessage(SignalboxProcessMessageEvent)
+    case processContextSummary(SignalboxProcessContextSummaryEvent)
+    case processModelIdentity(SignalboxProcessModelIdentityEvent)
+    case processModelCallUsage(SignalboxProcessModelCallUsageEvent)
+    case processImportedContent(SignalboxProcessImportedContentEvent)
     case processTool(SignalboxProcessToolEvent)
     case processTurnFailure(SignalboxProcessTurnFailureEvent)
     case processConservative(SignalboxProcessConservativeEvent)
@@ -39,6 +43,14 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
             return "turn_failed"
         case .processMessage:
             return "process_message"
+        case .processContextSummary:
+            return "process_context_summary"
+        case .processModelIdentity:
+            return "process_model_identity"
+        case .processModelCallUsage:
+            return "process_model_call_usage"
+        case .processImportedContent:
+            return "process_imported_content"
         case .processTool:
             return "process_tool"
         case .processTurnFailure:
@@ -106,6 +118,56 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
                     )
                 )
             }
+        case "process_context_summary":
+            do {
+                self = .processContextSummary(try SignalboxProcessContextSummaryEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
+        case "process_model_identity":
+            do {
+                self = .processModelIdentity(try SignalboxProcessModelIdentityEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
+        case "process_model_call_usage":
+            do {
+                self = .processModelCallUsage(try SignalboxProcessModelCallUsageEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
+        case "process_imported_content":
+            do {
+                self = .processImportedContent(
+                    try SignalboxProcessImportedContentEvent(from: decoder)
+                )
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
         case "process_tool":
             do {
                 self = .processTool(try SignalboxProcessToolEvent(from: decoder))
@@ -156,6 +218,14 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
         case .turnFailed(let event):
             try event.encode(to: encoder)
         case .processMessage(let event):
+            try event.encode(to: encoder)
+        case .processContextSummary(let event):
+            try event.encode(to: encoder)
+        case .processModelIdentity(let event):
+            try event.encode(to: encoder)
+        case .processModelCallUsage(let event):
+            try event.encode(to: encoder)
+        case .processImportedContent(let event):
             try event.encode(to: encoder)
         case .processTool(let event):
             try event.encode(to: encoder)

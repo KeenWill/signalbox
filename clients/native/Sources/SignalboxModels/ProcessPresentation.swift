@@ -116,7 +116,7 @@ public struct SignalboxProcessConversation: Identifiable, Equatable, Sendable {
       case .native:
         return "Session \(conversationID.rawValue.prefix(8))"
       case .imported:
-        return "Imported \(conversationID.rawValue.prefix(8))"
+        return "Untitled imported conversation \(conversationID.rawValue.prefix(8))"
       }
     }
     return title
@@ -306,6 +306,100 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     self.kind = "process_message"
     self.role = role
     self.text = text
+  }
+}
+
+public struct SignalboxProcessContextSummaryEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let text: String
+
+  public init(text: String) {
+    self.kind = "process_context_summary"
+    self.text = text
+  }
+}
+
+public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let defaultsVersion: SignalboxCanonicalUInt64
+  public let selectedModelID: SignalboxCanonicalUUID
+
+  public init(
+    defaultsVersion: SignalboxCanonicalUInt64,
+    selectedModelID: SignalboxCanonicalUUID
+  ) {
+    self.kind = "process_model_identity"
+    self.defaultsVersion = defaultsVersion
+    self.selectedModelID = selectedModelID
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case defaultsVersion = "defaults_version"
+    case selectedModelID = "selected_model_id"
+  }
+}
+
+public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let turnID: SignalboxCanonicalUUID
+  public let modelCallID: SignalboxCanonicalUUID
+  public let inputTokens: SignalboxCanonicalUInt64?
+  public let outputTokens: SignalboxCanonicalUInt64?
+  public let cacheCreationInputTokens: SignalboxCanonicalUInt64?
+  public let cacheReadInputTokens: SignalboxCanonicalUInt64?
+
+  public init(evidence: SignalboxTranscriptModelCallUsage) {
+    self.kind = "process_model_call_usage"
+    self.turnID = evidence.turnID
+    self.modelCallID = evidence.modelCallID
+    self.inputTokens = evidence.usage.inputTokens
+    self.outputTokens = evidence.usage.outputTokens
+    self.cacheCreationInputTokens = evidence.usage.cacheCreationInputTokens
+    self.cacheReadInputTokens = evidence.usage.cacheReadInputTokens
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case turnID = "turn_id"
+    case modelCallID = "model_call_id"
+    case inputTokens = "input_tokens"
+    case outputTokens = "output_tokens"
+    case cacheCreationInputTokens = "cache_creation_input_tokens"
+    case cacheReadInputTokens = "cache_read_input_tokens"
+  }
+}
+
+public enum SignalboxProcessImportedContentKind: String, Codable, Equatable, Sendable {
+  case sourceEvent = "source_event"
+  case sourceMessageBlock = "source_message_block"
+  case text
+  case toolCall = "tool_call"
+  case toolResult = "tool_result"
+  case thinking
+  case redactedThinking = "redacted_thinking"
+  case document
+  case messageContentAbsent = "message_content_absent"
+}
+
+public struct SignalboxProcessImportedContentEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let contentKind: SignalboxProcessImportedContentKind
+  public let sourceSpeaker: String
+
+  public init(
+    contentKind: SignalboxProcessImportedContentKind,
+    sourceSpeaker: String
+  ) {
+    kind = "process_imported_content"
+    self.contentKind = contentKind
+    self.sourceSpeaker = sourceSpeaker
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case contentKind = "content_kind"
+    case sourceSpeaker = "source_speaker"
   }
 }
 

@@ -51,6 +51,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private enum PresentationIdentity: Hashable, Sendable {
     case semantic(sourceSessionID: String, entryID: String)
     case toolRequest(String)
+    case modelCallUsage(String)
+    case turnState(String)
+    case followedCursor(UInt64)
   }
 
   private struct ToolContext: Sendable {
@@ -66,6 +69,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private var presentationIDs: [PresentationIdentity: SignalboxEventID] = [:]
   private var toolsByRequestID: [String: SignalboxProcessToolEvent] = [:]
   private var toolContextsByRequestID: [String: ToolContext] = [:]
+  private var nextSyntheticEventID = Int.min / 2
 
   public init() {}
 
@@ -94,6 +98,46 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     )
     self = candidate
     return projection
+  }
+
+  public mutating func projectUnrecognizedFollowedEvent(
+    _ followed: SignalboxFollowedSessionEvent
+  ) throws -> SignalboxStoredEvent? {
+    let content: (kind: String, diagnostic: String)?
+    switch followed.event {
+    case .modelCallTransition(_, _, .unknown(let kind, _)):
+      content = (
+        "model_call_transition.state.\(kind)",
+        "The daemon reported an unrecognized model-call state."
+      )
+    case .toolBatchTransition(_, _, .unknown(let kind, _)):
+      content = (
+        "tool_batch_transition.state.\(kind)",
+        "The daemon reported an unrecognized tool-batch state."
+      )
+    case .unknown(let kind, _, let diagnostic):
+      content = (
+        kind,
+        diagnostic?.message ?? "The daemon reported an unrecognized session event."
+      )
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
+      .turnRefused, .turnCancelled, .turnReconciliationRequired,
+      .turnToolReconciliationRequired:
+      content = nil
+    }
+    guard let content else {
+      return nil
+    }
+    return SignalboxStoredEvent(
+      eventID: try claimFollowedPresentationID(followed.cursor.rawValue),
+      event: .processConservative(
+        SignalboxProcessConservativeEvent(
+          kind: content.kind,
+          diagnostic: content.diagnostic
+        )
+      )
+    )
   }
 
   private enum Selection {
@@ -133,8 +177,21 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         if case .activeAwaitingToolApproval(let requestID) = turn.state {
           awaitingToolDecisionRequestID = requestID.rawValue
         }
-      case .modelCallUsage:
-        continue
+        if case .all = selection,
+          let unrecognized = try projectUnrecognizedTurnState(turn)
+        {
+          store(unrecognized, in: &projectedByID, order: &projectedOrder)
+        }
+      case .modelCallUsage(let evidence):
+        if usageIsSelected(evidence, selection: selection) {
+          let record = SignalboxStoredEvent(
+            eventID: try claimModelCallUsagePresentationID(evidence),
+            event: .processModelCallUsage(
+              SignalboxProcessModelCallUsageEvent(evidence: evidence)
+            )
+          )
+          store(record, in: &projectedByID, order: &projectedOrder)
+        }
       case .textEntry(let message):
         textAssembly = TextAssembly(message: message)
       case .content(let content):
@@ -189,16 +246,25 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     guard textIsSelected(message, selection: selection) else {
       return nil
     }
-    let role: SignalboxMessageRole
+    let event: SignalboxConversationEvent
     switch message.entry {
     case .user:
-      role = .user
-    case .assistant, .contextSummary:
-      role = .assistant
+      event = .processMessage(SignalboxProcessMessageEvent(role: .user, text: content))
+    case .assistant:
+      event = .processMessage(SignalboxProcessMessageEvent(role: .assistant, text: content))
+    case .contextSummary:
+      event = .processContextSummary(SignalboxProcessContextSummaryEvent(text: content))
     case .imported(_, _, let speaker):
-      role = importedRole(speaker)
-    case .unknown:
-      role = .unknown
+      event = .processMessage(
+        SignalboxProcessMessageEvent(role: importedRole(speaker), text: content)
+      )
+    case .unknown(let kind, _, let diagnostic):
+      event = .processConservative(
+        SignalboxProcessConservativeEvent(
+          kind: kind,
+          diagnostic: diagnostic?.message ?? "Unrecognized text entry: \(content)"
+        )
+      )
     }
     let eventID = try claimPresentationID(
       .semantic(
@@ -209,9 +275,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     )
     return SignalboxStoredEvent(
       eventID: eventID,
-      event: .processMessage(
-        SignalboxProcessMessageEvent(role: role, text: content)
-      )
+      event: event
     )
   }
 
@@ -227,11 +291,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .modelIdentityChanged(_, let defaultsVersion, let selectedModelID):
       return try semanticRecord(
         message,
-        event: .processConservative(
-          SignalboxProcessConservativeEvent(
-            kind: "model_identity_changed",
-            diagnostic:
-              "Model \(selectedModelID.rawValue) became active at defaults version \(defaultsVersion.rawValue)."
+        event: .processModelIdentity(
+          SignalboxProcessModelIdentityEvent(
+            defaultsVersion: defaultsVersion,
+            selectedModelID: selectedModelID
           )
         )
       )
@@ -289,13 +352,24 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           SignalboxProcessTurnFailureEvent(reason: "Turn failed.")
         )
       )
-    case .imported(_, _, _, let contentKind):
+    case .imported(_, _, let sourceSpeaker, let contentKind):
+      guard let presentationKind = importedContentKind(contentKind) else {
+        return try semanticRecord(
+          message,
+          event: .processConservative(
+            SignalboxProcessConservativeEvent(
+              kind: "imported_\(contentKind.rawValue)",
+              diagnostic: "The transcript contains an unrecognized imported content kind."
+            )
+          )
+        )
+      }
       return try semanticRecord(
         message,
-        event: .processConservative(
-          SignalboxProcessConservativeEvent(
-            kind: "imported_\(contentKind.rawValue)",
-            diagnostic: "The process snapshot preserves this imported content conservatively."
+        event: .processImportedContent(
+          SignalboxProcessImportedContentEvent(
+            contentKind: presentationKind,
+            sourceSpeaker: importedSpeakerLabel(sourceSpeaker)
           )
         )
       )
@@ -394,6 +468,104 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let claimed = SignalboxEventID(rawValue: Int(entryIndex.rawValue) + 1)
     presentationIDs[identity] = claimed
     return claimed
+  }
+
+  private mutating func claimSyntheticPresentationID(
+    _ identity: PresentationIdentity
+  ) throws -> SignalboxEventID {
+    if let existing = presentationIDs[identity] {
+      return existing
+    }
+    guard nextSyntheticEventID < 0 else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    let claimed = SignalboxEventID(rawValue: nextSyntheticEventID)
+    nextSyntheticEventID += 1
+    presentationIDs[identity] = claimed
+    return claimed
+  }
+
+  private mutating func claimFollowedPresentationID(
+    _ cursor: UInt64
+  ) throws -> SignalboxEventID {
+    let identity = PresentationIdentity.followedCursor(cursor)
+    if let existing = presentationIDs[identity] {
+      return existing
+    }
+    let base = Int.max / 2
+    guard cursor <= UInt64(Int.max - base) else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    let claimed = SignalboxEventID(rawValue: base + Int(cursor))
+    presentationIDs[identity] = claimed
+    return claimed
+  }
+
+  private mutating func claimModelCallUsagePresentationID(
+    _ evidence: SignalboxTranscriptModelCallUsage
+  ) throws -> SignalboxEventID {
+    let identity = PresentationIdentity.modelCallUsage(evidence.modelCallID.rawValue)
+    if let existing = presentationIDs[identity] {
+      return existing
+    }
+    let base = Int.max / 4
+    let index = evidence.modelCallIndex.rawValue
+    guard index < UInt64(Int.max / 4) else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    let claimed = SignalboxEventID(rawValue: base + Int(index))
+    presentationIDs[identity] = claimed
+    return claimed
+  }
+
+  private mutating func projectUnrecognizedTurnState(
+    _ turn: SignalboxTranscriptTurn
+  ) throws -> SignalboxStoredEvent? {
+    let content: (kind: String, diagnostic: String)?
+    switch turn.state {
+    case .unknown(let kind, _, let diagnostic):
+      content = (
+        "turn.state.\(kind)",
+        diagnostic?.message ?? "The snapshot retained an unrecognized turn state."
+      )
+    case .activeRunning(_, let currentModelCall):
+      if let currentModelCall, case .unknown(let kind, _) = currentModelCall.state {
+        content = (
+          "current_model_call.state.\(kind)",
+          "The snapshot retained an unrecognized current model-call state."
+        )
+      } else {
+        content = nil
+      }
+    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
+      .reconciliationRequired, .toolReconciliationRequired:
+      content = nil
+    }
+    guard let content else {
+      return nil
+    }
+    return SignalboxStoredEvent(
+      eventID: try claimSyntheticPresentationID(.turnState(turn.turnID.rawValue)),
+      event: .processConservative(
+        SignalboxProcessConservativeEvent(
+          kind: content.kind,
+          diagnostic: content.diagnostic
+        )
+      )
+    )
+  }
+
+  private func usageIsSelected(
+    _ evidence: SignalboxTranscriptModelCallUsage,
+    selection: Selection
+  ) -> Bool {
+    switch selection {
+    case .all:
+      return true
+    case .trigger(let trigger):
+      return turnID(for: trigger) == evidence.turnID
+    }
   }
 
   private func textIsSelected(
@@ -669,6 +841,52 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return .assistant
     case .unknown:
       return .unknown
+    }
+  }
+
+  private func importedContentKind(
+    _ kind: SignalboxImportedContentKind
+  ) -> SignalboxProcessImportedContentKind? {
+    switch kind {
+    case .sourceEvent:
+      return .sourceEvent
+    case .sourceMessageBlock:
+      return .sourceMessageBlock
+    case .text:
+      return .text
+    case .toolCall:
+      return .toolCall
+    case .toolResult:
+      return .toolResult
+    case .thinking:
+      return .thinking
+    case .redactedThinking:
+      return .redactedThinking
+    case .document:
+      return .document
+    case .messageContentAbsent:
+      return .messageContentAbsent
+    case .unknown:
+      return nil
+    }
+  }
+
+  private func importedSpeakerLabel(
+    _ speaker: SignalboxImportedSourceSpeaker
+  ) -> String {
+    switch speaker {
+    case .notAttested:
+      return "Speaker not attested"
+    case .attestedAbsent:
+      return "Speaker absent"
+    case .attested(.user):
+      return "User"
+    case .attested(.assistant):
+      return "Assistant"
+    case .attested(.unknown(let value)):
+      return "Unrecognized speaker (\(value))"
+    case .unknown(let kind, _):
+      return "Unrecognized source speaker (\(kind))"
     }
   }
 

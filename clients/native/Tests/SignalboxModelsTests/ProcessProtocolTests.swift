@@ -689,6 +689,20 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testUnderivableImportedTitleUsesAVisibleListFallback() throws {
+    let summary = try SignalboxJSONCoding.decoder().decode(
+      SignalboxConversationSummary.self,
+      from: ProcessProtocolFixture.importedConversationWithNullTitle()
+    )
+
+    let conversation = SignalboxProcessConversation(summary: summary)
+
+    XCTAssertEqual(
+      conversation.displayTitle,
+      ProcessProtocolFixture.untitledImportedConversationLabel
+    )
+  }
+
   func testPublicFrameDecoderRejectsOversizedInputBeforeScanning() {
     XCTAssertThrowsError(
       try SignalboxProcessServerFrame.decode(
@@ -704,6 +718,8 @@ final class ProcessProtocolTests: XCTestCase {
 }
 
 private enum ProcessProtocolFixture {
+  static let untitledImportedConversationLabel =
+    "Untitled imported conversation 33333333"
   static let requestID: UInt64 = 9
   static let firstEntryIndex: UInt64 = 0
   static let newerVersion: UInt64 = 2
@@ -1009,6 +1025,20 @@ private enum ProcessProtocolFixture {
           "source_format":"codex_rollout_jsonl_v1"
         }
         """
+    )
+  }
+
+  static func importedConversationWithNullTitle() -> Data {
+    Data(
+      """
+      {
+        "origin":"imported_conversation",
+        "imported_conversation_id":"33333333-3333-4333-8333-333333333333",
+        "title":null,
+        "entry_count":"1",
+        "source_format":"codex_rollout_jsonl_v1"
+      }
+      """.utf8
     )
   }
 

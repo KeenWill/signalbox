@@ -24,7 +24,7 @@ struct MockProcessProtocolConnectionFactory: SignalboxProcessConnectionFactory {
 
 enum MockProcessProtocolFixtures {
   static let sessionCount = 8
-  static let conversationRecordCount = 2
+  static let conversationRecordCount = 3
   static let snapshotCursor = "4"
   static let firstAcceptancePosition = "1"
   static let submittedAcceptancePosition = "2"

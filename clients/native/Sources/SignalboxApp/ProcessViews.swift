@@ -1705,6 +1705,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         }
         streamedText = nil
       case .event(let followed):
+        if let record = try projector.projectUnrecognizedFollowedEvent(followed) {
+          normalizer.upsert(record)
+          timeline = normalizer.timelineItems
+        }
         applyLiveEvent(followed.event)
       case .providerTextDelta(let delta):
         if var current = streamedText,
@@ -2258,6 +2262,8 @@ struct ProcessSessionDetailScreen: View {
           deniedToolRequest = tool.invocationID
         }
       )
+    case .processEvidence(let notice):
+      ProcessNoticeCard(notice: notice)
     case .turnFailure(let failure):
       FailureCard(failure: failure)
     case .unknown(let unknown):

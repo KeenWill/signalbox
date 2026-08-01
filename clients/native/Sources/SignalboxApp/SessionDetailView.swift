@@ -168,6 +168,8 @@ struct SessionDetailScreen: View {
                 onApprove: { Task { await viewModel.approve(invocationID: tool.invocationID) } },
                 onDeny: { Task { await viewModel.deny(invocationID: tool.invocationID) } }
             )
+        case .processEvidence(let notice):
+            ProcessNoticeCard(notice: notice)
         case .turnFailure(let failure):
             FailureCard(failure: failure)
         case .unknown(let unknown):

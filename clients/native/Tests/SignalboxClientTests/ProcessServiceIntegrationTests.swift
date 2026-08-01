@@ -378,10 +378,97 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     var projector = SignalboxProcessTranscriptProjector()
 
     let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+    let message = try ProcessProjectionFixture.onlyTimelineMessage(in: normalizer.timelineItems)
 
     XCTAssertEqual(message.text, ProcessProjectionFixture.contextSummaryText)
     XCTAssertEqual(message.role, .assistant)
+    XCTAssertEqual(message.label, ProcessProjectionFixture.contextSummaryLabel)
+  }
+
+  func testImportedSemanticMarkersProjectAsTypedTimelineNotices() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedMarkers()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      try ProcessProjectionFixture.importedContentKinds(in: projection),
+      ProcessProjectionFixture.importedContentKinds
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
+      ProcessProjectionFixture.importedNoticeTitles
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.futureImportedPresentationKinds
+    )
+  }
+
+  func testModelIdentityAndUsageProjectAsTypedTimelineNotices() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithModelPresentationEvidence()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
+      ProcessProjectionFixture.modelNoticeTitles
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeDetailValues(in: normalizer.timelineItems),
+      ProcessProjectionFixture.modelNoticeDetailValues
+    )
+  }
+
+  func testUnknownFollowedEventProjectsAsVisibleTimelineCard() throws {
+    let followed = try ProcessProjectionFixture.unknownFollowedEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let record = try XCTUnwrap(projector.projectUnrecognizedFollowedEvent(followed))
+    let normalizer = try SignalboxIncrementalEventNormalizer(
+      records: [ProcessProjectionFixture.knownMessageRecord]
+    )
+    normalizer.upsert(record)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.futureFollowedEventKinds
+    )
+    XCTAssertEqual(
+      normalizer.timelineItems.map(\.id),
+      ProcessProjectionFixture.knownThenFollowedTimelineIDs
+    )
+  }
+
+  func testUnknownSnapshotTurnStateProjectsAsVisibleTimelineCard() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownTurnState()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.futureSnapshotStatePresentationKinds
+    )
+  }
+
+  func testPlanToolsUseTypedFaithfulTimelineSummaries() throws {
+    let records = ProcessProjectionFixture.planToolRecords()
+
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: records)
+    let tools = ProcessProjectionFixture.toolCards(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tools.map(\.displayName), ProcessProjectionFixture.planDisplayNames)
+    XCTAssertEqual(
+      tools.map(\.compactArgumentSummary),
+      ProcessProjectionFixture.planArgumentPresentations
+    )
+    XCTAssertEqual(tools.map(\.outputPreview), ProcessProjectionFixture.planOutputPresentations)
   }
 
   func testFailedProviderCauseAppearsInNativeActivity() throws {
@@ -3600,10 +3687,76 @@ private enum ProcessProjectionFixture {
   static let completedAssistantEntry = "bbbbbbbb-2222-4222-8222-222222222222"
   static let completedAssistantText = "Fixture terminal assistant response."
   static let contextSummaryText = "Fixture compacted context summary."
+  static let contextSummaryLabel = "Context summary"
   static let contextSummaryEntry = "cccccccc-2222-4222-8222-222222222222"
   static let contextCompactionID = "dddddddd-2222-4222-8222-222222222222"
   static let closedToolID = "cccccccc-1111-4111-8111-111111111111"
   static let closedToolName = "closed_fixture_tool"
+  static let importedConversation = "eeeeeeee-4444-4444-8444-444444444444"
+  static let importedSourceEventEntry = "eeeeeeee-4444-4444-8444-444444444441"
+  static let importedThinkingEntry = "eeeeeeee-4444-4444-8444-444444444442"
+  static let importedToolCallEntry = "eeeeeeee-4444-4444-8444-444444444443"
+  static let importedToolResultEntry = "eeeeeeee-4444-4444-8444-444444444444"
+  static let importedFutureEntry = "eeeeeeee-4444-4444-8444-444444444445"
+  static let futureImportedContentKind = "fixture_future_imported_content"
+  static let futureImportedPresentationKind = "imported_\(futureImportedContentKind)"
+  static let futureImportedPresentationKinds = [futureImportedPresentationKind]
+  static let importedContentKinds: [SignalboxProcessImportedContentKind] = [
+    .sourceEvent, .thinking, .toolCall, .toolResult,
+  ]
+  static let importedNoticeTitles = [
+    "Imported source event", "Imported thinking", "Imported tool call",
+    "Imported tool result",
+  ]
+  static let modelNoticeTitles = ["Model changed", "Model usage"]
+  static let modelIdentityDefaultsVersion = UInt64(7)
+  static let modelInputTokens = UInt64(12)
+  static let modelOutputTokens = UInt64(3)
+  static let modelCacheCreationTokens = UInt64(4)
+  static let modelNoticeDetailValues = [
+    ProcessDriverFixture.modelCall,
+    modelIdentityDefaultsVersion.description,
+    ProcessDriverFixture.turn,
+    ProcessDriverFixture.modelCall,
+    modelInputTokens.description,
+    modelOutputTokens.description,
+    modelCacheCreationTokens.description,
+    "Not reported",
+  ]
+  static let futureFollowedEventKind = "future_session_event"
+  static let futureFollowedEventKinds = [futureFollowedEventKind]
+  static let futureTurnStateKind = "fixture_future_turn_state"
+  static let futureTurnStatePresentationKind = "turn.state.\(futureTurnStateKind)"
+  static let futureCurrentModelStateKind = "fixture_future_current_model_state"
+  static let futureCurrentModelStatePresentationKind =
+    "current_model_call.state.\(futureCurrentModelStateKind)"
+  static let futureSnapshotStatePresentationKinds = [
+    futureTurnStatePresentationKind, futureCurrentModelStatePresentationKind,
+  ]
+  static let knownMessageRecord = SignalboxStoredEvent(
+    eventID: SignalboxEventID(rawValue: 1),
+    event: .processMessage(
+      SignalboxProcessMessageEvent(role: .user, text: "Known fixture message")
+    )
+  )
+  static let knownThenFollowedTimelineIDs = [
+    "message-1", "unknown-\(Int.max / 2 + 1)",
+  ]
+  static let planReadRequestID = "ffffffff-5555-4555-8555-555555555551"
+  static let planWriteRequestID = "ffffffff-5555-4555-8555-555555555552"
+  static let planReadArguments = #"{"include_history":true}"#
+  static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress"}],"next_after_entry_id":null,"plan_truncated":false,"history":null,"history_truncated":false}"#
+  static let planWriteArguments = #"{"kind":"set_status","entry_id":1,"status":"completed"}"#
+  static let planWriteOutput = #"{"event":{"ordinal":2,"kind":"status_changed","entry_id":1,"status":"completed","provenance":{}}}"#
+  static let planDisplayNames = ["Plan read", "Plan update"]
+  static let planArgumentPresentations = [
+    "After entry: Beginning\nInclude history: Yes",
+    "Set entry #1 to Completed",
+  ]
+  static let planOutputPresentations = [
+    "Entries\n#1 [In progress] Audit protocol\nNext entry: None\nPlan truncated: No\nHistory\nNot included\nHistory truncated: No",
+    "Event #2: Set entry #1 to Completed",
+  ]
   static let firstPendingID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
   static let secondPendingID = "00000000-0000-4000-8000-000000000001"
   static let firstPendingTurn = "ffffffff-ffff-4fff-8fff-fffffffffffe"
@@ -3911,6 +4064,296 @@ private enum ProcessProjectionFixture {
         """,
       ]
     )
+  }
+
+  static func snapshotWithImportedMarkers() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        importedMarker(
+          index: 0,
+          entryID: importedSourceEventEntry,
+          speaker: #"{"type":"not_attested"}"#,
+          kind: "source_event"
+        ),
+        importedMarker(
+          index: 1,
+          entryID: importedThinkingEntry,
+          speaker: #"{"type":"attested","speaker":"assistant"}"#,
+          kind: "thinking"
+        ),
+        importedMarker(
+          index: 2,
+          entryID: importedToolCallEntry,
+          speaker: #"{"type":"attested","speaker":"assistant"}"#,
+          kind: "tool_call"
+        ),
+        importedMarker(
+          index: 3,
+          entryID: importedToolResultEntry,
+          speaker: #"{"type":"attested","speaker":"user"}"#,
+          kind: "tool_result"
+        ),
+        importedMarker(
+          index: 4,
+          entryID: importedFutureEntry,
+          speaker: #"{"type":"not_attested"}"#,
+          kind: futureImportedContentKind
+        ),
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"5"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithModelPresentationEvidence() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage":{
+            "input_tokens":"\(modelInputTokens)",
+            "output_tokens":"\(modelOutputTokens)",
+            "cache_creation_input_tokens":"\(modelCacheCreationTokens)",
+            "cache_read_input_tokens":null
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedAssistantEntry)",
+          "entry":{
+            "type":"model_identity_changed",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "defaults_version":"\(modelIdentityDefaultsVersion)",
+            "selected_model_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"1"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func unknownFollowedEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"\(futureFollowedEventKind)",
+        "retained":"fixture"
+      }
+      """
+    )
+  }
+
+  static func snapshotWithUnknownTurnState() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{"type":"\(futureTurnStateKind)","retained":"fixture"}
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(crossTurn)",
+          "acceptance_position":"2",
+          "state":{
+            "type":"active_running",
+            "current_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "current_model_call":{
+              "model_call_id":"\(ProcessDriverFixture.modelCall)",
+              "state":{"type":"\(futureCurrentModelStateKind)","retained":"fixture"}
+            }
+          }
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"2",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func planToolRecords() -> [SignalboxStoredEvent] {
+    [
+      SignalboxStoredEvent(
+        eventID: SignalboxEventID(rawValue: 1),
+        event: .processTool(
+          SignalboxProcessToolEvent(
+            toolRequestID: SignalboxToolInvocationID(rawValue: planReadRequestID),
+            toolName: "plan_read",
+            arguments: planReadArguments,
+            output: planReadOutput,
+            status: .completed
+          )
+        )
+      ),
+      SignalboxStoredEvent(
+        eventID: SignalboxEventID(rawValue: 2),
+        event: .processTool(
+          SignalboxProcessToolEvent(
+            toolRequestID: SignalboxToolInvocationID(rawValue: planWriteRequestID),
+            toolName: "plan_write",
+            arguments: planWriteArguments,
+            output: planWriteOutput,
+            status: .completed
+          )
+        )
+      ),
+    ]
+  }
+
+  static func importedContentKinds(
+    in projection: SignalboxProcessTranscriptProjection
+  ) throws -> [SignalboxProcessImportedContentKind] {
+    let kinds: [SignalboxProcessImportedContentKind] = projection.records.compactMap {
+      record -> SignalboxProcessImportedContentKind? in
+      guard case .processImportedContent(let event) = record.event else {
+        return nil
+      }
+      return event.contentKind
+    }
+    guard kinds.count == importedContentKinds.count else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureMessage
+    }
+    return kinds
+  }
+
+  static func noticeTitles(in timeline: [SignalboxTimelineItem]) -> [String] {
+    timeline.compactMap {
+      guard case .processEvidence(let notice) = $0 else {
+        return nil
+      }
+      return notice.title
+    }
+  }
+
+  static func noticeDetailValues(in timeline: [SignalboxTimelineItem]) -> [String] {
+    let notices: [SignalboxProcessNoticeCard] = timeline.compactMap {
+      item -> SignalboxProcessNoticeCard? in
+      guard case .processEvidence(let notice) = item else {
+        return nil
+      }
+      return notice
+    }
+    return notices.flatMap { $0.details }.map { $0.value }
+  }
+
+  static func unknownKinds(in timeline: [SignalboxTimelineItem]) -> [String] {
+    timeline.compactMap {
+      guard case .unknown(let unknown) = $0 else {
+        return nil
+      }
+      return unknown.kind
+    }
+  }
+
+  static func toolCards(in timeline: [SignalboxTimelineItem]) -> [SignalboxToolCard] {
+    timeline.compactMap {
+      guard case .tool(let tool) = $0 else {
+        return nil
+      }
+      return tool
+    }
+  }
+
+  private static func importedMarker(
+    index: UInt64,
+    entryID: String,
+    speaker: String,
+    kind: String
+  ) -> String {
+    """
+    {
+      "type":"transcript_entry",
+      "entry_index":"\(index)",
+      "source_session_id":"\(ProcessDriverFixture.session)",
+      "entry_id":"\(entryID)",
+      "entry":{
+        "type":"imported",
+        "imported_conversation_id":"\(importedConversation)",
+        "imported_entry_id":"\(entryID)",
+        "source_speaker":\(speaker),
+        "content_kind":"\(kind)"
+      }
+    }
+    """
   }
 
   static func snapshotWithCrossTurnReconciliationResult() throws
