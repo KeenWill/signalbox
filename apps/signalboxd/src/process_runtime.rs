@@ -1305,17 +1305,13 @@ where
                 .model_configuration
                 .conversation_import_max_source_bytes();
             if source.len() > limit {
-                return write_import_rejection(
-                    writer,
-                    version,
-                    request_id,
-                    RejectionDetail::ConversationImportSourceTooLarge {
-                        limit_bytes: wire_size(limit)?,
-                        declared_size_bytes: CanonicalU64::new(source_size),
-                        actual_size_bytes: Some(CanonicalU64::new(source_size)),
-                    },
-                )
-                .await;
+                let detail = RejectionDetail::ConversationImportSourceTooLarge {
+                    limit_bytes: wire_size(limit)?,
+                    declared_size_bytes: CanonicalU64::new(source_size),
+                    actual_size_bytes: Some(CanonicalU64::new(source_size)),
+                };
+                drop(source);
+                return write_import_rejection(writer, version, request_id, detail).await;
             }
             let import_permit = import_permit.ok_or(ProcessConnectionError::ImportBudgetClosed)?;
             handle_import_conversation(
@@ -3785,6 +3781,7 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let Some(pending) = pending.as_mut() else {
+        drop(chunk);
         return write_import_rejection(
             writer,
             version,
@@ -3803,6 +3800,7 @@ where
     if pending.actual_size_bytes <= limit_bytes.value() {
         pending.source.extend_from_slice(&chunk);
     }
+    drop(chunk);
     write_message(
         writer,
         version,
