@@ -137,45 +137,6 @@ impl PostgresEligibilitySweep {
                  WHERE active.state_kind = 'active'
                    AND active.active_phase_kind = 'running'
                    AND active.active_tool_round_call_id IS NOT NULL
-                UNION
-                SELECT goal.session_id
-                  FROM goal_turn AS goal
-                  JOIN turn_lifecycle AS terminal
-                    ON terminal.session_id = goal.session_id
-                   AND terminal.turn_id = goal.turn_id
-                  JOIN accepted_input AS accepted
-                    ON accepted.accepted_input_id = goal.accepted_input_id
-                   AND accepted.session_id = goal.session_id
-                   AND accepted.origin_turn_id = goal.turn_id
-                  JOIN LATERAL (
-                      SELECT event.event_kind, event.generation
-                        FROM goal_event AS event
-                       WHERE event.session_id = goal.session_id
-                       ORDER BY event.event_ordinal DESC
-                       LIMIT 1
-                  ) AS latest_event ON (
-                      (
-                          latest_event.event_kind IN ('commissioned', 'resumed')
-                          AND latest_event.generation = goal.goal_generation
-                      ) OR (
-                          latest_event.event_kind = 'superseded'
-                          AND latest_event.generation < 18446744073709551615
-                          AND latest_event.generation + 1 = goal.goal_generation
-                      )
-                  )
-                 WHERE terminal.state_kind = 'terminal'
-                   AND NOT EXISTS (
-                       SELECT 1
-                         FROM goal_turn AS later_goal
-                         JOIN accepted_input AS later_accepted
-                           ON later_accepted.accepted_input_id = later_goal.accepted_input_id
-                          AND later_accepted.session_id = later_goal.session_id
-                          AND later_accepted.origin_turn_id = later_goal.turn_id
-                        WHERE later_goal.session_id = goal.session_id
-                          AND later_goal.goal_generation = goal.goal_generation
-                          AND later_accepted.acceptance_position
-                              > accepted.acceptance_position
-                   )
              ), bounded AS (
                 SELECT COALESCE(
                     $2::uuid,

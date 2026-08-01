@@ -298,6 +298,55 @@ async fn insert_goal_tool_request(
     Ok(())
 }
 
+async fn insert_following_tool_request(
+    pool: &PgPool,
+    turn: TurnId,
+    declaration_request: ToolRequestId,
+    following_request: ToolRequestId,
+) -> Result<(), Box<dyn Error>> {
+    let producing_call = Uuid::from_u128(declaration_request.into_uuid().as_u128() + 0x1000);
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 1, 'inspect', 'json', '{}')",
+    )
+    .bind(following_request.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
+    .bind(producing_call)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             assistant_text_value, producing_model_call_id,
+             assistant_response_part_ordinal, assistant_tool_request_id)
+         VALUES ($1, $2, 'assistant_tool_use', NULL, $3, 2, $4)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(Uuid::from_u128(
+        following_request.into_uuid().as_u128() + 0x4000,
+    ))
+    .bind(producing_call)
+    .bind(following_request.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn set_goal_turn_acceptance_position(
     pool: &PgPool,
     turn: TurnId,
@@ -1827,6 +1876,71 @@ async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
         .await
         .expect_err("mismatched adjacent declaration text cannot source a goal event");
     assert_model_declaration_request_rejected(text_error);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: goal_declare is rejected when another response part follows it,
+/// preventing later tool effects after a terminal goal transition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_model_goal_declaration_is_the_final_response_part() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xba4);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x9a4),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("finish before any later tool request")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    let report_text = String::from("finished without later effects");
+    let declaration_request = tool_request(0xfa4);
+    insert_goal_tool_request(
+        &pool,
+        attached_turn.turn(),
+        declaration_request,
+        "goal_declare",
+        r#"{"transition":"achieved"}"#,
+        &report_text,
+    )
+    .await?;
+    insert_following_tool_request(
+        &pool,
+        attached_turn.turn(),
+        declaration_request,
+        tool_request(0xfa5),
+    )
+    .await?;
+    let provenance = GoalModelProvenance::new(attached_turn.turn(), declaration_request);
+
+    assert_eq!(
+        repository
+            .load_model_declaration_text(session(SESSION), provenance)
+            .await?,
+        None
+    );
+    let error = repository
+        .declare_achieved(
+            session(SESSION),
+            GoalReport::try_new(report_text).expect("fixture report is admitted"),
+            provenance,
+        )
+        .await
+        .expect_err("a nonfinal declaration cannot source a goal event");
+    assert_model_declaration_request_rejected(error);
 
     pool.close().await;
     drop(container);

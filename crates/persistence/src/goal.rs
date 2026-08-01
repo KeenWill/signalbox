@@ -362,7 +362,16 @@ impl GoalRepository {
               WHERE request.request_id = $1
                 AND request.session_id = $2
                 AND request.turn_id = $3
-                AND request.tool_name = 'goal_declare'",
+                AND request.tool_name = 'goal_declare'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM semantic_transcript_entry AS later_part
+                     WHERE later_part.source_session_id = tool_use.source_session_id
+                       AND later_part.producing_model_call_id =
+                           tool_use.producing_model_call_id
+                       AND later_part.assistant_response_part_ordinal >
+                           tool_use.assistant_response_part_ordinal
+                )",
         )
         .bind(tool_request_id_to_uuid(provenance.tool_request()))
         .bind(session_id_to_uuid(session))
