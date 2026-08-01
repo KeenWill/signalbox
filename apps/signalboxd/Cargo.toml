@@ -47,6 +47,7 @@ signalbox-tools-basic = { path = "../../crates/tools-basic" }
 signalbox-tools-code-host = { path = "../../crates/tools-code-host" }
 signalbox-tools-conversations = { path = "../../crates/tools-conversations" }
 signalbox-tools-github = { path = "../../crates/tools-github" }
+signalbox-tools-plan = { path = "../../crates/tools-plan" }
 signalbox-tools-workspace = { path = "../../crates/tools-workspace" }
 rustix = { version = "1.1.4", default-features = false, features = [
     "fs",

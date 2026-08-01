@@ -3236,6 +3236,7 @@ dependencies = [
  "signalbox-tools-code-host",
  "signalbox-tools-conversations",
  "signalbox-tools-github",
+ "signalbox-tools-plan",
  "signalbox-tools-workspace",
  "sqlx",
  "tempfile",
