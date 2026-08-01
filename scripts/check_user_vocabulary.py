@@ -58,7 +58,8 @@ ALLOWLIST = (
             r"`@codex review` request by an owner, member, or collaborator|"
             r"association is `OWNER`, `MEMBER`, or `COLLABORATOR`|"
             r"matches!\(association, \"OWNER\" \| \"MEMBER\" \| \"COLLABORATOR\"\)|"
-            r"author_association.*OWNER|author:.*[\"']owner[\"']|"
+            r"author_association:\s*String::from\(\"OWNER\"\)|"
+            r"author:.*[\"']owner[\"']|"
             r"valid_repository_segment\(owner\)|fn owner\(&self\)|"
             r"Merge pull request.*owner/",
             re.IGNORECASE,
@@ -87,7 +88,8 @@ ALLOWLIST = (
             r"stale local process socket has the wrong owner|"
             r"effective-user ownership|owner\s*==|"
             r"owner:\s*u32|child_owner|ParentOwnerMismatch|AncestorOwnerMismatch|"
-            r"[A-Za-z0-9_]*OwnerMismatch|ancestor_owner_is_trusted|ancestor_owner_must_be|file owner|"
+            r"ExistingSocketOwnerMismatch|PeerOwnerMismatch|\bOwnerMismatch\b|"
+            r"ancestor_owner_is_trusted|ancestor_owner_must_be|file owner|"
             r"owner_access|dropping the owner|its owner, so it cannot shadow|"
             r"owner-vs-other",
             re.IGNORECASE,
