@@ -68,7 +68,7 @@ later scaling retrofit.
 
 ## Why explicit state and strong types matter
 
-Signalbox coordinates durable intent with fallible physical effects. A user
+Signalbox coordinates durable intent with fallible physical effects. A user-role
 message, logical turn, orchestration attempt, model call, tool request, and tool
 attempt have different identities and retry rules. Conflating them makes stale
 writes, duplicate effects, misleading history, and silent loss likely.

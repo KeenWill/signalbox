@@ -114,7 +114,7 @@ impl fmt::Display for SessionTemplateNameError {
 
 impl std::error::Error for SessionTemplateNameError {}
 
-/// One positive user-assigned template bundle version.
+/// One positive operator-assigned template bundle version.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SessionTemplateVersion(u64);
 

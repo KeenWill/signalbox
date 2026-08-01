@@ -4010,7 +4010,7 @@ pub enum ServerMessage {
     TemplateSummary {
         /// Validated template name.
         name: String,
-        /// Positive user-assigned bundle version.
+        /// Positive operator-assigned bundle version.
         version: CanonicalU64,
     },
     /// Completes the available-template sequence.
