@@ -5748,10 +5748,12 @@ fn reconstitute_active_acceptance_tail(
                     AcceptedInputDisposition::OriginOf(origin) => {
                         !records_by_turn.contains_key(origin)
                             && !accepted_input_turns.contains_key(&accepted_input)
-                            && matches!(
-                                entry.delivery,
-                                DeliveryRequest::StartWhenNoActiveTurn { .. }
-                            )
+                            && match entry.delivery {
+                                DeliveryRequest::StartWhenNoActiveTurn { .. } => true,
+                                DeliveryRequest::Interrupt { .. }
+                                | DeliveryRequest::AfterCurrentTurn { .. }
+                                | DeliveryRequest::NextSafePoint { .. } => false,
+                            }
                     }
                     AcceptedInputDisposition::PendingSteering { .. }
                     | AcceptedInputDisposition::ConsumedAsSteering { .. }
