@@ -472,6 +472,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
             ?? "A malformed followed event could not be decoded."
         )
       }
+      // Unknown nested states are retained as visible evidence by the projector.
+      // Only malformed envelopes fail replay before cursor validation.
+      // This keeps snapshot catch-up tolerant of newer closed-state variants.
       let observedCursor = replayBufferLastCursor ?? snapshotCursor
       guard followed.cursor > observedCursor else {
         return diagnosticEffects(for: followed, stage: .replay)
@@ -588,6 +591,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
           ?? "A malformed followed event could not be decoded."
       )
     }
+    // Unknown nested states remain visible evidence after synchronization.
+    // They do not invalidate an otherwise well-formed followed event.
+    // The diagnostic path below reports their unrecognized protocol content.
+    // Cursor validation still governs whether the event advances the stream.
     guard followed.cursor > cursor else {
       return reportDiagnostics ? diagnosticEffects(for: followed, stage: .steady) : []
     }
@@ -1637,10 +1644,8 @@ extension SignalboxSynchronizationSnapshot.Record {
 extension SignalboxTranscriptTurnState {
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
-    case .queued:
-      return .impossible
-    case .unknown:
-      return .permitted
+    case .queued: return .impossible
+    case .unknown: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
       return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
@@ -1671,7 +1676,8 @@ extension SignalboxTranscriptTurnState {
   fileprivate var isInvalidStoredProjection: Bool {
     switch self {
     case .failed(_, let terminalAttemptID, let terminalModelCall):
-      return terminalModelCall != nil && terminalAttemptID == nil
+      return terminalModelCall != nil
+        && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
     case .queued, .activeRunning, .activeAwaitingModelCallRecovery,

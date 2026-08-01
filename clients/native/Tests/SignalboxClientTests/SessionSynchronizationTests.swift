@@ -516,96 +516,9 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testFutureEntryVariantCompletesAuthoritativeSnapshot() throws {
-    var transport = try SynchronizationFixture.transportInHistory(
-      cursor: SynchronizationFixture.initialCursor
-    )
-
-    _ = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.modelCallsEnd(count: 0)
-      )
-    )
-    let effects = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.futureTranscriptEntry()
-      )
-    )
-    let completionEffects = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.snapshotEnd(
-          cursor: SynchronizationFixture.initialCursor,
-          turnCount: 0,
-          entryCount: 1
-        )
-      )
-    )
-    let snapshot = try SynchronizationFixture.publishedSnapshot(in: completionEffects)
-
-    XCTAssertTrue(effects.isEmpty)
-    XCTAssertEqual(
-      snapshot.records.count,
-      SynchronizationFixture.futureEntrySnapshotRecordCount
-    )
-    XCTAssertEqual(
-      transport.machine.phase,
-      .replay(
-        generation: SynchronizationFixture.initialGeneration,
-        cursor: SignalboxCanonicalUInt64(rawValue: SynchronizationFixture.initialCursor)
-      )
-    )
-  }
-
-  func testFutureTextEntryVariantCompletesAuthoritativeSnapshot() throws {
-    var transport = try SynchronizationFixture.transportInHistory(
-      cursor: SynchronizationFixture.initialCursor
-    )
-
-    _ = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.modelCallsEnd(count: 0)
-      )
-    )
-    _ = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.futureTranscriptTextEntry()
-      )
-    )
-    _ = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.content()
-      )
-    )
-    let completionEffects = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.snapshotEnd(
-          cursor: SynchronizationFixture.initialCursor,
-          turnCount: 0,
-          entryCount: 1
-        )
-      )
-    )
-    let snapshot = try SynchronizationFixture.publishedSnapshot(in: completionEffects)
-
-    XCTAssertEqual(
-      snapshot.records.count,
-      SynchronizationFixture.futureTextEntrySnapshotRecordCount
-    )
-    XCTAssertEqual(
-      transport.machine.phase,
-      .replay(
-        generation: SynchronizationFixture.initialGeneration,
-        cursor: SignalboxCanonicalUInt64(rawValue: SynchronizationFixture.initialCursor)
-      )
-    )
-  }
+  // MARK: Snapshot validation
+  //
+  // Closed-frame and capacity checks remain grouped before model-call usage.
 
   func testOversizedContentFragmentFailsAuthoritativeSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
@@ -1856,6 +1769,93 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(
       transport.machine.phase,
       SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testFutureEntryVariantCompletesAuthoritativeSnapshot() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.futureTranscriptEntry()
+      )
+    )
+    let completionEffects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 0,
+          entryCount: 1
+        )
+      )
+    )
+    let snapshot = try SynchronizationFixture.publishedSnapshot(in: completionEffects)
+
+    XCTAssertTrue(effects.isEmpty)
+    XCTAssertEqual(
+      snapshot.records.count, SynchronizationFixture.futureEntrySnapshotRecordCount)
+    XCTAssertEqual(
+      transport.machine.phase,
+      .replay(
+        generation: SynchronizationFixture.initialGeneration,
+        cursor: SignalboxCanonicalUInt64(rawValue: SynchronizationFixture.initialCursor)
+      )
+    )
+  }
+
+  func testFutureTextEntryVariantCompletesAuthoritativeSnapshot() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.futureTranscriptTextEntry()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.content()
+      )
+    )
+    let completionEffects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 0,
+          entryCount: 1
+        )
+      )
+    )
+    let snapshot = try SynchronizationFixture.publishedSnapshot(in: completionEffects)
+
+    XCTAssertEqual(
+      snapshot.records.count, SynchronizationFixture.futureTextEntrySnapshotRecordCount)
+    XCTAssertEqual(
+      transport.machine.phase,
+      .replay(
+        generation: SynchronizationFixture.initialGeneration,
+        cursor: SignalboxCanonicalUInt64(rawValue: SynchronizationFixture.initialCursor)
+      )
     )
   }
 
