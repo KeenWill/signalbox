@@ -3793,16 +3793,15 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationImportFormat, ConversationOriginFilter,
-        ConversationSummary, FrameEncodeError, ImportedContentKind, ImportedSessionRelationship,
-        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
-        MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
-        ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
-        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
-        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        ConversationImportFormat, ConversationOriginFilter, ConversationSummary, FrameEncodeError,
+        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
+        InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
+        ModelCallState, ModelSelection, ProtocolVersion, ReviewConcernTerminalOutcome,
+        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
+        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
+        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
         encode_server_line,
     };
     use tokio::{
