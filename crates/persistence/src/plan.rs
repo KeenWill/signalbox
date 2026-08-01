@@ -431,7 +431,7 @@ impl SessionPlanRepository {
             if let Some(path) = path {
                 let path = path
                     .into_iter()
-                    .map(|ordinal| dependency_path_entry(ordinal))
+                    .map(dependency_path_entry)
                     .collect::<Result<Vec<_>, _>>()?;
                 transaction.rollback().await?;
                 let cycle = PlanDependencyCycle::try_new(*entry, *dependency, path)

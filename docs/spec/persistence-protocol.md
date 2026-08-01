@@ -22,15 +22,17 @@ storage version four were verified through PR #311
 lock inventory were verified against PR #314
 (`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
 was verified against this PR (`agent/domain-cleanup`); the session-plan event
-sequence was verified against this PR (`agent/plan-tool`). This page covers the
-Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+sequence was verified through PR #380 (`agent/plan-tool`); dependency edges and
+their readiness projection were verified against this PR
+(`agent/plan-dependencies`). This page covers the Postgres representation in
+`crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -112,11 +114,12 @@ Storage is a normalized, purpose-specific relational schema of current-state
 rows and append-only immutable facts. There is no general-purpose event store:
 outside session plans, the guarded row is the durable statement of record and
 current state is not rebuilt by replaying events (INV-005). Session plans are
-the deliberate exception verified against this PR (`agent/plan-tool`): their
-durable statement of record is the session-local append-only event sequence, and
-the current plan is its checked fold. Why: database-level invariants (INV-009,
-INV-012) stay declarative over current-state rows, while plan history is itself
-retained product evidence rather than an implementation log.
+the deliberate exception verified through PR #380 (`agent/plan-tool`) and this
+PR (`agent/plan-dependencies`): their durable statement of record is the
+session-local append-only event sequence, and the current plan is its checked
+fold. Why: database-level invariants (INV-009, INV-012) stay declarative over
+current-state rows, while plan history is itself retained product evidence
+rather than an implementation log.
 
 Implemented table families (across the forward-only migrations):
 
@@ -553,8 +556,8 @@ Locks per transaction, in acquisition order:
   adapter then uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the
   exact active tool attempt `FOR SHARE` while authenticating its request. The
   insert trigger reacquires those same locks in session-then-attempt order,
-  validates the complete new event and its predecessor, rejects dependency
-  edges whose existing path would close a cycle, and only then advances
+  validates the complete new event and its predecessor, rejects dependency edges
+  whose existing path would close a cycle, and only then advances
   `session_plan_head`; cycle traversal runs under the already-held session lock,
   and the head update's row lock is therefore last. A repeatable-read plan read
   takes no explicit lock, compares that certified head with the indexed latest
