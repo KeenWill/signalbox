@@ -244,6 +244,7 @@ pub struct HubModelConfiguration {
     session_credential_pin: SessionCredentialPin,
     credential_families: ModelCredentialFamilyCatalog,
     codex_cli: Option<CodexCliConfiguration>,
+    codex_cli_credential_profile: Option<Arc<str>>,
     compaction_prompt: Arc<str>,
     web_fetch_egress_policy: WebFetchEgressPolicy,
     daemon_tools: Option<DaemonToolConfiguration>,
@@ -575,6 +576,7 @@ impl HubModelConfiguration {
             session_credential_pin,
             credential_families,
             codex_cli,
+            codex_cli_credential_profile,
             compaction_prompt,
             web_fetch_egress_policy,
             daemon_tools,
@@ -695,12 +697,9 @@ impl HubModelConfiguration {
             .as_ref()
             .map(|configuration| {
                 let credential_profile = self
-                    .routes
-                    .values()
-                    .find(|route| route.adapter == ModelAdapter::CodexCli)
-                    .map_or(CODEX_CLI_CREDENTIAL_REFERENCE, |route| {
-                        route.credential_profile()
-                    });
+                    .codex_cli_credential_profile
+                    .as_deref()
+                    .unwrap_or(CODEX_CLI_CREDENTIAL_REFERENCE);
                 CodexCliRuntime::new(CodexCliConfig::new(
                     configuration.executable.clone(),
                     configuration.working_directory.clone(),
@@ -791,7 +790,7 @@ fn required_billing_rate(
     model: &Table,
     field: &str,
 ) -> Result<Decimal, HubModelConfigurationError> {
-    let rate = Decimal::from_str(required_string(model, field)?)
+    let rate = Decimal::from_str_exact(required_string(model, field)?)
         .map_err(|_| HubModelConfigurationError::InvalidBillingRate)?;
     if rate.is_sign_negative() {
         Err(HubModelConfigurationError::InvalidBillingRate)
@@ -819,6 +818,9 @@ fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
         };
         reported = true;
         let numerator = rate.checked_mul(Decimal::from(tokens))?;
+        if numerator.scale() != rate.scale() {
+            return None;
+        }
         let axis_cost = numerator.checked_div(Decimal::from(TOKENS_PER_MILLION))?;
         if axis_cost.checked_mul(Decimal::from(TOKENS_PER_MILLION))? != numerator {
             return None;
@@ -1252,6 +1254,7 @@ mod tests {
         credential_bytes, validate_alias_count,
     };
 
+    const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
     const CONFIGURATION: &str = r#"
 version = 1
 
@@ -1319,7 +1322,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "codex-subscription-primary"
+credential_profile = "{CODEX_SUBSCRIPTION_PROFILE}"
 
 [codex_cli]
 executable = "{}"
@@ -1486,6 +1489,27 @@ cache_read_input_usd_per_million_tokens = "4"
     }
 
     #[test]
+    fn rounded_rate_multiplication_yields_no_dollar_figure() {
+        let configuration = HubModelConfiguration::parse(&CONFIGURATION.replace(
+            "input_usd_per_million_tokens = \"3\"",
+            "input_usd_per_million_tokens = \"1.2345678901234567890123456789\"",
+        ))
+        .expect("the representable high-precision rate is valid configuration");
+
+        assert_eq!(
+            configuration.derive_model_call_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                ModelCallInputUsage::new(Some(u64::MAX), false),
+                None,
+                None,
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn an_unrated_model_yields_no_dollar_figure() {
         let unrated = CONFIGURATION
             .lines()
@@ -1538,6 +1562,19 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&partial).err(),
             Some(HubModelConfigurationError::IncompleteBillingRates)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_rate_that_requires_rounding() {
+        let too_precise = CONFIGURATION.replace(
+            "input_usd_per_million_tokens = \"3\"",
+            "input_usd_per_million_tokens = \"0.00000000000000000000000000001\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&too_precise).err(),
+            Some(HubModelConfigurationError::InvalidBillingRate)
         );
     }
 
@@ -1748,6 +1785,28 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&configuration).err(),
             Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn unused_codex_mapping_retains_its_declared_credential_profile() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = HubModelConfiguration::parse(&configuration_with_codex_paths(
+            &executable,
+            temporary.path(),
+        ))
+        .expect("the unused Codex mapping is valid configuration");
+
+        assert_eq!(
+            configuration.codex_cli_credential_profile.as_deref(),
+            Some(CODEX_SUBSCRIPTION_PROFILE)
+        );
+        assert!(
+            configuration
+                .codex_cli_runtime()
+                .expect("the stored profile constructs the runtime")
+                .is_some()
         );
     }
 
