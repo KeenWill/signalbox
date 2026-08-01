@@ -929,6 +929,7 @@ fn build_provider_request(
         return Err(WebSearchTransportFailure::InvalidCredential);
     }
     if request.query().contains(credential_text)
+        || unicode_normalized_contains(request.query(), credential_text)
         || encoded_contains_credential(request.query(), credential_text)
         || fixed_request_metadata_contains_credential(endpoint, credential_text)
     {
@@ -1222,6 +1223,7 @@ where
             Ok(response) => match success_evidence(response, &scrubber) {
                 Ok(evidence) => Ok(evidence),
                 Err(WebSearchExecutorError::EvidenceEncoding) => {
+                    let _reporting = report_response_sanitization_failure(correlation, &credential);
                     Ok(self.invalid_response_evidence(&scrubber))
                 }
                 Err(error) => Err(error),
@@ -1525,6 +1527,46 @@ fn report_transport_failure(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponseSanitizationFailure {
+    EvidenceEncoding,
+}
+
+fn report_response_sanitization_failure(
+    correlation: &ToolAttemptDispatchCorrelation,
+    credential: &CredentialValue,
+) -> Result<(), WebSearchExecutorError> {
+    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    let controlled_event = format!(
+        "WARN signalbox_tools_basic_web_search: web search response sanitization failed failure={:?} session_id={} turn_id={}",
+        ResponseSanitizationFailure::EvidenceEncoding,
+        correlation.session().as_uuid(),
+        correlation.turn().as_uuid()
+    );
+    if credential_text.is_empty()
+        || compact_formatter_metadata_may_contain(credential_text)
+        || controlled_event.contains(credential_text)
+    {
+        return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+            WebSearchCredentialDiagnostic {
+                rendered: safe_collision_diagnostic(credential_text),
+                failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                transport_failure_class: None,
+            },
+        ));
+    }
+    tracing::event!(
+        target: "signalbox_tools_basic_web_search",
+        parent: None,
+        tracing::Level::WARN,
+        failure = ?ResponseSanitizationFailure::EvidenceEncoding,
+        session_id = %correlation.session().as_uuid(),
+        turn_id = %correlation.turn().as_uuid(),
+        "web search response sanitization failed"
+    );
+    Ok(())
+}
+
 fn compact_formatter_metadata_may_contain(credential: &str) -> bool {
     const TIMESTAMP_AND_ANSI_CHARACTERS: &str = "0123456789-:+.TZ \u{1b}[;m";
     credential
@@ -1701,6 +1743,8 @@ impl CredentialScrubber {
     fn contains_credential(&self, text: &str) -> bool {
         text.contains(&self.exact)
             || text.contains(&self.json_escaped)
+            || unicode_normalized_contains(text, &self.exact)
+            || unicode_normalized_contains(text, &self.json_escaped)
             || self.contains_encoded_credential(text)
     }
 
@@ -1780,14 +1824,14 @@ fn encoded_contains_credential(text: &str, credential: &str) -> bool {
             return true;
         };
         let form_changed = form_decoded != decoded;
-        if form_changed && form_decoded.contains(credential) {
+        if form_changed && unicode_normalized_contains(&form_decoded, credential) {
             return true;
         }
         let Some((html_decoded, html_changed)) = decode_html_character_references(&form_decoded)
         else {
             return true;
         };
-        if html_changed && html_decoded.contains(credential) {
+        if html_changed && unicode_normalized_contains(&html_decoded, credential) {
             return true;
         }
         if !form_changed && !html_changed {
@@ -1834,6 +1878,15 @@ fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
     !normalized_needle.is_empty()
         && haystack
             .to_lowercase()
+            .nfc()
+            .collect::<String>()
+            .contains(&normalized_needle)
+}
+
+fn unicode_normalized_contains(haystack: &str, needle: &str) -> bool {
+    let normalized_needle = needle.nfc().collect::<String>();
+    !normalized_needle.is_empty()
+        && haystack
             .nfc()
             .collect::<String>()
             .contains(&normalized_needle)
@@ -2000,6 +2053,7 @@ mod tests {
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
     const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
+    const RESPONSE_SANITIZATION_FAILURE_CLASSIFICATION: &str = "failure=EvidenceEncoding";
     const SESSION_IDENTITY: u128 = 1;
     const TURN_IDENTITY: u128 = 2;
     const ISSUING_ATTEMPT_IDENTITY: u128 = 3;
@@ -2554,6 +2608,21 @@ mod tests {
             .finish();
         let result = tracing::subscriber::with_default(subscriber, || {
             report_transport_failure(failure, correlation, credential)
+        });
+        (output.text(), result)
+    }
+
+    fn capture_response_sanitization_failure(
+        correlation: &ToolAttemptDispatchCorrelation,
+        credential: &CredentialValue,
+    ) -> (String, Result<(), WebSearchExecutorError>) {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_writer(output.clone())
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            report_response_sanitization_failure(correlation, credential)
         });
         (output.text(), result)
     }
@@ -3321,6 +3390,32 @@ mod tests {
         assert!(!content.contains(HTML_ENTITY_COLLISION_VALUE));
     }
 
+    /// INV-035: canonical Unicode normalization cannot conceal a credential
+    /// reflected in an ordinary provider title.
+    #[test]
+    fn web_search_redacts_unicode_normalized_credential_in_result_text() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(URL_UNICODE_HOST_COLLISION_KEY),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("Unicode text fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY
+                .as_bytes()
+                .to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY));
+        assert!(!content.contains(URL_UNICODE_HOST_COLLISION_KEY));
+    }
+
     /// INV-035: repeated HTML character-reference decoding cannot conceal a
     /// credential reflected in provider-controlled text.
     #[test]
@@ -3549,6 +3644,22 @@ mod tests {
             build_brave_request(SYNTHETIC_KEY, SYNTHETIC_KEY),
             Err(WebSearchTransportFailure::RequestFailed)
         ));
+    }
+
+    /// INV-035: canonical Unicode normalization cannot conceal a credential
+    /// in a query before provider dispatch.
+    #[test]
+    fn brave_request_rejects_unicode_normalized_query_credential_collision() {
+        let failure = build_brave_request(
+            URL_UNICODE_HOST_COLLISION_KEY,
+            URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY,
+        )
+        .expect_err("Unicode-normalized credential query is rejected");
+
+        assert_eq!(
+            failure.class(),
+            WebSearchTransportFailureClass::RequestFailed
+        );
     }
 
     /// INV-035: a reversibly encoded API key in the query fails before URL
@@ -4040,6 +4151,22 @@ mod tests {
         assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(TRANSPORT_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
+    /// INV-035: post-response sanitization reports a credential-safe closed
+    /// discriminant before its typed error becomes invalid-response evidence.
+    #[test]
+    fn response_sanitization_failure_reports_safe_classification() {
+        let correlation = dispatch_correlation();
+        let credential = CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec());
+
+        let (diagnostic, result) = capture_response_sanitization_failure(&correlation, &credential);
+
+        result.expect("safe response-sanitization diagnostic is emitted");
+        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(RESPONSE_SANITIZATION_FAILURE_CLASSIFICATION));
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
     }
 
