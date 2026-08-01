@@ -22,6 +22,7 @@ members = [
     "crates/tool-schema-derive",
     "crates/tools-basic",
     "crates/tools-code-host",
+    "crates/tools-exec",
     "crates/tools-conversations",
     "crates/tools-github",
     "crates/tools-plan",

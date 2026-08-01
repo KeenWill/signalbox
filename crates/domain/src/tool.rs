@@ -519,6 +519,8 @@ pub enum ToolPermissionDefault {
     Auto,
     /// A user decision is required.
     Confirm,
+    /// A user decision is required even under blanket automatic approval.
+    AlwaysConfirm,
 }
 
 /// Crash-relevant physical effect classification.
@@ -816,6 +818,8 @@ impl ToolApprovalResolutionReconstitutionError {
 pub enum InitialToolApproval {
     /// Leave the request undecided and fail closed.
     Confirm,
+    /// Leave an `AlwaysConfirm` request undecided despite blanket posture.
+    AlwaysConfirm,
     /// Record automatic approval from registry policy.
     PolicyAuto,
     /// Record automatic approval from the frozen dangerous blanket.
@@ -825,7 +829,7 @@ pub enum InitialToolApproval {
 impl InitialToolApproval {
     pub(crate) const fn resolution(self, request: ToolRequestId) -> Option<ToolApprovalResolution> {
         match self {
-            Self::Confirm => None,
+            Self::Confirm | Self::AlwaysConfirm => None,
             Self::PolicyAuto => Some(ToolApprovalResolution::policy_auto(request)),
             Self::SessionBlanket => Some(ToolApprovalResolution::session_blanket(request)),
         }

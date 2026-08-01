@@ -3250,6 +3250,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-tools-exec"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-tool-contract",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "signalbox-tools-github"
 version = "0.0.0"
 dependencies = [
