@@ -3207,9 +3207,11 @@ name = "signalbox-tools-git"
 version = "0.0.0"
 dependencies = [
  "git2",
+ "rustix",
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "sha1",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-tool-contract",
@@ -3281,6 +3283,9 @@ dependencies = [
  "signalbox-runner-wire",
  "signalbox-tools-basic",
  "signalbox-tools-code-host",
+ "signalbox-tools-conversations",
+ "signalbox-tools-github",
+ "signalbox-tools-workspace",
  "sqlx",
  "tempfile",
  "testcontainers-modules",
