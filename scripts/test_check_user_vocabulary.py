@@ -157,6 +157,7 @@ def main() -> int:
             "A request by an owner, member, or collaborator approves tools.",
             'author_association = "HUMAN_OWNER"',
             'The protocol emits {"owner": "the human who approves tools"}.',
+            'The protocol emits json!({"owner": owner, "meaning": "the human principal"}).',
             "Merge pull request after the owner approves owner/repository.",
         )
         reviewed_identity_lines = (
@@ -354,7 +355,10 @@ def main() -> int:
             "impl GitHubRepository {\n"
             "fn owner(&self) -> &str {\n"
             "    &self.value[..self.owner_end]\n"
-            "}\n",
+            "}\n"
+            "let payload = json!({\n"
+            '    "owner": repository.owner(),\n'
+            "});\n",
             encoding="utf-8",
         )
         author_violation.write_text(

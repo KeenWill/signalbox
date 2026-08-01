@@ -91,8 +91,6 @@ ALLOWLIST = (
         ),
         re.compile(
             r"owner/repository|owner/name|repos/owner/|repository\(owner:|\$owner\b|"
-            r"[\"']owner[\"']:\s*(?:arguments[.]repository\(\)[.]owner\(\)|"
-            r"repository[.]owner\(\)|owner)(?:,|\s*$)|"
             r"(?:arguments[.]repository[(][)]|repository)[.]owner[(][)]|"
             r"let owner = &value\[\.\.owner_end\]|\bowner_end\b|"
             r"let \(owner, name\) = repository|"
@@ -103,6 +101,17 @@ ALLOWLIST = (
             r"author_association:\s*String::from\(\"OWNER\"\)|"
             r"valid_repository_segment\(owner\)",
             re.IGNORECASE,
+        ),
+    ),
+    Allowance(
+        "GitHub repository-coordinate request fields",
+        re.compile(
+            r"^(?:crates/tools-github/src/lib[.]rs|"
+            r"crates/tools-code-host/src/code_host/github[.]rs)$"
+        ),
+        re.compile(
+            r"[\"']owner[\"']:\s*(?:arguments[.]repository\(\)[.]owner\(\)|"
+            r"repository[.]owner\(\)|owner)(?:,|\s*$)"
         ),
     ),
     Allowance(
