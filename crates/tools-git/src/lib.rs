@@ -544,11 +544,15 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
         identity: GitIdentity,
     ) -> Result<Self, LocalGitToolsConstructionError> {
         let supplied_root = root_path.as_ref();
-        let root = WorkspaceRoot::try_new(&filesystem, supplied_root)
-            .map_err(LocalGitToolsConstructionError::Root)?;
         let root_path = fs::canonicalize(supplied_root)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let root_identity = validate_repository_layout(&root_path)?;
+        let root = WorkspaceRoot::try_new(&filesystem, supplied_root)
+            .map_err(LocalGitToolsConstructionError::Root)?;
+        let identity_after_root_open = validate_repository_layout(&root_path)?;
+        if identity_after_root_open != root_identity {
+            return Err(LocalGitToolsConstructionError::Repository);
+        }
         let invalid_detail = detail(INVALID_ARGUMENTS_DETAIL)?;
         let repository_detail = detail(REPOSITORY_REJECTED_DETAIL)?;
         let path_detail = detail(PATH_REJECTED_DETAIL)?;
@@ -681,12 +685,16 @@ fn reject_escaping_config(config_path: &Path) -> Result<(), LocalGitToolsConstru
             };
             continue;
         }
-        if section == "core"
-            && normalized
-                .split_once('=')
-                .is_some_and(|(key, _)| key.trim() == "worktree")
-        {
-            return Err(LocalGitToolsConstructionError::Repository);
+        if section == "core" {
+            let file_valued = normalized.split_once('=').is_some_and(|(key, _)| {
+                matches!(
+                    key.trim(),
+                    "worktree" | "excludesfile" | "attributesfile" | "hookspath" | "fsmonitor"
+                )
+            });
+            if file_valued {
+                return Err(LocalGitToolsConstructionError::Repository);
+            }
         }
     }
     Ok(())
@@ -802,7 +810,9 @@ struct LogResult {
 struct LogEntry {
     commit: String,
     author_name: String,
+    author_name_truncated: bool,
     author_email: String,
+    author_email_truncated: bool,
     message: String,
     message_truncated: bool,
 }
@@ -894,6 +904,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     index
                         .remove_path(&path)
                         .map_err(|_| LocalGitFailure::Operation)?;
+                }
+                Err(WorkspaceResolveError::Io { .. }) if index.get_path(&path, 0).is_some() => {
+                    match self.filesystem.entry_kind(&self.root, &path) {
+                        Ok(WorkspaceEntryKind::Directory) => index
+                            .remove_path(&path)
+                            .map_err(|_| LocalGitFailure::Operation)?,
+                        Ok(WorkspaceEntryKind::Symlink | WorkspaceEntryKind::Other)
+                        | Err(WorkspaceResolveError::Rejected(_)) => {
+                            return Err(LocalGitFailure::Path);
+                        }
+                        Ok(WorkspaceEntryKind::File) | Err(WorkspaceResolveError::Io { .. }) => {
+                            return Err(LocalGitFailure::Operation);
+                        }
+                    }
                 }
                 Err(WorkspaceResolveError::Io { .. }) => return Err(LocalGitFailure::Operation),
             }
@@ -1000,7 +1024,8 @@ fn status(repository: &Repository) -> Result<StatusResult, LocalGitFailure> {
     options
         .include_untracked(true)
         .recurse_untracked_dirs(true)
-        .exclude_submodules(true);
+        .exclude_submodules(true)
+        .renames_head_to_index(true);
     let statuses = repository
         .statuses(Some(&mut options))
         .map_err(|_| LocalGitFailure::Operation)?;
@@ -1008,8 +1033,10 @@ fn status(repository: &Repository) -> Result<StatusResult, LocalGitFailure> {
     let mut entries = Vec::new();
     for entry in statuses.iter().take(MAX_STATUS_ENTRIES) {
         let value = entry.status();
-        let (path, path_truncated) =
-            bounded_text(entry.path().unwrap_or("[non-utf8]"), MAX_STATUS_PATH_BYTES);
+        let (path, path_truncated) = match entry.path() {
+            Ok(path) => bounded_text(path, MAX_STATUS_PATH_BYTES),
+            Err(_) => ("[non-utf8]".to_owned(), true),
+        };
         truncated |= path_truncated;
         entries.push(StatusEntry {
             path,
@@ -1029,6 +1056,7 @@ fn branch_name(repository: &Repository) -> Option<String> {
     repository
         .head()
         .ok()
+        .filter(|head| head.is_branch())
         .and_then(|head| head.shorthand().ok().map(str::to_owned))
         .or_else(|| {
             repository
@@ -1160,12 +1188,18 @@ fn log(repository: &Repository, arguments: GitLogArguments) -> Result<LogResult,
             .find_commit(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
         let author = commit.author();
+        let (author_name, author_name_truncated) =
+            bounded_text(author.name().unwrap_or(""), MAX_LOG_IDENTITY_BYTES);
+        let (author_email, author_email_truncated) =
+            bounded_text(author.email().unwrap_or(""), MAX_LOG_IDENTITY_BYTES);
         let (message, message_truncated) =
             bounded_text(commit.message().unwrap_or(""), MAX_LOG_MESSAGE_BYTES);
         commits.push(LogEntry {
             commit: oid.to_string(),
-            author_name: bounded_text(author.name().unwrap_or(""), MAX_LOG_IDENTITY_BYTES).0,
-            author_email: bounded_text(author.email().unwrap_or(""), MAX_LOG_IDENTITY_BYTES).0,
+            author_name,
+            author_name_truncated,
+            author_email,
+            author_email_truncated,
             message,
             message_truncated,
         });
@@ -1245,11 +1279,17 @@ fn branch_create(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::symlink, path::Path};
+    use std::{
+        ffi::OsString,
+        fs,
+        os::unix::{ffi::OsStringExt, fs::symlink},
+        path::Path,
+    };
 
     use git2::{IndexAddOption, Oid, Repository, Signature};
     use signalbox_application::ToolCatalog;
     use signalbox_domain::{ToolEffectClass, ToolName, ToolPermissionDefault};
+    use signalbox_tools_workspace::{WorkspaceDirectoryRead, WorkspaceFileBytes};
     use tempfile::TempDir;
 
     use super::*;
@@ -1264,11 +1304,62 @@ mod tests {
     const CHANGED_CONTENT: &str = "after\n";
     const NESTED_TRACKED_DIRECTORY: &str = "removed";
     const NESTED_TRACKED_PATH: &str = "removed/tracked.txt";
+    const RENAMED_TRACKED_PATH: &str = "renamed.txt";
     const SUBMODULE_PATH: &str = "dependency";
 
     struct Fixture {
         directory: TempDir,
         initial: Oid,
+    }
+
+    #[derive(Clone, Debug)]
+    struct ReplacingRootFileSystem {
+        retired_root: PathBuf,
+    }
+
+    impl WorkspaceFileSystem for ReplacingRootFileSystem {
+        fn open_root(&self, root: &Path) -> Result<WorkspaceRoot, WorkspaceRootError> {
+            let pinned = LocalWorkspaceFileSystem.open_root(root)?;
+            fs::rename(root, &self.retired_root)
+                .expect("original root retires during fixture open");
+            fs::create_dir(root).expect("replacement root constructs during fixture open");
+            Repository::init(root).expect("replacement repository initializes during fixture open");
+            Ok(pinned)
+        }
+
+        fn entry_kind(
+            &self,
+            root: &WorkspaceRoot,
+            path: &Path,
+        ) -> Result<WorkspaceEntryKind, WorkspaceResolveError> {
+            LocalWorkspaceFileSystem.entry_kind(root, path)
+        }
+
+        fn read_directory(
+            &self,
+            root: &WorkspaceRoot,
+            path: &Path,
+            max_entries: usize,
+            max_inspections: usize,
+            max_path_bytes: usize,
+        ) -> Result<WorkspaceDirectoryRead, WorkspaceResolveError> {
+            LocalWorkspaceFileSystem.read_directory(
+                root,
+                path,
+                max_entries,
+                max_inspections,
+                max_path_bytes,
+            )
+        }
+
+        fn read_file_prefix(
+            &self,
+            root: &WorkspaceRoot,
+            path: &Path,
+            max_bytes: usize,
+        ) -> Result<WorkspaceFileBytes, WorkspaceResolveError> {
+            LocalWorkspaceFileSystem.read_file_prefix(root, path, max_bytes)
+        }
     }
 
     impl Fixture {
@@ -1338,6 +1429,14 @@ mod tests {
             .join(&segment)
             .join(&segment)
             .join(TRACKED_PATH)
+    }
+
+    fn long_author_name() -> String {
+        "n".repeat(MAX_LOG_IDENTITY_BYTES + 1)
+    }
+
+    fn long_author_email() -> String {
+        format!("{}@example.test", "e".repeat(MAX_LOG_IDENTITY_BYTES))
     }
 
     fn install_gitlink(repository: &Repository, path: &str, target: Oid) {
@@ -1613,6 +1712,26 @@ mod tests {
     }
 
     #[test]
+    fn stage_records_deletion_when_tracked_file_becomes_directory() {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("tracked fixture file removes");
+        fs::create_dir(fixture.root().join(TRACKED_PATH))
+            .expect("replacement fixture directory constructs");
+        let executor = fixture.executor();
+
+        execute(
+            &executor,
+            LocalOperation::Stage(GitStageArguments {
+                paths: vec![TRACKED_PATH.to_owned()],
+            }),
+        );
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let index = repository.index().expect("fixture index opens");
+
+        assert!(index.get_path(Path::new(TRACKED_PATH), 0).is_none());
+    }
+
+    #[test]
     fn branch_create_writes_real_non_forced_reference() {
         let fixture = Fixture::new();
         let executor = fixture.executor();
@@ -1719,6 +1838,66 @@ mod tests {
     }
 
     #[test]
+    fn status_marks_non_utf8_path_output_incomplete() {
+        let fixture = Fixture::new();
+        let path = OsString::from_vec(b"invalid-\xff".to_vec());
+        fs::write(fixture.root().join(path), CHANGED_CONTENT)
+            .expect("non-UTF-8 fixture file writes");
+        let executor = fixture.executor();
+
+        let status = execute(&executor, LocalOperation::Status);
+
+        assert_eq!(status["entries"][0]["path"], "[non-utf8]");
+        assert_eq!(status["truncated"], true);
+    }
+
+    #[test]
+    fn status_reports_detached_head_without_branch() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        repository
+            .set_head_detached(fixture.initial)
+            .expect("fixture HEAD detaches");
+        let executor = fixture.executor();
+
+        let status = execute(&executor, LocalOperation::Status);
+
+        assert!(status["branch"].is_null());
+        assert_eq!(status["head"], fixture.initial.to_string());
+    }
+
+    #[test]
+    fn status_detects_staged_rename() {
+        let fixture = Fixture::new();
+        fs::rename(
+            fixture.root().join(TRACKED_PATH),
+            fixture.root().join(RENAMED_TRACKED_PATH),
+        )
+        .expect("fixture tracked file renames");
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let mut index = repository.index().expect("fixture index opens");
+        index
+            .remove_path(Path::new(TRACKED_PATH))
+            .expect("old fixture path removes from index");
+        index
+            .add_path(Path::new(RENAMED_TRACKED_PATH))
+            .expect("new fixture path adds to index");
+        index.write().expect("fixture index writes");
+        let executor = fixture.executor();
+
+        let status = execute(&executor, LocalOperation::Status);
+
+        assert_eq!(
+            status["entries"]
+                .as_array()
+                .expect("entries are an array")
+                .len(),
+            1
+        );
+        assert_eq!(status["entries"][0]["index"], "renamed");
+    }
+
+    #[test]
     fn log_peels_annotated_tag_to_commit() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -1741,6 +1920,44 @@ mod tests {
         );
 
         assert_eq!(log["commits"][0]["commit"], fixture.initial.to_string());
+    }
+
+    #[test]
+    fn log_marks_truncated_author_identity() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let mut index = repository.index().expect("fixture index opens");
+        let tree_id = index.write_tree().expect("fixture tree writes");
+        let tree = repository.find_tree(tree_id).expect("fixture tree opens");
+        let parent = repository
+            .find_commit(fixture.initial)
+            .expect("fixture parent commit exists");
+        let author = Signature::now(&long_author_name(), &long_author_email())
+            .expect("long fixture signature constructs");
+        let committer =
+            Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture committer constructs");
+        let commit = repository
+            .commit(
+                Some("HEAD"),
+                &author,
+                &committer,
+                MODEL_MESSAGE,
+                &tree,
+                &[&parent],
+            )
+            .expect("long-author fixture commit writes");
+        let executor = fixture.executor();
+
+        let log = execute(
+            &executor,
+            LocalOperation::Log(GitLogArguments {
+                revision: commit.to_string(),
+                max_entries: 1,
+            }),
+        );
+
+        assert_eq!(log["commits"][0]["author_name_truncated"], true);
+        assert_eq!(log["commits"][0]["author_email_truncated"], true);
     }
 
     #[test]
@@ -1823,6 +2040,26 @@ mod tests {
     }
 
     #[test]
+    fn configured_external_ignore_file_is_rejected() {
+        let fixture = Fixture::new();
+        let outside = tempfile::NamedTempFile::new().expect("outside ignore file constructs");
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        repository
+            .config()
+            .expect("config opens")
+            .set_str(
+                "core.excludesFile",
+                outside.path().to_str().expect("temporary path is UTF-8"),
+            )
+            .expect("external ignore override writes");
+
+        let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+            .expect_err("external ignore file rejects");
+
+        assert!(matches!(error, LocalGitToolsConstructionError::Repository));
+    }
+
+    #[test]
     fn common_git_directory_indirection_is_rejected() {
         let fixture = Fixture::new();
         fs::write(fixture.root().join(".git/commondir"), "../outside")
@@ -1873,6 +2110,24 @@ mod tests {
             .expect_err("replacement root rejects");
 
         assert_eq!(failure, LocalGitFailure::Repository);
+    }
+
+    #[test]
+    fn construction_rejects_replacement_while_workspace_root_is_pinned() {
+        let parent = tempfile::tempdir().expect("workspace parent constructs");
+        let root = parent.path().join("workspace");
+        fs::create_dir(&root).expect("workspace root constructs");
+        let repository = Repository::init(&root).expect("repository initializes");
+        fs::write(root.join(TRACKED_PATH), INITIAL_CONTENT).expect("fixture file writes");
+        commit_all(&repository, INITIAL_MESSAGE);
+        let filesystem = ReplacingRootFileSystem {
+            retired_root: parent.path().join("retired"),
+        };
+
+        let error = LocalGitTools::try_new(filesystem, &root, identity())
+            .expect_err("replacement during root pinning rejects");
+
+        assert!(matches!(error, LocalGitToolsConstructionError::Repository));
     }
 
     #[test]
