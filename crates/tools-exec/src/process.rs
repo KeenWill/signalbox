@@ -1827,8 +1827,7 @@ fn outer_observe_descendants(
             break;
         }
     }
-    outer_retire_reused(root, descendants)?;
-    Ok(OuterObservationStatus::Complete)
+    outer_retire_reused(root, descendants, stop, deadline)
 }
 
 #[cfg(target_os = "linux")]
@@ -1841,7 +1840,9 @@ fn outer_observation_should_stop(stop: Option<&AtomicBool>, deadline: Option<Ins
 fn outer_retire_reused(
     root: u32,
     descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
-) -> Result<(), ()> {
+    stop: Option<&AtomicBool>,
+    deadline: Option<Instant>,
+) -> Result<OuterObservationStatus, ()> {
     let snapshot = {
         let tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
         tracked
@@ -1853,9 +1854,15 @@ fn outer_retire_reused(
     };
     let mut retired = Vec::new();
     for (raw_pid, expected_start_time) in snapshot {
+        if outer_observation_should_stop(stop, deadline) {
+            return Ok(OuterObservationStatus::Interrupted);
+        }
         if outer_process_start_time(raw_pid)? != Some(expected_start_time) {
             retired.push((raw_pid, expected_start_time));
         }
+    }
+    if outer_observation_should_stop(stop, deadline) {
+        return Ok(OuterObservationStatus::Interrupted);
     }
     let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
     for (raw_pid, expected_start_time) in retired {
@@ -1866,7 +1873,7 @@ fn outer_retire_reused(
             tracked.remove(&raw_pid);
         }
     }
-    Ok(())
+    Ok(OuterObservationStatus::Complete)
 }
 
 #[cfg(target_os = "linux")]
@@ -2046,8 +2053,11 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    if request.environment_inheritance == ProcessEnvironment::Clear {
-        command.env_clear();
+    match request.environment_inheritance {
+        ProcessEnvironment::Clear => {
+            command.env_clear();
+        }
+        ProcessEnvironment::Inherit => {}
     }
     for (name, value) in request.environment {
         command.env(name, value);
@@ -2419,6 +2429,29 @@ mod tests {
             ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Cleanup,
             }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn outer_retirement_honors_the_watcher_stop_signal() {
+        let stop = AtomicBool::new(true);
+        let tracked = Arc::new(Mutex::new(BTreeMap::new()));
+
+        assert_eq!(
+            outer_retire_reused(u32::MAX, &tracked, Some(&stop), None),
+            Ok(OuterObservationStatus::Interrupted)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn outer_retirement_honors_the_cleanup_deadline() {
+        let tracked = Arc::new(Mutex::new(BTreeMap::new()));
+
+        assert_eq!(
+            outer_retire_reused(u32::MAX, &tracked, None, Some(Instant::now())),
+            Ok(OuterObservationStatus::Interrupted)
         );
     }
 
