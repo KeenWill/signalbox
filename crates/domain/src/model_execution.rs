@@ -3905,12 +3905,22 @@ fn initial_tool_approval_matches_posture(
     posture: DangerousToolAutoApproval,
     approval: InitialToolApproval,
 ) -> bool {
-    match posture {
-        DangerousToolAutoApproval::ApproveAll => matches!(
-            approval,
-            InitialToolApproval::SessionBlanket | InitialToolApproval::AlwaysConfirm
-        ),
-        DangerousToolAutoApproval::Disabled => approval != InitialToolApproval::SessionBlanket,
+    match (posture, approval) {
+        (
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::AlwaysConfirm | InitialToolApproval::SessionBlanket,
+        )
+        | (
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Confirm
+            | InitialToolApproval::AlwaysConfirm
+            | InitialToolApproval::PolicyAuto,
+        ) => true,
+        (
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Confirm | InitialToolApproval::PolicyAuto,
+        )
+        | (DangerousToolAutoApproval::Disabled, InitialToolApproval::SessionBlanket) => false,
     }
 }
 
@@ -4493,6 +4503,10 @@ mod tests {
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::Confirm,
         ));
+        assert!(!initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::PolicyAuto,
+        ));
     }
 
     #[test]
@@ -4508,6 +4522,10 @@ mod tests {
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::Disabled,
             InitialToolApproval::Confirm,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::PolicyAuto,
         ));
     }
 

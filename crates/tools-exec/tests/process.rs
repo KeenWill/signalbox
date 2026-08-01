@@ -10,7 +10,7 @@ use std::{
 
 use signalbox_tools_exec::{
     CaptureCompleteness, ProcessEnvironment, ProcessOutcome, ProcessRequest, ProcessRunner,
-    ProcessSupervisionFailure, TokioProcessRunner,
+    ProcessStatusProtocol, ProcessSupervisionFailure, TokioProcessRunner,
 };
 
 const OBSERVED_OUTPUT: &str = "12345";
@@ -77,6 +77,7 @@ async fn production_runner_pins_the_supervisor_executable_identity()
             capture_bytes: 1024,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
         };
 
         let result = runner.run(request).await;
@@ -105,6 +106,7 @@ async fn production_runner_preserves_outer_spawn_path_failure()
             capture_bytes: 1024,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
         };
 
         let result = production_runner()?.run(request).await;
@@ -136,6 +138,7 @@ async fn production_runner_preserves_requested_program_spawn_failure()
             capture_bytes: 1024,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
         };
 
         let result = production_runner()?.run(request).await;
@@ -163,6 +166,7 @@ async fn production_runner_reports_observed_bytes_beyond_limit()
             capture_bytes: CAPTURE_BYTES,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
         };
 
         let result = production_runner()?.run(request).await;
@@ -192,6 +196,7 @@ async fn production_runner_clears_ambient_environment_when_requested()
                 OsString::from(EXPLICIT_ENVIRONMENT_VALUE),
             )]),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
         };
 
         let result = production_runner()?.run(request).await;
@@ -231,6 +236,7 @@ async fn production_dispatcher_marks_started_target_that_exits_127()
             capture_bytes: 1024,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::SandboxDispatch,
         };
 
         let result = production_runner()?.run(request).await;
@@ -239,6 +245,40 @@ async fn production_dispatcher_marks_started_target_that_exits_127()
             result.outcome,
             ProcessOutcome::Exited {
                 code: Some(LEGITIMATE_TARGET_EXIT_CODE),
+            }
+        );
+        assert_eq!(result.stderr.bytes, EXPECTED_DISPATCH_MARKER);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn production_dispatcher_preserves_target_spawn_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let supervisor = std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+        let missing = std::env::temp_dir().join(format!(
+            "signalbox-exec-missing-dispatched-target-{}",
+            std::process::id()
+        ));
+        let request = ProcessRequest {
+            program: supervisor.into_os_string(),
+            arguments: vec![OsString::from(DISPATCH_MODE), missing.into_os_string()],
+            working_directory: std::env::current_dir()?,
+            timeout: Duration::from_secs(5),
+            capture_bytes: 1024,
+            environment: BTreeMap::new(),
+            environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::SandboxDispatch,
+        };
+
+        let result = production_runner()?.run(request).await;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: signalbox_tools_exec::ProcessSpawnFailure::NotFound,
             }
         );
         assert_eq!(result.stderr.bytes, EXPECTED_DISPATCH_MARKER);
@@ -265,6 +305,7 @@ async fn production_dispatcher_preserves_target_signal_termination()
             capture_bytes: 1024,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::SandboxDispatch,
         };
 
         let result = production_runner()?.run(request).await;
@@ -295,6 +336,7 @@ async fn production_dispatcher_does_not_wait_for_descendant_held_pipes()
             capture_bytes: 64,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::SandboxDispatch,
         };
         let started = std::time::Instant::now();
 
@@ -325,6 +367,7 @@ async fn production_runner_kills_descendants_after_leader_completion()
             capture_bytes: 64,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
         };
 
         let result = production_runner()?.run(request).await;
@@ -354,6 +397,7 @@ async fn production_runner_kills_descendants_on_timeout() -> Result<(), Box<dyn 
             capture_bytes: 64,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
         };
 
         let result = production_runner()?.run(request).await;
@@ -717,6 +761,7 @@ fn shell_request(
         capture_bytes: 64,
         environment: BTreeMap::new(),
         environment_inheritance: ProcessEnvironment::Clear,
+        status_protocol: ProcessStatusProtocol::Direct,
     })
 }
 

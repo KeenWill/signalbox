@@ -6,7 +6,7 @@ mod linux {
         collections::{BTreeMap, BTreeSet},
         ffi::OsString,
         io::{Read, Write},
-        os::unix::process::{CommandExt, ExitStatusExt},
+        os::unix::process::CommandExt,
         process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
             Arc, Mutex, PoisonError,
@@ -24,6 +24,7 @@ mod linux {
     }
 
     use supervisor_protocol::{
+        LAUNCH_STATUS_TAIL_BYTES, LAUNCH_STATUS_TRAILER, LauncherStatus,
         SupervisorCaptureCompleteness, SupervisorFailureStage, SupervisorSpawnFailure,
         SupervisorStatus,
     };
@@ -36,22 +37,7 @@ mod linux {
     const OUTER_MODE: &str = "--outer";
     const SELF_EXE: &str = "/proc/self/exe";
     const DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
-    const LAUNCH_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-launch-status:";
-    const LAUNCH_STATUS_TAIL_BYTES: usize = 1024;
     const STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-    enum LauncherStatus {
-        Exited {
-            code: Option<i32>,
-            stdout: SupervisorCaptureCompleteness,
-            stderr: SupervisorCaptureCompleteness,
-        },
-        SpawnFailed {
-            reason: SupervisorSpawnFailure,
-        },
-        SupervisionFailed,
-    }
 
     enum TargetFailure {
         Spawn(std::io::Error),
@@ -220,17 +206,10 @@ mod linux {
         }
     }
 
-    fn dispatch(mut arguments: Vec<OsString>) -> ExitCode {
+    fn dispatch(arguments: Vec<OsString>) -> ExitCode {
         if arguments.is_empty() {
             return ExitCode::FAILURE;
         }
-        let program = arguments.remove(0);
-        let mut command = Command::new(program);
-        command
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
         let mut stderr = std::io::stderr().lock();
         if stderr
             .write_all(DISPATCH_MARKER)
@@ -239,23 +218,17 @@ mod linux {
         {
             return ExitCode::FAILURE;
         }
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => return dispatch_spawn_failure(&error),
-        };
-        match child.wait() {
-            Ok(status) => dispatch_exit_status(status),
-            Err(_) => {
-                terminate_child(&mut child);
-                ExitCode::FAILURE
-            }
-        }
+        emit_target_status(arguments)
     }
 
     fn launch(arguments: Vec<OsString>) -> ExitCode {
         if read_control_byte().is_err() {
             return ExitCode::FAILURE;
         }
+        emit_target_status(arguments)
+    }
+
+    fn emit_target_status(arguments: Vec<OsString>) -> ExitCode {
         let status = match run_target(arguments) {
             Ok(target) => LauncherStatus::Exited {
                 code: target.status.code(),
@@ -348,16 +321,6 @@ mod linux {
         })
     }
 
-    fn dispatch_exit_status(status: ExitStatus) -> ExitCode {
-        if let Some(code) = status.code() {
-            return ExitCode::from(code as u8);
-        }
-        if let Some(signal) = status.signal() {
-            let _ = signal_hook::low_level::emulate_default_handler(signal);
-        }
-        ExitCode::FAILURE
-    }
-
     fn copy_until_leader_exit<Source, Target>(
         source: &mut Source,
         target: &mut Target,
@@ -414,14 +377,6 @@ mod linux {
     fn terminate_child(child: &mut std::process::Child) {
         let _ = child.kill();
         let _ = child.wait();
-    }
-
-    fn dispatch_spawn_failure(error: &std::io::Error) -> ExitCode {
-        match error.kind() {
-            std::io::ErrorKind::NotFound => ExitCode::from(127),
-            std::io::ErrorKind::PermissionDenied => ExitCode::from(126),
-            _ => ExitCode::FAILURE,
-        }
     }
 
     fn supervise(

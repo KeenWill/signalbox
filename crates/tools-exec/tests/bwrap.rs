@@ -51,7 +51,18 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     let nested_result = runner.try_run(nested_arguments).await?;
 
-    assert_real_bwrap_result(nested_result)
+    assert_real_bwrap_result(nested_result)?;
+
+    let missing_arguments = ExecArguments {
+        program: String::from("signalbox-exec-definitely-missing-target"),
+        arguments: Vec::new(),
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+
+    let missing_result = runner.try_run(missing_arguments).await?;
+
+    assert_real_bwrap_spawn_failure(missing_result)
 }
 
 fn real_bwrap_gate(
@@ -98,6 +109,34 @@ fn assert_real_bwrap_result(
             assert!(result.stderr.text.is_empty());
             assert_eq!(result.stderr.completeness, CaptureCompleteness::Complete);
             assert_eq!(result.stderr.encoding, OutputEncoding::Utf8);
+            Ok(())
+        }
+        confinement => Err(format!("unexpected real bubblewrap result: {confinement:?}").into()),
+    }
+}
+
+fn assert_real_bwrap_spawn_failure(
+    result: signalbox_tools_exec::ExecResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match result.confinement {
+        ExecutionConfinement::FilesystemConfined => {
+            assert_eq!(
+                result.outcome,
+                ProcessOutcome::SpawnFailed {
+                    reason: ProcessSpawnFailure::NotFound,
+                }
+            );
+            Ok(())
+        }
+        ExecutionConfinement::SandboxRefused {
+            availability: BwrapAvailability::Unusable,
+        } => {
+            assert_eq!(
+                result.outcome,
+                ProcessOutcome::SpawnFailed {
+                    reason: ProcessSpawnFailure::SandboxUnavailable,
+                }
+            );
             Ok(())
         }
         confinement => Err(format!("unexpected real bubblewrap result: {confinement:?}").into()),
