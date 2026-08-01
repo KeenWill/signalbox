@@ -1202,18 +1202,14 @@ where
             }
         };
         let Some(scrubber) = CredentialScrubber::try_new(&credential) else {
-            let reporting = report_credential_value_failure(correlation, &credential);
+            let _reporting = report_credential_value_failure(correlation, &credential);
             let credential_text =
                 std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
             let detail = (!fixed_outer_error_debug_may_contain(credential_text))
                 .then(|| self.credential_unavailable_detail.clone());
-            if let Err(error) = reporting {
-                return WebSearchRequestOutcome::Error { error, credential };
-            }
-            return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Credentialed {
-                evidence: ToolExecutorEvidence::KnownFailed { detail },
-                credential,
-            });
+            return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Uncredentialed(
+                ToolExecutorEvidence::KnownFailed { detail },
+            ));
         };
         let transport_result = self
             .transport
@@ -1946,7 +1942,8 @@ mod tests {
         InProcessToolDispatchGate, PrepareToolContinuationOutcome,
         RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus, ToolCatalog,
         ToolCatalogValidationFailure, ToolContinuationIdentities, ToolCrashClosureIdentities,
-        ToolExecutionService, ToolExecutionTransaction, UuidV7ToolLoopIdGenerator,
+        ToolExecutionService, ToolExecutionServiceOutcome, ToolExecutionTransaction,
+        UuidV7ToolLoopIdGenerator,
     };
     use signalbox_domain::{
         AcceptedInputId, AuthorizedToolAttempt, ContextFrontierId,
@@ -1999,6 +1996,8 @@ mod tests {
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
     const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
     const SHORT_DIAGNOSTIC_COLLISION_KEY: &str = "r";
+    const EMPTY_CREDENTIAL_VALUE: &[u8] = b"";
+    const NON_UTF8_CREDENTIAL_VALUE: &[u8] = &[0xff];
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
     const TIMESTAMP_COLLISION_KEY: &str = "2026";
@@ -2057,6 +2056,19 @@ mod tests {
             _reference: &CredentialReference,
         ) -> Result<CredentialValue, CredentialAccessError> {
             Ok(CredentialValue::new(self.value.as_bytes().to_vec()))
+        }
+    }
+
+    struct RawCredentials {
+        value: &'static [u8],
+    }
+
+    impl CredentialAccess for RawCredentials {
+        async fn resolve(
+            &self,
+            _reference: &CredentialReference,
+        ) -> Result<CredentialValue, CredentialAccessError> {
+            Ok(CredentialValue::new(self.value.to_vec()))
         }
     }
 
@@ -2315,6 +2327,45 @@ mod tests {
         )
         .reconstitute()
         .expect("web_search batch fixture is valid")
+    }
+
+    async fn execute_raw_credential_through_service(
+        value: &'static [u8],
+    ) -> (ToolExecutionServiceOutcome, usize) {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = RawCredentials { value };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("fixture web_search tool compiles")
+            .into_parts();
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("invalid credential commits definitive evidence");
+        (outcome, searches.load(Ordering::Relaxed))
+    }
+
+    fn is_committed_known_failure(outcome: &ToolExecutionServiceOutcome) -> bool {
+        matches!(
+            outcome,
+            ToolExecutionServiceOutcome::ObservationCommitted(ended)
+                if matches!(
+                    ended.end(),
+                    signalbox_domain::ToolAttemptEnd::KnownFailed { .. }
+                )
+        )
     }
 
     fn arguments(value: &str) -> NormalizedToolArguments {
@@ -3722,31 +3773,17 @@ mod tests {
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
     }
 
-    /// INV-035: an unusable one-byte credential is retained while its
-    /// colliding diagnostic is suppressed and safely classified.
+    /// INV-035: an unusable one-byte credential suppresses colliding telemetry
+    /// and commits definitive pre-dispatch failure evidence.
     #[tokio::test]
     async fn unusable_short_credential_value_diagnostic_is_suppressed() {
         let correlation = dispatch_correlation();
         let credential = CredentialValue::new(SHORT_DIAGNOSTIC_COLLISION_KEY.as_bytes().to_vec());
-        let credentials = StaticCredentials {
-            value: SHORT_DIAGNOSTIC_COLLISION_KEY,
-        };
-        let searches = Arc::new(AtomicUsize::new(0));
-        let transport = CountingTransport {
-            searches: Arc::clone(&searches),
-        };
-        let (_catalog, mut executor) =
-            WebSearchTool::try_new(credentials, transport, configuration())
-                .expect("fixture web_search tool compiles")
-                .into_parts();
 
         let (diagnostic, result) = capture_credential_value_failure(&correlation, &credential);
         let report_error = result.expect_err("credential collision suppresses the diagnostic");
-        let executor_error = executor
-            .execute_request(request(), &correlation)
-            .await
-            .into_result()
-            .expect_err("short credential returns guarded failure");
+        let (outcome, searches) =
+            execute_raw_credential_through_service(SHORT_DIAGNOSTIC_COLLISION_KEY.as_bytes()).await;
 
         assert!(!diagnostic.contains(SHORT_DIAGNOSTIC_COLLISION_KEY));
         assert!(!format!("{report_error:?}").contains(SHORT_DIAGNOSTIC_COLLISION_KEY));
@@ -3755,17 +3792,30 @@ mod tests {
                 .to_string()
                 .contains(SHORT_DIAGNOSTIC_COLLISION_KEY)
         );
-        assert!(!format!("{executor_error:?}").contains(SHORT_DIAGNOSTIC_COLLISION_KEY));
-        assert!(
-            !executor_error
-                .to_string()
-                .contains(SHORT_DIAGNOSTIC_COLLISION_KEY)
-        );
-        assert_eq!(searches.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            executor_error.operator_failure_class(),
-            OperatorFailureClass::CallerOrHubBug
-        );
+        assert!(is_committed_known_failure(&outcome));
+        assert_eq!(searches, 0);
+    }
+
+    /// An empty credential is a definitive pre-dispatch known failure, not an
+    /// executor crash classification.
+    #[tokio::test]
+    async fn empty_credential_value_commits_known_failure_without_dispatch() {
+        let (outcome, searches) =
+            execute_raw_credential_through_service(EMPTY_CREDENTIAL_VALUE).await;
+
+        assert!(is_committed_known_failure(&outcome));
+        assert_eq!(searches, 0);
+    }
+
+    /// A non-UTF-8 credential is a definitive pre-dispatch known failure, not
+    /// an executor crash classification.
+    #[tokio::test]
+    async fn non_utf8_credential_value_commits_known_failure_without_dispatch() {
+        let (outcome, searches) =
+            execute_raw_credential_through_service(NON_UTF8_CREDENTIAL_VALUE).await;
+
+        assert!(is_committed_known_failure(&outcome));
+        assert_eq!(searches, 0);
     }
 
     #[test]
