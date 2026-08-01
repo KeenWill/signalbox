@@ -5,22 +5,22 @@
 //! injected root. The local family has no remote operation.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     ffi::{OsStr, OsString},
     fmt, fs,
     io::{Read, Seek, Write},
     os::fd::{AsRawFd, OwnedFd},
     os::unix::ffi::{OsStrExt, OsStringExt},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, symlink},
     path::{Component, Path, PathBuf},
     sync::Mutex,
 };
 
 use git2::{
-    BranchType, Config, Delta, DiffFindOptions, DiffFormat, DiffOptions, ErrorCode, Index,
-    IndexEntry, IndexTime, Patch, Repository, RepositoryOpenFlags, RepositoryState, Signature,
-    build::CheckoutBuilder,
+    BranchType, Buf, Config, Delta, DiffFindOptions, DiffFormat, DiffOptions, ErrorCode, Index,
+    IndexEntry, IndexTime, Indexer, Mempack, Odb, Patch, Repository, RepositoryOpenFlags,
+    RepositoryState, Signature, build::CheckoutBuilder,
 };
 use rustix::fs::{
     AtFlags, CWD, Mode, OFlags, RenameFlags, mkdirat, openat, renameat_with, unlinkat,
@@ -679,6 +679,11 @@ struct PinnedRepository {
     repository: Mutex<Repository>,
 }
 
+struct PinnedObjectDatabase {
+    directory: tempfile::TempDir,
+    _files: Vec<fs::File>,
+}
+
 impl fmt::Debug for PinnedRepository {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -731,6 +736,127 @@ impl PinnedRepository {
     fn git_path(&self, path: &str) -> PathBuf {
         descriptor_path(&self.git_directory).join(path)
     }
+}
+
+impl PinnedObjectDatabase {
+    fn capture(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
+        let objects = openat(
+            &authority.git_directory,
+            "objects",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Repository)?;
+        let directory = tempfile::tempdir().map_err(|_| LocalGitFailure::Operation)?;
+        fs::create_dir(directory.path().join("pack")).map_err(|_| LocalGitFailure::Operation)?;
+        let mut files = Vec::new();
+        let mut inspected = 0_usize;
+        for entry in fs::read_dir(descriptor_path_from_fd(&objects))
+            .map_err(|_| LocalGitFailure::Repository)?
+        {
+            let entry = entry.map_err(|_| LocalGitFailure::Repository)?;
+            inspected = inspected.saturating_add(1);
+            if inspected > 100_000 {
+                return Err(LocalGitFailure::Repository);
+            }
+            let name = entry.file_name();
+            let bytes = name.as_bytes();
+            if name == OsStr::new("info") {
+                continue;
+            }
+            if name == OsStr::new("pack") {
+                let pack = openat(
+                    &objects,
+                    &name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| LocalGitFailure::Repository)?;
+                pin_object_directory(
+                    &pack,
+                    &directory.path().join("pack"),
+                    &mut files,
+                    &mut inspected,
+                    false,
+                )?;
+                continue;
+            }
+            if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_hexdigit) {
+                return Err(LocalGitFailure::Repository);
+            }
+            let loose = openat(
+                &objects,
+                &name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| LocalGitFailure::Repository)?;
+            let destination = directory.path().join(&name);
+            fs::create_dir(&destination).map_err(|_| LocalGitFailure::Operation)?;
+            pin_object_directory(&loose, &destination, &mut files, &mut inspected, true)?;
+        }
+        Ok(Self {
+            directory,
+            _files: files,
+        })
+    }
+
+    fn add_to(&self, object_database: &Odb<'_>) -> Result<(), LocalGitFailure> {
+        let path = self
+            .directory
+            .path()
+            .to_str()
+            .ok_or(LocalGitFailure::Operation)?;
+        object_database
+            .add_disk_alternate(path)
+            .map_err(|_| LocalGitFailure::Operation)
+    }
+}
+
+fn descriptor_path_from_fd(file: &OwnedFd) -> PathBuf {
+    PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
+}
+
+fn pin_object_directory(
+    source: &OwnedFd,
+    destination: &Path,
+    files: &mut Vec<fs::File>,
+    inspected: &mut usize,
+    loose: bool,
+) -> Result<(), LocalGitFailure> {
+    for entry in
+        fs::read_dir(descriptor_path_from_fd(source)).map_err(|_| LocalGitFailure::Repository)?
+    {
+        let entry = entry.map_err(|_| LocalGitFailure::Repository)?;
+        *inspected = inspected.saturating_add(1);
+        if *inspected > 100_000 {
+            return Err(LocalGitFailure::Repository);
+        }
+        let name = entry.file_name();
+        if loose
+            && (name.as_bytes().len() != 38 || !name.as_bytes().iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err(LocalGitFailure::Repository);
+        }
+        let descriptor = openat(
+            source,
+            &name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Repository)?;
+        let file = fs::File::from(descriptor);
+        let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
+        if !metadata.is_file()
+            || (loose && metadata.len() > (MAX_OBJECT_BYTES.saturating_mul(2)) as u64)
+        {
+            return Err(LocalGitFailure::Repository);
+        }
+        symlink(descriptor_path(&file), destination.join(&name))
+            .map_err(|_| LocalGitFailure::Operation)?;
+        files.push(file);
+    }
+    Ok(())
 }
 
 fn open_pinned_repository(
@@ -1044,9 +1170,18 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     fn execute_operation(&self, operation: LocalOperation) -> Result<String, LocalGitFailure> {
         self.validate_current_repository()?;
         let mut repository = self.repository_authority.repository()?;
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        let object_database = Odb::new().map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&object_database)?;
+        let mempack = object_database
+            .add_new_mempack_backend(1000)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        repository
+            .set_odb(&object_database)
+            .map_err(|_| LocalGitFailure::Operation)?;
         let result = match operation {
             LocalOperation::Status => {
-                let _index_lock = self.bind_locked_index(&repository)?;
+                let _index_snapshot = self.bind_index_snapshot(&repository)?;
                 let untracked = self.discover_untracked_paths(&repository)?;
                 LocalGitResult::Status(status(
                     &repository,
@@ -1056,12 +1191,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 )?)
             }
             LocalOperation::Diff(arguments) => {
-                let index_lock = if matches!(arguments, GitDiffArguments::Worktree) {
-                    Some(self.bind_locked_index(&repository)?)
+                let index_snapshot = if matches!(arguments, GitDiffArguments::Worktree) {
+                    Some(self.bind_index_snapshot(&repository)?)
                 } else {
                     None
                 };
-                let untracked = if index_lock.is_some() {
+                let untracked = if index_snapshot.is_some() {
                     self.discover_untracked_paths(&repository)?
                 } else {
                     Vec::new()
@@ -1076,7 +1211,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             }
             LocalOperation::Log(arguments) => LocalGitResult::Log(log(&repository, arguments)?),
             LocalOperation::Stage(arguments) => {
-                let result = LocalGitResult::Stage(self.stage(&repository, arguments)?);
+                let result = LocalGitResult::Stage(self.stage_with_pinned_objects(
+                    &repository,
+                    &object_database,
+                    &mempack,
+                    arguments,
+                )?);
                 return encode_result(&result);
             }
             LocalOperation::Commit(arguments) => {
@@ -1086,6 +1226,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     arguments,
                     &self.repository_authority.git_path("index"),
                     &self.repository_authority.git_path("index.lock"),
+                    &self.repository_authority,
+                    &object_database,
                 )?);
                 return encode_result(&result);
             }
@@ -1107,9 +1249,24 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         encode_result(&result)
     }
 
+    #[cfg(test)]
     fn stage(
         &self,
         repository: &Repository,
+        arguments: GitStageArguments,
+    ) -> Result<StageResult, LocalGitFailure> {
+        let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
+        let mempack = object_database
+            .add_new_mempack_backend(1000)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.stage_with_pinned_objects(repository, &object_database, &mempack, arguments)
+    }
+
+    fn stage_with_pinned_objects(
+        &self,
+        repository: &Repository,
+        object_database: &Odb<'_>,
+        _mempack: &Mempack<'_>,
         arguments: GitStageArguments,
     ) -> Result<StageResult, LocalGitFailure> {
         let index_path = self.repository_authority.git_path("index");
@@ -1185,6 +1342,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             }
         }
         self.validate_current_repository()?;
+        let mut written_objects = Vec::new();
         for operation in planned {
             match operation {
                 PlannedStage::Add {
@@ -1198,6 +1356,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     let oid = repository
                         .blob(&bytes)
                         .map_err(|_| LocalGitFailure::Operation)?;
+                    written_objects.push(PackRoot::Object(oid));
                     let entry = IndexEntry {
                         ctime: IndexTime::new(0, 0),
                         mtime: IndexTime::new(0, 0),
@@ -1228,6 +1387,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .map_err(|_| LocalGitFailure::Operation)?,
             }
         }
+        persist_objects(
+            &self.repository_authority,
+            repository,
+            object_database,
+            &written_objects,
+        )?;
         index_lock.write(&index)?;
         drop(index);
         index_lock.commit()?;
@@ -1256,6 +1421,18 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .set_index(&mut index)
             .map_err(|_| LocalGitFailure::Operation)?;
         Ok(index_lock)
+    }
+
+    fn bind_index_snapshot(
+        &self,
+        repository: &Repository,
+    ) -> Result<IndexSnapshot, LocalGitFailure> {
+        let (snapshot, mut index) =
+            IndexSnapshot::acquire(&self.repository_authority.git_path("index"))?;
+        repository
+            .set_index(&mut index)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        Ok(snapshot)
     }
 
     fn discover_untracked_paths(
@@ -1380,6 +1557,15 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository: &Repository,
         arguments: GitBranchSwitchArguments,
     ) -> Result<BranchResult, LocalGitFailure> {
+        self.branch_switch_with_hook(repository, arguments, || {})
+    }
+
+    fn branch_switch_with_hook<Hook: FnOnce()>(
+        &self,
+        repository: &Repository,
+        arguments: GitBranchSwitchArguments,
+        post_checkout: Hook,
+    ) -> Result<BranchResult, LocalGitFailure> {
         let index_lock = self.bind_locked_index(repository)?;
         if repository.state() != RepositoryState::Clean {
             return Err(LocalGitFailure::Operation);
@@ -1451,20 +1637,25 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let changes = repository
             .diff_tree_to_tree(current_tree.as_ref(), Some(&target_tree), None)
             .map_err(|_| LocalGitFailure::Operation)?;
-        for delta in changes.deltas() {
-            if let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) {
-                validate_checkout_path(&self.filesystem, &self.root, path)?;
-            }
+        let checkout_paths = changes
+            .deltas()
+            .filter_map(|delta| {
+                delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())
+                    .map(Path::to_owned)
+            })
+            .collect::<BTreeSet<_>>();
+        for path in &checkout_paths {
+            validate_checkout_path(
+                &self.filesystem,
+                &self.root,
+                path,
+                &current_index,
+                &target_tree,
+            )?;
         }
-        let mut checkout = CheckoutBuilder::new();
-        checkout
-            .safe()
-            .update_index(false)
-            .refresh(false)
-            .disable_filters(true);
-        repository
-            .checkout_tree(target_commit.as_object(), Some(&mut checkout))
-            .map_err(|_| LocalGitFailure::Operation)?;
         let mut next_index = Index::new().map_err(|_| LocalGitFailure::Operation)?;
         next_index
             .read_tree(&target_tree)
@@ -1481,8 +1672,21 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             }
         }
         index_lock.write(&next_index)?;
-        index_lock.commit()?;
-        transaction
+        let mut checkout = CheckoutBuilder::new();
+        checkout
+            .safe()
+            .update_index(false)
+            .refresh(false)
+            .disable_filters(true);
+        repository
+            .checkout_tree(target_commit.as_object(), Some(&mut checkout))
+            .map_err(|_| LocalGitFailure::Operation)?;
+        post_checkout();
+        if index_lock.commit().is_err() {
+            rollback_checkout(repository, current_tree.as_ref(), &checkout_paths)?;
+            return Err(LocalGitFailure::Operation);
+        }
+        if transaction
             .set_symbolic_target(
                 "HEAD",
                 &reference_name,
@@ -1490,12 +1694,64 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 "checkout: moving to configured local branch",
             )
             .and_then(|_| transaction.commit())
-            .map_err(|_| LocalGitFailure::Operation)?;
+            .is_err()
+        {
+            rollback_checkout(repository, current_tree.as_ref(), &checkout_paths)?;
+            restore_index(
+                &self.repository_authority.git_path("index"),
+                &self.repository_authority.git_path("index.lock"),
+                &current_index,
+            )?;
+            return Err(LocalGitFailure::Operation);
+        }
         Ok(BranchResult {
             branch: arguments.name,
             head: target.to_string(),
         })
     }
+}
+
+fn rollback_checkout(
+    repository: &Repository,
+    current_tree: Option<&git2::Tree<'_>>,
+    checkout_paths: &BTreeSet<PathBuf>,
+) -> Result<(), LocalGitFailure> {
+    let generated_tree;
+    let tree = if let Some(current_tree) = current_tree {
+        current_tree
+    } else {
+        let mut empty = Index::new().map_err(|_| LocalGitFailure::Operation)?;
+        let oid = empty
+            .write_tree_to(repository)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        generated_tree = repository
+            .find_tree(oid)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        &generated_tree
+    };
+    let mut checkout = CheckoutBuilder::new();
+    checkout
+        .force()
+        .remove_untracked(true)
+        .update_index(false)
+        .refresh(false)
+        .disable_filters(true);
+    for path in checkout_paths {
+        checkout.path(path);
+    }
+    repository
+        .checkout_tree(tree.as_object(), Some(&mut checkout))
+        .map_err(|_| LocalGitFailure::Operation)
+}
+
+fn restore_index(
+    index_path: &Path,
+    index_lock_path: &Path,
+    index: &Index,
+) -> Result<(), LocalGitFailure> {
+    let (lock, _replacement) = IndexLock::acquire(index_path, index_lock_path)?;
+    lock.write(index)?;
+    lock.commit()
 }
 
 fn encode_result(result: &LocalGitResult) -> Result<String, LocalGitFailure> {
@@ -1555,47 +1811,41 @@ struct IndexLock {
     committed: bool,
 }
 
+struct IndexSnapshot {
+    _file: fs::File,
+}
+
+impl IndexSnapshot {
+    fn acquire(index_path: &Path) -> Result<(Self, Index), LocalGitFailure> {
+        let mut file = tempfile::tempfile().map_err(|_| LocalGitFailure::Operation)?;
+        copy_index_snapshot(index_path, &mut file, false)?;
+        let index = Index::open(&descriptor_path(&file)).map_err(|_| LocalGitFailure::Operation)?;
+        Ok((Self { _file: file }, index))
+    }
+}
+
 impl IndexLock {
     fn acquire(index_path: &Path, lock_path: &Path) -> Result<(Self, Index), LocalGitFailure> {
-        let mut lock = fs::OpenOptions::new()
+        let lock = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(lock_path)
             .map_err(|_| LocalGitFailure::Operation)?;
-        match openat(
-            CWD,
-            index_path,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(descriptor) => {
-                let mut source = fs::File::from(descriptor);
-                let metadata = source.metadata().map_err(|_| LocalGitFailure::Repository)?;
-                if !metadata.is_file() || metadata.len() > MAX_INDEX_BYTES as u64 {
-                    return Err(LocalGitFailure::Repository);
-                }
-                let copied = std::io::copy(
-                    &mut Read::by_ref(&mut source).take((MAX_INDEX_BYTES + 1) as u64),
-                    &mut lock,
-                )
-                .map_err(|_| LocalGitFailure::Operation)?;
-                if copied > MAX_INDEX_BYTES as u64 {
-                    return Err(LocalGitFailure::Repository);
-                }
-            }
-            Err(rustix::io::Errno::NOENT) => write_empty_index(&mut lock)?,
-            Err(_) => return Err(LocalGitFailure::Repository),
-        }
-        lock.sync_all().map_err(|_| LocalGitFailure::Operation)?;
         let identity = file_identity(&lock.metadata().map_err(|_| LocalGitFailure::Operation)?);
-        let index = Index::open(&descriptor_path(&lock)).map_err(|_| LocalGitFailure::Operation)?;
-        let guard = Self {
+        let mut guard = Self {
             index_path: index_path.to_owned(),
             lock_path: lock_path.to_owned(),
             lock,
             identity,
             committed: false,
         };
+        copy_index_snapshot(index_path, &mut guard.lock, true)?;
+        guard
+            .lock
+            .sync_all()
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let index =
+            Index::open(&descriptor_path(&guard.lock)).map_err(|_| LocalGitFailure::Operation)?;
         Ok((guard, index))
     }
 
@@ -1675,6 +1925,43 @@ impl IndexLock {
         self.committed = true;
         Ok(())
     }
+}
+
+fn copy_index_snapshot(
+    index_path: &Path,
+    destination: &mut fs::File,
+    preserve_permissions: bool,
+) -> Result<(), LocalGitFailure> {
+    match openat(
+        CWD,
+        index_path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => {
+            let mut source = fs::File::from(descriptor);
+            let metadata = source.metadata().map_err(|_| LocalGitFailure::Repository)?;
+            if !metadata.is_file() || metadata.len() > MAX_INDEX_BYTES as u64 {
+                return Err(LocalGitFailure::Repository);
+            }
+            if preserve_permissions {
+                destination
+                    .set_permissions(metadata.permissions())
+                    .map_err(|_| LocalGitFailure::Operation)?;
+            }
+            let copied = std::io::copy(
+                &mut Read::by_ref(&mut source).take((MAX_INDEX_BYTES + 1) as u64),
+                destination,
+            )
+            .map_err(|_| LocalGitFailure::Operation)?;
+            if copied > MAX_INDEX_BYTES as u64 {
+                return Err(LocalGitFailure::Repository);
+            }
+        }
+        Err(rustix::io::Errno::NOENT) => write_empty_index(destination)?,
+        Err(_) => return Err(LocalGitFailure::Repository),
+    }
+    Ok(())
 }
 
 impl Drop for IndexLock {
@@ -1787,6 +2074,8 @@ fn validate_checkout_path<FileSystem: WorkspaceFileSystem>(
     filesystem: &FileSystem,
     root: &WorkspaceRoot,
     path: &Path,
+    current_index: &Index,
+    target_tree: &git2::Tree<'_>,
 ) -> Result<(), LocalGitFailure> {
     let parent = path
         .parent()
@@ -1794,6 +2083,11 @@ fn validate_checkout_path<FileSystem: WorkspaceFileSystem>(
         .unwrap_or(Path::new("."));
     match filesystem.entry_kind(root, parent) {
         Ok(WorkspaceEntryKind::Directory) => {}
+        Ok(_)
+            if current_index.get_path(parent, 0).is_some()
+                && target_tree
+                    .get_path(parent)
+                    .is_ok_and(|entry| entry.kind() == Some(git2::ObjectType::Tree)) => {}
         Ok(_) | Err(WorkspaceResolveError::Rejected(_)) => return Err(LocalGitFailure::Path),
         Err(WorkspaceResolveError::Io { .. }) => {}
     }
@@ -2082,7 +2376,7 @@ fn diff<FileSystem: WorkspaceFileSystem>(
         return worktree_diff(repository, filesystem, root, untracked);
     };
     let mut options = DiffOptions::new();
-    options.ignore_submodules(true);
+    options.ignore_submodules(false);
     let base_tree = resolve_bounded_tree(repository, &base)?;
     let head_tree = resolve_bounded_tree(repository, &head)?;
     validate_tree_discovery(repository, &base_tree)?;
@@ -2295,10 +2589,17 @@ fn patch_with_mode_change(
     old_mode: u32,
     new_mode: u32,
 ) -> Result<Vec<u8>, LocalGitFailure> {
-    let path = path.to_str().ok_or(LocalGitFailure::Operation)?;
     let mode = format!("old mode {old_mode:06o}\nnew mode {new_mode:06o}\n");
     if patch.is_empty() {
-        return Ok(format!("diff --git a/{path} b/{path}\n{mode}").into_bytes());
+        let path = path.as_os_str().as_bytes();
+        let mut rendered = Vec::new();
+        rendered.extend_from_slice(b"diff --git a/");
+        rendered.extend_from_slice(path);
+        rendered.extend_from_slice(b" b/");
+        rendered.extend_from_slice(path);
+        rendered.push(b'\n');
+        rendered.extend_from_slice(mode.as_bytes());
+        return Ok(rendered);
     }
     let first_line = patch
         .iter()
@@ -2355,56 +2656,16 @@ fn render_patch_bytes(bytes: Vec<u8>, mut truncated: bool) -> Result<DiffResult,
 
 fn log(repository: &Repository, arguments: GitLogArguments) -> Result<LogResult, LocalGitFailure> {
     let start = resolve_bounded_commit(repository, &arguments.revision)?.id();
-    let mut pending = vec![start];
-    let mut seen = HashSet::new();
-    let mut parents_by_commit = HashMap::new();
-    let mut remaining_children = HashMap::<git2::Oid, usize>::new();
-    let mut commit_times = HashMap::new();
-    while let Some(oid) = pending.pop() {
-        if !seen.insert(oid) {
-            continue;
-        }
-        if seen.len() > MAX_WORKTREE_INSPECTIONS {
-            return Err(LocalGitFailure::Operation);
-        }
-        let commit = find_bounded_commit(repository, oid)?;
-        if commit.parent_count() > MAX_MERGE_PARENTS {
-            return Err(LocalGitFailure::Operation);
-        }
-        let parents = commit.parent_ids().collect::<Vec<_>>();
-        for parent in &parents {
-            *remaining_children.entry(*parent).or_default() += 1;
-        }
-        pending.extend(parents.iter().copied());
-        commit_times.insert(oid, commit.time().seconds());
-        parents_by_commit.insert(oid, parents);
-    }
-    let mut available = BTreeSet::from([(
-        *commit_times.get(&start).ok_or(LocalGitFailure::Operation)?,
-        start,
-    )]);
-    let mut ordered = Vec::with_capacity(seen.len());
-    while let Some((_, oid)) = available.pop_last() {
-        ordered.push(oid);
-        for parent in parents_by_commit
-            .get(&oid)
-            .ok_or(LocalGitFailure::Operation)?
-        {
-            let remaining = remaining_children
-                .get_mut(parent)
-                .ok_or(LocalGitFailure::Operation)?;
-            *remaining = remaining.checked_sub(1).ok_or(LocalGitFailure::Operation)?;
-            if *remaining == 0 {
-                available.insert((
-                    *commit_times.get(parent).ok_or(LocalGitFailure::Operation)?,
-                    *parent,
-                ));
-            }
-        }
-    }
-    if ordered.len() != seen.len() {
-        return Err(LocalGitFailure::Operation);
-    }
+    let mut walk = repository
+        .revwalk()
+        .map_err(|_| LocalGitFailure::Operation)?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+        .and_then(|()| walk.push(start))
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let ordered = walk
+        .take(arguments.max_entries.saturating_add(1))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| LocalGitFailure::Operation)?;
     let mut commits = Vec::new();
     let truncated = ordered.len() > arguments.max_entries;
     for oid in ordered.into_iter().take(arguments.max_entries) {
@@ -2646,6 +2907,8 @@ fn commit(
     arguments: GitCommitArguments,
     index_path: &Path,
     index_lock_path: &Path,
+    authority: &PinnedRepository,
+    object_database: &Odb<'_>,
 ) -> Result<CommitResult, LocalGitFailure> {
     let (_index_lock, mut index) = IndexLock::acquire(index_path, index_lock_path)?;
     validate_index_objects(repository, &index)?;
@@ -2697,6 +2960,12 @@ fn commit(
             &parent_refs,
         )
         .map_err(|_| LocalGitFailure::Operation)?;
+    persist_objects(
+        authority,
+        repository,
+        object_database,
+        &[PackRoot::Commit(oid)],
+    )?;
     let update_reference = locked_chain.last().ok_or(LocalGitFailure::Operation)?;
     let head_symbolic_target = locked_chain.get(1);
     transaction
@@ -2725,6 +2994,124 @@ fn commit(
         commit: oid.to_string(),
         state_cleaned,
     })
+}
+
+#[derive(Clone, Copy)]
+enum PackRoot {
+    Object(git2::Oid),
+    Commit(git2::Oid),
+}
+
+fn persist_objects(
+    authority: &PinnedRepository,
+    repository: &Repository,
+    object_database: &Odb<'_>,
+    roots: &[PackRoot],
+) -> Result<(), LocalGitFailure> {
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let mut buffer = Buf::new();
+    let mut builder = repository
+        .packbuilder()
+        .map_err(|_| LocalGitFailure::Operation)?;
+    for root in roots {
+        match root {
+            PackRoot::Object(oid) => builder.insert_object(*oid, None),
+            PackRoot::Commit(oid) => builder.insert_commit(*oid),
+        }
+        .map_err(|_| LocalGitFailure::Operation)?;
+    }
+    builder
+        .write_buf(&mut buffer)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let indexed = tempfile::tempdir().map_err(|_| LocalGitFailure::Operation)?;
+    let mut indexer = Indexer::new(Some(object_database), indexed.path(), 0o600, true)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    indexer
+        .write_all(&buffer)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let checksum = indexer.commit().map_err(|_| LocalGitFailure::Operation)?;
+    let objects = openat(
+        &authority.git_directory,
+        "objects",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitFailure::Repository)?;
+    let pack = openat(
+        &objects,
+        "pack",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitFailure::Repository)?;
+    let stem = format!("pack-{checksum}");
+    install_packed_object_file(&pack, &indexed.path().join(format!("{stem}.idx")))?;
+    install_packed_object_file(&pack, &indexed.path().join(format!("{stem}.pack")))
+}
+
+fn install_packed_object_file(
+    pack_directory: &OwnedFd,
+    source_path: &Path,
+) -> Result<(), LocalGitFailure> {
+    let name = source_path.file_name().ok_or(LocalGitFailure::Operation)?;
+    let mut temporary_name = OsString::from(name);
+    temporary_name.push(".lock");
+    let mut source = fs::File::open(source_path).map_err(|_| LocalGitFailure::Operation)?;
+    let source_length = source
+        .metadata()
+        .map_err(|_| LocalGitFailure::Operation)?
+        .len();
+    let descriptor = openat(
+        pack_directory,
+        &temporary_name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    let mut destination = fs::File::from(descriptor);
+    let copied =
+        std::io::copy(&mut source, &mut destination).map_err(|_| LocalGitFailure::Operation)?;
+    if copied != source_length {
+        let _ = unlinkat(pack_directory, &temporary_name, AtFlags::empty());
+        return Err(LocalGitFailure::Operation);
+    }
+    destination
+        .sync_all()
+        .map_err(|_| LocalGitFailure::Operation)?;
+    match renameat_with(
+        pack_directory,
+        &temporary_name,
+        pack_directory,
+        name,
+        RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error == rustix::io::Errno::EXIST => {
+            unlinkat(pack_directory, &temporary_name, AtFlags::empty())
+                .map_err(|_| LocalGitFailure::Operation)?;
+            let existing = openat(
+                pack_directory,
+                name,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| LocalGitFailure::Operation)?;
+            let metadata = fs::File::from(existing)
+                .metadata()
+                .map_err(|_| LocalGitFailure::Operation)?;
+            if metadata.is_file() && metadata.len() == source_length {
+                Ok(())
+            } else {
+                Err(LocalGitFailure::Operation)
+            }
+        }
+        Err(_) => {
+            let _ = unlinkat(pack_directory, &temporary_name, AtFlags::empty());
+            Err(LocalGitFailure::Operation)
+        }
+    }
 }
 
 fn branch_create(
@@ -2785,7 +3172,16 @@ fn packed_reference_exists(
             .and_then(|oid| git2::Oid::from_str(oid).ok())
             .ok_or(LocalGitFailure::Operation)?;
         let _ = oid;
-        if line.get(separator + 1..) == Some(reference_name.as_bytes()) {
+        let existing = line
+            .get(separator + 1..)
+            .ok_or(LocalGitFailure::Operation)?;
+        let requested = reference_name.as_bytes();
+        let requested_prefix = [requested, b"/"].concat();
+        let existing_prefix = [existing, b"/"].concat();
+        if existing == requested
+            || existing.starts_with(&requested_prefix)
+            || requested.starts_with(&existing_prefix)
+        {
             return Ok(true);
         }
     }
@@ -2796,6 +3192,15 @@ fn create_loose_branch_reference(
     authority: &PinnedRepository,
     branch: &str,
     target: git2::Oid,
+) -> Result<(), LocalGitFailure> {
+    create_loose_branch_reference_with_hook(authority, branch, target, || {})
+}
+
+fn create_loose_branch_reference_with_hook<Hook: FnOnce()>(
+    authority: &PinnedRepository,
+    branch: &str,
+    target: git2::Oid,
+    post_write: Hook,
 ) -> Result<(), LocalGitFailure> {
     let refs = openat(
         &authority.git_directory,
@@ -2828,9 +3233,20 @@ fn create_loose_branch_reference(
     )
     .map_err(|_| LocalGitFailure::Operation)?;
     let mut lock = fs::File::from(lock);
+    let identity = file_identity(&lock.metadata().map_err(|_| LocalGitFailure::Operation)?);
+    let lock_path = descriptor_path_from_fd(&directory).join(&lock_name);
     let outcome = (|| {
         writeln!(lock, "{target}").map_err(|_| LocalGitFailure::Operation)?;
         lock.sync_all().map_err(|_| LocalGitFailure::Operation)?;
+        post_write();
+        let path_identity = fs::symlink_metadata(&lock_path)
+            .map(|metadata| file_identity(&metadata))
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let descriptor_identity =
+            file_identity(&lock.metadata().map_err(|_| LocalGitFailure::Operation)?);
+        if path_identity != identity || descriptor_identity != identity {
+            return Err(LocalGitFailure::Operation);
+        }
         renameat_with(
             &directory,
             &lock_name,
@@ -2840,7 +3256,10 @@ fn create_loose_branch_reference(
         )
         .map_err(|_| LocalGitFailure::Operation)
     })();
-    if outcome.is_err() {
+    let still_owned = fs::symlink_metadata(&lock_path)
+        .map(|metadata| file_identity(&metadata) == identity)
+        .unwrap_or(false);
+    if outcome.is_err() && still_owned {
         let _ = unlinkat(&directory, &lock_name, AtFlags::empty());
     }
     outcome
@@ -3346,6 +3765,24 @@ mod tests {
             .expect("fixture commit object writes")
     }
 
+    fn plant_linear_history(repository: &Repository, mut parent: Oid, count: usize) -> Oid {
+        for sequence in 0..count {
+            let tree = repository
+                .find_commit(parent)
+                .expect("linear-history parent exists")
+                .tree_id();
+            let raw = format!(
+                "tree {tree}\nparent {parent}\nauthor Signalbox <fixer@example.test> {sequence} +0000\ncommitter Signalbox <fixer@example.test> {sequence} +0000\n\nlinear {sequence}\n"
+            );
+            parent = repository
+                .odb()
+                .expect("fixture object database opens")
+                .write(ObjectType::Commit, raw.as_bytes())
+                .expect("linear-history commit writes");
+        }
+        parent
+    }
+
     fn plant_over_budget_index(repository: &Repository) {
         let blob = repository.blob(b"bounded\n").expect("fixture blob writes");
         let mut index = repository.index().expect("fixture index opens");
@@ -3780,6 +4217,27 @@ mod tests {
     }
 
     #[test]
+    fn index_lock_acquisition_failure_removes_the_created_lock() {
+        let fixture = Fixture::new();
+        let index_path = fixture.root().join(".git/index");
+        let lock_path = fixture.root().join(".git/index.lock");
+        let index = fs::OpenOptions::new()
+            .write(true)
+            .open(&index_path)
+            .expect("fixture index opens");
+        index
+            .set_len((MAX_INDEX_BYTES + 1) as u64)
+            .expect("oversized sparse index sets length");
+
+        let failure = IndexLock::acquire(&index_path, &lock_path)
+            .err()
+            .expect("oversized index rejects lock acquisition");
+
+        assert_eq!(failure, LocalGitFailure::Repository);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
     fn status_rejects_oversized_head_before_libgit2_parsing() {
         let fixture = Fixture::new();
         let executor = fixture.executor();
@@ -3841,6 +4299,17 @@ mod tests {
 
         assert_eq!(status["entries"][0]["path"], ".gitignore");
         assert_eq!(status["entries"][0]["worktree"], "untracked");
+    }
+
+    #[test]
+    fn read_only_worktree_tools_leave_no_repository_lock() {
+        let fixture = Fixture::new();
+        let executor = fixture.executor();
+
+        execute(&executor, LocalOperation::Status);
+        execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+
+        assert!(!fixture.root().join(".git/index.lock").exists());
     }
 
     #[test]
@@ -3989,6 +4458,34 @@ mod tests {
     }
 
     #[test]
+    fn worktree_diff_reports_a_non_utf8_mode_only_change() {
+        let fixture = Fixture::new();
+        let path = OsString::from_vec(vec![b'n', 0xff, b'.', b't', b'x', b't']);
+        fs::write(fixture.root().join(&path), INITIAL_CONTENT)
+            .expect("non-UTF-8 fixture file writes");
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let mut index = repository.index().expect("fixture index opens");
+        index
+            .add_path(Path::new(&path))
+            .expect("non-UTF-8 fixture path stages");
+        index.write().expect("fixture index writes");
+        commit_index(&repository, INITIAL_MESSAGE);
+        fs::set_permissions(
+            fixture.root().join(&path),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("non-UTF-8 fixture executable mode sets");
+        let executor = fixture.executor();
+
+        let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+        let patch = diff["patch"].as_str().expect("patch is text");
+
+        assert_eq!(diff["truncated"], true);
+        assert!(patch.contains("old mode 100644"));
+        assert!(patch.contains("new mode 100755"));
+    }
+
+    #[test]
     fn worktree_diff_never_opens_a_worktree_ignore_fifo() {
         let fixture = Fixture::new();
         let ignore_path = fixture.root().join(".gitignore");
@@ -4103,6 +4600,31 @@ mod tests {
     }
 
     #[test]
+    fn revision_diff_reports_a_gitlink_change() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        install_gitlink(&repository, SUBMODULE_PATH, fixture.initial);
+        let base = commit_index(&repository, "base gitlink");
+        let changed_target = plant_linear_history(&repository, fixture.initial, 1);
+        install_gitlink(&repository, SUBMODULE_PATH, changed_target);
+        let head = commit_index(&repository, "changed gitlink");
+        let executor = fixture.executor();
+
+        let diff = execute(
+            &executor,
+            LocalOperation::Diff(GitDiffArguments::Revisions {
+                base: base.to_string(),
+                head: head.to_string(),
+            }),
+        );
+        let patch = diff["patch"].as_str().expect("patch is text");
+
+        assert!(patch.contains(SUBMODULE_PATH));
+        assert!(patch.contains(&format!("-Subproject commit {}", fixture.initial)));
+        assert!(patch.contains(&format!("+Subproject commit {changed_target}")));
+    }
+
+    #[test]
     fn revision_diff_rejects_tree_over_discovery_budget() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -4172,6 +4694,55 @@ mod tests {
 
         assert_eq!(log["commits"][0]["commit"], changed.to_string());
         assert_eq!(log["commits"][0]["message"], MODEL_MESSAGE);
+    }
+
+    #[test]
+    fn log_stops_after_the_requested_page_in_a_long_history() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let newest =
+            plant_linear_history(&repository, fixture.initial, MAX_WORKTREE_INSPECTIONS + 1);
+        let executor = fixture.executor();
+
+        let log = execute(
+            &executor,
+            LocalOperation::Log(GitLogArguments {
+                revision: newest.to_string(),
+                max_entries: 1,
+            }),
+        );
+
+        assert_eq!(log["commits"][0]["commit"], newest.to_string());
+        assert_eq!(log["truncated"], true);
+    }
+
+    #[test]
+    fn log_honors_a_repository_shallow_boundary() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let boundary = plant_linear_history(&repository, fixture.initial, 1);
+        let newest = plant_linear_history(&repository, boundary, 1);
+        fs::write(fixture.root().join(".git/shallow"), format!("{boundary}\n"))
+            .expect("fixture shallow boundary writes");
+        let executor = fixture.executor();
+
+        let log = execute(
+            &executor,
+            LocalOperation::Log(GitLogArguments {
+                revision: newest.to_string(),
+                max_entries: 10,
+            }),
+        );
+
+        assert_eq!(
+            log["commits"]
+                .as_array()
+                .expect("commits are an array")
+                .len(),
+            2
+        );
+        assert_eq!(log["commits"][0]["commit"], newest.to_string());
+        assert_eq!(log["commits"][1]["commit"], boundary.to_string());
     }
 
     #[test]
@@ -4255,6 +4826,70 @@ mod tests {
         let blob = repository.find_blob(entry.id).expect("staged blob exists");
 
         assert_eq!(blob.content(), CHANGED_CONTENT.as_bytes());
+    }
+
+    #[test]
+    fn stage_preserves_repository_index_permissions() {
+        let fixture = Fixture::new();
+        fs::set_permissions(
+            fixture.root().join(".git/index"),
+            fs::Permissions::from_mode(0o660),
+        )
+        .expect("fixture index permissions set");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("fixture change writes");
+        let executor = fixture.executor();
+
+        execute(
+            &executor,
+            LocalOperation::Stage(GitStageArguments {
+                paths: vec![TRACKED_PATH.to_owned()],
+            }),
+        );
+        let mode = fs::metadata(fixture.root().join(".git/index"))
+            .expect("updated index metadata reads")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o660);
+    }
+
+    #[test]
+    fn pinned_object_database_never_reopens_a_replacement_fifo() {
+        let fixture = Fixture::new();
+        let executor = fixture.executor();
+        let pinned = PinnedObjectDatabase::capture(&executor.repository_authority)
+            .expect("fixture object database pins");
+        let object = fixture.initial.to_string();
+        let object_path = fixture
+            .root()
+            .join(".git/objects")
+            .join(&object[..2])
+            .join(&object[2..]);
+        fs::rename(&object_path, object_path.with_extension("pinned"))
+            .expect("fixture object path retires");
+        mkfifoat(CWD, &object_path, Mode::RUSR | Mode::WUSR)
+            .expect("replacement object FIFO constructs");
+        let repository = executor
+            .repository_authority
+            .repository()
+            .expect("pinned fixture repository opens");
+        let object_database = Odb::new().expect("fixture object database constructs");
+        pinned
+            .add_to(&object_database)
+            .expect("pinned objects attach");
+        let _mempack = object_database
+            .add_new_mempack_backend(1000)
+            .expect("fixture memory object backend attaches");
+        repository
+            .set_odb(&object_database)
+            .expect("fixture object database selects");
+
+        let commit = find_bounded_commit(&repository, fixture.initial)
+            .expect("pinned commit remains readable");
+
+        assert_eq!(commit.id(), fixture.initial);
     }
 
     #[test]
@@ -4753,6 +5388,18 @@ mod tests {
             .repository_authority
             .repository()
             .expect("pinned fixture repository opens");
+        let pinned_objects = PinnedObjectDatabase::capture(&executor.repository_authority)
+            .expect("fixture objects pin");
+        let object_database = Odb::new().expect("fixture object database constructs");
+        pinned_objects
+            .add_to(&object_database)
+            .expect("fixture pinned objects attach");
+        let _mempack = object_database
+            .add_new_mempack_backend(1000)
+            .expect("fixture mempack attaches");
+        repository
+            .set_odb(&object_database)
+            .expect("fixture repository uses pinned objects");
         let merge_mode = fixture.root().join(".git/MERGE_MODE");
         fs::remove_file(&merge_mode).expect("fixture merge mode file removes");
         fs::create_dir(&merge_mode).expect("blocked merge mode directory constructs");
@@ -4768,6 +5415,8 @@ mod tests {
             },
             &executor.repository_authority.git_path("index"),
             &executor.repository_authority.git_path("index.lock"),
+            &executor.repository_authority,
+            &object_database,
         )
         .expect("commit succeeds after advancing HEAD");
         fs::set_permissions(&merge_mode, fs::Permissions::from_mode(0o700))
@@ -5063,6 +5712,58 @@ mod tests {
     }
 
     #[test]
+    fn branch_create_rejects_a_packed_descendant_reference() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.root().join(".git/packed-refs"),
+            format!(
+                "# pack-refs with: peeled fully-peeled sorted\n{} refs/heads/release/v1\n",
+                fixture.initial
+            ),
+        )
+        .expect("fixture packed reference writes");
+        let executor = fixture.executor();
+
+        let failure = executor
+            .execute_operation(LocalOperation::BranchCreate(GitBranchCreateArguments {
+                name: "release".to_owned(),
+                start: fixture.initial.to_string(),
+            }))
+            .expect_err("packed descendant reference rejects");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert!(!fixture.root().join(".git/refs/heads/release").exists());
+    }
+
+    #[test]
+    fn branch_create_rejects_a_replaced_lock_without_touching_it() {
+        let fixture = Fixture::new();
+        let executor = fixture.executor();
+        let lock_path = fixture.root().join(".git/refs/heads/race.lock");
+        let retired_lock = fixture.root().join(".git/refs/heads/race.lock.pinned");
+
+        let failure = create_loose_branch_reference_with_hook(
+            &executor.repository_authority,
+            "race",
+            fixture.initial,
+            || {
+                fs::rename(&lock_path, &retired_lock).expect("fixture branch lock retires");
+                fs::write(&lock_path, b"replacement\n").expect("replacement branch lock writes");
+            },
+        )
+        .expect_err("replaced branch lock rejects");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            fs::read(&lock_path).expect("replacement branch lock reads"),
+            b"replacement\n"
+        );
+        assert!(!fixture.root().join(".git/refs/heads/race").exists());
+        fs::remove_file(lock_path).expect("replacement branch lock removes");
+        fs::remove_file(retired_lock).expect("retired branch lock removes");
+    }
+
+    #[test]
     fn branch_switch_changes_real_head() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -5161,6 +5862,56 @@ mod tests {
             .find_blob(entry.id)
             .expect("switched blob exists");
         assert_eq!(blob.content(), INITIAL_CONTENT.as_bytes());
+    }
+
+    #[test]
+    fn branch_switch_allows_a_clean_file_to_directory_transition() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let initial_tree = repository
+            .find_commit(fixture.initial)
+            .expect("fixture initial commit exists")
+            .tree()
+            .expect("fixture initial tree opens");
+        let nested_blob = repository
+            .blob(b"nested\n")
+            .expect("nested fixture blob writes");
+        let mut nested_builder = repository
+            .treebuilder(None)
+            .expect("nested fixture tree builder opens");
+        nested_builder
+            .insert("main.txt", nested_blob, 0o100644)
+            .expect("nested fixture blob inserts");
+        let nested_tree = nested_builder.write().expect("nested fixture tree writes");
+        let mut target_builder = repository
+            .treebuilder(Some(&initial_tree))
+            .expect("target fixture tree builder opens");
+        target_builder
+            .insert("src", nested_tree, 0o040000)
+            .expect("target fixture directory inserts");
+        let target_tree = target_builder.write().expect("target fixture tree writes");
+        let target = raw_commit_with_tree(&repository, target_tree, fixture.initial);
+        let target = repository
+            .find_commit(target)
+            .expect("target fixture commit exists");
+        repository
+            .branch(FIX_BRANCH, &target, false)
+            .expect("target fixture branch creates");
+        fs::write(fixture.root().join("src"), b"flat\n").expect("flat fixture file writes");
+        commit_all(&repository, "flat source");
+        let executor = fixture.executor();
+
+        execute(
+            &executor,
+            LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            }),
+        );
+
+        assert_eq!(
+            fs::read(fixture.root().join("src/main.txt")).expect("nested fixture content reads"),
+            b"nested\n"
+        );
     }
 
     #[test]
@@ -5424,6 +6175,52 @@ mod tests {
         assert_eq!(
             fs::read(fixture.root().join(TRACKED_PATH)).expect("locked fixture content reads"),
             CHANGED_CONTENT.as_bytes()
+        );
+    }
+
+    #[test]
+    fn branch_switch_rolls_back_checkout_after_index_commit_failure() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let initial = repository
+            .find_commit(fixture.initial)
+            .expect("fixture initial commit exists");
+        repository
+            .branch(FIX_BRANCH, &initial, false)
+            .expect("fixture branch creates");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("root-level fixture change writes");
+        let original_head = commit_all(&repository, MODEL_MESSAGE);
+        let executor = fixture.executor();
+        let index_lock = fixture.root().join(".git/index.lock");
+        let retired_lock = fixture.root().join(".git/index.lock.pinned");
+
+        let failure = executor
+            .branch_switch_with_hook(
+                &executor
+                    .repository_authority
+                    .repository()
+                    .expect("pinned fixture repository opens"),
+                GitBranchSwitchArguments {
+                    name: FIX_BRANCH.to_owned(),
+                },
+                || {
+                    fs::rename(&index_lock, &retired_lock).expect("fixture index lock retires");
+                    fs::write(&index_lock, []).expect("replacement index lock writes");
+                },
+            )
+            .expect_err("replaced index lock rejects after checkout");
+        fs::remove_file(&index_lock).expect("replacement index lock removes");
+        fs::remove_file(&retired_lock).expect("retired index lock removes");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            fs::read(fixture.root().join(TRACKED_PATH)).expect("rolled-back fixture content reads"),
+            CHANGED_CONTENT.as_bytes()
+        );
+        assert_eq!(
+            repository.head().expect("fixture HEAD remains").target(),
+            Some(original_head)
         );
     }
 
