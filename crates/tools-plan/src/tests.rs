@@ -222,11 +222,15 @@ fn oversized_read_page(provenance: PlanEventProvenance) -> PlanReadPage {
             )
         })
         .collect();
-    PlanReadPage::new(entries, false, Some(PlanHistoryPage::new(events, false)))
+    PlanReadPage::new(
+        entries,
+        PlanPageCompleteness::Complete,
+        Some(PlanHistoryPage::new(events, PlanPageCompleteness::Complete)),
+    )
 }
 
 #[test]
-fn definitions_are_automatic_and_distinguish_read_from_write_effects() {
+fn definitions_default_to_automatic_permission() {
     let catalog = catalog();
     let write_name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
     let read_name = ToolName::try_new(PLAN_READ_NAME.to_owned()).expect("fixture name is valid");
@@ -239,6 +243,20 @@ fn definitions_are_automatic_and_distinguish_read_from_write_effects() {
 
     assert_eq!(write.permission_default(), ToolPermissionDefault::Auto);
     assert_eq!(read.permission_default(), ToolPermissionDefault::Auto);
+}
+
+#[test]
+fn definitions_distinguish_read_from_write_effects() {
+    let catalog = catalog();
+    let write_name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
+    let read_name = ToolName::try_new(PLAN_READ_NAME.to_owned()).expect("fixture name is valid");
+    let write = catalog
+        .definition(&write_name)
+        .expect("write definition exists");
+    let read = catalog
+        .definition(&read_name)
+        .expect("read definition exists");
+
     assert_eq!(write.effect_class(), ToolEffectClass::ExternalEffect);
     assert_eq!(read.effect_class(), ToolEffectClass::EffectFree);
 }
@@ -405,9 +423,13 @@ fn read_reports_long_history_truncation_without_implying_completeness() {
                 text: text(INITIAL_TEXT),
             },
         )],
-        true,
+        PlanPageCompleteness::Truncated,
     );
-    let port = FakePort::reading(PlanReadPage::new(vec![current], false, Some(history)));
+    let port = FakePort::reading(PlanReadPage::new(
+        vec![current],
+        PlanPageCompleteness::Complete,
+        Some(history),
+    ));
     let (_catalog, mut executor) = PlanTools::try_new(port)
         .expect("fixture tools compile")
         .into_parts();
@@ -521,10 +543,14 @@ fn read_rejects_current_entries_that_contradict_complete_history() {
                 text: text(INITIAL_TEXT),
             },
         )],
-        false,
+        PlanPageCompleteness::Complete,
     );
     let contradictory = PlanEntry::new(entry(1), text(REVISED_TEXT), PlanStatus::Pending);
-    let port = FakePort::reading(PlanReadPage::new(vec![contradictory], false, Some(history)));
+    let port = FakePort::reading(PlanReadPage::new(
+        vec![contradictory],
+        PlanPageCompleteness::Complete,
+        Some(history),
+    ));
     let (_catalog, mut executor) = PlanTools::try_new(port)
         .expect("fixture tools compile")
         .into_parts();

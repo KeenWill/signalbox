@@ -507,17 +507,36 @@ impl PlanReadRequest {
     }
 }
 
+/// Whether a bounded plan page contains all requested evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanPageCompleteness {
+    /// No requested evidence was omitted.
+    Complete,
+    /// Later requested evidence was omitted.
+    Truncated,
+}
+
+impl PlanPageCompleteness {
+    /// Returns whether requested evidence was omitted.
+    pub const fn is_truncated(self) -> bool {
+        matches!(self, Self::Truncated)
+    }
+}
+
 /// Optional bounded chronological history prefix.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanHistoryPage {
     events: Vec<PlanEvent>,
-    has_more: bool,
+    completeness: PlanPageCompleteness,
 }
 
 impl PlanHistoryPage {
-    /// Supplies returned events and whether later history exists.
-    pub fn new(events: Vec<PlanEvent>, has_more: bool) -> Self {
-        Self { events, has_more }
+    /// Supplies returned events and their labeled completeness.
+    pub fn new(events: Vec<PlanEvent>, completeness: PlanPageCompleteness) -> Self {
+        Self {
+            events,
+            completeness,
+        }
     }
 
     /// Borrows chronological events.
@@ -525,9 +544,9 @@ impl PlanHistoryPage {
         &self.events
     }
 
-    /// Returns whether later history was omitted.
-    pub const fn has_more(&self) -> bool {
-        self.has_more
+    /// Returns whether the history prefix is complete.
+    pub const fn completeness(&self) -> PlanPageCompleteness {
+        self.completeness
     }
 }
 
@@ -535,7 +554,7 @@ impl PlanHistoryPage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanReadPage {
     entries: Vec<PlanEntry>,
-    has_more_entries: bool,
+    completeness: PlanPageCompleteness,
     history: Option<PlanHistoryPage>,
 }
 
@@ -543,12 +562,12 @@ impl PlanReadPage {
     /// Supplies current entries and optional history.
     pub fn new(
         entries: Vec<PlanEntry>,
-        has_more_entries: bool,
+        completeness: PlanPageCompleteness,
         history: Option<PlanHistoryPage>,
     ) -> Self {
         Self {
             entries,
-            has_more_entries,
+            completeness,
             history,
         }
     }
@@ -558,9 +577,9 @@ impl PlanReadPage {
         &self.entries
     }
 
-    /// Returns whether later current entries were omitted.
-    pub const fn has_more_entries(&self) -> bool {
-        self.has_more_entries
+    /// Returns whether the current-entry page is complete.
+    pub const fn completeness(&self) -> PlanPageCompleteness {
+        self.completeness
     }
 
     /// Borrows optional history.
@@ -584,14 +603,26 @@ impl PlanReadPage {
             let retained = history_units.min(history.events.len());
             PlanHistoryPage::new(
                 history.events[..retained].to_vec(),
-                history.has_more || retained < history.events.len(),
+                retained_completeness(history.completeness, retained, history.events.len()),
             )
         });
         Self::new(
             self.entries[..entry_units].to_vec(),
-            self.has_more_entries || entry_units < self.entries.len(),
+            retained_completeness(self.completeness, entry_units, self.entries.len()),
             history,
         )
+    }
+}
+
+fn retained_completeness(
+    original: PlanPageCompleteness,
+    retained: usize,
+    available: usize,
+) -> PlanPageCompleteness {
+    if original.is_truncated() || retained < available {
+        PlanPageCompleteness::Truncated
+    } else {
+        PlanPageCompleteness::Complete
     }
 }
 
@@ -1049,9 +1080,13 @@ fn complete_history_matches_current(
     if let Some(after) = request.after_entry() {
         expected.retain(|entry| entry.id() > after);
     }
-    let has_more = expected.len() > request.max_entries();
+    let expected_completeness = if expected.len() > request.max_entries() {
+        PlanPageCompleteness::Truncated
+    } else {
+        PlanPageCompleteness::Complete
+    };
     expected.truncate(request.max_entries());
-    page.entries() == expected && page.has_more_entries() == has_more
+    page.entries() == expected && page.completeness() == expected_completeness
 }
 
 fn validate_read_page<PortError>(
@@ -1059,7 +1094,7 @@ fn validate_read_page<PortError>(
     page: &PlanReadPage,
 ) -> Result<(), PlanExecutorError<PortError>> {
     if page.entries().len() > request.max_entries()
-        || (page.has_more_entries() && page.entries().is_empty())
+        || (page.completeness().is_truncated() && page.entries().is_empty())
         || page.history().is_some() != request.history_limit().is_some()
     {
         return Err(PlanExecutorError::PortContract);
@@ -1075,13 +1110,17 @@ fn validate_read_page<PortError>(
         let limit = request
             .history_limit()
             .ok_or(PlanExecutorError::PortContract)?;
-        if history.events().len() > limit || (history.has_more() && history.events().is_empty()) {
+        if history.events().len() > limit
+            || (history.completeness().is_truncated() && history.events().is_empty())
+        {
             return Err(PlanExecutorError::PortContract);
         }
         let mut prior_ordinal = None;
         let folded =
             fold_plan_events(history.events()).map_err(|_| PlanExecutorError::PortContract)?;
-        if !history.has_more() && !complete_history_matches_current(request, page, folded) {
+        if !history.completeness().is_truncated()
+            && !complete_history_matches_current(request, page, folded)
+        {
             return Err(PlanExecutorError::PortContract);
         }
 
@@ -1231,7 +1270,7 @@ fn encode_admitted_read<PortError>(
 }
 
 fn read_output(page: PlanReadPage) -> ReadOutput {
-    let next_after_entry_id = if page.has_more_entries {
+    let next_after_entry_id = if page.completeness.is_truncated() {
         page.entries.last().map(|entry| entry.id().as_u64())
     } else {
         None
@@ -1239,14 +1278,14 @@ fn read_output(page: PlanReadPage) -> ReadOutput {
     let (history, history_truncated) = match page.history {
         Some(history) => (
             Some(history.events.into_iter().map(EventOutput::from).collect()),
-            history.has_more,
+            history.completeness.is_truncated(),
         ),
         None => (None, false),
     };
     ReadOutput {
         entries: page.entries.into_iter().map(EntryOutput::from).collect(),
         next_after_entry_id,
-        plan_truncated: page.has_more_entries,
+        plan_truncated: page.completeness.is_truncated(),
         history,
         history_truncated,
     }

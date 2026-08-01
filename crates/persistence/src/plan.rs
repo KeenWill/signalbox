@@ -11,7 +11,7 @@ use signalbox_domain::{
 use signalbox_tools_plan::{
     PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntry, PlanEntryId, PlanEvent,
     PlanEventDraft, PlanEventKind, PlanEventOrdinal, PlanEventProvenance, PlanHistoryPage,
-    PlanReadPage, PlanReadRequest, PlanText, SessionPlanPort,
+    PlanPageCompleteness, PlanReadPage, PlanReadRequest, PlanText, SessionPlanPort,
 };
 use sqlx::{PgPool, Row, postgres::PgRow};
 
@@ -294,11 +294,11 @@ impl SessionPlanRepository {
                     .collect::<Result<Vec<_>, _>>()?;
                 let has_more = events.len() > limit;
                 events.truncate(limit);
-                Some(PlanHistoryPage::new(events, has_more))
+                Some(PlanHistoryPage::new(events, page_completeness(has_more)))
             }
             None => None,
         };
-        let page = PlanReadPage::new(entries, has_more_entries, history);
+        let page = PlanReadPage::new(entries, page_completeness(has_more_entries), history);
         transaction.commit().await?;
         Ok(page)
     }
@@ -468,6 +468,14 @@ fn decode_provenance(
             },
         ),
     ))
+}
+
+fn page_completeness(has_more: bool) -> PlanPageCompleteness {
+    if has_more {
+        PlanPageCompleteness::Truncated
+    } else {
+        PlanPageCompleteness::Complete
+    }
 }
 
 fn positive_u64(value: Decimal, field: &'static str) -> Result<u64, SessionPlanCorruption> {
