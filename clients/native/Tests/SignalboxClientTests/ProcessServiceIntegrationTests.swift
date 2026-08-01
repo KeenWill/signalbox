@@ -597,6 +597,46 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testUnknownTerminalDispositionGatesMutations() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(.event(try ProcessProjectionFixture.activatedEvent()))
+
+    viewModel.apply(.event(try ProcessProjectionFixture.unknownDispositionModelCallEvent()))
+
+    XCTAssertFalse(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testSideSnapshotUnknownStateReplacesRunningActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    viewModel.apply(.event(trigger))
+
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownCurrentModelCallState(),
+        trigger: trigger
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testProposedToolWaitsOnlyWhenSideSnapshotShowsApproval() async throws {
     let service = makeService(scenario: .pendingApproval)
     let sessions = try await service.listSessions(includeArchived: false)
@@ -4144,11 +4184,33 @@ private enum ProcessProjectionFixture {
         """,
         """
         {
+          "type":"transcript_text_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedUserEntry)",
+          "entry":{
+            "type":"user",
+            "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"1",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(userText)"
+        }
+        """,
+        """
+        {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
           "turn_count":"1",
-          "entry_count":"1"
+          "entry_count":"2"
         }
         """,
       ]

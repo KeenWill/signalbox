@@ -1848,6 +1848,48 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testModelIdentityMarkerRequiresFollowingTurnOrigin() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelIdentityMarker(
+          turnID: SynchronizationFixture.turn
+        )
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.markerEntry(
+          index: 1,
+          entryID: SynchronizationFixture.secondAcceptedInput
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
   func testTurnActivatedRequestsSideSnapshotRefresh() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
@@ -3008,14 +3050,17 @@ private enum SynchronizationFixture {
     )
   }
 
-  static func markerEntry(index: UInt64) throws -> SignalboxProcessServerMessage {
+  static func markerEntry(
+    index: UInt64,
+    entryID: String = entry
+  ) throws -> SignalboxProcessServerMessage {
     try message(
       """
       {
         "type":"transcript_entry",
         "entry_index":"\(index)",
         "source_session_id":"\(session)",
-        "entry_id":"\(entry)",
+        "entry_id":"\(entryID)",
         "entry":{"type":"turn_completed","turn_id":"\(turn)"}
       }
       """

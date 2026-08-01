@@ -1390,6 +1390,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   private var modelCallIDs: Set<SignalboxCanonicalUUID> = []
   private var entryIDs: Set<SignalboxSnapshotEntryIdentity> = []
   private var modelIdentityTurnIDs: Set<SignalboxCanonicalUUID> = []
+  private var pendingModelIdentityTurnID: SignalboxCanonicalUUID?
   private var priorAcceptancePosition: UInt64?
   private var priorModelCallTurnAcceptancePosition: UInt64?
   private var priorModelCallID: String?
@@ -1409,7 +1410,6 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     self.boundary = boundary
     self.capacity = capacity
   }
-
   mutating func ingest(
     _ message: SignalboxProcessServerMessage,
     expectedSessionID: SignalboxCanonicalUUID
@@ -1510,7 +1510,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptEntry(let entry):
       entriesStarted = true
       guard
-        modelCallsEnded,
+        modelCallsEnded && pendingModelIdentityTurnID == nil,
         !entry.entry.hasMalformedStoredProjection && entry.entry.modelIdentityTurnIsKnown(in: turnAcceptancePositions),
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
@@ -1519,7 +1519,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
             entryID: entry.entryID
           )
         ).inserted,
-        entry.entry.modelIdentityTurnIsUnique(in: &modelIdentityTurnIDs)
+        entry.entry.admitsModelIdentityTurn(&modelIdentityTurnIDs, &pendingModelIdentityTurnID)
       else {
         return .invalid("Snapshot entry indices or source-qualified identities were invalid.")
       }
@@ -1532,7 +1532,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       entriesStarted = true
       guard
         modelCallsEnded,
-        !entry.entry.hasMalformedStoredProjection,
+        !entry.entry.hasMalformedStoredProjection && entry.entry.consumesTurnOrigin(&pendingModelIdentityTurnID),
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1556,7 +1556,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         end.cursor == boundary.cursor,
         end.turnCount.rawValue == turnCount,
         end.entryCount.rawValue == entryCount,
-        modelCallsEnded
+        modelCallsEnded && pendingModelIdentityTurnID == nil
       else {
         return .invalid("Snapshot terminal identity, cursor, or counts were invalid.")
       }
@@ -1746,10 +1746,18 @@ extension SignalboxTranscriptEntry {
     return true
   }
 
-  fileprivate func modelIdentityTurnIsUnique(
-    in turnIDs: inout Set<SignalboxCanonicalUUID>
+  fileprivate func admitsModelIdentityTurn(
+    _ turnIDs: inout Set<SignalboxCanonicalUUID>,
+    _ pendingTurnID: inout SignalboxCanonicalUUID?
   ) -> Bool {
-    modelIdentityTurnID.map { turnIDs.insert($0).inserted } ?? true
+    guard let modelIdentityTurnID else {
+      return true
+    }
+    guard turnIDs.insert(modelIdentityTurnID).inserted else {
+      return false
+    }
+    pendingTurnID = modelIdentityTurnID
+    return true
   }
 
   fileprivate var hasMalformedStoredProjection: Bool {
@@ -1779,6 +1787,22 @@ extension SignalboxTranscriptEntry {
 }
 
 extension SignalboxTranscriptTextEntry {
+  fileprivate func consumesTurnOrigin(
+    _ pendingTurnID: inout SignalboxCanonicalUUID?
+  ) -> Bool {
+    guard let expectedTurnID = pendingTurnID else {
+      return true
+    }
+    guard case .user(_, let turnID) = self else {
+      return false
+    }
+    guard turnID == expectedTurnID else {
+      return false
+    }
+    pendingTurnID = nil
+    return true
+  }
+
   fileprivate var hasMalformedStoredProjection: Bool {
     if case .unknown(_, _, let decodingDiagnostic) = self {
       return decodingDiagnostic != nil

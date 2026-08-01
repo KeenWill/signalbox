@@ -1703,7 +1703,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         timeline = normalizer.timelineItems
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
-        if projection.activity.state == .waitingForToolDecision,
+        if !mutationBlocksByTurnID.isEmpty {
+          activity = projection.activity
+        } else if projection.activity.state == .waitingForToolDecision,
           sideSnapshotApprovalMatchesTrigger(snapshot, trigger: trigger)
         {
           activity = projection.activity
@@ -1903,7 +1905,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       mutationBlocksByTurnID.removeValue(forKey: turnID)
       activity = .init(state: .running, label: "Running")
     case .modelCallTransition(let turnID, _, let state):
-      if case .unknown = state {
+      if modelCallStateBlocksMutation(state) {
         if mutationBlocksByTurnID[turnID] != .unknownTurnState {
           mutationBlocksByTurnID[turnID] = .unknownNestedState
         }
@@ -2051,6 +2053,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .running, .waitingForToolDecision, .recoveryRequired:
       return true
     case .unavailable, .queued, .failed, .completed, .refused, .cancelled:
+      return false
+    }
+  }
+
+  private func modelCallStateBlocksMutation(_ state: SignalboxModelCallState) -> Bool {
+    switch state {
+    case .terminal(.unknown), .unknown:
+      return true
+    case .prepared, .inFlight, .cancellationRequested, .terminal:
       return false
     }
   }
