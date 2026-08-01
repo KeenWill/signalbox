@@ -106,6 +106,18 @@ impl WorkspaceRootIdentity {
     }
 }
 
+fn checked_device_identity<Device>(device: Device) -> io::Result<u64>
+where
+    Device: TryInto<u64>,
+{
+    device.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace root descriptor reported a negative device identity",
+        )
+    })
+}
+
 impl fmt::Debug for WorkspaceRoot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -132,7 +144,7 @@ impl WorkspaceRoot {
     pub fn identity(&self) -> io::Result<WorkspaceRootIdentity> {
         let status = fstat(self.descriptor()).map_err(io::Error::from)?;
         Ok(WorkspaceRootIdentity {
-            device: status.st_dev,
+            device: checked_device_identity(status.st_dev)?,
             inode: status.st_ino,
         })
     }
