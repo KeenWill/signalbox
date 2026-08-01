@@ -113,7 +113,11 @@ fn assert_real_bwrap_result(
             assert_eq!(result.stderr.encoding, OutputEncoding::Utf8);
             Ok(())
         }
-        confinement => Err(format!("unexpected real bubblewrap result: {confinement:?}").into()),
+        confinement => Err(format!(
+            "unexpected real bubblewrap result: confinement={confinement:?}, outcome={:?}, stdout={:?}, stderr={:?}",
+            result.outcome, result.stdout, result.stderr
+        )
+        .into()),
     }
 }
 
