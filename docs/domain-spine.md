@@ -3346,6 +3346,7 @@ pub struct ToolApprovalResolutionReconstitutionError { /* private */ }
 // accessors: input(), into_input()
 pub enum InitialToolApproval {
     Confirm,
+    AlwaysConfirm,
     PolicyAuto,
     SessionBlanket,
 }

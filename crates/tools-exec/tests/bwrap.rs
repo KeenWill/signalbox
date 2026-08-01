@@ -37,7 +37,21 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     let result = runner.try_run(arguments).await?;
 
-    assert_real_bwrap_result(result)
+    assert_real_bwrap_result(result)?;
+
+    let nested_arguments = ExecArguments {
+        program: String::from("sh"),
+        arguments: vec![
+            String::from("-c"),
+            String::from("test \"$(pwd)\" = /workspace/crates/tools-exec"),
+        ],
+        working_directory: String::from("crates/tools-exec"),
+        timeout_seconds: 5,
+    };
+
+    let nested_result = runner.try_run(nested_arguments).await?;
+
+    assert_real_bwrap_result(nested_result)
 }
 
 fn real_bwrap_gate(

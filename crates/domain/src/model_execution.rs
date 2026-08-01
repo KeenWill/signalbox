@@ -3908,7 +3908,7 @@ fn initial_tool_approval_matches_posture(
     match posture {
         DangerousToolAutoApproval::ApproveAll => matches!(
             approval,
-            InitialToolApproval::SessionBlanket | InitialToolApproval::Confirm
+            InitialToolApproval::SessionBlanket | InitialToolApproval::AlwaysConfirm
         ),
         DangerousToolAutoApproval::Disabled => approval != InitialToolApproval::SessionBlanket,
     }
@@ -4483,11 +4483,15 @@ mod tests {
     fn always_confirm_approval_is_admitted_under_dangerous_blanket_posture() {
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::ApproveAll,
-            InitialToolApproval::Confirm,
+            InitialToolApproval::AlwaysConfirm,
         ));
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::SessionBlanket,
+        ));
+        assert!(!initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Confirm,
         ));
     }
 
@@ -4496,6 +4500,10 @@ mod tests {
         assert!(!initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::Disabled,
             InitialToolApproval::SessionBlanket,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::AlwaysConfirm,
         ));
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::Disabled,

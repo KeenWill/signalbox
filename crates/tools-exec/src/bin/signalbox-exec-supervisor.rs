@@ -23,7 +23,10 @@ mod linux {
         ));
     }
 
-    use supervisor_protocol::{SupervisorFailureStage, SupervisorSpawnFailure, SupervisorStatus};
+    use supervisor_protocol::{
+        SupervisorCaptureCompleteness, SupervisorFailureStage, SupervisorSpawnFailure,
+        SupervisorStatus,
+    };
 
     const MINIMUM_POLL_INTERVAL: Duration = Duration::from_millis(2);
     const MAXIMUM_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -39,14 +42,26 @@ mod linux {
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
     enum LauncherStatus {
-        Exited { code: Option<i32> },
-        SpawnFailed { reason: SupervisorSpawnFailure },
+        Exited {
+            code: Option<i32>,
+            stdout: SupervisorCaptureCompleteness,
+            stderr: SupervisorCaptureCompleteness,
+        },
+        SpawnFailed {
+            reason: SupervisorSpawnFailure,
+        },
         SupervisionFailed,
     }
 
     enum TargetFailure {
         Spawn(std::io::Error),
         Supervision,
+    }
+
+    struct TargetExit {
+        status: ExitStatus,
+        stdout: SupervisorCaptureCompleteness,
+        stderr: SupervisorCaptureCompleteness,
     }
 
     struct LauncherRead {
@@ -66,7 +81,7 @@ mod linux {
             return ExitCode::FAILURE;
         };
         if mode_or_timeout == DISPATCH_MODE {
-            return dispatch(arguments.collect(), true);
+            return dispatch(arguments.collect());
         }
         if mode_or_timeout == LAUNCH_MODE {
             return launch(arguments.collect());
@@ -162,6 +177,13 @@ mod linux {
             }
             std::thread::sleep(MINIMUM_POLL_INTERVAL);
         }
+        if cancelled.load(Ordering::Acquire)
+            || started.elapsed() >= Duration::from_millis(timeout_milliseconds)
+        {
+            drop(control);
+            let _ = tree.finish(&mut child);
+            return Err(());
+        }
         control.write_all(&[1]).map_err(|_| ())?;
         let mut child_success = None;
         let mut child_wait_failed = false;
@@ -198,11 +220,35 @@ mod linux {
         }
     }
 
-    fn dispatch(arguments: Vec<OsString>, announce_dispatch: bool) -> ExitCode {
-        match run_target(arguments, announce_dispatch) {
+    fn dispatch(mut arguments: Vec<OsString>) -> ExitCode {
+        if arguments.is_empty() {
+            return ExitCode::FAILURE;
+        }
+        let program = arguments.remove(0);
+        let mut command = Command::new(program);
+        command
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        let mut stderr = std::io::stderr().lock();
+        if stderr
+            .write_all(DISPATCH_MARKER)
+            .and_then(|()| stderr.flush())
+            .is_err()
+        {
+            return ExitCode::FAILURE;
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => return dispatch_spawn_failure(&error),
+        };
+        match child.wait() {
             Ok(status) => dispatch_exit_status(status),
-            Err(TargetFailure::Spawn(error)) => dispatch_spawn_failure(&error),
-            Err(TargetFailure::Supervision) => ExitCode::FAILURE,
+            Err(_) => {
+                terminate_child(&mut child);
+                ExitCode::FAILURE
+            }
         }
     }
 
@@ -210,9 +256,11 @@ mod linux {
         if read_control_byte().is_err() {
             return ExitCode::FAILURE;
         }
-        let status = match run_target(arguments, false) {
-            Ok(status) => LauncherStatus::Exited {
-                code: status.code(),
+        let status = match run_target(arguments) {
+            Ok(target) => LauncherStatus::Exited {
+                code: target.status.code(),
+                stdout: target.stdout,
+                stderr: target.stderr,
             },
             Err(TargetFailure::Spawn(error)) => LauncherStatus::SpawnFailed {
                 reason: spawn_failure(&error),
@@ -234,10 +282,7 @@ mod linux {
         }
     }
 
-    fn run_target(
-        mut arguments: Vec<OsString>,
-        announce_dispatch: bool,
-    ) -> Result<ExitStatus, TargetFailure> {
+    fn run_target(mut arguments: Vec<OsString>) -> Result<TargetExit, TargetFailure> {
         if arguments.is_empty() {
             return Err(TargetFailure::Supervision);
         }
@@ -260,17 +305,6 @@ mod linux {
             terminate_child(&mut child);
             return Err(TargetFailure::Supervision);
         };
-        if announce_dispatch {
-            let mut stderr = std::io::stderr().lock();
-            if stderr
-                .write_all(DISPATCH_MARKER)
-                .and_then(|()| stderr.flush())
-                .is_err()
-            {
-                terminate_child(&mut child);
-                return Err(TargetFailure::Supervision);
-            }
-        }
         let leader_exited = Arc::new(AtomicBool::new(false));
         let stdout_leader_exited = Arc::clone(&leader_exited);
         let stdout_copy = std::thread::spawn(move || {
@@ -299,12 +333,19 @@ mod linux {
             }
         };
         leader_exited.store(true, Ordering::Release);
-        let stdout_copy_failed = !matches!(stdout_copy.join(), Ok(Ok(())));
-        let stderr_copy_failed = !matches!(stderr_copy.join(), Ok(Ok(())));
-        if stdout_copy_failed || stderr_copy_failed {
-            return Err(TargetFailure::Supervision);
-        }
-        Ok(status)
+        let stdout = stdout_copy
+            .join()
+            .map_err(|_| TargetFailure::Supervision)?
+            .map_err(|_| TargetFailure::Supervision)?;
+        let stderr = stderr_copy
+            .join()
+            .map_err(|_| TargetFailure::Supervision)?
+            .map_err(|_| TargetFailure::Supervision)?;
+        Ok(TargetExit {
+            status,
+            stdout,
+            stderr,
+        })
     }
 
     fn dispatch_exit_status(status: ExitStatus) -> ExitCode {
@@ -321,7 +362,7 @@ mod linux {
         source: &mut Source,
         target: &mut Target,
         leader_exited: &AtomicBool,
-    ) -> std::io::Result<()>
+    ) -> std::io::Result<SupervisorCaptureCompleteness>
     where
         Source: Read + rustix::fd::AsFd,
         Target: Write,
@@ -333,25 +374,33 @@ mod linux {
         loop {
             if post_exit_remaining.is_none() && leader_exited.load(Ordering::Acquire) {
                 let remaining = rustix::io::ioctl_fionread(&*source)?;
-                if remaining == 0 {
-                    return Ok(());
-                }
                 post_exit_remaining = Some(remaining);
+            }
+            if post_exit_remaining == Some(0) {
+                return match source.read(&mut buffer[..1]) {
+                    Ok(0) => Ok(SupervisorCaptureCompleteness::Complete),
+                    Ok(read) => {
+                        target.write_all(&buffer[..read])?;
+                        target.flush()?;
+                        Ok(SupervisorCaptureCompleteness::Incomplete)
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        Ok(SupervisorCaptureCompleteness::Incomplete)
+                    }
+                    Err(error) => Err(error),
+                };
             }
             let read_limit = post_exit_remaining
                 .map(|remaining| usize::try_from(remaining).unwrap_or(usize::MAX))
                 .unwrap_or(buffer.len())
                 .min(buffer.len());
             match source.read(&mut buffer[..read_limit]) {
-                Ok(0) => return Ok(()),
+                Ok(0) => return Ok(SupervisorCaptureCompleteness::Complete),
                 Ok(read) => {
                     target.write_all(&buffer[..read])?;
                     target.flush()?;
                     if let Some(remaining) = post_exit_remaining.as_mut() {
                         *remaining = remaining.saturating_sub(read as u64);
-                        if *remaining == 0 {
-                            return Ok(());
-                        }
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -430,7 +479,10 @@ mod linux {
             Err(()) => {
                 terminate_child(&mut child);
                 cleanup_untracked_children(std::process::id());
-                let _ = emit_launcher_stdout(launcher_reader, false);
+                let _ = emit_launcher_stdout(
+                    launcher_reader,
+                    LauncherOutputTrust::UntrustedTargetBytes,
+                );
                 return SupervisorStatus::SupervisionFailed {
                     stage: SupervisorFailureStage::Cleanup,
                 };
@@ -438,7 +490,8 @@ mod linux {
         };
         if read_control_byte().is_err() || launcher_control.write_all(&[1]).is_err() {
             let cleanup = tree.finish(&mut child);
-            let _ = emit_launcher_stdout(launcher_reader, false);
+            let _ =
+                emit_launcher_stdout(launcher_reader, LauncherOutputTrust::UntrustedTargetBytes);
             return match cleanup {
                 CleanupStatus::Complete { .. } => SupervisorStatus::Cancelled,
                 CleanupStatus::ProcessTreeUnsupported { .. } | CleanupStatus::Failed { .. } => {
@@ -488,7 +541,12 @@ mod linux {
         let cleanup = tree.finish(&mut child);
         match cleanup {
             CleanupStatus::Complete { root_success } => {
-                let launcher_status = emit_launcher_stdout(launcher_reader, root_success);
+                let output_trust = if root_success {
+                    LauncherOutputTrust::TrustedSupervisorTrailer
+                } else {
+                    LauncherOutputTrust::UntrustedTargetBytes
+                };
+                let launcher_status = emit_launcher_stdout(launcher_reader, output_trust);
                 match status {
                     SupervisionCompletion::LauncherExited { success: true } => launcher_status
                         .ok()
@@ -510,7 +568,12 @@ mod linux {
             }
             CleanupStatus::ProcessTreeUnsupported { root_success }
             | CleanupStatus::Failed { root_success } => {
-                let _ = emit_launcher_stdout(launcher_reader, root_success);
+                let output_trust = if root_success {
+                    LauncherOutputTrust::TrustedSupervisorTrailer
+                } else {
+                    LauncherOutputTrust::UntrustedTargetBytes
+                };
+                let _ = emit_launcher_stdout(launcher_reader, output_trust);
                 SupervisorStatus::SupervisionFailed {
                     stage: SupervisorFailureStage::Cleanup,
                 }
@@ -554,16 +617,23 @@ mod linux {
             .map(|status| (marker, status))
     }
 
+    #[derive(Clone, Copy)]
+    enum LauncherOutputTrust {
+        UntrustedTargetBytes,
+        TrustedSupervisorTrailer,
+    }
+
     fn emit_launcher_stdout(
         reader: JoinHandle<std::io::Result<LauncherRead>>,
-        trusted: bool,
+        trust: LauncherOutputTrust,
     ) -> Result<Option<LauncherStatus>, ()> {
         let read = reader.join().map_err(|_| ())?.map_err(|_| ())?;
-        let (output_bytes, status) = if trusted {
-            let (marker, status) = read.parsed.ok_or(())?;
-            (&read.tail[..marker], Some(status))
-        } else {
-            (read.tail.as_slice(), None)
+        let (output_bytes, status) = match trust {
+            LauncherOutputTrust::UntrustedTargetBytes => (read.tail.as_slice(), None),
+            LauncherOutputTrust::TrustedSupervisorTrailer => {
+                let (marker, status) = read.parsed.ok_or(())?;
+                (&read.tail[..marker], Some(status))
+            }
         };
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(output_bytes).map_err(|_| ())?;
@@ -573,7 +643,15 @@ mod linux {
 
     fn launcher_supervisor_status(status: LauncherStatus) -> SupervisorStatus {
         match status {
-            LauncherStatus::Exited { code } => SupervisorStatus::Exited { code },
+            LauncherStatus::Exited {
+                code,
+                stdout,
+                stderr,
+            } => SupervisorStatus::Exited {
+                code,
+                stdout,
+                stderr,
+            },
             LauncherStatus::SpawnFailed { reason } => SupervisorStatus::SpawnFailed { reason },
             LauncherStatus::SupervisionFailed => SupervisorStatus::SupervisionFailed {
                 stage: SupervisorFailureStage::Wait,

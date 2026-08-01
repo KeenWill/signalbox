@@ -206,6 +206,8 @@ async fn production_runner_clears_ambient_environment_when_requested()
             result.stdout.bytes,
             explicit_environment_output().as_bytes()
         );
+        assert_eq!(result.stdout.completeness, CaptureCompleteness::Complete);
+        assert_eq!(result.stderr.completeness, CaptureCompleteness::Complete);
         Ok(())
     })
     .await
@@ -301,6 +303,8 @@ async fn production_dispatcher_does_not_wait_for_descendant_held_pipes()
         let descendant = std::str::from_utf8(&result.stdout.bytes)?.parse::<u32>()?;
 
         assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
+        assert_eq!(result.stdout.completeness, CaptureCompleteness::Truncated);
+        assert_eq!(result.stderr.completeness, CaptureCompleteness::Truncated);
         assert!(elapsed < Duration::from_secs(2));
         assert!(!std::path::Path::new(&format!("/proc/{descendant}")).exists());
         Ok(())
