@@ -32,6 +32,23 @@ fn correlation(session_seed: u128) -> ToolAttemptDispatchCorrelation {
     )
 }
 
+fn provenance_with_attempt(
+    provenance: PlanEventProvenance,
+    attempt_seed: u128,
+) -> PlanEventProvenance {
+    let base = provenance.correlation();
+    PlanEventProvenance::from_invocation(ToolAttemptDispatchCorrelation::reconstitute(
+        ToolAttemptDispatchCorrelationReconstitutionInput {
+            session: base.session(),
+            turn: base.turn(),
+            issuing_attempt: base.issuing_attempt(),
+            request: base.request(),
+            attempt: ToolAttemptId::from_uuid(uuid::Uuid::from_u128(attempt_seed)),
+            generation: base.generation(),
+        },
+    ))
+}
+
 fn ordinal(value: u64) -> PlanEventOrdinal {
     PlanEventOrdinal::try_from_u64(value).expect("fixture event ordinal is positive")
 }
@@ -215,7 +232,7 @@ fn oversized_read_page(provenance: PlanEventProvenance) -> PlanReadPage {
         .map(|value| {
             event(
                 value as u64,
-                provenance,
+                provenance_with_attempt(provenance, 1_000 + value as u128),
                 PlanEventKind::Created {
                     text: large_text.clone(),
                 },
@@ -450,6 +467,22 @@ fn read_reports_long_history_truncation_without_implying_completeness() {
 }
 
 #[test]
+fn direct_read_request_bounds_history_to_the_declared_page_limit() {
+    let dispatch = correlation(10);
+    let request = PlanReadRequest::new(dispatch.session(), None, Some(usize::MAX));
+
+    assert_eq!(request.history_limit(), Some(MAX_PLAN_HISTORY_EVENTS));
+}
+
+#[test]
+fn direct_read_request_lifts_history_to_the_declared_page_minimum() {
+    let dispatch = correlation(10);
+    let request = PlanReadRequest::new(dispatch.session(), None, Some(0));
+
+    assert_eq!(request.history_limit(), Some(MIN_PLAN_HISTORY_EVENTS));
+}
+
+#[test]
 fn text_rejects_postgres_null_at_the_checked_boundary() {
     let rejected = PlanText::try_new("cannot\0persist".to_owned());
 
@@ -529,6 +562,52 @@ fn read_truncates_oversized_encoded_evidence_and_reports_every_omission() {
     assert!(ToolResultText::try_new(encoded).is_ok());
     assert_eq!(output["plan_truncated"], json!(true));
     assert_eq!(output["history_truncated"], json!(true));
+}
+
+#[test]
+fn read_rejects_repeated_tool_attempt_provenance() {
+    let dispatch = correlation(10);
+    let provenance = PlanEventProvenance::from_invocation(dispatch);
+    let initial = text(INITIAL_TEXT);
+    let second = text(SECOND_TEXT);
+    let history = PlanHistoryPage::new(
+        vec![
+            event(
+                1,
+                provenance,
+                PlanEventKind::Created {
+                    text: initial.clone(),
+                },
+            ),
+            event(
+                2,
+                provenance,
+                PlanEventKind::Created {
+                    text: second.clone(),
+                },
+            ),
+        ],
+        PlanPageCompleteness::Complete,
+    );
+    let current = vec![
+        PlanEntry::new(entry(1), initial, PlanStatus::Pending),
+        PlanEntry::new(entry(2), second, PlanStatus::Pending),
+    ];
+    let port = FakePort::reading(PlanReadPage::new(
+        current,
+        PlanPageCompleteness::Complete,
+        Some(history),
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_read_operation(&arguments(json!({"include_history": true})))
+        .expect("fixture history arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("repeated physical attempt violates the port contract");
+
+    assert!(is_port_contract(&error));
 }
 
 #[test]

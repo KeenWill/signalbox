@@ -68,6 +68,8 @@ pub enum SessionPlanCorruption {
         /// Unsupported spelling.
         value: String,
     },
+    /// Two stored identity fields disagreed.
+    MismatchedIdentity(&'static str),
     /// Stored text violated the tool boundary.
     InvalidText,
 }
@@ -81,6 +83,9 @@ impl fmt::Display for SessionPlanCorruption {
             }
             Self::Unsupported { field, value } => {
                 write!(formatter, "session plan has unsupported {field}: {value}")
+            }
+            Self::MismatchedIdentity(field) => {
+                write!(formatter, "session plan has mismatched {field}")
             }
             Self::InvalidText => formatter.write_str("session plan has invalid entry text"),
         }
@@ -408,9 +413,16 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
     let provenance = decode_provenance(session, row)?;
     let event_kind: String = required(row, "event_kind")?;
     let kind = match event_kind.as_str() {
-        "created" => PlanEventKind::Created {
-            text: decode_text(row)?,
-        },
+        "created" => {
+            if entry.creation_ordinal() != ordinal {
+                return Err(
+                    SessionPlanCorruption::MismatchedIdentity("created entry identity").into(),
+                );
+            }
+            PlanEventKind::Created {
+                text: decode_text(row)?,
+            }
+        }
         "text_revised" => PlanEventKind::TextRevised {
             entry,
             text: decode_text(row)?,

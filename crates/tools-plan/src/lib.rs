@@ -1,6 +1,6 @@
 //! Durable, session-scoped plan tools over an injected append/read port.
 
-use std::{error::Error, fmt, future::Future, num::NonZeroU64};
+use std::{collections::HashSet, error::Error, fmt, future::Future, num::NonZeroU64};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -25,6 +25,8 @@ pub const PLAN_TOOL_NAMES: [&str; 2] = [PLAN_WRITE_NAME, PLAN_READ_NAME];
 pub const MAX_PLAN_TEXT_CHARS: usize = 4096;
 /// Greatest number of current entries returned by one read.
 pub const MAX_PLAN_READ_ENTRIES: usize = 100;
+/// Least number of history events returned when history is requested.
+pub const MIN_PLAN_HISTORY_EVENTS: usize = 1;
 /// Greatest number of history events returned by one read.
 pub const MAX_PLAN_HISTORY_EVENTS: usize = 100;
 
@@ -479,6 +481,11 @@ impl PlanReadRequest {
         after_entry: Option<PlanEntryId>,
         history_limit: Option<usize>,
     ) -> Self {
+        let history_limit = match history_limit {
+            Some(limit) if limit < MIN_PLAN_HISTORY_EVENTS => Some(MIN_PLAN_HISTORY_EVENTS),
+            Some(limit) if limit > MAX_PLAN_HISTORY_EVENTS => Some(MAX_PLAN_HISTORY_EVENTS),
+            requested => requested,
+        };
         Self {
             session,
             after_entry,
@@ -975,14 +982,17 @@ impl<Port: SessionPlanPort> PlanExecutor<Port> {
                         validate_append(&request, &event)?;
                         Ok(ToolExecutorEvidence::CompletedText(encode_append(event)?))
                     }
-                    PlanAppendOutcome::Rejected(rejection)
-                        if rejection_matches_request(request.draft(), rejection) =>
-                    {
-                        Ok(ToolExecutorEvidence::KnownFailed {
-                            detail: Some(self.entry_not_found_detail.clone()),
-                        })
-                    }
-                    PlanAppendOutcome::Rejected(_) => Err(PlanExecutorError::PortContract),
+                    PlanAppendOutcome::Rejected(rejection) => match rejection {
+                        PlanAppendRejection::UnknownEntry { entry } => {
+                            if missing_entry_matches_request(request.draft(), entry) {
+                                Ok(ToolExecutorEvidence::KnownFailed {
+                                    detail: Some(self.entry_not_found_detail.clone()),
+                                })
+                            } else {
+                                Err(PlanExecutorError::PortContract)
+                            }
+                        }
+                    },
                 }
             }
             PlanOperation::Read {
@@ -1062,15 +1072,12 @@ fn event_matches_draft(event: &PlanEvent, draft: &PlanEventDraft) -> bool {
     }
 }
 
-fn rejection_matches_request(draft: &PlanEventDraft, rejection: PlanAppendRejection) -> bool {
-    match (draft, rejection) {
-        (
-            PlanEventDraft::Revise { entry, .. } | PlanEventDraft::SetStatus { entry, .. },
-            PlanAppendRejection::UnknownEntry {
-                entry: rejected_entry,
-            },
-        ) => *entry == rejected_entry,
-        (PlanEventDraft::Create { .. }, PlanAppendRejection::UnknownEntry { .. }) => false,
+fn missing_entry_matches_request(draft: &PlanEventDraft, rejected_entry: PlanEntryId) -> bool {
+    match draft {
+        PlanEventDraft::Revise { entry, .. } | PlanEventDraft::SetStatus { entry, .. } => {
+            *entry == rejected_entry
+        }
+        PlanEventDraft::Create { .. } => false,
     }
 }
 
@@ -1119,6 +1126,7 @@ fn validate_read_page<PortError>(
             return Err(PlanExecutorError::PortContract);
         }
         let mut prior_ordinal = None;
+        let mut provenance_attempts = HashSet::with_capacity(history.events().len());
         let folded =
             fold_plan_events(history.events()).map_err(|_| PlanExecutorError::PortContract)?;
         if !history.completeness().is_truncated()
@@ -1130,6 +1138,7 @@ fn validate_read_page<PortError>(
         for event in history.events() {
             if event.provenance().session() != request.session()
                 || prior_ordinal.is_some_and(|prior| event.ordinal() <= prior)
+                || !provenance_attempts.insert(event.provenance().correlation().attempt())
             {
                 return Err(PlanExecutorError::PortContract);
             }
