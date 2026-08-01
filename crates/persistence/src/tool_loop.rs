@@ -1666,9 +1666,6 @@ async fn decode_approval(
         }
     };
     let user_command: Option<Uuid> = row.try_get("owner_command_id")?;
-    let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
-    let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
-    let rationale: Option<String> = row.try_get("rationale")?;
     let input = match required::<String>(&row, "decision_source")?.as_str() {
         "owner_command" => {
             let command_id = durable_command_id_from_uuid(
@@ -1701,6 +1698,9 @@ async fn decode_approval(
             )
         }
         "delegate" if user_command.is_none() => {
+            let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
+            let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
+            let rationale: Option<String> = row.try_get("rationale")?;
             let request_record = load_request_by_id(connection, request)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("delegate approval request"))?;
