@@ -750,7 +750,9 @@ fn credential_safe_transport_outcome(
         Ok(response) => {
             let credential_text =
                 std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-            if credential_text.is_empty() || format!("{response:?}").contains(credential_text) {
+            if credential_text.is_empty()
+                || ascii_case_insensitive_contains(&format!("{response:?}"), credential_text)
+            {
                 Err(WebSearchTransportFailure::CredentialDiagnosticCollision(
                     WebSearchCredentialDiagnostic {
                         rendered: safe_collision_diagnostic(credential_text),
@@ -765,7 +767,8 @@ fn credential_safe_transport_outcome(
         Err(failure) => Err(credential_safe_transport_failure(failure, credential)),
     };
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-    let result = if credential_text.is_empty() || format!("{sanitized:?}").contains(credential_text)
+    let result = if credential_text.is_empty()
+        || ascii_case_insensitive_contains(&format!("{sanitized:?}"), credential_text)
     {
         let failure_class = match &sanitized {
             Ok(_) => WebSearchCredentialDiagnosticClass::CallerOrHubBug,
@@ -826,8 +829,8 @@ fn credential_safe_transport_failure(
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let (source_contains_credential, executor_contains_credential) = match &failure {
         WebSearchTransportFailure::ProviderRejected(error) => (
-            format!("{error:?}").contains(credential_text)
-                || error.to_string().contains(credential_text),
+            ascii_case_insensitive_contains(&format!("{error:?}"), credential_text)
+                || ascii_case_insensitive_contains(&error.to_string(), credential_text),
             false,
         ),
         WebSearchTransportFailure::InvalidCredential
@@ -839,14 +842,17 @@ fn credential_safe_transport_failure(
             let executor_error = WebSearchExecutorError::DispatchUnknown;
             (
                 false,
-                format!("{executor_error:?}").contains(credential_text)
-                    || executor_error.to_string().contains(credential_text),
+                ascii_case_insensitive_contains(&format!("{executor_error:?}"), credential_text)
+                    || ascii_case_insensitive_contains(
+                        &executor_error.to_string(),
+                        credential_text,
+                    ),
             )
         }
     };
     if credential_text.is_empty()
-        || format!("{failure:?}").contains(credential_text)
-        || failure.to_string().contains(credential_text)
+        || ascii_case_insensitive_contains(&format!("{failure:?}"), credential_text)
+        || ascii_case_insensitive_contains(&failure.to_string(), credential_text)
         || source_contains_credential
         || executor_contains_credential
     {
@@ -865,7 +871,7 @@ fn safe_collision_diagnostic(credential: &str) -> String {
     const DIAGNOSTIC: &str = "web search credential diagnostic suppressed";
     const REDACTION: &str = "[redacted]";
     let redacted = DIAGNOSTIC.replace(credential, REDACTION);
-    if !credential.is_empty() && !redacted.contains(credential) {
+    if !credential.is_empty() && !ascii_case_insensitive_contains(&redacted, credential) {
         return redacted;
     }
     if credential == "!" {
@@ -883,8 +889,8 @@ fn credential_safe_executor_error(
     let failure_class = executor_error_diagnostic_class(&error);
     let transport_failure_class = executor_error_transport_failure_class(&error);
     if credential_text.is_empty()
-        || format!("{error:?}").contains(credential_text)
-        || error.to_string().contains(credential_text)
+        || ascii_case_insensitive_contains(&format!("{error:?}"), credential_text)
+        || ascii_case_insensitive_contains(&error.to_string(), credential_text)
     {
         WebSearchExecutorError::CredentialDiagnosticCollision(WebSearchCredentialDiagnostic {
             rendered: safe_collision_diagnostic(credential_text),
@@ -940,9 +946,7 @@ fn build_provider_request(
     if credential_text.is_empty() {
         return Err(WebSearchTransportFailure::InvalidCredential);
     }
-    if request.query().contains(credential_text)
-        || unicode_normalized_contains(request.query(), credential_text)
-        || encoded_contains_credential(request.query(), credential_text)
+    if query_contains_credential(request.query(), credential_text)
         || fixed_request_metadata_contains_credential(endpoint, credential_text)
     {
         return Err(WebSearchTransportFailure::RequestFailed);
@@ -971,6 +975,12 @@ fn build_provider_request(
         return Err(WebSearchTransportFailure::RequestFailed);
     }
     Ok(http_request)
+}
+
+fn query_contains_credential(query: &str, credential: &str) -> bool {
+    query.contains(credential)
+        || unicode_normalized_contains(query, credential)
+        || encoded_contains_credential(query, credential)
 }
 
 fn fixed_request_metadata_contains_credential(
@@ -1230,6 +1240,19 @@ where
                 ToolExecutorEvidence::KnownFailed { detail },
             ));
         };
+        let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+        if query_contains_credential(request.query(), credential_text) {
+            let outcome = known_failure_evidence(self.request_failed_detail.clone(), &scrubber);
+            return match outcome {
+                Ok(evidence) => {
+                    WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Credentialed {
+                        evidence,
+                        credential,
+                    })
+                }
+                Err(error) => WebSearchRequestOutcome::Error { error, credential },
+            };
+        }
         let transport_result = self
             .transport
             .search(request, &credential)
@@ -1323,8 +1346,9 @@ where
     }
 
     fn invalid_response_evidence(&self, scrubber: &CredentialScrubber) -> ToolExecutorEvidence {
-        let detail = (!scrubber.contains_credential(self.invalid_response_detail.as_str()))
-            .then(|| self.invalid_response_detail.clone());
+        let detail = (!scrubber
+            .contains_case_normalized_credential(self.invalid_response_detail.as_str()))
+        .then(|| self.invalid_response_detail.clone());
         ToolExecutorEvidence::KnownFailed { detail }
     }
 }
@@ -1388,7 +1412,7 @@ fn bind_request_outcome(
                 Result::<&CorrelatedToolExecutorEvidence, _>::Err(&error)
             );
             if !credential_text.is_empty()
-                && !bound_diagnostic_contains_credential(&rendered_result, credential_text)
+                && !ascii_case_insensitive_contains(&rendered_result, credential_text)
             {
                 return Err(error);
             }
@@ -1407,9 +1431,7 @@ fn bind_request_outcome(
             let fallback = invocation.bind(ToolExecutorEvidence::KnownFailed { detail: None });
             let rendered_fallback =
                 format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&fallback));
-            if !credential_text.is_empty()
-                && !bound_diagnostic_contains_credential(&rendered_fallback, credential_text)
-            {
+            if !credential_text.is_empty() && !rendered_fallback.contains(credential_text) {
                 return Ok(fallback);
             }
             return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
@@ -1428,6 +1450,8 @@ fn bind_request_outcome(
             credential,
         } => (evidence, Some(credential)),
     };
+    let check_case_normalized_diagnostic =
+        matches!(&evidence, ToolExecutorEvidence::CompletedText(_));
     let bound = invocation.bind(evidence);
     let Some(credential) = credential else {
         return Ok(bound);
@@ -1435,7 +1459,9 @@ fn bind_request_outcome(
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let rendered_result = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&bound));
     if credential_text.is_empty()
-        || bound_diagnostic_contains_credential(&rendered_result, credential_text)
+        || rendered_result.contains(credential_text)
+        || (check_case_normalized_diagnostic
+            && ascii_case_insensitive_contains(&rendered_result, credential_text))
     {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
@@ -1711,7 +1737,7 @@ fn success_evidence(
         "truncated": truncated,
     }))
     .map_err(|_| WebSearchExecutorError::EvidenceEncoding)?;
-    if scrubber.contains_credential(&content) {
+    if scrubber.contains_case_normalized_credential(&content) {
         return Err(WebSearchExecutorError::EvidenceEncoding);
     }
     Ok(ToolExecutorEvidence::CompletedText(content))
@@ -1721,7 +1747,7 @@ fn known_failure_evidence(
     detail: ToolExecutionErrorDetail,
     scrubber: &CredentialScrubber,
 ) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
-    let detail = (!scrubber.contains_credential(detail.as_str())).then_some(detail);
+    let detail = (!scrubber.contains_case_normalized_credential(detail.as_str())).then_some(detail);
     Ok(ToolExecutorEvidence::KnownFailed { detail })
 }
 
@@ -1753,7 +1779,7 @@ fn provider_error_detail(
         )
     };
     let bounded = truncate_after_redaction(detail);
-    if scrubber.contains_credential(&bounded) {
+    if scrubber.contains_case_normalized_credential(&bounded) {
         return Ok(None);
     }
     ToolExecutionErrorDetail::try_new(bounded)
@@ -1819,6 +1845,12 @@ impl CredentialScrubber {
     fn contains_encoded_credential(&self, text: &str) -> bool {
         encoded_contains_credential(text, &self.exact)
             || encoded_contains_credential(text, &self.json_escaped)
+    }
+
+    fn contains_case_normalized_credential(&self, text: &str) -> bool {
+        self.contains_credential(text)
+            || unicode_case_insensitive_contains(text, &self.exact)
+            || unicode_case_insensitive_contains(text, &self.json_escaped)
     }
 
     fn url_contains_encoded_credential(&self, text: &str) -> bool {
@@ -1891,13 +1923,6 @@ fn ascii_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
             .as_bytes()
             .windows(needle.len())
             .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
-fn bound_diagnostic_contains_credential(rendered: &str, credential: &str) -> bool {
-    rendered.contains(credential)
-        || rendered
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .any(|token| token.eq_ignore_ascii_case(credential))
 }
 
 fn encoded_contains_credential(text: &str, credential: &str) -> bool {
@@ -2136,7 +2161,10 @@ mod tests {
     const TIMESTAMP_COLLISION_KEY: &str = "2026";
     const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
     const EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY: &str = "completedtext";
+    const EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY: &str = "completedtext(";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
+    const TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY: &str = "requestfailed";
+    const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
     const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
@@ -2918,6 +2946,37 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 1);
     }
 
+    /// INV-035: query/credential collisions are rejected before the injected
+    /// transport boundary, independent of the production request builder.
+    #[tokio::test]
+    async fn web_search_rejects_query_credential_before_injected_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: SYNTHETIC_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(SYNTHETIC_KEY),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("query collision is definitive pre-dispatch evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
     /// INV-035: the actual `ToolExecutor::execute` result fails closed before
     /// its bound evidence diagnostic can reproduce the request credential.
     #[tokio::test]
@@ -2996,6 +3055,48 @@ mod tests {
         assert!(!unicode_case_insensitive_contains(
             &rendered,
             EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY
+        ));
+    }
+
+    /// INV-035: punctuation does not conceal a case-normalized fixed Debug
+    /// spelling in the public bound executor result.
+    #[tokio::test]
+    async fn web_search_bound_executor_result_omits_punctuated_case_collision() {
+        let diagnostic = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&diagnostic);
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY,
+        };
+        let transport = CountingTransport { searches };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("static web_search tool compiles")
+            .into_parts();
+        let executor = FormattingExecutor {
+            inner: executor,
+            diagnostic: captured,
+        };
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let rendered = diagnostic
+            .lock()
+            .expect("captured executor diagnostic lock is available")
+            .clone();
+
+        assert!(result.is_err());
+        assert!(!unicode_case_insensitive_contains(
+            &rendered,
+            EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY
         ));
     }
 
@@ -3981,6 +4082,30 @@ mod tests {
         ));
     }
 
+    /// INV-035: a transport failure's case-normalized fixed Debug spelling
+    /// cannot survive in the public transport outcome.
+    #[test]
+    fn web_search_transport_rejects_case_normalized_failure_collision() {
+        let credential = CredentialValue::new(
+            TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY
+                .as_bytes()
+                .to_vec(),
+        );
+        let outcome = WebSearchTransportOutcome::failed(
+            WebSearchTransportFailure::RequestFailed,
+            &credential,
+        );
+
+        assert!(!unicode_case_insensitive_contains(
+            &format!("{outcome:?}"),
+            TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY
+        ));
+        assert!(matches!(
+            outcome.into_result(),
+            Err(WebSearchTransportFailure::CredentialDiagnosticCollision(_))
+        ));
+    }
+
     /// INV-035: the public successful transport outcome cannot synthesize a
     /// request credential in its outer `Result` diagnostic.
     #[test]
@@ -4189,6 +4314,18 @@ mod tests {
         assert_eq!(searches, 1);
     }
 
+    /// INV-035: a case-normalized definitive detail collision is omitted while
+    /// the public service still commits the completed request failure.
+    #[tokio::test]
+    async fn case_normalized_detail_collision_commits_request_failure() {
+        let (outcome, searches) =
+            execute_request_failure_through_service(CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY)
+                .await;
+
+        assert!(is_committed_known_failure_without_detail(&outcome));
+        assert_eq!(searches, 1);
+    }
+
     /// INV-035: a dynamic provider-rejection detail that collides with the
     /// credential is omitted while the public service commits known failure.
     #[tokio::test]
@@ -4223,6 +4360,8 @@ mod tests {
         assert_eq!(detail, INVALID_RESPONSE_DETAIL);
     }
 
+    /// INV-035: credential-resolution telemetry carries only its safe closed
+    /// classification and request correlation.
     #[test]
     fn credential_failure_diagnostic_preserves_safe_classification() {
         let error = CredentialAccessError::new(
@@ -4239,6 +4378,8 @@ mod tests {
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
     }
 
+    /// INV-035: unusable-credential telemetry cannot retain the resolved
+    /// credential bytes.
     #[test]
     fn unusable_credential_value_diagnostic_preserves_safe_classification() {
         let correlation = dispatch_correlation();
@@ -4309,6 +4450,8 @@ mod tests {
         assert_eq!(searches, 0);
     }
 
+    /// INV-035: transport-failure telemetry cannot retain the request
+    /// credential.
     #[test]
     fn transport_failure_diagnostic_preserves_safe_classification() {
         let correlation = dispatch_correlation();
