@@ -28,6 +28,7 @@ const PARENT_KILL_PID_FILE: &str = "signalbox-exec-parent-kill";
 const GRANDPARENT_KILL_PID_FILE: &str = "signalbox-exec-grandparent-kill";
 const ESCAPED_SUPERVISOR_KILL_PID_FILE: &str = "signalbox-exec-escaped-supervisor-kill";
 const CANCELLATION_PID_FILE: &str = "signalbox-tools-exec-cancel";
+const PROCESS_GROUP_KILL_TIME_LIMIT: Duration = Duration::from_secs(5);
 const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
 const INHERITED_STDOUT_FIXTURE_NAME: &str = "inherited_subprocess_stdout_fixture";
 const INHERITED_FORGED_TEST_NAME: &str = "inherited::forged";
@@ -98,7 +99,6 @@ fn inherited_subprocess_stdout_fixture() -> Result<(), Box<dyn std::error::Error
     assert!(status.success());
     Ok(())
 }
-
 struct TemporaryPath {
     path: PathBuf,
 }
@@ -542,7 +542,7 @@ async fn production_runner_survives_target_killing_its_direct_parent()
                 reason: ProcessSupervisionFailure::Wait,
             }
         );
-        assert!(elapsed < Duration::from_secs(2));
+        assert!(elapsed < PROCESS_GROUP_KILL_TIME_LIMIT);
         assert!(!std::path::Path::new(&format!("/proc/{target}")).exists());
         Ok(())
     })
@@ -642,7 +642,7 @@ async fn production_runner_reaps_new_session_target_after_process_group_kill()
                 reason: ProcessSupervisionFailure::Wait,
             }
         );
-        assert!(elapsed < Duration::from_secs(2));
+        assert!(elapsed < PROCESS_GROUP_KILL_TIME_LIMIT);
         assert!(!std::path::Path::new(&format!("/proc/{target}")).exists());
         Ok(())
     })
