@@ -123,7 +123,11 @@ AS $$
            AND request.turn_id = candidate.provenance_turn_id
            AND request.tool_name = 'plan_write'
            AND request.arguments_kind = 'json'
-           AND request.arguments_text::jsonb =
+           AND CASE
+                   WHEN request.arguments_kind = 'json'
+                   THEN request.arguments_text::jsonb
+                   ELSE NULL::jsonb
+               END =
                 CASE candidate.event_kind
                     WHEN 'created' THEN jsonb_build_object(
                         'kind', 'create',
@@ -196,7 +200,11 @@ BEGIN
        AND attempt.session_id = NEW.session_id
        AND request.tool_name = 'plan_write'
        AND request.arguments_kind = 'json'
-       AND request.arguments_text::jsonb =
+       AND CASE
+               WHEN request.arguments_kind = 'json'
+               THEN request.arguments_text::jsonb
+               ELSE NULL::jsonb
+           END =
             CASE NEW.event_kind
                 WHEN 'created' THEN jsonb_build_object(
                     'kind', 'create',

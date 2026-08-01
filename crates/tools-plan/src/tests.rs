@@ -345,6 +345,7 @@ fn fold_applies_text_revision() {
 #[test]
 fn fold_applies_status_move() {
     let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let moved_status = PlanStatus::InProgress;
     let events = vec![
         event(
             1,
@@ -358,14 +359,14 @@ fn fold_applies_status_move() {
             provenance,
             PlanEventKind::StatusChanged {
                 entry: entry(1),
-                status: PlanStatus::InProgress,
+                status: moved_status,
             },
         ),
     ];
 
     let folded = fold_plan_events(&events).expect("contiguous fixture history folds");
 
-    assert_eq!(only_entry(&folded).status(), PlanStatus::InProgress);
+    assert_eq!(only_entry(&folded).status(), moved_status);
 }
 
 #[test]
@@ -399,6 +400,9 @@ fn fold_preserves_creation_order_under_interleaved_entry_appends() {
     let provenance = PlanEventProvenance::from_invocation(correlation(10));
     let revised_first = text(REVISED_TEXT);
     let second = text(SECOND_TEXT);
+    let first_entry = entry(1);
+    let later_entry = entry(2);
+    let later_status = PlanStatus::InProgress;
     let events = vec![
         event(
             1,
@@ -418,15 +422,15 @@ fn fold_preserves_creation_order_under_interleaved_entry_appends() {
             3,
             provenance,
             PlanEventKind::StatusChanged {
-                entry: entry(2),
-                status: PlanStatus::InProgress,
+                entry: later_entry,
+                status: later_status,
             },
         ),
         event(
             4,
             provenance,
             PlanEventKind::TextRevised {
-                entry: entry(1),
+                entry: first_entry,
                 text: revised_first.clone(),
             },
         ),
@@ -435,12 +439,12 @@ fn fold_preserves_creation_order_under_interleaved_entry_appends() {
     let folded = fold_plan_events(&events).expect("interleaved fixture history folds");
     let (first, later) = ordered_pair(&folded);
 
-    assert_eq!(first.id(), entry(1));
+    assert_eq!(first.id(), first_entry);
     assert_eq!(first.text(), &revised_first);
     assert_eq!(first.status(), PlanStatus::Pending);
-    assert_eq!(later.id(), entry(2));
+    assert_eq!(later.id(), later_entry);
     assert_eq!(later.text(), &second);
-    assert_eq!(later.status(), PlanStatus::InProgress);
+    assert_eq!(later.status(), later_status);
 }
 
 #[test]
@@ -518,6 +522,7 @@ fn read_reports_long_history_truncation_without_implying_completeness() {
         )],
         PlanPageCompleteness::Truncated,
     );
+    let expected_history_len = history.events().len();
     let port = FakePort::reading(PlanReadPage::new(
         dispatch.session(),
         vec![current],
@@ -540,7 +545,10 @@ fn read_reports_long_history_truncation_without_implying_completeness() {
     assert_eq!(observed.session(), dispatch.session());
     assert_eq!(observed.history_limit(), Some(MAX_PLAN_HISTORY_EVENTS));
     assert_eq!(output["history_truncated"], json!(true));
-    assert_eq!(output["history"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        output["history"].as_array().map(Vec::len),
+        Some(expected_history_len)
+    );
 }
 
 #[test]
