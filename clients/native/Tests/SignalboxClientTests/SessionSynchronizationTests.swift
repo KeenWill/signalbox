@@ -2529,7 +2529,7 @@ private enum SynchronizationFixture {
         "state":{
           "type":"queued",
           "accepted_input_id":"\(acceptedInput)",
-          "content":"fixture owner input"
+          "content":"fixture user input"
         }
       }
       """
@@ -2546,7 +2546,7 @@ private enum SynchronizationFixture {
         "state":{
           "type":"queued",
           "accepted_input_id":"\(secondAcceptedInput)",
-          "content":"fixture second owner input"
+          "content":"fixture second user input"
         }
       }
       """
@@ -2698,7 +2698,7 @@ private enum SynchronizationFixture {
         "entry_index":"0",
         "fragment_index":"\(fragmentIndex)",
         "final_fragment":true,
-        "content_fragment":"fixture owner input"
+        "content_fragment":"fixture user input"
       }
       """
     )
@@ -2785,7 +2785,7 @@ private enum SynchronizationFixture {
           "accepted_input_id":"\(acceptedInput)",
           "turn_id":"\(turn)",
           "acceptance_position":"1",
-          "content":"fixture owner input"
+          "content":"fixture user input"
         }
       }
       """

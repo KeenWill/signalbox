@@ -315,7 +315,7 @@ impl ProcessFailedTerminalModelCall {
     }
 }
 
-/// Whether a session can owe an owner reconciliation decision right now.
+/// Whether a session can owe a user reconciliation decision right now.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessModelCallRecoveryPrecondition {
     /// No such session exists in this snapshot.
@@ -336,7 +336,7 @@ pub enum ProcessTurnState {
     Queued {
         /// Accepted input that created the queued turn.
         accepted_input: AcceptedInputId,
-        /// Exact accepted owner text.
+        /// Exact accepted user text.
         content: String,
     },
     /// The current attempt is running.
@@ -353,7 +353,7 @@ pub enum ProcessTurnState {
         /// Ambiguous call awaiting recovery.
         recovery_call: ModelCallId,
     },
-    /// The yielded tool batch is parked on an owner decision.
+    /// The yielded tool batch is parked on a user decision.
     ActiveAwaitingToolApproval {
         /// Earliest undecided tool request.
         request: ToolRequestId,
@@ -506,8 +506,8 @@ impl ProcessTranscriptTurn {
 /// Session ancestry relevant to process-protocol compatibility.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessSessionAncestry {
-    /// Owner-initiated native session.
-    OwnerInitiated,
+    /// User-initiated native session.
+    UserInitiated,
     /// Session seeded from one immutable imported frontier.
     ImportedConversation,
 }
@@ -583,7 +583,7 @@ pub enum ProcessTranscriptEntry {
         /// Exact model-produced summary text.
         content: String,
     },
-    /// Exact accepted owner input.
+    /// Exact accepted user input.
     User {
         /// Zero-based position in the projected frontier.
         entry_index: u64,
@@ -647,7 +647,7 @@ pub enum ProcessTranscriptEntry {
         /// Exact provider-visible result content.
         content: String,
     },
-    /// Owner or policy denied one tool request.
+    /// User or policy denied one tool request.
     ToolDenied {
         /// Zero-based position in the projected frontier.
         entry_index: u64,
@@ -1337,7 +1337,7 @@ impl ProcessReadRepository {
     /// turn is parked on the model-call recovery wait.
     ///
     /// This narrow read lets a process adapter refuse a reconciliation request
-    /// whose named turn owes no owner decision, before recording a durable
+    /// whose named turn owes no user decision, before recording a durable
     /// command. It is a precondition, never authority: the authoritative
     /// transaction revalidates the exact expected active turn under the
     /// session lock, and an ended attempt never returns to a live phase, so an
@@ -1617,7 +1617,7 @@ fn decode_process_session_ancestry(
 ) -> Result<ProcessSessionAncestry, ProcessReadError> {
     let ancestry: String = required(row, "ancestry_kind")?;
     match ancestry.as_str() {
-        "none" => Ok(ProcessSessionAncestry::OwnerInitiated),
+        "none" => Ok(ProcessSessionAncestry::UserInitiated),
         "imported_conversation" => Ok(ProcessSessionAncestry::ImportedConversation),
         _ => Err(ProcessReadCorruption::Unsupported {
             field: "session ancestry kind",
@@ -1652,7 +1652,7 @@ async fn load_checked_imported_seed_frontier(
     let ancestry = decode_process_session_ancestry(&row)?;
     let seed: Option<Uuid> = row.try_get("seed_context_frontier_id")?;
     match (ancestry, seed) {
-        (ProcessSessionAncestry::OwnerInitiated, None) => Ok(None),
+        (ProcessSessionAncestry::UserInitiated, None) => Ok(None),
         (ProcessSessionAncestry::ImportedConversation, Some(frontier)) => {
             Ok(Some(ContextFrontierId::from_uuid(frontier)))
         }

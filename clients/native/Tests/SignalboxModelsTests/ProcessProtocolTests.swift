@@ -54,7 +54,7 @@ final class ProcessProtocolTests: XCTestCase {
   func testImportedConversationEntryDecodesItsAttestedTextPreview() throws {
     let importedEntryID = "33333333-3333-4333-8333-333333333333"
     let position = SignalboxCanonicalUInt64(rawValue: 1)
-    let preview = "Owner fixture text"
+    let preview = "User fixture text"
     let encoded = Data(
       """
       {

@@ -717,9 +717,9 @@ mod tests {
         ));
     }
 
-    /// Owner attribution cannot authenticate a matching tool replacement.
+    /// User attribution cannot authenticate a matching tool replacement.
     #[test]
-    fn session_status_owner_snapshot_does_not_authenticate_tool_write() {
+    fn session_status_user_snapshot_does_not_authenticate_tool_write() {
         let session = SessionId::from_uuid(Uuid::from_u128(FIXTURE_SESSION_ID));
         let request = ToolRequestId::from_uuid(Uuid::from_u128(FIXTURE_REQUEST_ID));
         let replacement = SessionMetadataContent::empty();
@@ -728,7 +728,7 @@ mod tests {
             replacement.clone(),
             SessionMetadataLastWriter::new(
                 SessionMetadataUpdatedAt::from_unix_micros(17),
-                Actor::Owner,
+                Actor::User,
             ),
         );
 

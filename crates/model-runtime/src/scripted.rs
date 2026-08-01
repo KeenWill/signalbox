@@ -222,7 +222,7 @@ mod tests {
     }
 
     /// An operation whose correlation seed is the one knob; other facts are
-    /// canonical ("model-x" targets, one user message, 64-token ceiling).
+    /// canonical ("model-x" targets, one user-role message, 64-token ceiling).
     fn operation(correlation: &str) -> ModelOperation<String> {
         ModelOperation::new(
             correlation.to_string(),
