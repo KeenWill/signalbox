@@ -303,10 +303,15 @@ impl SessionPlanRepository {
         request: PlanAppendRequest,
     ) -> Result<PlanAppendOutcome, SessionPlanRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let next: Decimal = sqlx::query_scalar("SELECT next_session_plan_event_ordinal($1)")
-            .bind(request.session().into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
+        let next: Option<Decimal> =
+            sqlx::query_scalar("SELECT next_session_plan_event_ordinal($1)")
+                .bind(request.session().into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?;
+        let Some(next) = next else {
+            transaction.rollback().await?;
+            return Err(SessionPlanRepositoryError::InvalidAppendProvenance);
+        };
         let next = PlanEventOrdinal::try_from_u64(positive_u64(next, "next event ordinal")?)
             .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
                 "next event ordinal",

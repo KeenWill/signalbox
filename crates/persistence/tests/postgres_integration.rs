@@ -20864,6 +20864,47 @@ async fn session_plan_append_and_read_round_trip_through_postgres() -> Result<()
     Ok(())
 }
 
+/// A direct repository caller cannot turn a missing owning session into a
+/// retryable database failure before provenance authentication.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_classifies_missing_session_as_invalid_provenance()
+-> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "refuse a missing session";
+    const FIXTURE_SEED: u128 = 0xd000;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let correlation = signalbox_domain::ToolAttemptDispatchCorrelation::reconstitute(
+        signalbox_domain::ToolAttemptDispatchCorrelationReconstitutionInput {
+            session: SessionId::from_uuid(Uuid::from_u128(FIXTURE_SEED)),
+            turn: TurnId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 1)),
+            issuing_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 2)),
+            request: ToolRequestId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 3)),
+            attempt: ToolAttemptId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 4)),
+            generation: signalbox_domain::ToolDispatchGeneration::first(),
+        },
+    );
+    let repository = SessionPlanRepository::new(pool.clone());
+    let error = repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(correlation),
+            PlanEventDraft::Create {
+                text: plan_text(CREATED_TEXT),
+            },
+        ))
+        .await
+        .expect_err("the absent owning session rejects the append");
+
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::InvalidAppendProvenance
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A revision naming no creation event returns its typed rejection without an
 /// append or ordinal allocation.
 #[tokio::test(flavor = "multi_thread")]

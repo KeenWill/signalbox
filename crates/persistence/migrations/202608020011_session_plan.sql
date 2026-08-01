@@ -180,7 +180,7 @@ BEGIN
      WHERE session_id = target_session_id
        FOR NO KEY UPDATE;
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'session plan event requires its owning session';
+        RETURN NULL;
     END IF;
 
     SELECT event_ordinal
