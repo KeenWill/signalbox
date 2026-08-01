@@ -2475,8 +2475,40 @@ impl ClientRequest {
             | Self::SubmitInput { .. }
             | Self::CompactSession { .. }
             | Self::ReadTranscript { .. }
-            | Self::FollowSession { .. } => {}
-            _ => {}
+            | Self::FollowSession { .. }
+            | Self::ListSessionMetadata { .. }
+            | Self::ListConversations { .. }
+            | Self::ListModelAliases {}
+            | Self::ReadSessionMetadata { .. }
+            | Self::ReplaceSessionMetadata { .. }
+            | Self::ReplaceSessionDefaults { .. }
+            | Self::ReadSessionDefaults { .. }
+            | Self::ImportConversation { .. }
+            | Self::ReadImportedConversation { .. }
+            | Self::CreateSessionFromImportedFrontier { .. }
+            | Self::ReconcileTurn { .. }
+            | Self::CreateReviewTarget { .. }
+            | Self::StartReviewRun { .. }
+            | Self::ActivateReviewPass { .. }
+            | Self::CompleteReviewPass { .. }
+            | Self::RecordReviewFindings { .. }
+            | Self::RecordReviewFindingEvent { .. }
+            | Self::ReserveReviewExternalLink { .. }
+            | Self::AttachReviewExternalLink { .. }
+            | Self::ReadReviewTarget { .. }
+            | Self::ReadReviewRun { .. }
+            | Self::ReadReviewFinding { .. }
+            | Self::ListReviewFindings { .. }
+            | Self::StartReviewOrchestration { .. }
+            | Self::RecordReviewImportOutcome { .. }
+            | Self::RecordReviewConcernOutcome { .. }
+            | Self::RecordReviewJudgmentPlan { .. }
+            | Self::RecordReviewJudgmentEffect { .. }
+            | Self::RecordReviewRepairOutcomes { .. }
+            | Self::RecordReviewPublicationOutcomes { .. }
+            | Self::ReadReviewOrchestration { .. }
+            | Self::StopTurn { .. }
+            | Self::DecideToolRequest { .. } => {}
         }
         if let Self::SubmitInput {
             expected_defaults_version,

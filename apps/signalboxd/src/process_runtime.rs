@@ -1000,7 +1000,6 @@ where
                 command_id.into_uuid(),
                 session_id,
                 GoalUserAction::Attach(statement),
-                true,
                 services,
             )
             .await
@@ -1045,7 +1044,6 @@ where
                 command_id.into_uuid(),
                 session_id,
                 GoalUserAction::Resume(guidance),
-                true,
                 services,
             )
             .await
@@ -1061,7 +1059,6 @@ where
                 command_id.into_uuid(),
                 session_id,
                 GoalUserAction::Stop,
-                false,
                 services,
             )
             .await
@@ -1087,7 +1084,6 @@ where
                 command_id.into_uuid(),
                 session_id,
                 GoalUserAction::Supersede(statement),
-                true,
                 services,
             )
             .await
@@ -9438,13 +9434,18 @@ async fn handle_goal_user_command<Writer>(
     command_uuid: uuid::Uuid,
     session_id: CanonicalUuid,
     action: GoalUserAction,
-    schedules_turn: bool,
     services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let session = SessionId::from_uuid(session_id.into_uuid());
+    let schedules_turn = match &action {
+        GoalUserAction::Attach(_) | GoalUserAction::Resume(_) | GoalUserAction::Supersede(_) => {
+            true
+        }
+        GoalUserAction::Stop => false,
+    };
     let command = GoalUserCommand::new(DurableCommandId::from_uuid(command_uuid), session, action);
     let candidates = schedules_turn.then(|| {
         GoalTurnCandidates::new(

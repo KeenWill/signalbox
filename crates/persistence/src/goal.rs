@@ -274,7 +274,7 @@ impl GoalRepository {
                         }
                     }
                 }
-                CurrentOriginConfiguration::UnknownAlias(_) => {
+                CurrentOriginConfiguration::UnknownAlias => {
                     result = GoalCommandResult::Rejected(GoalCommandRejection::UnknownModelAlias);
                     None
                 }
@@ -335,8 +335,8 @@ impl GoalRepository {
     /// Reconciles one current goal turn's durable terminal disposition.
     ///
     /// Nonterminal work is left alone, completion queues one idempotent
-    /// successor, and every unsuccessful terminal disposition blocks pursuit
-    /// with scheduler-only execution-failure provenance.
+    /// successor, and every unsuccessful terminal or successor-admission failure
+    /// blocks pursuit with scheduler-only execution-failure provenance.
     pub async fn reconcile_current_after_execution<SelectDefinition>(
         &self,
         session: SessionId,
@@ -370,22 +370,14 @@ impl GoalRepository {
                 return Ok(GoalTurnContinuationOutcome::NotTerminal);
             }
             GoalTurnTerminalState::Unsuccessful => {
-                let transitioned = goal
-                    .block_execution_failure(
-                        failure_need,
-                        GoalSchedulerProvenance::new(predecessor),
-                    )
-                    .map_err(|_| {
-                        GoalCorruption::Inconsistent(
-                            "pursuing goal rejected scheduler failure blocking",
-                        )
-                    })?;
-                let event = latest_event(&transitioned)?;
-                insert_event(&mut transaction, session, &event).await?;
-                commit(transaction).await?;
-                return Ok(GoalTurnContinuationOutcome::Blocked {
-                    event: event.ordinal(),
-                });
+                return block_goal_continuation(
+                    transaction,
+                    session,
+                    goal,
+                    failure_need,
+                    predecessor,
+                )
+                .await;
             }
             GoalTurnTerminalState::Completed => {}
         }
@@ -401,16 +393,28 @@ impl GoalRepository {
         .await?
         {
             CurrentOriginConfiguration::Selected(configuration) => configuration,
-            CurrentOriginConfiguration::UnknownAlias(alias) => {
-                transaction.rollback().await?;
-                return Ok(GoalTurnContinuationOutcome::UnknownModelAlias { alias });
+            CurrentOriginConfiguration::UnknownAlias => {
+                return block_goal_continuation(
+                    transaction,
+                    session,
+                    goal,
+                    failure_need,
+                    predecessor,
+                )
+                .await;
             }
         };
         let position = match next_goal_turn_acceptance_position(&mut transaction, session).await? {
             GoalTurnAcceptancePosition::Available(position) => position,
-            GoalTurnAcceptancePosition::Exhausted { last } => {
-                transaction.rollback().await?;
-                return Ok(GoalTurnContinuationOutcome::AcceptancePositionExhausted { last });
+            GoalTurnAcceptancePosition::Exhausted { .. } => {
+                return block_goal_continuation(
+                    transaction,
+                    session,
+                    goal,
+                    failure_need,
+                    predecessor,
+                )
+                .await;
             }
         };
         insert_goal_turn(
@@ -598,7 +602,7 @@ fn select_definition_with_frozen_fallback(
 
 enum CurrentOriginConfiguration {
     Selected(OriginConfiguration),
-    UnknownAlias(ModelAlias),
+    UnknownAlias,
 }
 
 async fn current_origin_configuration<SelectDefinition>(
@@ -627,7 +631,7 @@ where
     Ok(
         match OriginConfiguration::freeze(checked, select_definition) {
             Ok(configuration) => CurrentOriginConfiguration::Selected(configuration),
-            Err(error) => CurrentOriginConfiguration::UnknownAlias(error.alias()),
+            Err(_) => CurrentOriginConfiguration::UnknownAlias,
         },
     )
 }
@@ -742,6 +746,26 @@ fn rejection_from_transition(
             "user command produced a model-only rejection",
         )),
     }
+}
+
+async fn block_goal_continuation(
+    mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+    goal: Goal,
+    need: GoalNeed,
+    predecessor: TurnId,
+) -> Result<GoalTurnContinuationOutcome, GoalRepositoryError> {
+    let transitioned = goal
+        .block_execution_failure(need, GoalSchedulerProvenance::new(predecessor))
+        .map_err(|_| {
+            GoalCorruption::Inconsistent("pursuing goal rejected scheduler failure blocking")
+        })?;
+    let event = latest_event(&transitioned)?;
+    insert_event(&mut transaction, session, &event).await?;
+    commit(transaction).await?;
+    Ok(GoalTurnContinuationOutcome::Blocked {
+        event: event.ordinal(),
+    })
 }
 
 async fn lock_session(

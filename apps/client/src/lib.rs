@@ -1549,22 +1549,35 @@ where
         connection.message().await.map_err(ClientError::mutation)?,
     )?;
     output
-        .goal_transition_applied(receipt.0, receipt.1, receipt.2)
+        .goal_transition_applied(
+            receipt.session_id,
+            receipt.event_ordinal,
+            receipt.generation,
+        )
         .map_err(ClientError::from)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GoalMutationReceipt {
+    session_id: CanonicalUuid,
+    event_ordinal: u64,
+    generation: u64,
 }
 
 fn decode_goal_mutation_receipt(
     expected_session: CanonicalUuid,
     message: ServerMessage,
-) -> Result<(CanonicalUuid, u64, u64), ClientError> {
+) -> Result<GoalMutationReceipt, ClientError> {
     match message {
         ServerMessage::GoalTransitionApplied {
             session_id,
             event_ordinal,
             generation,
-        } if session_id == expected_session => {
-            Ok((session_id, event_ordinal.value(), generation.value()))
-        }
+        } if session_id == expected_session => Ok(GoalMutationReceipt {
+            session_id,
+            event_ordinal: event_ordinal.value(),
+            generation: generation.value(),
+        }),
         ServerMessage::Error {
             code,
             message,

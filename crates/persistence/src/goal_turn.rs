@@ -80,25 +80,13 @@ pub enum GoalTurnContinuationOutcome {
     },
     /// The goal turn remains queued or active and requires no disposition.
     NotTerminal,
-    /// An unsuccessfully terminalized goal turn durably blocked pursuit.
+    /// A terminal turn or successor-admission failure durably blocked pursuit.
     Blocked {
         /// The appended blocked event ordinal.
         event: signalbox_domain::GoalEventOrdinal,
     },
     /// The current goal state is absent or scheduler-terminal.
     NotPursuing,
-    /// The completed turn is not owned by the current goal generation.
-    NotCurrentGoalTurn,
-    /// The selected defaults name an alias with no available definition.
-    UnknownModelAlias {
-        /// The unavailable alias selected by the current defaults epoch.
-        alias: ModelAlias,
-    },
-    /// The session's accepted-input position cannot advance beyond `u64::MAX`.
-    AcceptancePositionExhausted {
-        /// The maximum durable position already occupied by the session.
-        last: SessionInputPosition,
-    },
     /// This predecessor already has its one durable goal successor.
     AlreadyScheduled,
 }

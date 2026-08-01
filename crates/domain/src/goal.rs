@@ -193,17 +193,17 @@ impl GoalModelProvenance {
     }
 }
 
-/// Scheduler provenance for execution-failure blocking.
+/// Scheduler provenance for execution or continuation-admission failure blocking.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GoalSchedulerProvenance(TurnId);
 
 impl GoalSchedulerProvenance {
-    /// Binds the transition to the exact failed turn.
+    /// Binds the transition to the exact source turn.
     pub const fn new(turn: TurnId) -> Self {
         Self(turn)
     }
 
-    /// Returns the failed turn.
+    /// Returns the source turn.
     pub const fn turn(self) -> TurnId {
         self.0
     }
@@ -272,9 +272,9 @@ pub enum GoalBlockProvenance {
         /// Trusted tool-dispatch provenance.
         provenance: GoalModelProvenance,
     },
-    /// The scheduler observed a failed turn.
+    /// The scheduler observed a failed turn or could not admit its successor.
     ExecutionFailure {
-        /// Exact failed turn.
+        /// Exact source turn.
         provenance: GoalSchedulerProvenance,
     },
 }
@@ -566,7 +566,7 @@ impl Goal {
         self.block(GoalBlockProvenance::Model { reason, provenance }, need)
     }
 
-    /// Blocks after an exact failed turn without retrying it.
+    /// Blocks after an exact scheduler disposition failure without retrying it.
     pub fn block_execution_failure(
         self,
         need: GoalNeed,

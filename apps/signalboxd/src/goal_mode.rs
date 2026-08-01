@@ -309,7 +309,16 @@ pub enum PostgresGoalPassDispositionError {
 
 impl fmt::Display for PostgresGoalPassDispositionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("goal scheduler disposition failed")
+        match self {
+            Self::Repository(error) => {
+                write!(
+                    formatter,
+                    "goal scheduler disposition repository failure: {error}"
+                )
+            }
+            Self::InvalidStaticNeed => formatter
+                .write_str("goal scheduler disposition static execution-failure need is invalid"),
+        }
     }
 }
 
@@ -407,8 +416,14 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                     adapter.model_configuration.resolve_alias(alias)
                 })
                 .await?;
-            if let GoalTurnContinuationOutcome::Scheduled { .. } = outcome {
-                let _ = adapter.eligibility_nudge.nudge(session);
+            match outcome {
+                GoalTurnContinuationOutcome::Scheduled { .. } => {
+                    let _ = adapter.eligibility_nudge.nudge(session);
+                }
+                GoalTurnContinuationOutcome::NotTerminal
+                | GoalTurnContinuationOutcome::Blocked { .. }
+                | GoalTurnContinuationOutcome::NotPursuing
+                | GoalTurnContinuationOutcome::AlreadyScheduled => {}
             }
             Ok(())
         }
@@ -488,6 +503,23 @@ mod tests {
         };
 
         assert_eq!(decoded.as_str(), report);
+    }
+
+    #[test]
+    fn goal_disposition_error_displays_distinguish_static_and_repository_failures() {
+        let repository = PostgresGoalPassDispositionError::Repository(
+            GoalRepositoryError::Corruption(GoalCorruption::Missing("turn")),
+        );
+        let invalid_static_need = PostgresGoalPassDispositionError::InvalidStaticNeed;
+
+        assert_eq!(
+            repository.to_string(),
+            "goal scheduler disposition repository failure: missing goal turn"
+        );
+        assert_eq!(
+            invalid_static_need.to_string(),
+            "goal scheduler disposition static execution-failure need is invalid"
+        );
     }
 
     #[test]

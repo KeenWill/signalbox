@@ -74,7 +74,7 @@ reference from that same invocation.
 `user_input_required`, `external_change_required`, and `authorization_required`.
 Every blocked event carries exact nonempty need text. `execution_failure` is the
 fourth stored reason and is scheduler-only: its provenance shape requires the
-failed turn and cannot be constructed from a model declaration.
+source turn and cannot be constructed from a model declaration.
 
 **Implemented behavior.** Stop is explicit user authority and yields
 `user_stopped`, distinct from model-declared achievement and blocking. Supersede
@@ -92,22 +92,23 @@ state remains pursuing. Goal state is the only continuation stopping condition:
 there is no goal turn count, elapsed-time budget, verdict counter, or silent
 model fallback. If current defaults still name the predecessor's alias, restart
 reconciliation may reuse that turn's frozen definition when the catalog entry
-has disappeared. A changed current alias with no definition instead returns a
-typed `UnknownModelAlias` continuation outcome and is never classified as
-durable corruption. If the session's positive accepted-input ordinal is already
-exhausted, continuation returns a typed `AcceptancePositionExhausted` outcome
-and appends no successor turn.
+has disappeared. A changed current alias with no definition never falls back;
+the same atomic scheduler disposition blocks pursuit with `execution_failure`.
+If the session's positive accepted-input ordinal is already exhausted, that
+disposition likewise blocks pursuit instead of leaving the completed turn
+eligible for another sweep.
 
-**Implemented behavior.** A failed goal turn is not retried. In the same
-scheduler disposition path, the daemon appends `blocked` with reason
-`execution_failure`, need text describing the execution repair required, and the
-exact failed-turn provenance. That scheduler-turn provenance is single-use. A
-delayed replay of an already-recorded failure returns that blocked transition
-without appending a second event, including after resume. An unrecorded failure
-from an older turn returns `NotCurrentGoalTurn` once resume has made a successor
-turn current, so it cannot block the resumed pursuit. Continuation stops on
-blocked, achieved, user-stopped, and a superseded generation; supersession's
-successor is pursuing and therefore independently eligible to continue.
+**Implemented behavior.** A failed goal turn, unavailable changed alias, or
+exhausted successor position is not retried. In the same scheduler disposition
+path, the daemon appends `blocked` with reason `execution_failure`, need text
+describing the execution repair required, and the exact source-turn provenance.
+That scheduler-turn provenance is single-use. A delayed replay of an
+already-recorded failure returns that blocked transition without appending a
+second event, including after resume. An unrecorded failure from an older turn
+returns `NotCurrentGoalTurn` once resume has made a successor turn current, so
+it cannot block the resumed pursuit. Continuation stops on blocked, achieved,
+user-stopped, and a superseded generation; supersession's successor is pursuing
+and therefore independently eligible to continue.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The

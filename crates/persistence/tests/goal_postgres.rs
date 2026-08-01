@@ -13,13 +13,13 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
     CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalCommandRejection,
-    GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
-    GoalSchedulerProvenance, GoalStatement, GoalUserAction, GoalUserCommand, GoalUserProvenance,
-    ModelAlias, ModelSelectionRequest, PreparedCreateSession, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionInputPosition, SubmitInput, ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId,
-    UserContent,
+    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockedReasonKind,
+    GoalCommandRejection, GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind,
+    GoalModelProvenance, GoalNeed, GoalSchedulerProvenance, GoalState, GoalStatement,
+    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest,
+    PreparedCreateSession, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
+    ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -1190,11 +1190,11 @@ async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Resul
     Ok(())
 }
 
-/// INV-048: exhausting the session acceptance ordinal yields typed scheduler
-/// backpressure and a durable, replayable user-command rejection.
+/// INV-048: exhausting the session acceptance ordinal durably blocks pursuit and
+/// leaves later user-command rejection replayable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
+async fn inv048_goal_turn_acceptance_position_exhaustion_blocks_without_retry()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1223,23 +1223,45 @@ async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
         attached_turn.turn()
     );
     mark_goal_turn_completed(&pool, attached_turn.turn()).await?;
+    let failure_need =
+        GoalNeed::try_new(String::from("repair execution")).expect("fixture need is admitted");
+
+    let outcome = repository
+        .reconcile_current_after_execution(
+            session(SESSION),
+            turn_candidates(0xb82),
+            failure_need.clone(),
+            |_| None,
+        )
+        .await?;
     let history_before_rejection = repository
         .load_goal(session(SESSION))
         .await?
-        .expect("the attached lineage exists");
+        .expect("the blocked lineage remains");
+    let blocked_event = history_before_rejection
+        .events()
+        .last()
+        .expect("the scheduler block event exists");
 
     assert_eq!(
-        repository
-            .reconcile_current_after_execution(
-                session(SESSION),
-                turn_candidates(0xb82),
-                GoalNeed::try_new(String::from("repair execution"))
-                    .expect("fixture need is admitted"),
-                |_| None,
-            )
-            .await?,
-        GoalTurnContinuationOutcome::AcceptancePositionExhausted { last: maximum }
+        outcome,
+        GoalTurnContinuationOutcome::Blocked {
+            event: blocked_event.ordinal()
+        }
     );
+    assert_eq!(
+        history_before_rejection.current().state(),
+        &GoalState::Blocked {
+            reason: GoalBlockedReasonKind::ExecutionFailure,
+            need: failure_need,
+        }
+    );
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(sessions.is_empty());
+    assert!(!continuation);
 
     let supersede = GoalUserCommand::new(
         command(0x982),
@@ -1472,12 +1494,12 @@ async fn inv048_model_goal_declaration_request_is_single_use() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: a changed current alias that is unavailable at reconciliation is
-/// a typed continuation outcome, not durable-state corruption.
+/// INV-048: a changed current alias unavailable at reconciliation blocks pursuit
+/// without falling back or re-entering the durable sweep.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Result<(), Box<dyn Error>>
-{
+async fn inv048_changed_unknown_alias_blocks_without_fallback_or_retry()
+-> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let first_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa21));
     let changed_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa22));
@@ -1522,21 +1544,45 @@ async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Resul
         .bind(Uuid::from_u128(SESSION))
         .execute(&pool)
         .await?;
+    let failure_need =
+        GoalNeed::try_new(String::from("repair execution")).expect("fixture need is admitted");
+
+    let outcome = repository
+        .reconcile_current_after_execution(
+            session(SESSION),
+            turn_candidates(0xb72),
+            failure_need.clone(),
+            |_| None,
+        )
+        .await?;
+    let blocked = repository
+        .load_goal(session(SESSION))
+        .await?
+        .expect("the blocked lineage remains");
+    let blocked_event = blocked
+        .events()
+        .last()
+        .expect("the scheduler block event exists");
 
     assert_eq!(
-        repository
-            .reconcile_current_after_execution(
-                session(SESSION),
-                turn_candidates(0xb72),
-                GoalNeed::try_new(String::from("repair execution"))
-                    .expect("fixture need is admitted"),
-                |_| None,
-            )
-            .await?,
-        GoalTurnContinuationOutcome::UnknownModelAlias {
-            alias: changed_alias
+        outcome,
+        GoalTurnContinuationOutcome::Blocked {
+            event: blocked_event.ordinal()
         }
     );
+    assert_eq!(
+        blocked.current().state(),
+        &GoalState::Blocked {
+            reason: GoalBlockedReasonKind::ExecutionFailure,
+            need: failure_need,
+        }
+    );
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(sessions.is_empty());
+    assert!(!continuation);
 
     pool.close().await;
     drop(container);
