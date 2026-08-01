@@ -823,7 +823,9 @@ fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
             return None;
         }
         let next_amount = amount.checked_add(axis_cost)?;
-        if next_amount.checked_sub(amount)? != axis_cost {
+        if next_amount.checked_sub(amount)? != axis_cost
+            || next_amount.checked_sub(axis_cost)? != amount
+        {
             return None;
         }
         amount = next_amount;
@@ -1538,6 +1540,37 @@ cache_read_input_usd_per_million_tokens = "4"
                     ProcessModelCallInputTokenSemantics::CacheExclusive
                 ),
                 None,
+                None,
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn cost_sum_that_loses_an_earlier_axis_yields_no_dollar_figure() {
+        let configuration = HubModelConfiguration::parse(
+            &CONFIGURATION
+                .replace(
+                    "input_usd_per_million_tokens = \"3\"",
+                    "input_usd_per_million_tokens = \"0.0000000000000000000000000001\"",
+                )
+                .replace(
+                    "output_usd_per_million_tokens = \"15\"",
+                    "output_usd_per_million_tokens = \"10000000000000000000000000000\"",
+                ),
+        )
+        .expect("both extreme rates are representable configuration values");
+
+        assert_eq!(
+            configuration.derive_model_call_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                ModelCallInputUsage::new(
+                    Some(1_000_000),
+                    ProcessModelCallInputTokenSemantics::CacheExclusive
+                ),
+                Some(1),
                 None,
                 None,
             ),
