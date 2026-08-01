@@ -1032,9 +1032,21 @@ fn credential_debug_contains_credential(
     text_contains_credential_variant(&format!("{credential:?}"), credential_text)
 }
 
+fn request_credential_debug_contains_credential(
+    request: &WebSearchRequest,
+    credential: &CredentialValue,
+    credential_text: &str,
+) -> bool {
+    text_contains_credential_variant(&format!("{request:?} {credential:?}"), credential_text)
+}
+
 fn fixed_success_payload_contains_credential(credential: &str) -> bool {
-    (0..=MAX_RETURNED_RESULTS).any(|result_count| {
-        [false, true].into_iter().any(|truncated| {
+    fixed_success_payloads().any(|payload| text_contains_credential_variant(&payload, credential))
+}
+
+fn fixed_success_payloads() -> impl Iterator<Item = String> {
+    (0..=MAX_RETURNED_RESULTS).flat_map(|result_count| {
+        [false, true].into_iter().map(move |truncated| {
             let results = (0..result_count)
                 .map(|_| serde_json::json!({"title": "", "url": "", "snippet": ""}))
                 .collect::<Vec<_>>();
@@ -1042,7 +1054,7 @@ fn fixed_success_payload_contains_credential(credential: &str) -> bool {
                 "results": results,
                 "truncated": truncated,
             });
-            text_contains_credential_variant(&payload.to_string(), credential)
+            payload.to_string()
         })
     })
 }
@@ -1406,6 +1418,7 @@ where
             || fixed_request_metadata_contains_credential(&request, credential_text)
             || serialized_request_url_contains_credential(&request, credential_text)
             || credential_debug_contains_credential(&credential, credential_text)
+            || request_credential_debug_contains_credential(&request, &credential, credential_text)
         {
             let outcome = known_failure_evidence(self.request_failed_detail.clone(), &scrubber);
             return match outcome {
@@ -2615,20 +2628,18 @@ fn fixed_bound_wrapper_token_collides(
     scrubber: &CredentialScrubber,
     correlation: &ToolAttemptDispatchCorrelation,
 ) -> bool {
+    if fixed_success_payloads().any(|payload| {
+        if scrubber.contains_case_normalized_credential(&payload) {
+            return false;
+        }
+        let evidence = ToolExecutorEvidence::CompletedText(payload);
+        bound_wrapper_evidence_collides(scrubber, correlation, &evidence)
+    }) {
+        return true;
+    }
     let mut evidence = ToolExecutorEvidence::CompletedText(String::new());
     loop {
-        let probe = CorrelatedToolExecutorEvidenceDebugProbe {
-            correlation,
-            evidence: &evidence,
-        };
-        let rendered = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&probe));
-        let check_collision = match bound_diagnostic_check(&evidence) {
-            BoundDiagnosticCheck::AllCredentialVariants => true,
-            BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-                !scrubber.contains_case_normalized_credential("Failed")
-            }
-        };
-        if check_collision && scrubber.contains_case_normalized_credential(&rendered) {
+        if bound_wrapper_evidence_collides(scrubber, correlation, &evidence) {
             return true;
         }
         let Some(next) = next_fixed_bound_evidence_probe(&evidence) else {
@@ -2636,6 +2647,25 @@ fn fixed_bound_wrapper_token_collides(
         };
         evidence = next;
     }
+}
+
+fn bound_wrapper_evidence_collides(
+    scrubber: &CredentialScrubber,
+    correlation: &ToolAttemptDispatchCorrelation,
+    evidence: &ToolExecutorEvidence,
+) -> bool {
+    let probe = CorrelatedToolExecutorEvidenceDebugProbe {
+        correlation,
+        evidence,
+    };
+    let rendered = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&probe));
+    let check_collision = match bound_diagnostic_check(evidence) {
+        BoundDiagnosticCheck::AllCredentialVariants => true,
+        BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
+            !scrubber.contains_case_normalized_credential("Failed")
+        }
+    };
+    check_collision && scrubber.contains_case_normalized_credential(&rendered)
 }
 
 struct CorrelatedToolExecutorEvidenceDebugProbe<'a> {
@@ -2797,6 +2827,7 @@ mod tests {
     const SERIALIZED_URL_SYNTAX_COLLISION_KEY: &str = "?";
     const REQUEST_DEBUG_COLLISION_KEY: &str = "provider";
     const CREDENTIAL_DEBUG_COLLISION_KEY: &str = "REDACTED";
+    const REQUEST_CREDENTIAL_DEBUG_COLLISION_KEY: &str = "} CredentialValue";
     const RESPONSE_DEBUG_COLLISION_KEY: &str = "result_count";
     const SUCCESS_PAYLOAD_COLLISION_KEY: &str = "results";
     const SUCCESS_PAYLOAD_DELIMITER_COLLISION_KEY: &str = "[";
@@ -2861,6 +2892,7 @@ mod tests {
     const EXECUTOR_OK_WRAPPER_COLLISION_KEY: &str = "ok";
     const EXECUTOR_BOUND_WRAPPER_COLLISION_KEY: &str = "correlated";
     const EXECUTOR_BOUND_WRAPPER_FIELD_COLLISION_KEY: &str = "{ fence:";
+    const EXECUTOR_POPULATED_SUCCESS_WRAPPER_COLLISION_KEY: &str = "CompletedText(\"{";
     const TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY: &str = "requestfailed";
     const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
     const UNICODE_FULL_FOLD_COLLISION_KEY: &str = "STRASSE";
@@ -3951,6 +3983,40 @@ mod tests {
         assert!(output.text().is_empty());
     }
 
+    /// INV-035: diagnostic framing that combines the request and credential
+    /// Debug values is checked before the injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_combined_request_credential_debug_before_transport() {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_writer(output.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: REQUEST_CREDENTIAL_DEBUG_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("combined Debug collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+        assert!(output.text().is_empty());
+    }
+
     /// INV-035: every bounded response Debug representation is checked before
     /// the injected transport boundary.
     #[tokio::test]
@@ -4430,6 +4496,20 @@ mod tests {
 
         assert!(failed);
         assert!(!rendered.contains(EXECUTOR_BOUND_WRAPPER_FIELD_COLLISION_KEY));
+        assert_eq!(searches, 0);
+    }
+
+    /// INV-035: populated completed evidence is combined with the correlated
+    /// bound wrapper before physical dispatch.
+    #[tokio::test]
+    async fn web_search_populated_success_wrapper_fails_before_dispatch() {
+        let (failed, searches, rendered) = execute_formatted_raw_credential_through_service(
+            EXECUTOR_POPULATED_SUCCESS_WRAPPER_COLLISION_KEY.as_bytes(),
+        )
+        .await;
+
+        assert!(failed);
+        assert!(!rendered.contains(EXECUTOR_POPULATED_SUCCESS_WRAPPER_COLLISION_KEY));
         assert_eq!(searches, 0);
     }
 
