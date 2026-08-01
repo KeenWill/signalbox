@@ -1603,11 +1603,11 @@ below. The client accepts a global `--socket <path>` override or reads
 - `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `conversations [--title <substring>] [--origin <native|imported|all>] [--include-archived] [--limit <decimal>] [--after <native|imported>:<uuid>]`;
 - `compact <session-uuid> [--through-position <positive-decimal>] [--command-id <uuid>]`;
-- `goal attach <session-uuid> --statement <text> [--command-id <uuid>]`;
+- `goal attach <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
 - `goal show <session-uuid>`;
-- `goal resume <session-uuid> [--guidance <text>] [--command-id <uuid>]`;
+- `goal resume <session-uuid> [--guidance <text> | --guidance-file <path>] [--command-id <uuid>]`;
 - `goal stop <session-uuid> [--command-id <uuid>]`;
-- `goal supersede <session-uuid> --statement <text> [--command-id <uuid>]`;
+- `goal supersede <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `send <session-uuid> --queue [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `steer <session-uuid> [--command-id <uuid> --turn <uuid>]`;

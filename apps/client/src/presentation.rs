@@ -390,8 +390,12 @@ impl<'a> Output<'a> {
             )?,
         }
         self.goal_text_field("statement", statement)?;
-        if let GoalLifecycleState::Blocked { need, .. } = state {
-            self.goal_text_field("need", need)?;
+        match state {
+            GoalLifecycleState::Blocked { need, .. } => self.goal_text_field("need", need)?,
+            GoalLifecycleState::Pursuing {}
+            | GoalLifecycleState::Achieved { .. }
+            | GoalLifecycleState::UserStopped {}
+            | GoalLifecycleState::Superseded { .. } => {}
         }
         Ok(())
     }
