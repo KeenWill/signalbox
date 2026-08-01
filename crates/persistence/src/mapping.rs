@@ -31,6 +31,8 @@ pub(crate) enum DurableCommandKind {
     ReviewOrchestration,
     /// Session context compaction.
     CompactSession,
+    /// Session goal command.
+    Goal,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -47,6 +49,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReviewWorkflow => "review_workflow",
         DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
+        DurableCommandKind::Goal => "goal",
     }
 }
 
@@ -64,6 +67,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "review_workflow" => Some(DurableCommandKind::ReviewWorkflow),
         "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),
+        "goal" => Some(DurableCommandKind::Goal),
         _ => None,
     }
 }
@@ -136,7 +140,9 @@ pub fn dangerous_tool_auto_approval_from_str(value: &str) -> Option<DangerousToo
     }
 }
 
-fn positive_u64_from_numeric(value: Decimal) -> Result<u64, PositiveOrdinalMappingError> {
+pub(crate) fn positive_u64_from_numeric(
+    value: Decimal,
+) -> Result<u64, PositiveOrdinalMappingError> {
     if !value.fract().is_zero() {
         return Err(PositiveOrdinalMappingError::Fractional);
     }

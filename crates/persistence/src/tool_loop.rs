@@ -289,7 +289,8 @@ impl PostgresToolLoopRepository {
                 | CommandKind::SubmitInput
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
-                | CommandKind::CompactSession,
+                | CommandKind::CompactSession
+                | CommandKind::Goal,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }

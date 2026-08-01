@@ -533,7 +533,8 @@ impl SubmitInputRepository {
                 | CommandKind::DecideToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
-                | CommandKind::CompactSession,
+                | CommandKind::CompactSession
+                | CommandKind::Goal,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -620,7 +621,8 @@ where
             | CommandKind::DecideToolRequest
             | CommandKind::ReviewWorkflow
             | CommandKind::ReviewOrchestration
-            | CommandKind::CompactSession,
+            | CommandKind::CompactSession
+            | CommandKind::Goal,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -657,7 +659,8 @@ where
                 | CommandKind::DecideToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
-                | CommandKind::CompactSession,
+                | CommandKind::CompactSession
+                | CommandKind::Goal,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),

@@ -6794,6 +6794,228 @@ pub struct CredentialProfileChange {
 }
 ```
 
+## domain: goal
+
+```rust
+pub struct GoalStatement(/* private String */);
+pub struct GoalNeed(/* private String */);
+pub struct GoalGuidance(/* private String */);
+pub struct GoalReport(/* private String */);
+impl GoalStatement {
+    pub fn try_new(value: String) -> Result<Self, GoalTextError>;
+    // accessors: as_str(), into_string()
+}
+impl GoalNeed {
+    pub fn try_new(value: String) -> Result<Self, GoalTextError>;
+    // accessors: as_str(), into_string()
+}
+impl GoalGuidance {
+    pub fn try_new(value: String) -> Result<Self, GoalTextError>;
+    // accessors: as_str(), into_string()
+}
+impl GoalReport {
+    pub fn try_new(value: String) -> Result<Self, GoalTextError>;
+    // accessors: as_str(), into_string()
+}
+
+pub enum GoalTextError {
+    Empty,
+    Oversized { utf8_byte_length: usize },
+}
+
+pub struct GoalGeneration(/* private NonZeroU64 */);
+impl GoalGeneration {
+    pub const fn new(value: NonZeroU64) -> Self;
+    // accessor: get()
+}
+pub struct GoalEventOrdinal(/* private NonZeroU64 */);
+impl GoalEventOrdinal {
+    pub const fn new(value: NonZeroU64) -> Self;
+    // accessor: get()
+}
+
+pub struct GoalUserProvenance(/* private DurableCommandId */);
+impl GoalUserProvenance {
+    pub const fn new(command: DurableCommandId) -> Self;
+    // accessor: command()
+}
+pub struct GoalModelProvenance { /* private turn + tool request */ }
+impl GoalModelProvenance {
+    pub const fn new(turn: TurnId, tool_request: ToolRequestId) -> Self;
+    // accessors: turn(), tool_request(), report_ref()
+}
+pub struct GoalSchedulerProvenance(/* private TurnId */);
+impl GoalSchedulerProvenance {
+    pub const fn new(turn: TurnId) -> Self;
+    // accessor: turn()
+}
+pub struct GoalReportRef { /* private turn + tool request */ }
+impl GoalReportRef {
+    // accessors: turn(), tool_request()
+}
+
+pub enum GoalModelBlockedReasonKind {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+}
+pub enum GoalBlockedReasonKind {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+pub enum GoalBlockProvenance {
+    Model { reason: GoalModelBlockedReasonKind, provenance: GoalModelProvenance },
+    ExecutionFailure { provenance: GoalSchedulerProvenance },
+}
+impl GoalBlockProvenance {
+    // accessor: reason_kind()
+}
+
+pub enum GoalState {
+    Pursuing,
+    Blocked { reason: GoalBlockedReasonKind, need: GoalNeed },
+    Achieved { report: GoalReportRef },
+    UserStopped,
+    Superseded { by_generation: GoalGeneration },
+}
+pub struct GoalGenerationSnapshot { /* private generation + statement + state */ }
+impl GoalGenerationSnapshot {
+    // accessors: generation(), statement(), state()
+}
+
+pub struct GoalEvent { /* private ordinal + generation + kind */ }
+impl GoalEvent {
+    pub const fn from_stored_parts(
+        ordinal: GoalEventOrdinal,
+        generation: GoalGeneration,
+        kind: GoalEventKind,
+    ) -> Self;
+    // accessors: ordinal(), generation(), kind()
+}
+pub enum GoalEventKind {
+    Commissioned { statement: GoalStatement, provenance: GoalUserProvenance },
+    Blocked { block: GoalBlockProvenance, need: GoalNeed },
+    Resumed { guidance: Option<GoalGuidance>, provenance: GoalUserProvenance },
+    Achieved { report: GoalReport, provenance: GoalModelProvenance },
+    UserStopped { provenance: GoalUserProvenance },
+    Superseded {
+        replacement_statement: GoalStatement,
+        provenance: GoalUserProvenance,
+    },
+}
+
+pub struct Goal { /* private session + generations + events */ }
+impl Goal {
+    pub fn commission(
+        session: SessionId,
+        statement: GoalStatement,
+        provenance: GoalUserProvenance,
+    ) -> Self;
+    pub fn commission_successor(
+        self,
+        statement: GoalStatement,
+        provenance: GoalUserProvenance,
+    ) -> Result<Self, GoalTransitionError>;
+    pub fn declare_blocked(
+        self,
+        reason: GoalModelBlockedReasonKind,
+        need: GoalNeed,
+        provenance: GoalModelProvenance,
+    ) -> Result<Self, GoalTransitionError>;
+    pub fn block_execution_failure(
+        self,
+        need: GoalNeed,
+        provenance: GoalSchedulerProvenance,
+    ) -> Result<Self, GoalTransitionError>;
+    pub fn resume(
+        self,
+        guidance: Option<GoalGuidance>,
+        provenance: GoalUserProvenance,
+    ) -> Result<Self, GoalTransitionError>;
+    pub fn declare_achieved(
+        self,
+        report: GoalReport,
+        provenance: GoalModelProvenance,
+    ) -> Result<Self, GoalTransitionError>;
+    pub fn stop(self, provenance: GoalUserProvenance) -> Result<Self, GoalTransitionError>;
+    pub fn supersede(
+        self,
+        replacement_statement: GoalStatement,
+        provenance: GoalUserProvenance,
+    ) -> Result<Self, GoalTransitionError>;
+    // accessors: session(), generations(), current(), events()
+}
+
+pub enum GoalTransitionFailure {
+    RequiresPursuing,
+    RequiresBlocked,
+    RequiresPursuingOrBlocked,
+    RequiresNoActiveGoal,
+    GenerationExhausted,
+    EventOrdinalExhausted,
+}
+pub struct GoalTransitionError { /* unchanged goal + failure */ }
+impl GoalTransitionError {
+    // accessors: failure(), goal(), into_goal()
+}
+
+pub struct GoalReconstitutionInput { /* private session + complete ordered events */ }
+impl GoalReconstitutionInput {
+    pub fn new(session: SessionId, events: Vec<GoalEvent>) -> Self;
+    pub fn reconstitute(self) -> Result<Goal, GoalReconstitutionError>;
+}
+pub enum GoalReconstitutionFailure {
+    MissingCommission,
+    EventSequence,
+    InvalidTransition,
+}
+pub struct GoalReconstitutionError(/* private GoalReconstitutionFailure */);
+impl GoalReconstitutionError {
+    // accessor: failure()
+}
+```
+
+## domain: goal_command
+
+```rust
+pub enum GoalUserAction {
+    Attach(GoalStatement),
+    Resume(Option<GoalGuidance>),
+    Stop,
+    Supersede(GoalStatement),
+}
+pub struct GoalUserCommand { /* private command identity + session + action */ }
+impl GoalUserCommand {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        action: GoalUserAction,
+    ) -> Self;
+    // accessors: command_id(), session(), action()
+}
+
+pub enum GoalCommandRejection {
+    SessionNotFound,
+    GoalAlreadyAttached,
+    GoalNotAttached,
+    RequiresBlocked,
+    RequiresPursuingOrBlocked,
+    GenerationExhausted,
+    EventOrdinalExhausted,
+}
+pub enum GoalCommandResult {
+    Applied(GoalEvent),
+    Rejected(GoalCommandRejection),
+}
+pub struct ReconstitutedGoalCommand { /* private command + result */ }
+impl ReconstitutedGoalCommand {
+    pub const fn new(command: GoalUserCommand, result: GoalCommandResult) -> Self;
+    // accessors: command(), result()
+}
+```
+
 ## domain: review_workflow
 
 ```rust
@@ -7625,10 +7847,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
+| domain: goal                                       | 24                   |
+| domain: goal_command                               | 5                    |
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **567 (+7 free fn)** |
+| **signalbox-domain total**                         | **596 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
