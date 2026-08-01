@@ -63,6 +63,9 @@ def main() -> int:
         author_violation = reviewed_author.with_name("example.rs")
         imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
         domain_record = root / "crates" / "domain" / "src" / "session.rs"
+        legacy_actor = (
+            root / "crates" / "persistence" / "src" / "session_metadata.rs"
+        )
         mixed_storage_path = (
             root / "apps" / "signalboxd" / "tests" / "offline_tool_loop.rs"
         )
@@ -184,6 +187,9 @@ def main() -> int:
             "// The owner approves this tool.",
         )
         domain_record_lines = ('let OwnerID = "human who approves tools";',)
+        legacy_actor_lines = (
+            'let human_principal = String::from("owner"); // approves tools',
+        )
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
         mixed_storage_path.parent.mkdir(parents=True)
@@ -260,12 +266,17 @@ def main() -> int:
         domain_record.write_text(
             fixture_text(domain_record_lines), encoding="utf-8"
         )
+        legacy_actor.parent.mkdir(parents=True, exist_ok=True)
+        legacy_actor.write_text(
+            fixture_text(legacy_actor_lines), encoding="utf-8"
+        )
         git(root, "init", "--quiet")
         git(
             root,
             "add",
             "crates/domain/src/imported_conversation.rs",
             "crates/domain/src/session.rs",
+            "crates/persistence/src/session_metadata.rs",
             "crates/tools-code-host/src/code_host/review_slog/convergence.rs",
             "crates/tools-code-host/src/code_host/review_slog/example.rs",
             "crates/tools-github/src/lib.rs",
@@ -332,6 +343,9 @@ def main() -> int:
                 "crates/domain/src/session.rs", domain_record_lines
             ),
             *expected_diagnostics(
+                "crates/persistence/src/session_metadata.rs", legacy_actor_lines
+            ),
+            *expected_diagnostics(
                 "apps/signalboxd/tests/offline_tool_loop.rs",
                 mixed_storage_lines,
                 mixed_storage_lines[:1],
@@ -384,6 +398,10 @@ def main() -> int:
         imported.write_text(fixture_text(imported_lines[:-1]), encoding="utf-8")
         domain_record.write_text(
             'let user_id = "human who approves tools";\n', encoding="utf-8"
+        )
+        legacy_actor.write_text(
+            "let kind = encode_actor(Actor::User).kind.to_owned();\n",
+            encoding="utf-8",
         )
         mixed_storage_path.write_text(
             'const PROCESS_ACTOR: &str = "user";\n'

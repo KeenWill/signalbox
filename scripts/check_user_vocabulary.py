@@ -285,7 +285,7 @@ ALLOWLIST = (
         re.compile(
             r"\(\"owner\", (?:None|Some\(_\))(?:, None)?\)|"
             r"\"owner\" \| \"model\"|kind:\s*\"owner\"|"
-            r"String::from\(\"owner\"\)|expected_issuer\s*=\s*\(\"owner\"|"
+            r"expected_issuer\s*=\s*\(\"owner\"|"
             r"\(`owner`/(?:`model`|`tool`)"
         ),
     ),
