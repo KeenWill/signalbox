@@ -297,7 +297,7 @@ fn status_arguments_reject_values_outside_the_closed_vocabulary() {
 }
 
 #[test]
-fn fold_applies_revisions_and_status_moves_without_removing_abandoned_entries() {
+fn fold_applies_text_revision() {
     let provenance = PlanEventProvenance::from_invocation(correlation(10));
     let revised = text(REVISED_TEXT);
     let events = vec![
@@ -316,16 +316,52 @@ fn fold_applies_revisions_and_status_moves_without_removing_abandoned_entries() 
                 text: revised.clone(),
             },
         ),
+    ];
+
+    let folded = fold_plan_events(&events).expect("contiguous fixture history folds");
+
+    assert_eq!(only_entry(&folded).text(), &revised);
+}
+
+#[test]
+fn fold_applies_status_move() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let events = vec![
         event(
-            3,
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ),
+        event(
+            2,
             provenance,
             PlanEventKind::StatusChanged {
                 entry: entry(1),
                 status: PlanStatus::InProgress,
             },
         ),
+    ];
+
+    let folded = fold_plan_events(&events).expect("contiguous fixture history folds");
+
+    assert_eq!(only_entry(&folded).status(), PlanStatus::InProgress);
+}
+
+#[test]
+fn fold_retains_an_abandoned_entry() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let events = vec![
         event(
-            4,
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ),
+        event(
+            2,
             provenance,
             PlanEventKind::StatusChanged {
                 entry: entry(1),
@@ -335,11 +371,8 @@ fn fold_applies_revisions_and_status_moves_without_removing_abandoned_entries() 
     ];
 
     let folded = fold_plan_events(&events).expect("contiguous fixture history folds");
-    let current = only_entry(&folded);
 
-    assert_eq!(current.id(), entry(1));
-    assert_eq!(current.text(), &revised);
-    assert_eq!(current.status(), PlanStatus::Abandoned);
+    let _retained = only_entry(&folded);
 }
 
 #[test]

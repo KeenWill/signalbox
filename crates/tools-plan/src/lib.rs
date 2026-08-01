@@ -639,7 +639,7 @@ fn retained_completeness(
 /// Durable boundary for the invoking session's plan.
 pub trait SessionPlanPort: Send {
     /// Sanitized storage failure.
-    type Error: ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure + Error + 'static;
 
     /// Atomically assigns the next session ordinal and appends one event.
     fn append_plan_event(

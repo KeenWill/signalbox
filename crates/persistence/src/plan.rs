@@ -70,6 +70,8 @@ pub enum SessionPlanCorruption {
     },
     /// Two stored identity fields disagreed.
     MismatchedIdentity(&'static str),
+    /// Nullable event payload fields did not match their discriminator.
+    InvalidEventPayload(&'static str),
     /// Stored text violated the tool boundary.
     InvalidText,
 }
@@ -86,6 +88,9 @@ impl fmt::Display for SessionPlanCorruption {
             }
             Self::MismatchedIdentity(field) => {
                 write!(formatter, "session plan has mismatched {field}")
+            }
+            Self::InvalidEventPayload(kind) => {
+                write!(formatter, "session plan has invalid {kind} payload")
             }
             Self::InvalidText => formatter.write_str("session plan has invalid entry text"),
         }
@@ -412,23 +417,39 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
     ))?;
     let provenance = decode_provenance(session, row)?;
     let event_kind: String = required(row, "event_kind")?;
+    let entry_text: Option<String> = row.try_get("entry_text")?;
+    let entry_status: Option<String> = row.try_get("entry_status")?;
     let kind = match event_kind.as_str() {
         "created" => {
+            let (Some(value), None) = (entry_text, entry_status) else {
+                return Err(SessionPlanCorruption::InvalidEventPayload("created event").into());
+            };
             if entry.creation_ordinal() != ordinal {
                 return Err(
                     SessionPlanCorruption::MismatchedIdentity("created entry identity").into(),
                 );
             }
             PlanEventKind::Created {
-                text: decode_text(row)?,
+                text: decode_text(value)?,
             }
         }
-        "text_revised" => PlanEventKind::TextRevised {
-            entry,
-            text: decode_text(row)?,
-        },
+        "text_revised" => {
+            let (Some(value), None) = (entry_text, entry_status) else {
+                return Err(
+                    SessionPlanCorruption::InvalidEventPayload("text-revised event").into(),
+                );
+            };
+            PlanEventKind::TextRevised {
+                entry,
+                text: decode_text(value)?,
+            }
+        }
         "status_changed" => {
-            let value: String = required(row, "entry_status")?;
+            let (None, Some(value)) = (entry_text, entry_status) else {
+                return Err(
+                    SessionPlanCorruption::InvalidEventPayload("status-changed event").into(),
+                );
+            };
             let status = mapping::plan_status_from_str(&value).ok_or({
                 SessionPlanCorruption::Unsupported {
                     field: "entry status",
@@ -448,8 +469,7 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
     Ok(PlanEvent::new(ordinal, provenance, kind))
 }
 
-fn decode_text(row: &PgRow) -> Result<PlanText, SessionPlanRepositoryError> {
-    let value: String = required(row, "entry_text")?;
+fn decode_text(value: String) -> Result<PlanText, SessionPlanRepositoryError> {
     PlanText::try_new(value)
         .map_err(|_| SessionPlanCorruption::InvalidText)
         .map_err(Into::into)
