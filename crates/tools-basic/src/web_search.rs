@@ -1044,6 +1044,18 @@ fn fixed_success_payload_contains_credential(credential: &str) -> bool {
     fixed_success_payloads().any(|payload| text_contains_credential_variant(&payload, credential))
 }
 
+fn dynamic_success_field_boundary_may_collide(scrubber: &CredentialScrubber) -> bool {
+    const FIELD_BOUNDARIES: [&str; 3] = [r#""title":""#, r#"","url":""#, r#"","snippet":""#];
+    scrubber.output_collision_variants().any(|credential| {
+        credential.char_indices().skip(1).any(|(split, _)| {
+            let credential_prefix = &credential[..split];
+            FIELD_BOUNDARIES
+                .iter()
+                .any(|boundary| unicode_case_insensitive_ends_with(boundary, credential_prefix))
+        })
+    })
+}
+
 fn fixed_success_payloads() -> impl Iterator<Item = String> {
     (0..=MAX_RETURNED_RESULTS).flat_map(|result_count| {
         [false, true].into_iter().map(move |truncated| {
@@ -1416,6 +1428,7 @@ where
         }
         if query_contains_credential(request.query(), credential_text)
             || fixed_request_metadata_contains_credential(&request, credential_text)
+            || dynamic_success_field_boundary_may_collide(&scrubber)
             || serialized_request_url_contains_credential(&request, credential_text)
             || credential_debug_contains_credential(&credential, credential_text)
             || request_credential_debug_contains_credential(&request, &credential, credential_text)
@@ -2225,6 +2238,12 @@ impl CredentialScrubber {
         std::iter::once(self.exact.as_str()).chain(self.decoded_variants.iter().map(String::as_str))
     }
 
+    fn output_collision_variants(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.exact.as_str())
+            .chain(std::iter::once(self.json_escaped.as_str()))
+            .chain(self.decoded_variants.iter().map(String::as_str))
+    }
+
     fn url_contains_encoded_credential(&self, text: &str) -> bool {
         if self.contains_encoded_credential(text)
             || self.decoded_variants.iter().any(|variant| {
@@ -2339,13 +2358,16 @@ fn normalize_url_path_dot_segments(path: &str) -> Option<String> {
 }
 
 fn canonicalized_url_port_fragment(value: &str) -> Option<String> {
-    let port = value.strip_prefix(':')?;
+    let (port, retained_prefix) = match value.strip_prefix(':') {
+        Some(port) => (port, ":"),
+        None => (value, ""),
+    };
     if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let candidate = format!("http://example.com{value}/");
+    let candidate = format!("http://example.com:{port}/");
     let url = Url::parse(&candidate).ok()?;
-    url.port().map(|port| format!(":{port}"))
+    url.port().map(|port| format!("{retained_prefix}{port}"))
 }
 
 fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {
@@ -2421,7 +2443,7 @@ fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
             .take(MAX_CHARACTER_REFERENCE_BYTES)
             .position(|byte| byte == b';')
         else {
-            if over_window_numeric_reference_prefix(reference, MAX_CHARACTER_REFERENCE_BYTES) {
+            if numeric_character_reference_prefix(reference) {
                 return None;
             }
             decoded.push('&');
@@ -2438,11 +2460,8 @@ fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
     Some((decoded, changed))
 }
 
-fn over_window_numeric_reference_prefix(reference: &str, scan_bytes: usize) -> bool {
-    let Some(window) = reference.as_bytes().get(..scan_bytes) else {
-        return false;
-    };
-    let Some(numeric) = window.strip_prefix(b"&#") else {
+fn numeric_character_reference_prefix(reference: &str) -> bool {
+    let Some(numeric) = reference.as_bytes().strip_prefix(b"&#") else {
         return false;
     };
     let (digits, radix) = if let Some(hexadecimal) = numeric
@@ -2453,12 +2472,11 @@ fn over_window_numeric_reference_prefix(reference: &str, scan_bytes: usize) -> b
     } else {
         (numeric, 10)
     };
-    !digits.is_empty()
-        && digits.iter().all(|byte| match radix {
-            16 => byte.is_ascii_hexdigit(),
-            10 => byte.is_ascii_digit(),
-            _ => false,
-        })
+    digits.first().is_some_and(|byte| match radix {
+        16 => byte.is_ascii_hexdigit(),
+        10 => byte.is_ascii_digit(),
+        _ => false,
+    })
 }
 
 fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
@@ -2851,6 +2869,8 @@ mod tests {
     const SUCCESS_PAYLOAD_DELIMITER_COLLISION_KEY: &str = "[";
     const SUCCESS_PAYLOAD_EMPTY_RESULTS_COLLISION_KEY: &str = "[]";
     const SUCCESS_PAYLOAD_MULTI_RESULT_COLLISION_KEY: &str = "},{";
+    const SUCCESS_FIELD_BOUNDARY_COLLISION_KEY: &str = r#"title":"Synthetic"#;
+    const SUCCESS_FIELD_BOUNDARY_COLLISION_VALUE: &str = "Synthetic boundary result";
     const ACCEPT_HEADER_CASE_COLLISION_KEY: &str = "APPLICATION/JSON";
     const PROVIDER_HOST_CASE_COLLISION_KEY: &str = "API.SEARCH.BRAVE.COM";
     const URL_SCHEME_COLLISION_KEY: &str = "https";
@@ -2873,6 +2893,7 @@ mod tests {
     const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
     const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
     const URL_PORT_COLLISION_KEY: &str = ":08081";
+    const URL_BARE_PORT_COLLISION_KEY: &str = "08081";
     const URL_PORT_COLLISION_VALUE: &str = "http://example.com:8081/";
     const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
@@ -2880,6 +2901,8 @@ mod tests {
     const UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE: &str = "&ast;";
     const HTML_NUMERIC_C1_COLLISION_KEY: &str = "€";
     const HTML_NUMERIC_C1_COLLISION_VALUE: &str = "&#x80;";
+    const SEMICOLONLESS_NUMERIC_HTML_COLLISION_KEY: &str = ">";
+    const SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE: &str = "&#62";
     const OVER_WINDOW_NUMERIC_HTML_COLLISION_KEY: &str = "ZXQ";
     const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
     const FORM_HTML_COLLISION_VALUE: &str = "abc%26amp%3Bdef";
@@ -2966,6 +2989,28 @@ mod tests {
         ) -> WebSearchTransportOutcome {
             self.searches.fetch_add(1, Ordering::Relaxed);
             WebSearchTransportOutcome::completed(response_with_result_count(1), credential)
+        }
+    }
+
+    struct SuccessFieldBoundaryTransport {
+        searches: Arc<AtomicUsize>,
+    }
+
+    impl WebSearchTransport for SuccessFieldBoundaryTransport {
+        async fn search(
+            &mut self,
+            _request: WebSearchRequest,
+            credential: &CredentialValue,
+        ) -> WebSearchTransportOutcome {
+            self.searches.fetch_add(1, Ordering::Relaxed);
+            WebSearchTransportOutcome::completed(
+                WebSearchResponse::new(
+                    vec![result(SUCCESS_FIELD_BOUNDARY_COLLISION_VALUE)],
+                    WebSearchPageCompleteness::Complete,
+                )
+                .expect("boundary-collision fixture response is admitted"),
+                credential,
+            )
         }
     }
 
@@ -4186,6 +4231,33 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
+    /// INV-035: fixed successful-payload field framing is checked together
+    /// with every possible provider-controlled value prefix before dispatch.
+    #[tokio::test]
+    async fn web_search_rejects_success_field_boundary_collision_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: SUCCESS_FIELD_BOUNDARY_COLLISION_KEY,
+        };
+        let transport = SuccessFieldBoundaryTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("success-field boundary collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
     /// INV-035: an HTML C1 numeric reference is decoded through its standard
     /// replacement mapping before the injected transport boundary.
     #[tokio::test]
@@ -4243,6 +4315,37 @@ mod tests {
             .await
             .into_result()
             .expect("unsupported named-reference syntax is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: semicolonless numeric HTML references fail closed before query
+    /// text reaches the injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_semicolonless_numeric_reference_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: SEMICOLONLESS_NUMERIC_HTML_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("semicolonless numeric-reference syntax is definitive evidence");
 
         assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
         assert_eq!(searches.load(Ordering::Relaxed), 0);
@@ -5142,6 +5245,30 @@ mod tests {
         assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE));
     }
 
+    /// INV-035: semicolonless numeric HTML-reference syntax fails closed
+    /// before provider-controlled text enters completed evidence.
+    #[test]
+    fn web_search_redacts_semicolonless_numeric_reference_in_result_text() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("semicolonless numeric-reference fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            SEMICOLONLESS_NUMERIC_HTML_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(SEMICOLONLESS_NUMERIC_HTML_COLLISION_KEY));
+        assert!(!content.contains(SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE));
+    }
+
     /// INV-035: credential scrubbing cannot turn a checked result title into
     /// an empty title in completed evidence.
     #[test]
@@ -5540,6 +5667,29 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_PORT_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: a bare numeric credential is canonicalized in URL port
+    /// context before provider result evidence is retained.
+    #[test]
+    fn web_search_rejects_canonicalized_bare_port_credential_in_result_url() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(URL_PORT_COLLISION_VALUE),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("canonical bare-port fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_BARE_PORT_COLLISION_KEY.as_bytes().to_vec(),
         ))
         .expect("fixture credential is usable");
 
