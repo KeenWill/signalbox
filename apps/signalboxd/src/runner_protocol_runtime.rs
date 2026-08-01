@@ -8,16 +8,19 @@ use signalbox_domain::{
     RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerId,
 };
 use signalbox_persistence::runner_protocol::{
-    IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
-    RunnerConnectionEpoch, RunnerConnectionTransition, RunnerConnectionTransitionOutcome,
-    RunnerEnrollmentRequestFailure, RunnerEnrollmentRequestId, RunnerProtocolStore,
-    RunnerProtocolStoreError, RunnerRegistrationRevision,
+    AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
+    PristineRunnerEnrollmentRequest, RunnerConnectionCause, RunnerConnectionEpoch,
+    RunnerConnectionTransition, RunnerConnectionTransitionEffect,
+    RunnerConnectionTransitionOutcome, RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure,
+    RunnerEnrollmentRequestId, RunnerProtocolStore, RunnerProtocolStoreError,
+    RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
-    FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message, PositiveU64,
-    ReconnectDirectives, Registered, Rejected, RejectionCode, Resume, Resumed, Shutdown,
-    ShutdownReason, advertisement_digest, decode_line, encode_line,
+    FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, MAX_FRAME_BYTES, Message,
+    PositiveU64, ReconnectDirectives, Registered, Rejected, RejectionCode, Resume, Resumed,
+    Shutdown, ShutdownReason, WorkspaceFailureCorrelation, advertisement_digest, decode_line,
+    encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -97,8 +100,32 @@ impl PostgresRunnerRegistrationService {
     }
 
     /// Classifies prior-process nonterminal connections as lost before admission.
-    pub async fn mark_orphaned_connections_lost(&self) -> Result<u64, RunnerProtocolStoreError> {
-        self.store.mark_orphaned_connections_lost().await
+    pub async fn mark_orphaned_connections_lost(
+        &self,
+    ) -> Result<Vec<AppliedRunnerConnectionTransition>, RunnerProtocolStoreError> {
+        let connections = self.store.load_nonterminal_connection_heads().await?;
+        let mut transitions = Vec::new();
+        for connection in connections {
+            let effect = self
+                .store
+                .transition_connection_with_effect(
+                    connection.enrollment(),
+                    connection.epoch(),
+                    RunnerConnectionTransition::TransportClosed,
+                )
+                .await?;
+            match effect {
+                RunnerConnectionTransitionEffect::Applied(applied) => {
+                    log_connection_transition(applied, RunnerConnectionTransition::TransportClosed);
+                    transitions.push(applied);
+                }
+                RunnerConnectionTransitionEffect::Unchanged(
+                    RunnerConnectionTransitionOutcome::Current(_)
+                    | RunnerConnectionTransitionOutcome::Stale { .. },
+                ) => {}
+            }
+        }
+        Ok(transitions)
     }
 
     async fn enroll_durably(&self, request: Enroll) -> Result<Enrolled, RunnerRegistrationFailure> {
@@ -144,6 +171,22 @@ impl PostgresRunnerRegistrationService {
             })?;
         let receipt = outcome.receipt();
         let identities = receipt.identities();
+        tracing::info!(
+            request_id = %receipt.request().into_uuid(),
+            enrollment_id = %identities.enrollment().into_uuid(),
+            runner_id = %identities.runner().into_uuid(),
+            disposition = ?outcome.disposition(),
+            "runner enrollment accepted"
+        );
+        match outcome.disposition() {
+            RunnerEnrollmentDisposition::Created => tracing::info!(
+                enrollment_id = %identities.enrollment().into_uuid(),
+                runner_id = %identities.runner().into_uuid(),
+                registration_revision = receipt.registration().revision().get(),
+                "runner registration revision stored"
+            ),
+            RunnerEnrollmentDisposition::Replayed => {}
+        }
         let connection = self
             .store
             .open_connection(identities.enrollment())
@@ -151,6 +194,13 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Enroll, correlation.clone(), error)
             })?;
+        tracing::info!(
+            enrollment_id = %identities.enrollment().into_uuid(),
+            runner_id = %identities.runner().into_uuid(),
+            connection_epoch = connection.epoch().get(),
+            connection_cause = ?connection.cause(),
+            "runner connection established"
+        );
         Ok(Enrolled {
             request_id: CanonicalUuid::from_uuid(receipt.request().into_uuid()),
             enrollment_id: CanonicalUuid::from_uuid(identities.enrollment().into_uuid()),
@@ -200,6 +250,23 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
+        let previous_registration_revision = match self
+            .store
+            .load_enrollment(identities.enrollment())
+            .await
+            .map_err(|error| {
+                store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+            })? {
+            Some(enrollment) => self
+                .store
+                .load_current_registration(&enrollment)
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?
+                .map(|registration| registration.revision()),
+            None => None,
+        };
         let receipt = self
             .store
             .resume_registration(
@@ -212,11 +279,28 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
+        if previous_registration_revision == Some(prior)
+            && receipt.registration().revision() != prior
+        {
+            tracing::info!(
+                enrollment_id = %receipt.enrollment().enrollment().into_uuid(),
+                runner_id = %receipt.enrollment().runner().into_uuid(),
+                registration_revision = receipt.registration().revision().get(),
+                "runner registration revision stored"
+            );
+        }
         let connection = self
             .store
             .open_connection(receipt.enrollment().enrollment())
             .await
             .map_err(|error| store_failure(RunnerInboundFrameKind::Resume, correlation, error))?;
+        tracing::info!(
+            enrollment_id = %receipt.enrollment().enrollment().into_uuid(),
+            runner_id = %receipt.enrollment().runner().into_uuid(),
+            connection_epoch = connection.epoch().get(),
+            connection_cause = ?connection.cause(),
+            "runner connection established"
+        );
         Ok(Resumed {
             registration_revision: positive_revision(receipt.registration().revision())?,
             connection_epoch: positive_epoch(connection.epoch())?,
@@ -327,6 +411,12 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Advertise, correlation, error)
             })?;
+        tracing::info!(
+            enrollment_id = %enrollment.enrollment().into_uuid(),
+            runner_id = %enrollment.runner().into_uuid(),
+            registration_revision = registration.revision().get(),
+            "runner registration revision stored"
+        );
         Ok(Registered {
             registration_revision: positive_revision(registration.revision())?,
             advertisement_digest: digest,
@@ -348,8 +438,9 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::CorrelationMismatch,
             )
         })?;
-        self.store
-            .transition_connection(
+        let effect = self
+            .store
+            .transition_connection_with_effect(
                 RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
                 epoch,
                 transition,
@@ -361,7 +452,62 @@ impl PostgresRunnerRegistrationService {
                     AvailableCorrelation::ConnectionEpoch(wire_epoch),
                     error,
                 )
-            })
+            })?;
+        match effect {
+            RunnerConnectionTransitionEffect::Applied(applied) => {
+                log_connection_transition(applied, transition);
+                Ok(RunnerConnectionTransitionOutcome::Current(
+                    applied.snapshot(),
+                ))
+            }
+            RunnerConnectionTransitionEffect::Unchanged(outcome) => Ok(outcome),
+        }
+    }
+}
+
+fn log_connection_transition(
+    applied: AppliedRunnerConnectionTransition,
+    transition: RunnerConnectionTransition,
+) {
+    let enrollment = applied.enrollment();
+    let snapshot = applied.snapshot();
+    match (transition, snapshot.cause()) {
+        (RunnerConnectionTransition::DaemonShutdown, RunnerConnectionCause::DaemonShutdown)
+        | (RunnerConnectionTransition::RunnerShutdown, RunnerConnectionCause::RunnerShutdown) => {
+            tracing::info!(
+                enrollment_id = %enrollment.into_uuid(),
+                connection_epoch = snapshot.epoch().get(),
+                shutdown_cause = ?snapshot.cause(),
+                "runner shutdown recorded"
+            )
+        }
+        (RunnerConnectionTransition::TransportClosed, RunnerConnectionCause::TransportClosed) => {
+            tracing::info!(
+                enrollment_id = %enrollment.into_uuid(),
+                connection_epoch = snapshot.epoch().get(),
+                loss_cause = ?snapshot.cause(),
+                "runner transport loss recorded"
+            )
+        }
+        (
+            RunnerConnectionTransition::Observe
+            | RunnerConnectionTransition::HeartbeatRecovered
+            | RunnerConnectionTransition::HeartbeatMissed
+            | RunnerConnectionTransition::HeartbeatTimeout
+            | RunnerConnectionTransition::ProtocolFailure
+            | RunnerConnectionTransition::DaemonShutdown
+            | RunnerConnectionTransition::RunnerShutdown
+            | RunnerConnectionTransition::TransportClosed,
+            RunnerConnectionCause::Established
+            | RunnerConnectionCause::HeartbeatRecovered
+            | RunnerConnectionCause::HeartbeatMissed
+            | RunnerConnectionCause::DaemonShutdown
+            | RunnerConnectionCause::RunnerShutdown
+            | RunnerConnectionCause::HeartbeatTimeout
+            | RunnerConnectionCause::TransportClosed
+            | RunnerConnectionCause::ProtocolFailure
+            | RunnerConnectionCause::EnrollmentRevoked,
+        ) => {}
     }
 }
 
@@ -1521,7 +1667,7 @@ impl HeartbeatState {
         if acknowledgement.lease_phase.is_some() || acknowledgement.workspace_phase.is_some() {
             return Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::HeartbeatAck,
-                AvailableCorrelation::None,
+                heartbeat_ack_correlation(acknowledgement),
                 RejectionCode::Unavailable,
             ));
         }
@@ -1621,42 +1767,86 @@ async fn write_message(
 fn available_correlation(message: &Message) -> AvailableCorrelation {
     match message {
         Message::Enroll(value) => AvailableCorrelation::Enrollment(value.request_id),
+        Message::Enrolled(value) => AvailableCorrelation::Enrollment(value.request_id),
         Message::Resume(value) => AvailableCorrelation::Enrollment(value.request_id),
+        Message::Resumed(value) => AvailableCorrelation::Registration(value.registration_revision),
+        Message::ReplacementPending(value) => AvailableCorrelation::Enrollment(value.request_id),
         Message::Advertise(value) => {
+            AvailableCorrelation::Registration(value.registration_revision)
+        }
+        Message::Registered(value) => {
             AvailableCorrelation::Registration(value.registration_revision)
         }
         Message::WorkspaceLeakPage(value) => {
             AvailableCorrelation::LeakPage(value.page.correlation.clone())
         }
+        Message::WorkspaceLeakRecorded(value) => {
+            AvailableCorrelation::LeakPage(value.correlation.clone())
+        }
+        Message::WorkspaceProvision(value) => {
+            AvailableCorrelation::Provision(value.correlation.clone())
+        }
         Message::WorkspaceReady(value) => {
             AvailableCorrelation::Provision(value.correlation.clone())
+        }
+        Message::WorkspaceRecorded(value) => {
+            AvailableCorrelation::Provision(value.correlation.clone())
+        }
+        Message::WorkspaceRelease(value) => {
+            AvailableCorrelation::Release(value.correlation.clone())
         }
         Message::WorkspaceReleased(value) => {
             AvailableCorrelation::Release(value.correlation.clone())
         }
+        Message::WorkspaceReleaseRecorded(value) => {
+            AvailableCorrelation::Release(value.correlation.clone())
+        }
+        Message::LeaseOffer(value) => AvailableCorrelation::Lease(value.correlation.clone()),
         Message::LeaseClaim(value) => AvailableCorrelation::Lease(value.correlation.clone()),
+        Message::LeaseClaimed(value) => AvailableCorrelation::Lease(value.correlation.clone()),
+        Message::Dispatch(value) => AvailableCorrelation::Lease(value.correlation.clone()),
         Message::Result(value) => AvailableCorrelation::Lease(value.correlation.clone()),
+        Message::ResultRecorded(value) => AvailableCorrelation::Lease(value.correlation.clone()),
         Message::OperationFailed(value) => {
             AvailableCorrelation::OperationFailure(value.failure.correlation.clone())
         }
+        Message::OperationFailureRecorded(value) => {
+            AvailableCorrelation::OperationFailure(value.correlation.clone())
+        }
         Message::Shutdown(value) => AvailableCorrelation::ConnectionEpoch(value.connection_epoch),
-        Message::Enrolled(_)
-        | Message::Resumed(_)
-        | Message::ReplacementPending(_)
-        | Message::Registered(_)
-        | Message::Heartbeat(_)
-        | Message::HeartbeatAck(_)
-        | Message::WorkspaceLeakRecorded(_)
-        | Message::WorkspaceProvision(_)
-        | Message::WorkspaceRecorded(_)
-        | Message::WorkspaceRelease(_)
-        | Message::WorkspaceReleaseRecorded(_)
-        | Message::LeaseOffer(_)
-        | Message::LeaseClaimed(_)
-        | Message::Dispatch(_)
-        | Message::ResultRecorded(_)
-        | Message::OperationFailureRecorded(_)
-        | Message::Rejected(_) => AvailableCorrelation::None,
+        Message::Rejected(value) => value.available_correlation.clone(),
+        Message::Heartbeat(_) => AvailableCorrelation::None,
+        Message::HeartbeatAck(value) => heartbeat_ack_correlation(value),
+    }
+}
+
+fn heartbeat_ack_correlation(acknowledgement: &HeartbeatAck) -> AvailableCorrelation {
+    match (
+        acknowledgement.lease_phase.as_ref(),
+        acknowledgement.workspace_phase.as_ref(),
+    ) {
+        (Some(lease), None | Some(_)) => AvailableCorrelation::Lease(lease.correlation.clone()),
+        (None, Some(HeartbeatWorkspacePhase::Provisioning { correlation }))
+        | (None, Some(HeartbeatWorkspacePhase::ReadyUnrecorded { correlation })) => {
+            AvailableCorrelation::Provision(correlation.clone())
+        }
+        (None, Some(HeartbeatWorkspacePhase::ReleaseAccepted { correlation }))
+        | (None, Some(HeartbeatWorkspacePhase::ReleaseCompleted { correlation })) => {
+            AvailableCorrelation::Release(correlation.clone())
+        }
+        (
+            None,
+            Some(HeartbeatWorkspacePhase::FailureUnrecorded {
+                correlation: WorkspaceFailureCorrelation::Provision(correlation),
+            }),
+        ) => AvailableCorrelation::Provision(correlation.clone()),
+        (
+            None,
+            Some(HeartbeatWorkspacePhase::FailureUnrecorded {
+                correlation: WorkspaceFailureCorrelation::Release(correlation),
+            }),
+        ) => AvailableCorrelation::Release(correlation.clone()),
+        (None, None) => AvailableCorrelation::None,
     }
 }
 
@@ -1782,6 +1972,13 @@ mod tests {
     const DATABASE_PASSWORD: &str = "signalbox-test";
     const DATABASE_NAME: &str = "signalbox";
     const CONFIGURED_REPOSITORY: &str = "signalbox";
+    const ARBITRARY_HEARTBEAT_CHALLENGE_SEQUENCE: u64 = 1;
+    const ARBITRARY_HEARTBEAT_RUNNER_SEQUENCE: u64 = 1;
+    const ARBITRARY_PROVISION_AUTHORIZATION_ID_SEED: u128 = 5;
+    const ARBITRARY_PROVISION_SESSION_ID_SEED: u128 = 6;
+    const ARBITRARY_PROVISION_RUNNER_ID_SEED: u128 = 7;
+    const ARBITRARY_PROVISION_PLACEMENT_REVISION: u64 = 1;
+    const ARBITRARY_PROVISION_REGISTRATION_REVISION: u64 = 1;
 
     #[derive(Clone)]
     struct EnrollmentService {
@@ -1835,6 +2032,37 @@ mod tests {
         CanonicalUuid::from_uuid(uuid::Uuid::from_u128(value))
     }
 
+    fn canonical_lease_correlation() -> signalbox_runner_wire::LeaseCorrelation {
+        let arbitrary_identity = identity(1);
+        let first = PositiveU64::try_new(1).expect("the first fixture generation is positive");
+        signalbox_runner_wire::LeaseCorrelation {
+            registration_revision: first,
+            lease_id: arbitrary_identity,
+            lease_generation: first,
+            runner_id: arbitrary_identity,
+            tool_name: signalbox_runner_wire::WireToolName::try_new("git_fetch".to_owned())
+                .expect("the fixture tool name is valid"),
+            session_id: arbitrary_identity,
+            turn_id: arbitrary_identity,
+            tool_request_id: arbitrary_identity,
+            tool_attempt_id: arbitrary_identity,
+            issuing_turn_attempt_id: arbitrary_identity,
+            tool_dispatch_generation: first,
+        }
+    }
+
+    #[track_caller]
+    fn expect_applied_transition(
+        effect: RunnerConnectionTransitionEffect,
+    ) -> AppliedRunnerConnectionTransition {
+        match effect {
+            RunnerConnectionTransitionEffect::Applied(applied) => applied,
+            RunnerConnectionTransitionEffect::Unchanged(outcome) => {
+                panic!("expected an applied connection transition, observed {outcome:?}")
+            }
+        }
+    }
+
     fn challenge_tick(state: &mut HeartbeatState) -> Heartbeat {
         let HeartbeatTick::Challenge(challenge) = state
             .next_tick()
@@ -1874,6 +2102,21 @@ mod tests {
                 .expect("the configured repository key is checked"),
                 credential_profile: Some(profile),
             }],
+        }
+    }
+
+    fn workspace_provision_correlation() -> signalbox_runner_wire::ProvisionCorrelation {
+        signalbox_runner_wire::ProvisionCorrelation {
+            authorization_id: identity(ARBITRARY_PROVISION_AUTHORIZATION_ID_SEED),
+            session_id: identity(ARBITRARY_PROVISION_SESSION_ID_SEED),
+            placement_revision: PositiveU64::try_new(ARBITRARY_PROVISION_PLACEMENT_REVISION)
+                .expect("the fixture placement revision is positive"),
+            runner_id: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: PositiveU64::try_new(ARBITRARY_PROVISION_REGISTRATION_REVISION)
+                .expect("the fixture registration revision is positive"),
+            repository: None,
+            sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
+            credential_profile: None,
         }
     }
 
@@ -2288,6 +2531,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_workspace_provision_rejection_preserves_its_complete_correlation() {
+        let correlation = workspace_provision_correlation();
+        let advertisement = empty_advertisement();
+        let service = EnrollmentService {
+            response: enrolled_response(correlation.authorization_id, &advertisement),
+        };
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::WorkspaceProvision(signalbox_runner_wire::WorkspaceProvision {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await
+            .expect("the initial workspace provision frame is sent");
+            read_frame(&mut reader)
+                .await
+                .expect("the typed rejection is received")
+                .message
+        };
+
+        let (served, observed) = tokio::join!(server, client);
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceProvision,
+                AvailableCorrelation::Provision(correlation),
+                RejectionCode::CorrelationMismatch,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the pre-enrollment workspace provision closes after rejection");
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn initial_heartbeat_ack_rejection_preserves_its_complete_phase_correlation() {
+        let correlation = workspace_provision_correlation();
+        let advertisement = empty_advertisement();
+        let service = EnrollmentService {
+            response: enrolled_response(correlation.authorization_id, &advertisement),
+        };
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::HeartbeatAck(HeartbeatAck {
+                    challenge_sequence: PositiveU64::try_new(
+                        ARBITRARY_HEARTBEAT_CHALLENGE_SEQUENCE,
+                    )
+                    .expect("the fixture challenge sequence is positive"),
+                    runner_sequence: PositiveU64::try_new(ARBITRARY_HEARTBEAT_RUNNER_SEQUENCE)
+                        .expect("the fixture runner sequence is positive"),
+                    lease_phase: None,
+                    workspace_phase: Some(HeartbeatWorkspacePhase::Provisioning {
+                        correlation: correlation.clone(),
+                    }),
+                }),
+            )
+            .await
+            .expect("the initial heartbeat acknowledgement is sent");
+            read_frame(&mut reader)
+                .await
+                .expect("the typed rejection is received")
+                .message
+        };
+
+        let (served, observed) = tokio::join!(server, client);
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::HeartbeatAck,
+                AvailableCorrelation::Provision(correlation),
+                RejectionCode::CorrelationMismatch,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the pre-enrollment heartbeat acknowledgement closes after rejection");
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
     async fn second_peer_enrolls_while_first_peer_is_stalled() {
         let directory = private_tempdir();
         let path = directory.path().join("runner.sock");
@@ -2649,6 +2983,56 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn duplicate_transport_loss_reports_only_first_transition_as_applied() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let enrolled = service
+            .enroll(Enroll {
+                request_id: identity(1),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("the real registration service enrolls the runner");
+        let enrollment = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+        let epoch = RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
+            .expect("the enrolled connection epoch is positive");
+
+        let first = store
+            .transition_connection_with_effect(
+                enrollment,
+                epoch,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the first transport loss commits");
+        let observed = store
+            .load_connection(enrollment)
+            .await
+            .expect("the loss state loads")
+            .expect("the connection lifecycle exists");
+        let replayed = store
+            .transition_connection_with_effect(
+                enrollment,
+                epoch,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the repeated loss observes terminal state");
+        let applied = expect_applied_transition(first);
+
+        assert_eq!(applied.enrollment(), enrollment);
+        assert_eq!(applied.snapshot(), observed);
+        assert_eq!(
+            replayed,
+            RunnerConnectionTransitionEffect::Unchanged(
+                RunnerConnectionTransitionOutcome::Current(observed)
+            )
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn enrollment_ack_write_failure_cannot_leave_the_runner_healthy() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store, []);
@@ -2704,10 +3088,13 @@ mod tests {
             .await
             .expect("the prior process enrolls the runner");
 
-        let transitioned = service
+        let transitions = service
             .mark_orphaned_connections_lost()
             .await
             .expect("startup classifies prior-process connection heads");
+        let applied = transitions
+            .first()
+            .expect("the prior-process connection produces one applied loss");
         let observed = store
             .load_connection(RunnerEnrollmentId::from_uuid(
                 enrolled.enrollment_id.into_uuid(),
@@ -2716,7 +3103,12 @@ mod tests {
             .expect("the startup loss state loads")
             .expect("the connection lifecycle exists");
 
-        assert_eq!(transitioned, 1);
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(
+            applied.enrollment().into_uuid(),
+            enrolled.enrollment_id.into_uuid()
+        );
+        assert_eq!(applied.snapshot(), observed);
         assert_eq!(observed.state(), RunnerConnectionState::Lost);
         assert_eq!(observed.cause(), RunnerConnectionCause::TransportClosed);
     }
@@ -3215,8 +3607,8 @@ mod tests {
             .await
             .expect("the terminal connection loads")
             .expect("the connection lifecycle exists");
-        let startup_transitions = store
-            .mark_orphaned_connections_lost()
+        let startup_candidates = store
+            .load_nonterminal_connection_heads()
             .await
             .expect("startup reconciliation ignores the terminal connection");
         let expected = Message::Rejected(
@@ -3233,7 +3625,7 @@ mod tests {
         assert_eq!(rejected, expected);
         assert_eq!(connection.state(), RunnerConnectionState::Lost);
         assert_eq!(connection.cause(), RunnerConnectionCause::EnrollmentRevoked);
-        assert_eq!(startup_transitions, 0);
+        assert!(startup_candidates.is_empty());
     }
 
     #[tokio::test]
@@ -3385,9 +3777,55 @@ mod tests {
     }
 
     #[test]
+    fn dual_phase_heartbeat_ack_preserves_a_complete_lease_correlation() {
+        let correlation = canonical_lease_correlation();
+        let arbitrary_workspace_identity = identity(2);
+        let first = PositiveU64::try_new(1).expect("the first fixture revision is positive");
+        let acknowledgement = HeartbeatAck {
+            challenge_sequence: PositiveU64::try_new(1)
+                .expect("the first challenge sequence is positive"),
+            runner_sequence: PositiveU64::try_new(1)
+                .expect("the first runner sequence is positive"),
+            lease_phase: Some(signalbox_runner_wire::LeasePhase {
+                correlation: correlation.clone(),
+                phase: signalbox_runner_wire::LeasePhaseKind::WaitingDispatch,
+            }),
+            workspace_phase: Some(HeartbeatWorkspacePhase::Provisioning {
+                correlation: signalbox_runner_wire::ProvisionCorrelation {
+                    authorization_id: arbitrary_workspace_identity,
+                    session_id: arbitrary_workspace_identity,
+                    placement_revision: first,
+                    runner_id: arbitrary_workspace_identity,
+                    registration_revision: first,
+                    repository: None,
+                    sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
+                    credential_profile: None,
+                },
+            }),
+        };
+
+        assert_eq!(
+            heartbeat_ack_correlation(&acknowledgement),
+            AvailableCorrelation::Lease(correlation)
+        );
+    }
+
+    #[test]
     fn heartbeat_operation_phase_is_unavailable_in_registration_only_runtime() {
         let mut state = HeartbeatState::new();
         let challenge = challenge_tick(&mut state);
+        let correlation = signalbox_runner_wire::ProvisionCorrelation {
+            authorization_id: identity(10),
+            session_id: identity(11),
+            placement_revision: PositiveU64::try_new(1)
+                .expect("the first placement revision is positive"),
+            runner_id: identity(12),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the first registration revision is positive"),
+            repository: None,
+            sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
+            credential_profile: None,
+        };
         let acknowledgement = HeartbeatAck {
             challenge_sequence: challenge.sequence,
             runner_sequence: PositiveU64::try_new(1)
@@ -3395,18 +3833,7 @@ mod tests {
             lease_phase: None,
             workspace_phase: Some(
                 signalbox_runner_wire::HeartbeatWorkspacePhase::Provisioning {
-                    correlation: signalbox_runner_wire::ProvisionCorrelation {
-                        authorization_id: identity(10),
-                        session_id: identity(11),
-                        placement_revision: PositiveU64::try_new(1)
-                            .expect("the first placement revision is positive"),
-                        runner_id: identity(12),
-                        registration_revision: PositiveU64::try_new(1)
-                            .expect("the first registration revision is positive"),
-                        repository: None,
-                        sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
-                        credential_profile: None,
-                    },
+                    correlation: correlation.clone(),
                 },
             ),
         };
@@ -3416,5 +3843,9 @@ mod tests {
             .expect_err("operation state is unavailable in this runtime");
 
         assert_eq!(failure.code, RejectionCode::Unavailable);
+        assert_eq!(
+            failure.available_correlation.as_ref(),
+            &AvailableCorrelation::Provision(correlation)
+        );
     }
 }
