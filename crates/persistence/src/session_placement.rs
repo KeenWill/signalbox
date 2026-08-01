@@ -13,6 +13,7 @@ use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use crate::command_registry::{
     self, CommandKind, RegistryCorruption, RegistryInspectionError, UPDATE_SESSION_PLACEMENT_KIND,
 };
+use crate::lock_inventory;
 use crate::mapping::{durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid};
 
 const STORAGE_VERSION: i16 = 1;
@@ -231,18 +232,10 @@ async fn load_current_for_update(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
-    let row = sqlx::query(
-        "SELECT event.version, event.placement_path, event.root_global_read_intent
-           FROM session_current_placement AS head
-           JOIN session_placement_event AS event
-             ON event.session_id = head.session_id
-            AND event.version = head.current_version
-          WHERE head.session_id = $1
-          FOR UPDATE OF head",
-    )
-    .bind(session_id_to_uuid(session))
-    .fetch_optional(&mut *connection)
-    .await?;
+    let row = sqlx::query(lock_inventory::UPDATE_SESSION_PLACEMENT_HEAD)
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&mut *connection)
+        .await?;
     row.map(decode_versioned_placement).transpose()
 }
 
