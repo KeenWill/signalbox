@@ -1290,6 +1290,7 @@ where
         }
         ClientRequest::ImportConversation { format, source } => {
             if pending_import.is_some() {
+                drop(source);
                 return write_import_rejection(
                     writer,
                     version,
@@ -11773,9 +11774,11 @@ context_window_tokens = 200000
         let permit = budget.clone().acquire_owned().await?;
         let first = b"first".to_vec();
         let second = b"second".to_vec();
+        let expected_source = [first.as_slice(), second.as_slice()].concat();
+        let expected_size = u64::try_from(expected_source.len())?;
         let mut pending = Some(PendingConversationImport {
             format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes: 11,
+            declared_size_bytes: expected_size,
             actual_size_bytes: 0,
             source: Vec::new(),
             import_permit: permit,
@@ -11786,7 +11789,7 @@ context_window_tokens = 200000
             &mut writer,
             ProtocolVersion::One,
             RequestId::try_new(1)?,
-            first.clone(),
+            first,
             32,
             &mut pending,
         )
@@ -11795,15 +11798,15 @@ context_window_tokens = 200000
             &mut writer,
             ProtocolVersion::One,
             RequestId::try_new(2)?,
-            second.clone(),
+            second,
             32,
             &mut pending,
         )
         .await?;
 
         let assembled = pending.as_ref().expect("the import remains pending");
-        assert_eq!(assembled.source, [first, second].concat());
-        assert_eq!(assembled.actual_size_bytes, 11);
+        assert_eq!(assembled.source, expected_source);
+        assert_eq!(assembled.actual_size_bytes, expected_size);
         Ok(())
     }
 
