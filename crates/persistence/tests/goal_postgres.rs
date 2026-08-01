@@ -20,7 +20,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
     create_session::CreateSessionRepository,
-    goal::{GoalCommandHandlingOutcome, GoalRepository},
+    goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
     start_eligible_turn::StartEligibleTurnRepository,
@@ -123,6 +123,20 @@ fn activated_turn(outcome: StartEligibleTurnOutcome) -> TurnId {
             panic!("fixture goal turn must be eligible for activation")
         }
     }
+}
+
+#[track_caller]
+fn assert_applied_transition(outcome: GoalTransitionOutcome) {
+    let GoalTransitionOutcome::Applied(_) = outcome else {
+        panic!("fixture transition must apply");
+    };
+}
+
+#[track_caller]
+fn assert_applied_command(outcome: GoalCommandHandlingOutcome) {
+    let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_)) = outcome else {
+        panic!("fixture command must apply");
+    };
 }
 
 /// INV-048: a goal-owned accepted input activates without a synthetic user
@@ -241,10 +255,7 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
             GoalSchedulerProvenance::new(attached_turn.turn()),
         )
         .await?;
-    assert!(matches!(
-        blocked,
-        signalbox_persistence::goal::GoalTransitionOutcome::Applied(_)
-    ));
+    assert_applied_transition(blocked);
 
     let guidance = GoalGuidance::try_new(String::from("use the newly granted credential"))
         .expect("fixture guidance is admitted");
@@ -260,10 +271,7 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
             |_| None,
         )
         .await?;
-    assert!(matches!(
-        resumed,
-        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
-    ));
+    assert_applied_command(resumed);
 
     let resumed_content: String = sqlx::query_scalar(
         "SELECT content_text
