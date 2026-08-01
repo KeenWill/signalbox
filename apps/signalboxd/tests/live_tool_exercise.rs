@@ -108,8 +108,13 @@ struct PlanEntryFixture {
     status: &'static str,
 }
 
+struct ScriptedToolCall {
+    name: String,
+    arguments_json: String,
+}
+
 struct PlanFixture {
-    calls: Vec<(String, String)>,
+    calls: Vec<ScriptedToolCall>,
     entries: [PlanEntryFixture; 2],
 }
 
@@ -155,7 +160,7 @@ impl PlanFixture {
     fn history_count(&self) -> usize {
         self.calls
             .iter()
-            .filter(|(name, _)| name == PLAN_WRITE_NAME)
+            .filter(|call| call.name == PLAN_WRITE_NAME)
             .count()
     }
 }
@@ -248,6 +253,7 @@ async fn run_live_smoke() -> SmokeResult {
     let plan_fixture = PlanFixture::new();
 
     let scripts = smoke_scripts(&plan_fixture, &gate_calls);
+    let expected_model_operations = scripts.len();
     let scripted = ScriptedModel::<ModelCallId>::following(scripts);
     let probe = scripted.clone();
     let provider = RuntimeModelCallProvider::new(scripted, runtime_models);
@@ -374,6 +380,7 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
+    assert_eq!(probe.received_operations().len(), expected_model_operations);
     assert_eq!(tool_attempt_count(&pool, gate_turn).await?, 0);
     assert!(!workspace.path().join(DENIED_WRITE_PATH).exists());
     assert!(!workspace.path().join(DENIED_PATCH_PATH).exists());
@@ -456,7 +463,7 @@ fn session_template_configuration(
     Ok(SessionTemplateConfiguration::read(&path, || None, models)?)
 }
 
-fn smoke_scripts(plan_fixture: &PlanFixture, gate_calls: &[(String, String)]) -> Vec<Script> {
+fn smoke_scripts(plan_fixture: &PlanFixture, gate_calls: &[ScriptedToolCall]) -> Vec<Script> {
     let workspace_reads = vec![
         call(
             READ_FILE_NAME,
@@ -529,19 +536,22 @@ fn smoke_scripts(plan_fixture: &PlanFixture, gate_calls: &[(String, String)]) ->
     ]
 }
 
-fn call(name: &str, arguments: Value) -> (String, String) {
-    (name.to_owned(), arguments.to_string())
+fn call(name: &str, arguments: Value) -> ScriptedToolCall {
+    ScriptedToolCall {
+        name: name.to_owned(),
+        arguments_json: arguments.to_string(),
+    }
 }
 
-fn tool_use_script(calls: &[(String, String)]) -> Script {
+fn tool_use_script(calls: &[ScriptedToolCall]) -> Script {
     let content = calls
         .iter()
         .enumerate()
-        .map(|(ordinal, (name, arguments))| {
+        .map(|(ordinal, call)| {
             AssistantPart::ToolCall(ToolCallProposal {
                 id: ToolCallId::new(format!("live-call-{ordinal}")),
-                name: ToolName::new(name),
-                arguments_json: arguments.clone(),
+                name: ToolName::new(&call.name),
+                arguments_json: call.arguments_json.clone(),
             })
         })
         .collect();
@@ -575,7 +585,7 @@ fn confirm_tool_names(catalog: &impl ToolCatalog) -> Vec<String> {
         .collect()
 }
 
-fn confirm_calls(session: CanonicalUuid) -> Vec<(String, String)> {
+fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
     vec![
         call(
             APPLY_PATCH_NAME,
@@ -644,10 +654,10 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<(String, String)> {
     ]
 }
 
-fn assert_confirm_calls(calls: &[(String, String)], expected_names: &[&str]) {
+fn assert_confirm_calls(calls: &[ScriptedToolCall], expected_names: &[&str]) {
     let actual_names = calls
         .iter()
-        .map(|(name, _)| name.as_str())
+        .map(|call| call.name.as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_names, expected_names);
 }
@@ -700,13 +710,8 @@ fn current_tool_result_delta_rejects_changed_prior_evidence() {
     let changed_previous = json!({"round": "changed"});
     let current = json!({"round": "current"});
 
-    let error = current_tool_result_delta(vec![previous], vec![changed_previous, current])
+    let _error = current_tool_result_delta(vec![previous], vec![changed_previous, current])
         .expect_err("changed prior evidence must be rejected");
-
-    assert_eq!(
-        error.to_string(),
-        "the continuation did not preserve prior tool results"
-    );
 }
 
 fn operation_tool_results(

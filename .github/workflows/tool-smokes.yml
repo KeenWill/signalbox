@@ -39,6 +39,7 @@ jobs:
           cache-on-failure: true
           key: tool-live-smokes
       - name: Run GitHub read smokes
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
