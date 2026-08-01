@@ -106,7 +106,10 @@ impl WebSearchResult {
 
 impl ResultTitle {
     fn try_new(title: String) -> Option<Self> {
-        (title.len() <= MAX_RESULT_TITLE_BYTES && !title.trim().is_empty()).then_some(Self(title))
+        if title.len() > MAX_RESULT_TITLE_BYTES || title.trim().is_empty() {
+            return None;
+        }
+        Some(Self(entity_escape(&title, MAX_RESULT_TITLE_BYTES)?))
     }
 
     pub(super) fn as_str(&self) -> &str {
@@ -253,7 +256,7 @@ impl WebSearchResponse {
 /// Parsed provider rejection facts with no retained raw response bytes.
 pub struct WebSearchProviderError {
     pub(super) status: u16,
-    pub(super) message: Option<String>,
+    pub(super) detail: Option<String>,
     pub(super) body_failure_class: Option<WebSearchTransportFailureClass>,
 }
 
@@ -274,18 +277,18 @@ impl Error for WebSearchProviderError {}
 impl WebSearchProviderError {
     /// Parses one complete provider error body without retaining raw bytes.
     ///
-    /// Only the known string-valued `message` component is retained, and it is
-    /// entity-escaped before it can become failure evidence. Unknown or
+    /// Only the known string-valued `error.detail` component is retained, and
+    /// it is entity-escaped before it can become failure evidence. Unknown or
     /// malformed bodies contribute no provider text.
     pub fn new(status: u16, body: Vec<u8>) -> Option<Self> {
         let status_code = StatusCode::from_u16(status).ok()?;
         if status_code.is_success() || body.len() > MAX_PROVIDER_RESPONSE_BYTES {
             return None;
         }
-        let message = parsed_provider_error_message(&body);
+        let detail = parsed_provider_error_detail(&body);
         Some(Self {
             status,
-            message,
+            detail,
             body_failure_class: None,
         })
     }
@@ -299,9 +302,18 @@ impl WebSearchProviderError {
     }
 }
 
-fn parsed_provider_error_message(body: &[u8]) -> Option<String> {
-    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
-    let message = value.get("message")?.as_str()?;
+#[derive(serde::Deserialize)]
+struct ProviderErrorEnvelope {
+    error: ProviderErrorDetail,
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderErrorDetail {
+    detail: String,
+}
+
+fn parsed_provider_error_detail(body: &[u8]) -> Option<String> {
+    let envelope = serde_json::from_slice::<ProviderErrorEnvelope>(body).ok()?;
     let maximum_escaped_bytes = MAX_PROVIDER_RESPONSE_BYTES.checked_mul("&quot;".len())?;
-    entity_escape(message, maximum_escaped_bytes)
+    entity_escape(&envelope.error.detail, maximum_escaped_bytes)
 }

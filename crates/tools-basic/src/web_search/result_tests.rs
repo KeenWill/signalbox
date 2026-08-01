@@ -119,17 +119,18 @@ fn web_search_result_drops_fragments() {
     assert_eq!(result.url(), FIXTURE_RESULT_URL);
 }
 
-/// INV-035: snippets are entity-escaped while the provider response is parsed,
-/// before any evidence renderer can observe them.
+/// INV-035: provider text is entity-escaped while the response is parsed,
+/// before any evidence renderer can observe it.
 #[test]
-fn web_search_result_entity_escapes_snippets() {
+fn web_search_result_entity_escapes_provider_text() {
     let result = WebSearchResult::try_new(WebSearchResultFields {
-        title: String::from(FIXTURE_RESULT_TITLE),
+        title: String::from(FIXTURE_MARKUP_TITLE),
         url: String::from(FIXTURE_RESULT_URL),
         snippet: String::from(FIXTURE_MARKUP_SNIPPET),
     })
-    .expect("markup snippet fixture is bounded");
+    .expect("markup provider-text fixture is bounded");
 
+    assert_eq!(result.title(), FIXTURE_ESCAPED_MARKUP_TITLE);
     assert_eq!(result.snippet(), FIXTURE_ESCAPED_MARKUP_SNIPPET);
 }
 

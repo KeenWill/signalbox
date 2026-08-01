@@ -78,9 +78,9 @@ pub(super) fn provider_error_detail(
     scrubber: &CredentialScrubber,
 ) -> Result<Option<ToolExecutionErrorDetail>, WebSearchExecutorError> {
     let redacted = error
-        .message
+        .detail
         .as_deref()
-        .map(|message| scrubber.redact_text(message))
+        .map(|detail| scrubber.redact_text(detail))
         .unwrap_or_default();
     let normalized = redacted
         .chars()

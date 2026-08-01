@@ -53,6 +53,16 @@ pub(super) const FIXTURE_MARKUP_SNIPPET: &str = "Synthetic <b>result & details</
 pub(super) const FIXTURE_ESCAPED_MARKUP_SNIPPET: &str =
     "Synthetic &lt;b&gt;result &amp; details&lt;/b&gt;";
 
+pub(super) const FIXTURE_MARKUP_TITLE: &str = "Synthetic <result> & \"title\"";
+
+pub(super) const FIXTURE_ESCAPED_MARKUP_TITLE: &str =
+    "Synthetic &lt;result&gt; &amp; &quot;title&quot;";
+
+pub(super) const FIXTURE_PROVIDER_ERROR_DETAIL: &str = "Synthetic <rejection> & detail";
+
+pub(super) const FIXTURE_ESCAPED_PROVIDER_ERROR_DETAIL: &str =
+    "Synthetic &lt;rejection&gt; &amp; detail";
+
 pub(super) const SUCCESS_PAYLOAD_COLLISION_KEY: &str = "results";
 
 pub(super) const URL_SCHEME_COLLISION_KEY: &str = "https";
