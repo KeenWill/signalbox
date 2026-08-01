@@ -12,6 +12,8 @@ from pathlib import Path
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
+    r"\b(?![A-Za-z0-9]*ownership[A-Za-z0-9]*\b)"
+    r"[A-Za-z0-9]*owner[A-Za-z0-9]*\b|"
     r"(?i:\bowners?\d*(?:\b|[_-])|owners?[_-]|(?<=[_-])owners?\d*(?:\b|[_-]))|"
     r"\b[Oo]wners?\d+[A-Z][A-Za-z0-9_]*|"
     r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
@@ -159,8 +161,22 @@ ALLOWLIST = (
         ),
         re.compile(
             r"[\"']owner_initiated[\"']|[\"']owner_command(?:_id)?[\"']|"
-            r"[\"']owner[\"']|`owner`|legacy owner|owner/tool|"
             r"\bowner_command_id\b"
+        ),
+    ),
+    Allowance(
+        "legacy PostgreSQL actor encodings",
+        re.compile(
+            r"^(?:crates/persistence/src/(?:session_metadata|submit_input)[.]rs|"
+            r"crates/persistence/tests/(?:postgres_integration|"
+            r"session_metadata_postgres)[.]rs|"
+            r"docs/spec/identity-and-commands[.]md)$"
+        ),
+        re.compile(
+            r"\(\"owner\", (?:None|Some\(_\))(?:, None)?\)|"
+            r"\"owner\" \| \"model\"|kind:\s*\"owner\"|"
+            r"String::from\(\"owner\"\)|expected_issuer\s*=\s*\(\"owner\"|"
+            r"'owner'|\(`owner`/(?:`model`|`tool`)"
         ),
     ),
     Allowance(

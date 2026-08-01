@@ -32,10 +32,14 @@ def main() -> int:
         root = Path(directory)
         allowed = root / "crates" / "tools-github" / "src" / "lib.rs"
         imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
+        mixed_storage_path = (
+            root / "apps" / "signalboxd" / "tests" / "offline_tool_loop.rs"
+        )
         violation = root / "docs" / "spec" / "example.md"
         reviewed_unix_path = root / "docs" / "spec" / "process-protocol.md"
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
+        mixed_storage_path.parent.mkdir(parents=True)
         violation.parent.mkdir(parents=True)
         allowed.write_text(
             'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
@@ -58,7 +62,16 @@ def main() -> int:
             "The wrong owner approves this tool.\n"
             "The process protocol emits {\"type\":\"owner\"}.\n"
             "A request by an owner, member, or collaborator approves tools.\n"
-            "isCollapsedByOwner = true\n",
+            "isCollapsedByOwner = true\n"
+            "sessionowner = []\n"
+            "ownerid = nil\n"
+            "Sessionowner = []\n"
+            "ownerId = nil\n",
+            encoding="utf-8",
+        )
+        mixed_storage_path.write_text(
+            'const PROCESS_ACTOR: &str = "owner";\n'
+            'const DECISION_SOURCE: &str = "owner_command";\n',
             encoding="utf-8",
         )
         reviewed_unix_path.write_text(
@@ -83,6 +96,7 @@ def main() -> int:
             "add",
             "crates/domain/src/imported_conversation.rs",
             "crates/tools-github/src/lib.rs",
+            "apps/signalboxd/tests/offline_tool_loop.rs",
             "docs/spec/example.md",
             "docs/spec/process-protocol.md",
         )
@@ -125,12 +139,20 @@ def main() -> int:
         external_field_outside_reviewed_path = (
             "docs/spec/example.md:18: isCollapsedByOwner = true"
         )
+        lowercase_suffix = "docs/spec/example.md:19: sessionowner = []"
+        lowercase_prefix = "docs/spec/example.md:20: ownerid = nil"
+        mixed_case_suffix = "docs/spec/example.md:21: Sessionowner = []"
+        mixed_case_prefix = "docs/spec/example.md:22: ownerId = nil"
         unix_role_inside_reviewed_path = (
             "docs/spec/process-protocol.md:1: The wrong owner approves this tool."
         )
         imported_role_owner = (
             "crates/domain/src/imported_conversation.rs:10: "
             "// The owner approves this tool."
+        )
+        stale_actor_in_mixed_storage_path = (
+            "apps/signalboxd/tests/offline_tool_loop.rs:1: "
+            'const PROCESS_ACTOR: &str = "owner";'
         )
         assert expected in rejected.stdout, (
             f"singular violation missing:\n{rejected.stdout}"
@@ -186,11 +208,26 @@ def main() -> int:
         assert external_field_outside_reviewed_path in rejected.stdout, (
             f"external-field allowance violation missing:\n{rejected.stdout}"
         )
+        assert lowercase_suffix in rejected.stdout, (
+            f"lowercase suffix violation missing:\n{rejected.stdout}"
+        )
+        assert lowercase_prefix in rejected.stdout, (
+            f"lowercase prefix violation missing:\n{rejected.stdout}"
+        )
+        assert mixed_case_suffix in rejected.stdout, (
+            f"mixed-case suffix violation missing:\n{rejected.stdout}"
+        )
+        assert mixed_case_prefix in rejected.stdout, (
+            f"mixed-case prefix violation missing:\n{rejected.stdout}"
+        )
         assert unix_role_inside_reviewed_path in rejected.stdout, (
             f"reviewed-path Unix-role violation missing:\n{rejected.stdout}"
         )
         assert imported_role_owner in rejected.stdout, (
             f"imported-file role violation missing:\n{rejected.stdout}"
+        )
+        assert stale_actor_in_mixed_storage_path in rejected.stdout, (
+            f"mixed storage-path actor violation missing:\n{rejected.stdout}"
         )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
         reviewed_unix_path.write_text(
@@ -207,6 +244,11 @@ def main() -> int:
             "        owner,\n"
             "    );\n"
             "}\n",
+            encoding="utf-8",
+        )
+        mixed_storage_path.write_text(
+            'const PROCESS_ACTOR: &str = "user";\n'
+            'const DECISION_SOURCE: &str = "owner_command";\n',
             encoding="utf-8",
         )
         accepted = run_checker(root)
