@@ -114,7 +114,9 @@ def main() -> int:
             'let sessionOwner = "human who approves tools"\n', encoding="utf-8"
         )
         reviewed_domain_path.write_text(
-            "The foreign owner approves this tool.\n", encoding="utf-8"
+            "The foreign owner approves this tool.\n"
+            "`foreign_session_owner` names the human who approves this tool.\n",
+            encoding="utf-8",
         )
         reviewed_github_path.write_text(
             "A request by an owner, member, or collaborator approves tools.\n",
@@ -223,6 +225,10 @@ def main() -> int:
         domain_role_inside_reviewed_path = (
             "docs/spec/review-workflows.md:1: The foreign owner approves this tool."
         )
+        domain_role_identifier_inside_reviewed_path = (
+            "docs/spec/review-workflows.md:2: "
+            "`foreign_session_owner` names the human who approves this tool."
+        )
         github_role_inside_reviewed_path = (
             "docs/spec/tool-loop.md:1: "
             "A request by an owner, member, or collaborator approves tools."
@@ -322,6 +328,9 @@ def main() -> int:
         )
         assert domain_role_inside_reviewed_path in rejected.stdout, (
             f"domain reviewed-path role violation missing:\n{rejected.stdout}"
+        )
+        assert domain_role_identifier_inside_reviewed_path in rejected.stdout, (
+            f"domain reviewed-path identifier violation missing:\n{rejected.stdout}"
         )
         assert github_role_inside_reviewed_path in rejected.stdout, (
             f"GitHub reviewed-path role violation missing:\n{rejected.stdout}"
