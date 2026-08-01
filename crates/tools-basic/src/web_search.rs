@@ -1996,7 +1996,7 @@ fn decode_reversible_text_once(text: &str) -> Option<(String, bool)> {
     let form_decoded = String::from_utf8(form_decode_once(text.as_bytes())).ok()?;
     let form_changed = form_decoded != text;
     let (html_decoded, html_changed) = decode_html_character_references(&form_decoded);
-    let (json_decoded, json_changed) = decode_json_unicode_escapes(&html_decoded);
+    let (json_decoded, json_changed) = decode_json_string_escapes(&html_decoded);
     Some((json_decoded, form_changed || html_changed || json_changed))
 }
 
@@ -2054,16 +2054,28 @@ fn unicode_normalized_contains(haystack: &str, needle: &str) -> bool {
             .contains(&normalized_needle)
 }
 
-fn decode_json_unicode_escapes(text: &str) -> (String, bool) {
+fn decode_json_string_escapes(text: &str) -> (String, bool) {
     let mut decoded = String::with_capacity(text.len());
     let mut remaining = text;
     let mut changed = false;
-    while let Some(relative_start) = remaining.find("\\u") {
+    while let Some(relative_start) = remaining.find('\\') {
         decoded.push_str(&remaining[..relative_start]);
         let escape = &remaining[relative_start..];
-        let Some((character, consumed)) = decode_json_unicode_escape(escape) else {
-            decoded.push_str("\\u");
-            remaining = &escape[2..];
+        let decoded_escape = match escape.as_bytes().get(1) {
+            Some(b'"') => Some(('"', 2)),
+            Some(b'\\') => Some(('\\', 2)),
+            Some(b'/') => Some(('/', 2)),
+            Some(b'b') => Some(('\u{8}', 2)),
+            Some(b'f') => Some(('\u{c}', 2)),
+            Some(b'n') => Some(('\n', 2)),
+            Some(b'r') => Some(('\r', 2)),
+            Some(b't') => Some(('\t', 2)),
+            Some(b'u') => decode_json_unicode_escape(escape),
+            _ => None,
+        };
+        let Some((character, consumed)) = decoded_escape else {
+            decoded.push('\\');
+            remaining = &escape[1..];
             continue;
         };
         decoded.push(character);
@@ -2274,6 +2286,8 @@ mod tests {
     const REVERSE_ENCODED_COLLISION_VALUE: &str = "abc&def";
     const JSON_UNICODE_COLLISION_KEY: &str = "abc";
     const JSON_UNICODE_COLLISION_VALUE: &str = r"\u0061\u0062\u0063";
+    const JSON_SOLIDUS_COLLISION_KEY: &str = r"abc\/def";
+    const JSON_SOLIDUS_COLLISION_VALUE: &str = "abc/def";
     const SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE: &str = "safe&nbsp;value";
     const REQUEST_DETAIL_COLLISION_KEY: &str = "failed";
     const QUERY_CASE_NORMALIZED_COLLISION_KEY: &str = "ABCDEF";
@@ -3213,6 +3227,37 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
+    /// INV-035: reversible short JSON escapes in the credential itself cannot
+    /// conceal a decoded query before the injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_query_matching_json_solidus_escaped_credential() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: JSON_SOLIDUS_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(JSON_SOLIDUS_COLLISION_VALUE),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("JSON solidus collision is definitive pre-dispatch evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
     /// INV-035: a multi-character full Unicode case fold cannot conceal a
     /// credential before the injected transport boundary.
     #[tokio::test]
@@ -3647,6 +3692,30 @@ mod tests {
             &content,
             JSON_UNICODE_COLLISION_KEY,
         ));
+    }
+
+    /// INV-035: reversible short JSON escapes in the credential itself apply
+    /// before provider-controlled fields enter completed evidence.
+    #[test]
+    fn web_search_success_evidence_redacts_json_solidus_decoded_credential() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(JSON_SOLIDUS_COLLISION_VALUE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("JSON solidus fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            JSON_SOLIDUS_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(JSON_SOLIDUS_COLLISION_KEY));
+        assert!(!content.contains(JSON_SOLIDUS_COLLISION_VALUE));
     }
 
     /// INV-035: multi-character full Unicode folding applies to provider text
