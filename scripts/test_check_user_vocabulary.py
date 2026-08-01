@@ -80,6 +80,7 @@ def main() -> int:
         violation = root / "docs" / "spec" / "example.md"
         reviewed_domain_path = root / "docs" / "spec" / "review-workflows.md"
         reviewed_github_path = root / "docs" / "spec" / "tool-loop.md"
+        reviewed_identity_path = root / "docs" / "spec" / "identity-and-commands.md"
         reviewed_unix_path = root / "docs" / "spec" / "process-protocol.md"
         violation_lines = (
             "The owner approves this tool.",
@@ -124,6 +125,10 @@ def main() -> int:
         reviewed_github_lines = (
             "A request by an owner, member, or collaborator approves tools.",
             'author_association = "HUMAN_OWNER"',
+            'The protocol emits {"owner": "the human who approves tools"}.',
+        )
+        reviewed_identity_lines = (
+            "The process protocol still accepts the human actor 'owner'.",
         )
         reviewed_unix_lines = (
             "The wrong owner approves this tool.",
@@ -167,6 +172,9 @@ def main() -> int:
         reviewed_github_path.write_text(
             fixture_text(reviewed_github_lines), encoding="utf-8"
         )
+        reviewed_identity_path.write_text(
+            fixture_text(reviewed_identity_lines), encoding="utf-8"
+        )
         reviewed_unix_path.write_text(
             fixture_text(reviewed_unix_lines), encoding="utf-8"
         )
@@ -182,6 +190,7 @@ def main() -> int:
             "crates/persistence/migrations/202608020009_user_vocabulary.sql",
             "clients/native/Sources/SignalboxClient/SessionSynchronization.swift",
             "docs/spec/example.md",
+            "docs/spec/identity-and-commands.md",
             "docs/spec/process-protocol.md",
             "docs/spec/review-workflows.md",
             "docs/spec/tool-loop.md",
@@ -204,6 +213,9 @@ def main() -> int:
                 "docs/spec/review-workflows.md", reviewed_domain_lines
             ),
             *expected_diagnostics("docs/spec/tool-loop.md", reviewed_github_lines),
+            *expected_diagnostics(
+                "docs/spec/identity-and-commands.md", reviewed_identity_lines
+            ),
             *expected_diagnostics(
                 "crates/domain/src/imported_conversation.rs",
                 imported_lines,
@@ -251,6 +263,10 @@ def main() -> int:
         )
         reviewed_github_path.write_text(
             "`@codex review` request by an owner, member, or collaborator.\n",
+            encoding="utf-8",
+        )
+        reviewed_identity_path.write_text(
+            "The process protocol accepts the human actor 'user'.\n",
             encoding="utf-8",
         )
         accepted = run_checker(root)

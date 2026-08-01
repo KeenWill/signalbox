@@ -51,7 +51,8 @@ ALLOWLIST = (
         ),
         re.compile(
             r"owner/repository|owner/name|repos/owner/|repository\(owner:|\$owner\b|"
-            r"[\"']owner[\"']:\s*owner|[\"']owner[\"']\s*:|"
+            r"[\"']owner[\"']:\s*(?:arguments[.]repository\(\)[.]owner\(\)|"
+            r"repository[.]owner\(\)|owner)(?:,|\s*$)|"
             r"\.owner\(\)|let owner = .*owner_end|\bowner_end\b|"
             r"let \(owner, name\) = repository|"
             r"Exact owner/repository|canonical `owner/repository`|"
@@ -208,8 +209,16 @@ ALLOWLIST = (
             r"\(\"owner\", (?:None|Some\(_\))(?:, None)?\)|"
             r"\"owner\" \| \"model\"|kind:\s*\"owner\"|"
             r"String::from\(\"owner\"\)|expected_issuer\s*=\s*\(\"owner\"|"
-            r"'owner'|\(`owner`/(?:`model`|`tool`)"
+            r"\(`owner`/(?:`model`|`tool`)"
         ),
+    ),
+    Allowance(
+        "legacy PostgreSQL SQL actor literals",
+        re.compile(
+            r"^crates/persistence/tests/(?:postgres_integration|"
+            r"session_metadata_postgres)[.]rs$"
+        ),
+        re.compile(r"(?:^|,|=\s*)\s*'owner'(?=\s*[,)]|$)"),
     ),
     Allowance(
         "Rust and domain-record ownership phrasing",
