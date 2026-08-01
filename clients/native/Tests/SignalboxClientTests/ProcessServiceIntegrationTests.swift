@@ -493,6 +493,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(projection.activity, ProcessProjectionFixture.runningActivity)
   }
 
+  func testTurnActivationSideProjectionRejectsMissingActivatedTurn() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithoutTurns()
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
   func testFailedProviderCauseAppearsInNativeActivity() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithFailedProviderCause()
     var projector = SignalboxProcessTranscriptProjector()
@@ -539,6 +554,46 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertFalse(viewModel.canSend)
     XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testKnownNestedTransitionsDoNotClearUnknownTopLevelTurnGate() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithUnknownTurnState())
+    )
+
+    viewModel.apply(.event(try ProcessProjectionFixture.completedModelCallEvent()))
+    viewModel.apply(.event(try ProcessProjectionFixture.proposedToolTrigger()))
+
+    XCTAssertFalse(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testKnownModelCallTransitionClearsUnknownNestedTurnGate() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithUnknownCurrentModelCallState()
+      )
+    )
+
+    viewModel.apply(.event(try ProcessProjectionFixture.completedModelCallEvent()))
+
+    XCTAssertTrue(viewModel.canStopAndSend)
   }
 
   @MainActor
@@ -4109,6 +4164,30 @@ private enum ProcessProjectionFixture {
         "current_model_call":null
       }
       """
+    )
+  }
+
+  static func snapshotWithoutTurns() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"0"
+        }
+        """,
+      ]
     )
   }
 

@@ -554,8 +554,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for trigger: SignalboxProcessSessionEvent
   ) -> Bool {
     switch trigger {
-    case .turnActivated:
-      return true
+    case .turnActivated(let turnID, _):
+      return snapshot.records.contains { record in
+        guard case .turn(let turn) = record else {
+          return false
+        }
+        return turn.turnID == turnID
+      }
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:

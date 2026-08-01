@@ -488,24 +488,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       let page = try await conversationPage(
         includeArchived: includeArchived,
         after: cursor,
-        pageSize: policy.metadataPageSize
+        pageSize: policy.metadataPageSize,
+        maximumRetainedUTF8Bytes:
+          policy.maximumMetadataListUTF8Bytes - retainedUTF8Bytes
       )
-      for conversation in page.conversations {
-        let titleBytes = UInt(conversation.title?.utf8.count ?? 0)
-        let sourceFormatBytes = conversation.importedSourceFormat?.retainedUnknownUTF8Bytes ?? 0
-        let conversationBytes = titleBytes.saturatedAdding(sourceFormatBytes)
-        let (nextBytes, overflowed) =
-          retainedUTF8Bytes.addingReportingOverflow(conversationBytes)
-        guard
-          !overflowed,
-          nextBytes <= policy.maximumMetadataListUTF8Bytes
-        else {
-          throw SignalboxProcessServiceError.invalidPage(
-            "The native conversation list exceeded its retained UTF-8 byte limit."
-          )
-        }
-        retainedUTF8Bytes = nextBytes
-      }
+      retainedUTF8Bytes += page.retainedUTF8Bytes
       conversations.append(contentsOf: page.conversations)
       pageCount += 1
       guard let next = page.nextAfter else {
@@ -1014,12 +1001,14 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   private struct ConversationPage {
     let conversations: [SignalboxProcessConversation]
     let nextAfter: SignalboxConversationCursor?
+    let retainedUTF8Bytes: UInt
   }
 
   private func conversationPage(
     includeArchived: Bool,
     after cursor: SignalboxConversationCursor?,
-    pageSize: SignalboxCanonicalUInt64
+    pageSize: SignalboxCanonicalUInt64,
+    maximumRetainedUTF8Bytes: UInt
   ) async throws -> ConversationPage {
     try await withExchange(
       request: .listConversations(
@@ -1031,6 +1020,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       )
     ) { exchange in
       var conversations: [SignalboxProcessConversation] = []
+      var retainedUTF8Bytes: UInt = 0
       var started = false
       var priorCursor: SignalboxConversationCursor?
       while let frame = try await nextFrame(from: exchange) {
@@ -1060,6 +1050,15 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
               "The conversation page exceeded its requested row limit."
             )
           }
+          let conversationBytes = conversation.retainedUTF8Bytes
+          let (nextBytes, overflowed) =
+            retainedUTF8Bytes.addingReportingOverflow(conversationBytes)
+          guard !overflowed, nextBytes <= maximumRetainedUTF8Bytes else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The native conversation list exceeded its retained UTF-8 byte limit."
+            )
+          }
+          retainedUTF8Bytes = nextBytes
           priorCursor = summaryCursor
           conversations.append(conversation)
         case .conversationPageEnd(let end) where started:
@@ -1080,7 +1079,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
           }
           return ConversationPage(
             conversations: conversations,
-            nextAfter: end.nextAfter
+            nextAfter: end.nextAfter,
+            retainedUTF8Bytes: retainedUTF8Bytes
           )
         case .protocolError(let error):
           throw remote(error)
@@ -1589,6 +1589,14 @@ extension SignalboxImportedConversationSourceFormat {
       return UInt(value.utf8.count)
     }
     return 0
+  }
+}
+
+extension SignalboxProcessConversation {
+  fileprivate var retainedUTF8Bytes: UInt {
+    UInt(title?.utf8.count ?? 0).saturatedAdding(
+      importedSourceFormat?.retainedUnknownUTF8Bytes ?? 0
+    )
   }
 }
 
