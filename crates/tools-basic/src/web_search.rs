@@ -979,7 +979,7 @@ fn build_provider_request(
 
 fn query_contains_credential(query: &str, credential: &str) -> bool {
     query.contains(credential)
-        || unicode_normalized_contains(query, credential)
+        || unicode_case_insensitive_contains(query, credential)
         || encoded_contains_credential(query, credential)
 }
 
@@ -1450,8 +1450,11 @@ fn bind_request_outcome(
             credential,
         } => (evidence, Some(credential)),
     };
-    let check_case_normalized_diagnostic =
-        matches!(&evidence, ToolExecutorEvidence::CompletedText(_));
+    let check_case_normalized_diagnostic = match &evidence {
+        ToolExecutorEvidence::CompletedText(_) => true,
+        ToolExecutorEvidence::KnownFailed { .. } => false,
+        ToolExecutorEvidence::Ambiguous => true,
+    };
     let bound = invocation.bind(evidence);
     let Some(credential) = credential else {
         return Ok(bound);
@@ -1527,7 +1530,7 @@ fn report_credential_value_failure(
     );
     if credential_text.is_empty()
         || compact_formatter_metadata_may_contain(credential_text)
-        || controlled_event.contains(credential_text)
+        || unicode_case_insensitive_contains(&controlled_event, credential_text)
     {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
@@ -1561,7 +1564,7 @@ fn report_transport_failure(
     );
     if credential_text.is_empty()
         || compact_formatter_metadata_may_contain(credential_text)
-        || controlled_event.contains(credential_text)
+        || unicode_case_insensitive_contains(&controlled_event, credential_text)
     {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
@@ -1596,7 +1599,7 @@ fn report_response_body_failure(
     );
     if credential_text.is_empty()
         || compact_formatter_metadata_may_contain(credential_text)
-        || controlled_event.contains(credential_text)
+        || unicode_case_insensitive_contains(&controlled_event, credential_text)
     {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
@@ -1636,7 +1639,7 @@ fn report_response_sanitization_failure(
     );
     if credential_text.is_empty()
         || compact_formatter_metadata_may_contain(credential_text)
-        || controlled_event.contains(credential_text)
+        || unicode_case_insensitive_contains(&controlled_event, credential_text)
     {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
@@ -1933,14 +1936,14 @@ fn encoded_contains_credential(text: &str, credential: &str) -> bool {
             return true;
         };
         let form_changed = form_decoded != decoded;
-        if form_changed && unicode_normalized_contains(&form_decoded, credential) {
+        if form_changed && unicode_case_insensitive_contains(&form_decoded, credential) {
             return true;
         }
         let Some((html_decoded, html_changed)) = decode_html_character_references(&form_decoded)
         else {
             return true;
         };
-        if html_changed && unicode_normalized_contains(&html_decoded, credential) {
+        if html_changed && unicode_case_insensitive_contains(&html_decoded, credential) {
             return true;
         }
         if !form_changed && !html_changed {
@@ -2151,6 +2154,8 @@ mod tests {
     const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
     const FORM_HTML_COLLISION_VALUE: &str = "abc%26amp%3Bdef";
     const REQUEST_DETAIL_COLLISION_KEY: &str = "failed";
+    const QUERY_CASE_NORMALIZED_COLLISION_KEY: &str = "ABCDEF";
+    const QUERY_CASE_NORMALIZED_COLLISION_VALUE: &str = "%61%62%63%64%65%66";
     const SHORT_DIAGNOSTIC_COLLISION_KEY: &str = "r";
     const LEADING_HEADER_WHITESPACE_KEY: &str = " fixture-search-key";
     const TRAILING_HEADER_WHITESPACE_KEY: &[u8] = b"fixture-search-key\t";
@@ -2170,6 +2175,7 @@ mod tests {
     const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
     const RESPONSE_BODY_FAILURE_CLASSIFICATION: &str = "failure=DispatchUnknown";
     const RESPONSE_SANITIZATION_FAILURE_CLASSIFICATION: &str = "failure=EvidenceEncoding";
+    const RESPONSE_SANITIZATION_CASE_NORMALIZED_COLLISION_KEY: &str = "evidenceencoding";
     const SESSION_IDENTITY: u128 = 1;
     const TURN_IDENTITY: u128 = 2;
     const ISSUING_ATTEMPT_IDENTITY: u128 = 3;
@@ -2974,6 +2980,37 @@ mod tests {
             .expect("query collision is definitive pre-dispatch evidence");
 
         assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: reversible query decoding and Unicode case normalization
+    /// cannot conceal a credential before the injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_encoded_case_normalized_query_credential_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: QUERY_CASE_NORMALIZED_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(QUERY_CASE_NORMALIZED_COLLISION_VALUE),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("encoded case-normalized collision is definitive evidence");
+        let _detail = known_failure_detail(evidence);
+
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
@@ -4501,6 +4538,34 @@ mod tests {
         assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(RESPONSE_SANITIZATION_FAILURE_CLASSIFICATION));
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
+    /// INV-035: a case-normalized credential collision in the controlled
+    /// response-sanitization event suppresses telemetry and stays opaque.
+    #[test]
+    fn response_sanitization_failure_omits_case_normalized_credential_collision() {
+        let correlation = dispatch_correlation();
+        let credential = CredentialValue::new(
+            RESPONSE_SANITIZATION_CASE_NORMALIZED_COLLISION_KEY
+                .as_bytes()
+                .to_vec(),
+        );
+
+        let (diagnostic, result) = capture_response_sanitization_failure(&correlation, &credential);
+
+        let error = result.expect_err("case-normalized credential suppresses the event");
+        assert!(!unicode_case_insensitive_contains(
+            &diagnostic,
+            RESPONSE_SANITIZATION_CASE_NORMALIZED_COLLISION_KEY,
+        ));
+        assert!(!unicode_case_insensitive_contains(
+            &format!("{error:?}"),
+            RESPONSE_SANITIZATION_CASE_NORMALIZED_COLLISION_KEY,
+        ));
+        assert!(!unicode_case_insensitive_contains(
+            &error.to_string(),
+            RESPONSE_SANITIZATION_CASE_NORMALIZED_COLLISION_KEY,
+        ));
     }
 
     /// INV-035: compact formatter timestamps and ANSI metadata are accounted
