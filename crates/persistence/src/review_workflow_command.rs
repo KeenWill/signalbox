@@ -1,4 +1,4 @@
-//! Durable owner-global command receipts for review-workflow mutations.
+//! Durable user-global command receipts for review-workflow mutations.
 
 use signalbox_application::{
     ReviewPassCompletionStatus, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,

@@ -1,12 +1,15 @@
 # Conversation import
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
 converters, the append-only Postgres import store, evidence-derived display
-titles and their startup backfill, the owner-operated one-file and
-directory-scan import surfaces, and the imported-conversation inspection read.
-The one-file surface was verified against the implementing stack through PR #252
+titles and their startup backfill, the user-operated one-file and directory-scan
+import surfaces, and the imported-conversation inspection read. The one-file
+surface was verified against the implementing stack through PR #252
 (`agent/import-surfaces`); the directory scan through PR #284
 (`agent/import-directory-scan`); the derived display title and its startup
 backfill through PR #304 (`agent/unified-conversation-listing`); and the
@@ -282,7 +285,7 @@ domain or application crates.
 
 ## Operational surface
 
-The owner terminal preserves the single-file form,
+The user terminal preserves the single-file form,
 `signalbox import --format <claude-code|codex> <file>`, and adds the explicit
 directory form, `signalbox import --format <claude-code|codex> --scan <dir>`.
 Exactly one file or scan directory is required. Both forms keep format selection

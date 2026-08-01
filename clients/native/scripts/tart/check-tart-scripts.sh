@@ -132,7 +132,7 @@ test_real_smoke_shard_stops_before_legacy_setup() (
 	}
 
 	output="$(run_real_smoke_shard)"
-	[[ "$output" == *"remote/mobile transport is an owner design gate"* ]]
+	[[ "$output" == *"remote/mobile transport is a maintainer design gate"* ]]
 )
 
 bash -n "$SCRIPT_DIR/run-guest-shard.sh"

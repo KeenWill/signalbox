@@ -156,7 +156,7 @@ pub enum NonEmptyIssuedOperationRefsError {
     },
 }
 
-/// Authority from one applied exact-set owner decision to stop for
+/// Authority from one applied exact-set user decision to stop for
 /// reconciliation.
 ///
 /// S06 / INV-006 / INV-026: raw command and turn identities cannot construct
@@ -165,7 +165,7 @@ pub enum NonEmptyIssuedOperationRefsError {
 /// ```compile_fail
 /// use signalbox_domain::{AppliedStopForReconciliationProof, DurableCommandId, TurnId};
 ///
-/// fn raw_ids_are_not_owner_stop_authority(command: DurableCommandId, turn: TurnId) {
+/// fn raw_ids_are_not_user_stop_authority(command: DurableCommandId, turn: TurnId) {
 ///     let _ = AppliedStopForReconciliationProof {
 ///         decision_command: command,
 ///         turn,
@@ -181,7 +181,7 @@ pub struct AppliedStopForReconciliationProof {
 }
 
 impl AppliedStopForReconciliationProof {
-    /// Returns the applied owner-decision command identity.
+    /// Returns the applied user-decision command identity.
     pub const fn decision_command(&self) -> DurableCommandId {
         self.decision_command
     }
@@ -206,9 +206,9 @@ pub(crate) const fn test_applied_stop_for_reconciliation_proof(
 /// The typed reason an exact ambiguity set requires reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconciliationReason {
-    /// The owner applied an exact-set decision to stop.
-    OwnerChoseReconciliation {
-        /// Purpose-specific authority from the applied owner decision.
+    /// The user applied an exact-set decision to stop.
+    UserChoseReconciliation {
+        /// Purpose-specific authority from the applied user decision.
         decision: AppliedStopForReconciliationProof,
     },
     /// An applied interrupt cannot honestly resolve remaining ambiguity.
@@ -376,7 +376,7 @@ pub enum TurnDisposition {
         /// The exact applied interrupt authority for this turn.
         cause: AppliedInterruptProof,
     },
-    /// Unacknowledged physical ambiguity requires owner reconciliation.
+    /// Unacknowledged physical ambiguity requires user reconciliation.
     ReconciliationRequired {
         /// The exact nonempty ambiguity set and typed reason.
         marker: ReconciliationMarker,
@@ -412,7 +412,7 @@ mod tests {
         test_applied_interrupt_proof(command_id(value), turn_id(100))
     }
 
-    fn owner_stop(value: u128) -> AppliedStopForReconciliationProof {
+    fn user_stop(value: u128) -> AppliedStopForReconciliationProof {
         AppliedStopForReconciliationProof {
             decision_command: command_id(value),
             turn: turn_id(100),
@@ -594,8 +594,8 @@ mod tests {
         let ambiguous_operations = operations(&[1, 2]);
         assert_marker_preserves_set_and_reason(
             ambiguous_operations.clone(),
-            ReconciliationReason::OwnerChoseReconciliation {
-                decision: owner_stop(1),
+            ReconciliationReason::UserChoseReconciliation {
+                decision: user_stop(1),
             },
         );
         assert_marker_preserves_set_and_reason(
@@ -685,10 +685,10 @@ mod tests {
         .assert_debug_eq(&(cancelled, reconciliation));
     }
 
-    /// INV-006 / INV-026: the owner-stop proof exposes only its exact applied
+    /// INV-006 / INV-026: the user-stop proof exposes only its exact applied
     /// command and turn while raw identities cannot construct it publicly.
     #[test]
-    fn owner_stop_proof_preserves_exact_identity() {
+    fn user_stop_proof_preserves_exact_identity() {
         let decision_command = command_id(1);
         let turn = turn_id(100);
         let proof = AppliedStopForReconciliationProof {

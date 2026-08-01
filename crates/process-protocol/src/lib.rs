@@ -314,7 +314,7 @@ impl From<RequestId> for String {
     }
 }
 
-/// Exact owner input content carried to the application admission boundary.
+/// Exact user input content carried to the application admission boundary.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct InputContent(String);
@@ -1438,8 +1438,8 @@ where
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MetadataActor {
-    /// The owner wrote the snapshot.
-    Owner {},
+    /// The user wrote the snapshot.
+    User {},
 }
 
 /// The post-lock database statement time and actor of the latest replacement.
@@ -1844,7 +1844,7 @@ fn validate_review_orchestration_snapshot(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
-    /// Create an owner-initiated session.
+    /// Create a user-initiated session.
     CreateSession {
         /// Durable mutation identity.
         command_id: CommandId,
@@ -1854,7 +1854,7 @@ pub enum ClientRequest {
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
-    /// Create an owner-initiated session from one daemon-held template.
+    /// Create a user-initiated session from one daemon-held template.
     CreateSessionFromTemplate {
         /// Durable mutation identity.
         command_id: CommandId,
@@ -1865,13 +1865,13 @@ pub enum ClientRequest {
     ListTemplates {},
     /// List current sessions.
     ListSessions {},
-    /// Submit owner input with an admitted delivery treatment.
+    /// Submit user input with an admitted delivery treatment.
     SubmitInput {
         /// Durable mutation identity.
         command_id: CommandId,
         /// Target session.
         session_id: CanonicalUuid,
-        /// Exact owner text.
+        /// Exact user text.
         content: InputContent,
         /// Caller-observed defaults version, or null for configuration-free
         /// steering.
@@ -2008,7 +2008,7 @@ pub enum ClientRequest {
     /// Reconcile the exact active turn parked on an ambiguous model call.
     ///
     /// The named turn must be the session's active turn and must be parked in
-    /// the model-call recovery wait. The request supplies the owner interrupt
+    /// the model-call recovery wait. The request supplies the user interrupt
     /// authority that turn's terminal disposition requires and carries the
     /// successor input the session continues with.
     ReconcileTurn {
@@ -2018,7 +2018,7 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// The turn the caller observed parked awaiting reconciliation.
         expected_active_turn_id: CanonicalUuid,
-        /// Exact owner text for the immediate successor turn.
+        /// Exact user text for the immediate successor turn.
         content: InputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
@@ -2193,12 +2193,12 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// The turn the caller observed active in the session.
         expected_active_turn_id: CanonicalUuid,
-        /// Exact owner text for the immediate successor turn.
+        /// Exact user text for the immediate successor turn.
         content: InputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
     },
-    /// Supply the owner decision for one pending tool request.
+    /// Supply the user decision for one pending tool request.
     DecideToolRequest {
         /// Durable mutation identity.
         command_id: CommandId,
@@ -2222,7 +2222,7 @@ pub enum ToolDecision {
     Approve {},
     /// Execution is permanently prohibited for this request.
     Deny {
-        /// Exact owner explanation rendered to the model.
+        /// Exact user explanation rendered to the model.
         reason: String,
     },
 }
@@ -2986,7 +2986,7 @@ pub enum TurnState {
     Queued {
         /// Accepted input that created the queued turn.
         accepted_input_id: CanonicalUuid,
-        /// Exact accepted owner text.
+        /// Exact accepted user text.
         content: InputContent,
     },
     /// The turn is running its current attempt.
@@ -3004,7 +3004,7 @@ pub enum TurnState {
         /// Ambiguous call awaiting recovery.
         recovery_model_call_id: CanonicalUuid,
     },
-    /// The turn is parked on an owner decision for a tool request.
+    /// The turn is parked on a user decision for a tool request.
     ActiveAwaitingToolApproval {
         /// Earliest undecided tool request.
         tool_request_id: CanonicalUuid,
@@ -3466,7 +3466,7 @@ pub enum TranscriptEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptTextEntry {
-    /// Owner input text.
+    /// User input text.
     User {
         /// Exact accepted input.
         accepted_input_id: CanonicalUuid,
@@ -3551,7 +3551,7 @@ pub enum ToolBatchState {
         /// Exact frontier containing the result suffix.
         frontier_id: CanonicalUuid,
     },
-    /// One ambiguous physical attempt requires owner recovery.
+    /// One ambiguous physical attempt requires user recovery.
     RecoveryRequired {
         /// Exact ambiguous tool attempt.
         tool_attempt_id: CanonicalUuid,
@@ -3564,7 +3564,7 @@ pub enum ToolBatchState {
 pub enum SessionEvent {
     /// Session creation committed.
     SessionCreated {},
-    /// Owner input acceptance and its queued turn committed.
+    /// User input acceptance and its queued turn committed.
     InputAccepted {
         /// Accepted input.
         accepted_input_id: CanonicalUuid,
@@ -3572,7 +3572,7 @@ pub enum SessionEvent {
         turn_id: CanonicalUuid,
         /// Immutable session acceptance position.
         acceptance_position: CanonicalU64,
-        /// Exact accepted owner text.
+        /// Exact accepted user text.
         content: InputContent,
     },
     /// A queued turn became active.
@@ -3724,7 +3724,7 @@ pub enum ServerMessage {
     TemplateSummary {
         /// Validated template name.
         name: String,
-        /// Positive owner-assigned bundle version.
+        /// Positive operator-assigned bundle version.
         version: CanonicalU64,
     },
     /// Completes the available-template sequence.
@@ -3842,7 +3842,7 @@ pub enum ServerMessage {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         system_prompt: Option<SystemPromptText>,
     },
-    /// One recorded owner tool-decision receipt.
+    /// One recorded user tool-decision receipt.
     ///
     /// The receipt mirrors the recorded applied result exactly; an equal
     /// command replay returns this same projection.
@@ -7887,7 +7887,7 @@ mod tests {
         let tags =
             serde_json::to_string(&numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1))?;
         let json = format!(
-            r#"{{"version":1,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
+            r#"{{"version":1,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"user"}}}}}}}}"#
         );
         assert_server_malformed(&json);
         Ok(())
@@ -7900,14 +7900,14 @@ mod tests {
         exact_tags.sort();
         let tags = serde_json::to_string(&exact_tags)?;
         let json = format!(
-            r#"{{"version":1,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
+            r#"{{"version":1,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"user"}}}}}}}}"#
         );
         decode_server_line(&line(&json))?;
         Ok(())
     }
 
     #[test]
-    fn inv033_metadata_writer_actor_is_owner_only() {
+    fn inv033_metadata_writer_actor_is_user_only() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
         );
@@ -7977,7 +7977,7 @@ mod tests {
             ServerMessage::SessionMetadataReplaced {
                 session_id: uuid(1),
                 metadata: exact,
-                last_writer: MetadataLastWriter::new(CanonicalU64::new(1), MetadataActor::Owner {}),
+                last_writer: MetadataLastWriter::new(CanonicalU64::new(1), MetadataActor::User {}),
             },
         )?)?;
         assert!(encoded.len() < super::MAX_FRAME_BYTES);
@@ -8049,7 +8049,7 @@ mod tests {
             archived: false,
             last_writer: Some(MetadataLastWriter::new(
                 CanonicalU64::new(1),
-                MetadataActor::Owner {},
+                MetadataActor::User {},
             )),
         };
 
@@ -8124,7 +8124,7 @@ mod tests {
             archived: false,
             last_writer: Some(MetadataLastWriter::new(
                 CanonicalU64::new(1),
-                MetadataActor::Owner {},
+                MetadataActor::User {},
             )),
         })
     }
@@ -8539,7 +8539,7 @@ mod tests {
             },
             r#"{"type":"sessions_end","session_count":"1"}"#,
         )?;
-        let writer = MetadataLastWriter::new(CanonicalU64::new(17), MetadataActor::Owner {});
+        let writer = MetadataLastWriter::new(CanonicalU64::new(17), MetadataActor::User {});
         assert_server_message_round_trip(
             request(32)?,
             ServerMessage::SessionMetadataPageStart {},
@@ -8559,7 +8559,7 @@ mod tests {
                 archived: true,
                 last_writer: Some(writer),
             },
-            r#"{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"2","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"title":"Planning","tags":["daily","work"],"archived":true,"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"owner"}}}"#,
+            r#"{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"2","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"title":"Planning","tags":["daily","work"],"archived":true,"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"user"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(34)?,
@@ -8585,7 +8585,7 @@ mod tests {
                 metadata: metadata(true)?,
                 last_writer: writer,
             },
-            r#"{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":"Planning","tags":["daily","work"],"attributes":{"run":"17","trigger":""},"archived":true},"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"owner"}}}"#,
+            r#"{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":"Planning","tags":["daily","work"],"attributes":{"run":"17","trigger":""},"archived":true},"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"user"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(6)?,

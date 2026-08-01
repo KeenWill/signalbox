@@ -265,7 +265,7 @@ run_screenshots_shard() {
 }
 
 run_real_smoke_shard() {
-	echo "==> Real server UI smoke disabled: remote/mobile transport is an owner design gate."
+	echo "==> Real server UI smoke disabled: remote/mobile transport is a maintainer design gate."
 }
 
 run_privacy_shard() {

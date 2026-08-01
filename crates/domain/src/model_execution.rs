@@ -4536,7 +4536,7 @@ mod tests {
             session_id,
             session_id,
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             session_id,
@@ -4847,7 +4847,7 @@ mod tests {
     }
 
     fn denied_approval(request: ToolRequestId) -> ToolApprovalResolution {
-        ToolApprovalResolutionReconstitutionInput::owner_fixture(
+        ToolApprovalResolutionReconstitutionInput::user_fixture(
             request,
             ToolApprovalDecision::Deny { reason: None },
         )
@@ -5130,7 +5130,7 @@ mod tests {
         );
         let mut approved_instead = input.clone();
         approved_instead.tool_denial_correlations = vec![
-            ToolApprovalResolutionReconstitutionInput::owner_fixture(
+            ToolApprovalResolutionReconstitutionInput::user_fixture(
                 request,
                 ToolApprovalDecision::Approve,
             )
@@ -6168,14 +6168,15 @@ mod tests {
             .current_snapshot
             .derive_appending_candidate(context_frontier_id(43), vec![tool_use.reference()])
             .expect("the tool proposal extends the current frontier");
-        let approval = ToolApprovalResolutionReconstitutionInput::owner_fixture(
+        let approval = ToolApprovalResolutionReconstitutionInput::user_fixture(
             request.id(),
             ToolApprovalDecision::Approve,
         )
         .reconstitute()
-        .expect("the owner approval is valid");
+        .expect("the user approval is valid");
+        let crash_lost_attempt = tool_attempt_id(44);
         let crash_lost = ToolAttemptReconstitutionInput::new(
-            tool_attempt_id(44),
+            crash_lost_attempt,
             request.id(),
             execution.session(),
             execution.turn(),
@@ -6216,19 +6217,18 @@ mod tests {
         )
         .expect("the prepared tool checkpoint closes directly");
 
-        assert!(matches!(
-            cancelled.attempt().end(),
-            AttemptEnd::AfterCancellation {
-                cause,
-                disposition: CancellationStopDisposition::Cancelled,
-            } if *cause == interrupt.proof()
-        ));
+        let AttemptEnd::AfterCancellation { cause, disposition } = cancelled.attempt().end() else {
+            panic!("the interrupted attempt ends after cancellation");
+        };
+        assert_eq!(*cause, interrupt.proof());
+        assert_eq!(*disposition, CancellationStopDisposition::Cancelled);
         assert_eq!(cancelled.tool_result_entries().len(), 1);
-        assert!(matches!(
-            cancelled.tool_result_entries()[0].payload(),
-            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt }
-                if *attempt == tool_attempt_id(44)
-        ));
+        let SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } =
+            cancelled.tool_result_entries()[0].payload()
+        else {
+            panic!("the interrupted tool projects its execution result");
+        };
+        assert_eq!(*attempt, crash_lost_attempt);
     }
 
     /// S07 / INV-005 / INV-029: interrupt result projection is bound to the

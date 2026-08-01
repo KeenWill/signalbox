@@ -230,7 +230,7 @@ fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, Tr
         if !valid {
             return Err(TranslationError::Failure(
                 PreparationFailure::UnsupportedOperation {
-                    detail: "Codex requires tool results in user messages and tool calls or \
+                    detail: "Codex requires tool results in user-role messages and tool calls or \
                              thinking blocks in assistant messages"
                         .to_string(),
                 },
