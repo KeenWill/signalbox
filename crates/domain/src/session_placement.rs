@@ -24,11 +24,10 @@ impl SessionPlacementPath {
         if value.is_empty() {
             return Err(SessionPlacementPathError::Empty);
         }
-        let segments = value.split('.').collect::<Vec<_>>();
-        if segments.len() > MAX_SESSION_PLACEMENT_DEPTH {
-            return Err(SessionPlacementPathError::TooDeep);
-        }
-        for segment in &segments {
+        for (index, segment) in value.split('.').enumerate() {
+            if index == MAX_SESSION_PLACEMENT_DEPTH {
+                return Err(SessionPlacementPathError::TooDeep);
+            }
             if segment.is_empty() {
                 return Err(SessionPlacementPathError::EmptySegment);
             }
@@ -167,6 +166,21 @@ pub enum SessionPlacementError {
     RootRequiresGlobalReadIntent,
     GlobalReadIntentRequiresRoot,
 }
+
+impl fmt::Display for SessionPlacementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::RootRequiresGlobalReadIntent => {
+                "root session placement requires explicit global-read intent"
+            }
+            Self::GlobalReadIntentRequiresRoot => {
+                "global-read intent is valid only for root session placement"
+            }
+        })
+    }
+}
+
+impl Error for SessionPlacementError {}
 
 /// The requesting session's parent directory; root is the empty prefix.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -463,6 +477,18 @@ mod tests {
     }
 
     #[test]
+    fn placement_errors_explain_the_required_root_intent_shape() {
+        assert_eq!(
+            SessionPlacementError::RootRequiresGlobalReadIntent.to_string(),
+            "root session placement requires explicit global-read intent"
+        );
+        assert_eq!(
+            SessionPlacementError::GlobalReadIntentRequiresRoot.to_string(),
+            "global-read intent is valid only for root session placement"
+        );
+    }
+
+    #[test]
     fn s36_inv049_prefix_rule_allows_siblings_and_descendants_but_not_ancestors_or_disjoint_paths()
     {
         let requester = scoped("projects.foo.reviews.pr123");
@@ -531,7 +557,8 @@ mod tests {
         );
         assert_eq!(
             event.placement().version(),
-            SessionPlacementVersion::INITIAL.next().unwrap()
+            SessionPlacementVersion::try_from_u64(2)
+                .expect("fixture successor version is positive")
         );
         assert_eq!(event.placement().placement(), &replacement);
         assert_eq!(event.command_id(), command);

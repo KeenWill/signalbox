@@ -10,8 +10,9 @@ use signalbox_domain::{
     ModelSelectionRequest, PreparedCreateSession, ReconstitutedSessionCreation,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionPlacement, SessionPlacementPath, SessionPlacementVersion, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, TranscriptAncestry, VersionedSessionPlacement,
+    SessionPlacement, SessionPlacementEventKind, SessionPlacementPath, SessionPlacementVersion,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -20,7 +21,7 @@ use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
     defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
-    session_id_to_uuid,
+    session_id_to_uuid, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
@@ -385,9 +386,12 @@ async fn insert_prepared(
         "INSERT INTO session_placement_event
             (session_id, version, prior_version, event_kind, placement_path,
              root_global_read_intent, provenance_command_id, recorded_at)
-         VALUES ($1, 1, NULL, 'created', $2, $3, $4, transaction_timestamp())",
+         VALUES ($1, 1, NULL, $2, $3, $4, $5, transaction_timestamp())",
     )
     .bind(session_id_to_uuid(session.id()))
+    .bind(session_placement_event_kind_to_str(
+        SessionPlacementEventKind::Created,
+    ))
     .bind(placement_path)
     .bind(root_intent)
     .bind(durable_command_id_to_uuid(command.command_id()))

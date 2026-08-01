@@ -41,6 +41,11 @@ ALTER TABLE create_session_command
         root_global_read_intent = (
             placement_path IS NOT NULL AND position('.' IN placement_path) = 0
         )
+    ),
+    ADD CONSTRAINT create_session_command_placement_path_shape CHECK (
+        placement_path IS NULL
+        OR (octet_length(placement_path) BETWEEN 1 AND 4159
+            AND placement_path ~ '^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,63}$')
     );
 
 CREATE TABLE session_placement_event (
@@ -53,6 +58,7 @@ CREATE TABLE session_placement_event (
     provenance_command_id uuid NOT NULL REFERENCES durable_command(command_id) ON DELETE RESTRICT,
     recorded_at timestamptz NOT NULL,
     PRIMARY KEY (session_id, version),
+    UNIQUE (session_id, version, provenance_command_id),
     FOREIGN KEY (session_id, prior_version)
         REFERENCES session_placement_event(session_id, version) ON DELETE RESTRICT,
     CHECK (
@@ -121,8 +127,8 @@ CREATE TABLE update_session_placement_command (
     FOREIGN KEY (command_id, command_kind, storage_version)
         REFERENCES durable_command(command_id, command_kind, storage_version)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, result_version)
-        REFERENCES session_placement_event(session_id, version)
+    FOREIGN KEY (session_id, result_version, command_id)
+        REFERENCES session_placement_event(session_id, version, provenance_command_id)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 

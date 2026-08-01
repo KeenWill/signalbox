@@ -260,13 +260,8 @@ fn decode_complete(
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
+            VersionedSessionPlacement::reconstitute(placement_version, placement),
         )
-        .map(|session| {
-            session.with_reconstituted_placement(VersionedSessionPlacement::reconstitute(
-                placement_version,
-                placement,
-            ))
-        })
         .map_err(map_imported_error);
     }
     if row.try_get::<Option<Uuid>, _>("seed_session_id")?.is_some() {

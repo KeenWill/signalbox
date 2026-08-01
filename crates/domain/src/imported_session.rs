@@ -15,6 +15,7 @@ use crate::{
     SemanticTranscriptEntryReconstitutionInput, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, TranscriptAncestry, VersionedSessionConfigurationDefaults,
+    VersionedSessionPlacement,
 };
 
 /// The applied result recorded for imported-frontier session creation.
@@ -371,6 +372,7 @@ pub struct BoundedImportedSessionReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
+    current_placement: VersionedSessionPlacement,
     seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
     seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
 }
@@ -387,6 +389,7 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self {
@@ -399,6 +402,7 @@ impl BoundedImportedSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            current_placement,
             seed_records,
             seed_headers,
         }
@@ -426,6 +430,7 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self {
@@ -449,6 +454,7 @@ impl BoundedImportedSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            current_placement,
             seed_records,
             seed_headers,
         )
@@ -541,6 +547,7 @@ impl BoundedImportedSessionReconstitutionInput {
                 self.defaults_version,
                 self.defaults,
             ),
+            self.current_placement,
         ))
     }
 
@@ -582,6 +589,11 @@ impl BoundedImportedSessionReconstitutionInput {
     /// Borrows the selected complete defaults.
     pub const fn defaults(&self) -> &SessionConfigurationDefaults {
         &self.defaults
+    }
+
+    /// Borrows the selected current placement event.
+    pub const fn current_placement(&self) -> &VersionedSessionPlacement {
+        &self.current_placement
     }
 
     /// Borrows all candidate seed records.
@@ -871,6 +883,7 @@ pub struct ImportedSessionReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
+    current_placement: VersionedSessionPlacement,
     imported_conversation: ImportedConversation,
     seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
     seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -889,6 +902,7 @@ impl ImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
         imported_conversation: ImportedConversation,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -903,6 +917,7 @@ impl ImportedSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            current_placement,
             imported_conversation,
             seed_records,
             seed_snapshots,
@@ -965,6 +980,7 @@ impl ImportedSessionReconstitutionInput {
                 self.defaults_version,
                 self.defaults,
             ),
+            self.current_placement,
         );
         Ok(ReconstitutedImportedSession {
             session,
@@ -1012,6 +1028,11 @@ impl ImportedSessionReconstitutionInput {
     /// Borrows the selected complete defaults.
     pub const fn defaults(&self) -> &SessionConfigurationDefaults {
         &self.defaults
+    }
+
+    /// Borrows the selected current placement event.
+    pub const fn current_placement(&self) -> &VersionedSessionPlacement {
+        &self.current_placement
     }
 
     /// Borrows the supplied immutable imported aggregate.
@@ -1416,7 +1437,8 @@ mod tests {
         ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
         ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
         ImportedTranscriptContent, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
-        ModelSelectionRequest, SemanticTranscriptEntryRef,
+        ModelSelectionRequest, SemanticTranscriptEntryRef, SessionPlacement, SessionPlacementPath,
+        SessionPlacementVersion,
     };
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
@@ -1601,6 +1623,7 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             prepared.command().initial_configuration_defaults().clone(),
+            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
             conversation.clone(),
             seeds,
             snapshots,
@@ -1626,6 +1649,7 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             prepared.command().initial_configuration_defaults().clone(),
+            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
             vec![ImportedSessionSeedReconstitutionInput::new(
                 seed.session(),
                 seed.seed_frontier(),
@@ -1849,7 +1873,16 @@ mod tests {
     #[test]
     fn s28_inv002_inv003_inv015_inv039_current_session_reconstitutes_seed() {
         let (conversation, _, prepared) = prepared_fixture();
-        let input = current_input(&conversation, &prepared);
+        let mut input = current_input(&conversation, &prepared);
+        let placement = VersionedSessionPlacement::reconstitute(
+            SessionPlacementVersion::try_from_u64(4).expect("fixture version is positive"),
+            SessionPlacement::scoped(
+                SessionPlacementPath::try_new("projects.foo.session".into()).unwrap(),
+            )
+            .unwrap(),
+        );
+        input.current_placement = placement.clone();
+        assert_eq!(input.current_placement(), &placement);
 
         let reconstituted = input
             .reconstitute()
@@ -1861,6 +1894,7 @@ mod tests {
             prepared.session().provenance()
         );
         assert_eq!(reconstituted.imported_seed(), prepared.imported_seed());
+        assert_eq!(reconstituted.session().current_placement(), &placement);
         assert_eq!(reconstituted.seed_snapshot(), prepared.seed_snapshot());
         assert_eq!(
             reconstituted.semantic_entries(),
@@ -1874,7 +1908,16 @@ mod tests {
     #[test]
     fn s28_inv002_inv015_inv039_bounded_current_session_reconstitutes() {
         let (_, _, prepared) = prepared_fixture();
-        let input = bounded_input(&prepared);
+        let mut input = bounded_input(&prepared);
+        let placement = VersionedSessionPlacement::reconstitute(
+            SessionPlacementVersion::try_from_u64(5).expect("fixture version is positive"),
+            SessionPlacement::scoped(
+                SessionPlacementPath::try_new("projects.foo.session".into()).unwrap(),
+            )
+            .unwrap(),
+        );
+        input.current_placement = placement.clone();
+        assert_eq!(input.current_placement(), &placement);
 
         let session = input
             .reconstitute()
@@ -1889,6 +1932,7 @@ mod tests {
             session.current_configuration_defaults(),
             prepared.session().configuration_defaults()
         );
+        assert_eq!(session.current_placement(), &placement);
     }
 
     /// S28 / INV-002 / INV-003 / INV-015 / INV-039: every constructible

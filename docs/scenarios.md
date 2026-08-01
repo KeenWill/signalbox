@@ -1147,7 +1147,8 @@ INV-tagged test names and attached doc comments.
   next-version event and preserves every prior event.
 - **State transitions:** Pathless retains legacy read behavior. Scoped placement
   reads the parent directory subtree by one prefix comparison. Root placement
-  reads everything only when creation records explicit global-read intent.
+  reads everything only when the current creation or update event records
+  explicit global-read intent.
 - **Transient updates:** None; a denied selected-transcript read returns typed
   refusal evidence naming the requester's directory and closed reason.
 - **Owning component:** Domain owns validated paths, events, and scope decision;

@@ -21,7 +21,8 @@ use signalbox_domain::{
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, TranscriptAncestry,
+    SessionCreationProvenance, SessionId, SessionPlacementEventKind, TranscriptAncestry,
+    VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -39,6 +40,7 @@ use crate::{
         dangerous_tool_auto_approval_from_str, dangerous_tool_auto_approval_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+        session_placement_event_kind_to_str,
     },
     model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
     outbox,
@@ -458,9 +460,12 @@ async fn insert_prepared(
         "INSERT INTO session_placement_event
             (session_id, version, prior_version, event_kind, placement_path,
              root_global_read_intent, provenance_command_id, recorded_at)
-         VALUES ($1, 1, NULL, 'created', NULL, FALSE, $2, transaction_timestamp())",
+         VALUES ($1, 1, NULL, $2, NULL, FALSE, $3, transaction_timestamp())",
     )
     .bind(session_id_to_uuid(session.id()))
+    .bind(session_placement_event_kind_to_str(
+        SessionPlacementEventKind::Created,
+    ))
     .bind(durable_command_id_to_uuid(command.command_id()))
     .execute(&mut *connection)
     .await?;
@@ -801,6 +806,7 @@ fn identity_collision(error: &sqlx::Error) -> Option<ImportedSessionIdentityColl
 pub(crate) fn reconstitute_bounded_current(
     requested_session: SessionId,
     row: PgRow,
+    current_placement: VersionedSessionPlacement,
 ) -> Result<Session, ImportedSessionRepositoryError> {
     require_spelling(&row, "stored_cause", USER_INITIATED)?;
     require_spelling(&row, "stored_ancestry", IMPORTED_ANCESTRY)?;
@@ -875,6 +881,7 @@ pub(crate) fn reconstitute_bounded_current(
         defaults_session,
         defaults_version,
         defaults,
+        current_placement,
         seed_records,
         seed_headers,
     )
@@ -907,6 +914,7 @@ pub(crate) async fn load_complete_current(
         session.id(),
         current_defaults.version(),
         current_defaults.defaults().clone(),
+        session.current_placement().clone(),
         conversation,
         projection.seed_records,
         projection.seed_snapshots,

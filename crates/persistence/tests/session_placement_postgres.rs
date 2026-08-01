@@ -201,7 +201,7 @@ async fn s36_placement_update_appends_history_and_equal_replay_preserves_it()
     );
     assert_eq!(
         event.placement().version(),
-        SessionPlacementVersion::INITIAL.next().unwrap()
+        SessionPlacementVersion::try_from_u64(2).expect("fixture successor version is positive")
     );
     assert_eq!(repository.handle(update).await?, first);
     let history: Vec<(i64, String)> = sqlx::query_as(
@@ -257,6 +257,61 @@ async fn s36_missing_placement_head_fails_closed_instead_of_rejecting_session_ab
         panic!("missing placement history fails with typed corruption")
     };
     assert_eq!(reason, "session placement head missing");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(0x205);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x107),
+            session_id,
+            SessionPlacement::Pathless,
+        ))
+        .await?;
+    let first_command = command(0x108);
+    let first = UpdateSessionPlacement::new(
+        first_command,
+        session_id,
+        SessionPlacementVersion::INITIAL,
+        scoped("projects.foo.first"),
+    );
+    let second = UpdateSessionPlacement::new(
+        command(0x109),
+        session_id,
+        SessionPlacementVersion::try_from_u64(2).expect("fixture version is positive"),
+        scoped("projects.foo.second"),
+    );
+    let repository = SessionPlacementRepository::new(pool.clone());
+    repository.handle(first.clone()).await?;
+    repository.handle(second).await?;
+    sqlx::query("ALTER TABLE update_session_placement_command DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE update_session_placement_command SET result_version = 3 WHERE command_id = $1",
+    )
+    .bind(*first_command.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE update_session_placement_command ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let error = repository
+        .handle(first)
+        .await
+        .expect_err("an applied receipt cannot name another command's event");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("cross-wired receipt fails with typed corruption")
+    };
+    assert_eq!(reason, "applied event provenance");
 
     pool.close().await;
     drop(container);

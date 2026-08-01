@@ -656,13 +656,14 @@ impl Session {
         id: SessionId,
         creation_provenance: SessionCreationProvenance,
         current_configuration_defaults: VersionedSessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
     ) -> Self {
         Self {
             id,
             creation_provenance,
             template_provenance: None,
             current_configuration_defaults,
-            current_placement: VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            current_placement,
         }
     }
 
@@ -690,12 +691,6 @@ impl Session {
     /// Borrows the complete placement event selected as current.
     pub const fn current_placement(&self) -> &VersionedSessionPlacement {
         &self.current_placement
-    }
-
-    /// Installs the independently reconstituted current placement snapshot.
-    pub fn with_reconstituted_placement(mut self, placement: VersionedSessionPlacement) -> Self {
-        self.current_placement = placement;
-        self
     }
 }
 

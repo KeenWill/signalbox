@@ -5,8 +5,9 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     DurableCommandId, RootPlacementGlobalReadIntent, SessionId, SessionPlacement,
-    SessionPlacementEvent, SessionPlacementPath, SessionPlacementVersion, UpdateSessionPlacement,
-    UpdateSessionPlacementRejection, UpdateSessionPlacementResult, VersionedSessionPlacement,
+    SessionPlacementEvent, SessionPlacementEventKind, SessionPlacementPath,
+    SessionPlacementVersion, UpdateSessionPlacement, UpdateSessionPlacementRejection,
+    UpdateSessionPlacementResult, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 
@@ -14,7 +15,13 @@ use crate::command_registry::{
     self, CommandKind, RegistryCorruption, RegistryInspectionError, UPDATE_SESSION_PLACEMENT_KIND,
 };
 use crate::lock_inventory;
-use crate::mapping::{durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid};
+use crate::mapping::{
+    SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
+    durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+    session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+    session_placement_rejection_from_str, session_placement_rejection_to_str,
+    session_placement_result_kind_from_str, session_placement_result_kind_to_str,
+};
 
 const STORAGE_VERSION: i16 = 1;
 
@@ -262,11 +269,12 @@ async fn insert_event(
         "INSERT INTO session_placement_event
             (session_id, version, prior_version, event_kind, placement_path,
              root_global_read_intent, provenance_command_id, recorded_at)
-         VALUES ($1, $2, $3, 'updated', $4, $5, $6, transaction_timestamp())",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, transaction_timestamp())",
     )
     .bind(session_id_to_uuid(event.session()))
     .bind(version_to_numeric(event.placement().version()))
     .bind(event.prior_version().map(version_to_numeric))
+    .bind(session_placement_event_kind_to_str(event.kind()))
     .bind(path)
     .bind(root_intent)
     .bind(durable_command_id_to_uuid(event.command_id()))
@@ -283,30 +291,26 @@ async fn insert_command_record(
     let (path, root_intent) = encode_placement(command.replacement());
     let (result_kind, rejection_kind, result_version, current_version) = match result {
         UpdateSessionPlacementResult::Applied(event) => (
-            "applied",
+            session_placement_result_kind_to_str(SessionPlacementResultStorageKind::Applied),
             None,
             Some(version_to_numeric(event.placement().version())),
             None,
         ),
-        UpdateSessionPlacementResult::Rejected(
-            UpdateSessionPlacementRejection::SessionNotFound { .. },
-        ) => ("rejected", Some("session_not_found"), None, None),
-        UpdateSessionPlacementResult::Rejected(
-            UpdateSessionPlacementRejection::CurrentVersionMismatch { current, .. },
-        ) => (
-            "rejected",
-            Some("current_version_mismatch"),
-            None,
-            Some(version_to_numeric(*current)),
-        ),
-        UpdateSessionPlacementResult::Rejected(
-            UpdateSessionPlacementRejection::VersionExhausted { current, .. },
-        ) => (
-            "rejected",
-            Some("version_exhausted"),
-            None,
-            Some(version_to_numeric(*current)),
-        ),
+        UpdateSessionPlacementResult::Rejected(rejection) => {
+            let current = match rejection {
+                UpdateSessionPlacementRejection::SessionNotFound { .. } => None,
+                UpdateSessionPlacementRejection::CurrentVersionMismatch { current, .. }
+                | UpdateSessionPlacementRejection::VersionExhausted { current, .. } => {
+                    Some(version_to_numeric(*current))
+                }
+            };
+            (
+                session_placement_result_kind_to_str(SessionPlacementResultStorageKind::Rejected),
+                Some(session_placement_rejection_to_str(rejection)),
+                None,
+                current,
+            )
+        }
     };
     sqlx::query(
         "INSERT INTO update_session_placement_command
@@ -339,8 +343,11 @@ async fn load_record(
     SessionPlacementRepositoryError,
 > {
     let row = sqlx::query(
-        "SELECT command.*, event.prior_version, event.placement_path AS result_path,
-                event.root_global_read_intent AS result_root_intent
+        "SELECT command.*, event.prior_version, event.version AS result_event_version,
+                event.event_kind AS result_event_kind,
+                event.placement_path AS result_path,
+                event.root_global_read_intent AS result_root_intent,
+                event.provenance_command_id AS result_provenance_command_id
            FROM update_session_placement_command AS command
            LEFT JOIN session_placement_event AS event
              ON event.session_id = command.session_id
@@ -365,32 +372,87 @@ fn decode_record(
         row.try_get("root_global_read_intent")?,
     )?;
     let command = UpdateSessionPlacement::new(command_id, session, expected, replacement);
-    let result_kind: String = row.try_get("result_kind")?;
-    let rejection: Option<String> = row.try_get("rejection_kind")?;
-    let result = match (result_kind.as_str(), rejection.as_deref()) {
-        ("applied", None) => {
+    let result_kind =
+        session_placement_result_kind_from_str(row.try_get::<String, _>("result_kind")?.as_str())
+            .ok_or(SessionPlacementRepositoryError::Corruption("result kind"))?;
+    let rejection = match row.try_get::<Option<String>, _>("rejection_kind")? {
+        Some(value) => Some(session_placement_rejection_from_str(&value).ok_or(
+            SessionPlacementRepositoryError::Corruption("rejection kind"),
+        )?),
+        None => None,
+    };
+    let result = match (result_kind, rejection) {
+        (SessionPlacementResultStorageKind::Applied, None) => {
+            let event_kind = session_placement_event_kind_from_str(
+                required::<String>(&row, "result_event_kind")?.as_str(),
+            )
+            .ok_or(SessionPlacementRepositoryError::Corruption(
+                "result event kind",
+            ))?;
+            if event_kind != SessionPlacementEventKind::Updated {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied event kind",
+                ));
+            }
+            let provenance: sqlx::types::Uuid = required(&row, "result_provenance_command_id")?;
+            if provenance != durable_command_id_to_uuid(command_id) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied event provenance",
+                ));
+            }
             let prior = decode_version(required(&row, "prior_version")?)?;
+            if prior != expected {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied prior version",
+                ));
+            }
             let placement = decode_placement(
                 row.try_get("result_path")?,
                 required(&row, "result_root_intent")?,
             )?;
+            if &placement != command.replacement() {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied replacement",
+                ));
+            }
+            let recorded_result_version = decode_version(required(&row, "result_version")?)?;
+            let event_result_version = decode_version(required(&row, "result_event_version")?)?;
+            if recorded_result_version != event_result_version {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied result version",
+                ));
+            }
             let event = SessionPlacementEvent::updated(session, prior, placement, command_id)
                 .ok_or(SessionPlacementRepositoryError::Corruption(
                     "applied version exhausted",
                 ))?;
+            if event.placement().version() != event_result_version {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied event version",
+                ));
+            }
             UpdateSessionPlacementResult::Applied(event)
         }
-        ("rejected", Some("session_not_found")) => UpdateSessionPlacementResult::Rejected(
+        (
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+        ) => UpdateSessionPlacementResult::Rejected(
             UpdateSessionPlacementRejection::SessionNotFound { session },
         ),
-        ("rejected", Some("current_version_mismatch")) => UpdateSessionPlacementResult::Rejected(
+        (
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch),
+        ) => UpdateSessionPlacementResult::Rejected(
             UpdateSessionPlacementRejection::CurrentVersionMismatch {
                 session,
                 expected,
                 current: decode_version(required(&row, "result_current_version")?)?,
             },
         ),
-        ("rejected", Some("version_exhausted")) => UpdateSessionPlacementResult::Rejected(
+        (
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::VersionExhausted),
+        ) => UpdateSessionPlacementResult::Rejected(
             UpdateSessionPlacementRejection::VersionExhausted {
                 session,
                 current: decode_version(required(&row, "result_current_version")?)?,

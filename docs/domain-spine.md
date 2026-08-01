@@ -805,10 +805,6 @@ pub struct Session { /* private */ }
 // non-Copy: owned snapshot, cloned deliberately (session aggregate,
 // spec/sessions-and-transcript.md)
 impl Session {
-    pub fn with_reconstituted_placement(
-        self,
-        placement: VersionedSessionPlacement,
-    ) -> Self;
     // accessors: id(), creation_provenance(), template_provenance(),
     //   current_configuration_defaults(), current_placement()
 }
@@ -851,7 +847,7 @@ impl SessionReconstitutionInput {
     pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   template_provenance(), current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults(), placement()
+    //   defaults_session(), defaults_version(), defaults(), current_placement()
 }
 
 pub enum SessionReconstitutionFailure {
@@ -1031,6 +1027,7 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
@@ -1047,6 +1044,7 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
@@ -1055,7 +1053,7 @@ impl BoundedImportedSessionReconstitutionInput {
     ) -> Result<Session, BoundedImportedSessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults(), seed_records(),
+    //   defaults_session(), defaults_version(), defaults(), current_placement(), seed_records(),
     //   seed_headers()
 }
 
@@ -1120,6 +1118,7 @@ impl ImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
         imported_conversation: ImportedConversation,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -1130,7 +1129,7 @@ impl ImportedSessionReconstitutionInput {
     ) -> Result<ReconstitutedImportedSession, ImportedSessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults(),
+    //   defaults_session(), defaults_version(), defaults(), current_placement(),
     //   imported_conversation(), seed_records(), seed_snapshots(),
     //   semantic_entries()
 }
