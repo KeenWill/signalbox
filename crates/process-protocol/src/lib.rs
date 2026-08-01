@@ -69,6 +69,9 @@ pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 /// Maximum UTF-8 bytes in one transcript content fragment.
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 
+/// Maximum UTF-8 bytes in one delegate approval rationale.
+const MAX_TOOL_DECISION_RATIONALE_BYTES: usize = 4_096;
+
 /// Maximum total UTF-8 bytes in one complete metadata object or filter.
 pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
 
@@ -1663,6 +1666,35 @@ impl ConversationSummary {
             }
         }
     }
+}
+
+fn validate_tool_approval_event_shape(
+    decision: &ToolApprovalEventDecision,
+    decider: &ToolApprovalEventDecider,
+    rationale: &Option<String>,
+) -> Result<(), FrameValidationError> {
+    let shape_matches = match (decision, decider, rationale) {
+        (
+            ToolApprovalEventDecision::Approve {} | ToolApprovalEventDecision::Deny { .. },
+            ToolApprovalEventDecider::User { .. },
+            None,
+        ) => true,
+        (
+            ToolApprovalEventDecision::Approve {}
+            | ToolApprovalEventDecision::Deny { reason: None },
+            ToolApprovalEventDecider::Delegate { .. },
+            Some(rationale),
+        ) => {
+            !rationale.is_empty()
+                && rationale.len() <= MAX_TOOL_DECISION_RATIONALE_BYTES
+                && !rationale.contains("\0")
+        }
+        _ => false,
+    };
+    if !shape_matches {
+        return Err(FrameValidationError::ToolApprovalShape);
+    }
+    Ok(())
 }
 
 /// Validates the wire restatement of the derived display-title shape:
@@ -4502,19 +4534,13 @@ impl ServerMessage {
             Self::SessionEvent {
                 event:
                     SessionEvent::ToolApprovalDecided {
-                        decider, rationale, ..
+                        decision,
+                        decider,
+                        rationale,
+                        ..
                     },
                 ..
-            } => {
-                let shape_matches = matches!(
-                    (decider, rationale),
-                    (ToolApprovalEventDecider::User { .. }, None)
-                        | (ToolApprovalEventDecider::Delegate { .. }, Some(_))
-                );
-                if !shape_matches {
-                    return Err(FrameValidationError::ToolApprovalShape);
-                }
-            }
+            } => validate_tool_approval_event_shape(decision, decider, rationale)?,
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -5254,11 +5280,12 @@ mod tests {
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
-        ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
-        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
-        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
+        MAX_TOOL_DECISION_RATIONALE_BYTES, MetadataActor, MetadataLastWriter, ModelCallDisposition,
+        ModelCallState, ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
+        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+        ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -8295,6 +8322,27 @@ mod tests {
             r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
         );
         Ok(())
+    }
+
+    #[test]
+    fn tool_approval_decision_events_reject_invalid_delegate_shapes() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"8","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"9","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"unsafe\u0000rationale"}}}"#,
+        );
+        let oversized_rationale = "x".repeat(MAX_TOOL_DECISION_RATIONALE_BYTES + 1);
+        let oversized_frame = [
+            r#"{"version":1,"request_id":"10","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""#,
+            oversized_rationale.as_str(),
+            r#""}}}"#,
+        ]
+        .concat();
+        assert_server_malformed(&oversized_frame);
     }
 
     /// INV-033: every stop rejection carries its exact closed wire shape.

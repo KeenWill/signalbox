@@ -3365,6 +3365,35 @@ async fn approval_guard_user_decision_follows_recorded_delegated_escalation()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_judge_preparation_requires_active_wait() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e78,
+        &[("echo", "{}"), ("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [_, later] = requests.as_slice() else {
+        panic!("the fixture has two delegated requests")
+    };
+    let mut connection = pool.acquire().await?;
+    let error = insert_completed_judge(&mut connection, &fixture, *later, 0x7e79, "approve", None)
+        .await
+        .expect_err("a judge call must target the current active approval wait");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_judge_requires_active_wait")
+    );
+
+    drop(connection);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_delegate_decision_cannot_bypass_an_earlier_wait()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
@@ -3375,12 +3404,38 @@ async fn approval_guard_delegate_decision_cannot_bypass_an_earlier_wait()
         InitialToolApproval::Delegated,
     )
     .await?;
-    let [_, later] = requests.as_slice() else {
+    let [earlier, later] = requests.as_slice() else {
         panic!("the fixture has two delegated requests")
     };
     let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET approval_tool_request_id = $1
+          WHERE turn_id = $2
+            AND session_id = $3
+            AND approval_tool_request_id = $4",
+    )
+    .bind(later.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(earlier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
     let (selection, call) =
         insert_completed_judge(&mut transaction, &fixture, *later, 0x7e90, "approve", None).await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET approval_tool_request_id = $1
+          WHERE turn_id = $2
+            AND session_id = $3
+            AND approval_tool_request_id = $4",
+    )
+    .bind(earlier.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(later.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source,

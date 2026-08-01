@@ -116,6 +116,23 @@ DECLARE
     request_posture text;
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        IF NOT EXISTS (
+            SELECT 1
+              FROM turn_lifecycle AS lifecycle
+             WHERE lifecycle.turn_id = NEW.turn_id
+               AND lifecycle.session_id = NEW.session_id
+               AND lifecycle.state_kind = 'active'
+               AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
+               AND lifecycle.approval_tool_request_id = NEW.request_id
+        ) OR EXISTS (
+            SELECT 1
+              FROM tool_approval_decision AS decision
+             WHERE decision.request_id = NEW.request_id
+        ) THEN
+            RAISE EXCEPTION 'approval judge call lacks an active approval wait'
+                USING ERRCODE = '23514',
+                      CONSTRAINT = 'tool_approval_judge_requires_active_wait';
+        END IF;
         IF NEW.state_kind <> 'prepared'
             OR NEW.terminal_disposition_kind IS NOT NULL
             OR NEW.recommendation_kind IS NOT NULL

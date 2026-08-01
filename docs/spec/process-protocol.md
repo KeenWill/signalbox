@@ -1445,7 +1445,9 @@ The `tool_approval_decided` decision is exactly `approve {}` or
 `deny { reason }`, where `reason` is required-nullable because delegate denials
 carry no user-authored reason. Its decider is exactly `user { command_id }` or
 `delegate { model_selection_id, model_call_id }`; `rationale` is
-required-nullable and present only for a delegate decision.
+required-nullable and present only for a delegate decision. A delegate denial
+has a null `reason`; its rationale is 1 through 4,096 UTF-8 bytes and contains
+no U+0000.
 
 The protocol additionally admits
 `tool_batch_transition { turn_id, model_call_id, state }`, where `state` is

@@ -176,7 +176,8 @@ Implemented table families (across the forward-only migrations):
   certifies the complete validated prefix for bounded current reads; and
 - migration `202608020015` freezes `approval_posture` on each tool request,
   records dedicated approval-judge calls in the global model-call identity
-  namespace, correlates delegate decisions to their completed call, selection,
+  namespace only while their request is the current active approval wait,
+  correlates delegate decisions to their completed call, selection,
   recommendation, and rationale, and adds the typed
   `tool_approval_decided_outbox_event` family;
 - the outbox family (below).
