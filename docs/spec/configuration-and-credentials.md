@@ -498,7 +498,9 @@ Each `[[models]]` entry defines one direct selection:
   `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
   `cache_creation_input_usd_per_million_tokens`, and
   `cache_read_input_usd_per_million_tokens`. The four rates are nonnegative
-  decimal USD strings per million tokens. The version is nonempty, unpadded,
+  decimal USD strings per million tokens. A derived figure is absent when
+  multiplying, dividing by one million, or summing those rates and the reported
+  counts would lose decimal precision. The version is nonempty, unpadded,
   NUL-free, and at most 128 UTF-8 bytes. Declaring only part of the set is a
   configuration error; omitting all five is valid and yields no dollar figure
   for that model.
@@ -713,12 +715,16 @@ profile stored on that call selects `api_metered` or `subscription`. An
 API-metered profile produces `real`; a subscription profile produces
 `metered_equivalent`, regardless of adapter kind. A missing rate set, missing
 historical profile declaration, or call with no present usage axis produces no
-dollar figure rather than zero. A credential update that advances the session
-head cannot relabel an earlier call because that call retains its original
-profile pin. Deployment keeps one profile name's billing meaning stable and uses
-a new name when an authentication update changes that meaning. The parser cannot
-detect a same-name semantic rewrite across configuration restarts; such a
-rewrite would relabel historical reads and is invalid deployment evolution.
+dollar figure rather than zero. Codex CLI's reported `input_tokens` includes its
+reported cache-creation and cache-read breakdowns, so derivation subtracts the
+present cache counts from total input before applying the ordinary input rate
+and applies each cache rate once. A cache breakdown larger than total input
+yields no figure. A credential update that advances the session head cannot
+relabel an earlier call because that call retains its original profile pin.
+Deployment keeps one profile name's billing meaning stable and uses a new name
+when an authentication update changes that meaning. The parser cannot detect a
+same-name semantic rewrite across configuration restarts; such a rewrite would
+relabel historical reads and is invalid deployment evolution.
 
 In the provider bridge, a durably resolved target with no `RuntimeModelCatalog`
 mapping is a typed adapter defect (`UnconfiguredTarget`), never provider

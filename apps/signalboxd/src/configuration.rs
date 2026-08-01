@@ -224,6 +224,7 @@ pub struct HubModelConfiguration {
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
     billing_kinds: HashMap<Arc<str>, BillingKind>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
+    target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
     provider_model_adapters: HashMap<String, ModelAdapter>,
     session_credential_pin: SessionCredentialPin,
     credential_families: ModelCredentialFamilyCatalog,
@@ -426,6 +427,7 @@ impl HubModelConfiguration {
         let mut direct_selections = HashSet::with_capacity(models.len());
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
+        let mut target_adapters = HashMap::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
         for model in models {
             reject_unknown_fields(
@@ -464,6 +466,11 @@ impl HubModelConfiguration {
             let rates = parse_model_billing_rates(model)?;
             if let Some(previous) = target_billing_rates.insert(target, rates.clone())
                 && previous != rates
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
+            }
+            if let Some(previous) = target_adapters.insert(target, mapping.adapter)
+                && previous != mapping.adapter
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
@@ -548,6 +555,7 @@ impl HubModelConfiguration {
             routes,
             billing_kinds,
             billing_rates,
+            target_adapters,
             provider_model_adapters,
             session_credential_pin,
             credential_families,
@@ -625,6 +633,20 @@ impl HubModelConfiguration {
     ) -> Option<DerivedModelCallCost> {
         let rates = self.billing_rates.get(&target)?;
         let billing_kind = *self.billing_kinds.get(credential_profile)?;
+        let adapter = *self.target_adapters.get(&target)?;
+        let input_tokens = match adapter {
+            ModelAdapter::Anthropic => input_tokens,
+            ModelAdapter::CodexCli => match input_tokens {
+                Some(total) => Some(
+                    total.checked_sub(
+                        cache_creation_input_tokens
+                            .unwrap_or_default()
+                            .checked_add(cache_read_input_tokens.unwrap_or_default())?,
+                    )?,
+                ),
+                None => None,
+            },
+        };
         let amount_usd = fold_reported_cost([
             (input_tokens, rates.input),
             (output_tokens, rates.output),
@@ -765,6 +787,7 @@ fn validated_rate_version(value: &str) -> Result<Arc<str>, HubModelConfiguration
 }
 
 fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
+    const TOKENS_PER_MILLION: u64 = 1_000_000;
     let mut amount = Decimal::ZERO;
     let mut reported = false;
     for (tokens, rate) in axes {
@@ -772,10 +795,16 @@ fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
             continue;
         };
         reported = true;
-        let axis_cost = rate
-            .checked_mul(Decimal::from(tokens))?
-            .checked_div(Decimal::from(1_000_000_u64))?;
-        amount = amount.checked_add(axis_cost)?;
+        let numerator = rate.checked_mul(Decimal::from(tokens))?;
+        let axis_cost = numerator.checked_div(Decimal::from(TOKENS_PER_MILLION))?;
+        if axis_cost.checked_mul(Decimal::from(TOKENS_PER_MILLION))? != numerator {
+            return None;
+        }
+        let next_amount = amount.checked_add(axis_cost)?;
+        if next_amount.checked_sub(amount)? != axis_cost {
+            return None;
+        }
+        amount = next_amount;
     }
     reported.then(|| amount.normalize())
 }
@@ -1413,6 +1442,27 @@ cache_read_input_usd_per_million_tokens = "4"
     }
 
     #[test]
+    fn inexact_rate_arithmetic_yields_no_dollar_figure() {
+        let configuration = HubModelConfiguration::parse(&CONFIGURATION.replace(
+            "input_usd_per_million_tokens = \"3\"",
+            "input_usd_per_million_tokens = \"0.0000000000000000000000000001\"",
+        ))
+        .expect("the representable high-precision rate is valid configuration");
+
+        assert_eq!(
+            configuration.derive_model_call_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                Some(1),
+                None,
+                None,
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn an_unrated_model_yields_no_dollar_figure() {
         let unrated = CONFIGURATION
             .lines()
@@ -1514,6 +1564,34 @@ context_window_tokens = 200000
         assert_eq!(route.adapter(), ModelAdapter::CodexCli);
         assert_eq!(route.credential_profile(), "codex-api-primary");
         assert_eq!(cost.billing_kind(), BillingKind::ApiMetered);
+    }
+
+    #[test]
+    fn codex_cache_breakdowns_are_not_charged_twice_as_input() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = HubModelConfiguration::parse(
+            &configuration_with_api_metered_codex_model(&executable, temporary.path()),
+        )
+        .expect("the API-metered Codex fixture is valid");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000002").expect("fixture UUID is valid"),
+        );
+        let route = configuration
+            .resolve_direct_model(selection)
+            .expect("the Codex fixture has a route");
+        let cost = configuration
+            .derive_model_call_cost(
+                route.target(),
+                route.credential_profile(),
+                Some(1_000_000),
+                None,
+                Some(100_000),
+                Some(200_000),
+            )
+            .expect("the consistent Codex breakdown derives a cost");
+
+        assert_eq!(cost.amount_usd().to_string(), "1.8");
     }
 
     #[test]

@@ -98,7 +98,7 @@ pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum canonical decimal USD amount text.
-pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 64;
+pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
 /// Maximum UTF-8 bytes in one deployment-owned billing rate version.
 pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
@@ -896,6 +896,8 @@ pub struct CanonicalDollarAmount(String);
 impl CanonicalDollarAmount {
     /// Validates one shortest nonnegative base-ten decimal spelling.
     pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        const MAX_DECIMAL_COEFFICIENT: u128 = 79_228_162_514_264_337_593_543_950_335;
+
         let (integer, fraction) = value
             .split_once('.')
             .map_or((value.as_str(), None), |parts| (parts.0, Some(parts.1)));
@@ -908,10 +910,21 @@ impl CanonicalDollarAmount {
                 && fraction.bytes().all(|byte| byte.is_ascii_digit())
                 && !fraction.ends_with('0')
         });
+        let coefficient =
+            value
+                .bytes()
+                .filter(|byte| *byte != b'.')
+                .try_fold(0_u128, |coefficient, digit| {
+                    coefficient
+                        .checked_mul(10)?
+                        .checked_add(u128::from(digit.checked_sub(b'0')?))
+                });
         if value.is_empty()
             || value.len() > MAX_DOLLAR_AMOUNT_BYTES
             || !integer_is_canonical
             || !fraction_is_canonical
+            || fraction.is_some_and(|fraction| fraction.len() > 28)
+            || coefficient.is_none_or(|coefficient| coefficient > MAX_DECIMAL_COEFFICIENT)
         {
             Err(CanonicalValueError::DollarAmount)
         } else {
@@ -5518,6 +5531,19 @@ mod tests {
         );
         assert_client_malformed(
             r#"{"version":1,"request_id":"+1","request":{"type":"list_sessions"}}"#,
+        );
+    }
+
+    #[test]
+    fn canonical_dollar_amount_matches_the_wire_decimal_representation() {
+        assert!(
+            CanonicalDollarAmount::try_new(String::from("79228162514264337593543950335")).is_ok()
+        );
+        assert!(
+            CanonicalDollarAmount::try_new(String::from("0.0000000000000000000000000001")).is_ok()
+        );
+        assert!(
+            CanonicalDollarAmount::try_new(String::from("79228162514264337593543950336")).is_err()
         );
     }
 
