@@ -84,10 +84,11 @@ use signalbox_persistence::{
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
-        ProcessModelCallRecoveryPrecondition, ProcessModelCallUsageProvenance,
-        ProcessModelSelection, ProcessProviderModelCallFailureCause, ProcessReadCorruption,
-        ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
-        ProcessSessionDefaultsRead, ProcessTranscriptEntry, ProcessTurnState,
+        ProcessModelCallInputTokenSemantics, ProcessModelCallRecoveryPrecondition,
+        ProcessModelCallUsageProvenance, ProcessModelSelection,
+        ProcessProviderModelCallFailureCause, ProcessReadCorruption, ProcessReadError,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
+        ProcessTranscriptEntry, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -455,6 +456,10 @@ async fn model_call_usage_keeps_credential_pin_after_update_event() -> Result<()
     assert_eq!(
         usage.provenance(),
         ProcessModelCallUsageProvenance::Reported
+    );
+    assert_eq!(
+        usage.input_token_semantics(),
+        ProcessModelCallInputTokenSemantics::CacheExclusive
     );
 
     pool.close().await;

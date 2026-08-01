@@ -8064,7 +8064,7 @@ where
             evidence.credential_profile(),
             crate::configuration::ModelCallInputUsage::new(
                 usage.input_tokens(),
-                evidence.input_includes_cache_tokens(),
+                evidence.input_token_semantics(),
             ),
             usage.output_tokens(),
             usage.cache_creation_input_tokens(),

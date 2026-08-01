@@ -1137,6 +1137,7 @@ impl<'a> Output<'a> {
     }
 
     fn render_usage(&mut self, snapshot: &mut TranscriptSnapshot) -> Result<(), ClientError> {
+        let mut rendered_usage = tempfile::tempfile()?;
         let mut current_turn: Option<(CanonicalUuid, UsageAggregate)> = None;
         let mut session_total = UsageAggregate::new()?;
         for record in snapshot.replay()? {
@@ -1150,7 +1151,7 @@ impl<'a> Output<'a> {
                 let (turn, mut total) = current_turn.take().ok_or(ClientError::Protocol(
                     "token usage turn grouping was invalid",
                 ))?;
-                self.usage_lines(Some(turn), &mut total)?;
+                Self::usage_lines(&mut rendered_usage, Some(turn), &mut total)?;
             }
             if current_turn.is_none() {
                 current_turn = Some((evidence.turn_id, UsageAggregate::new()?));
@@ -1162,19 +1163,21 @@ impl<'a> Output<'a> {
             session_total.add(&evidence)?;
         }
         if let Some((turn, mut total)) = current_turn {
-            self.usage_lines(Some(turn), &mut total)?;
+            Self::usage_lines(&mut rendered_usage, Some(turn), &mut total)?;
         }
-        self.usage_lines(None, &mut session_total)?;
+        Self::usage_lines(&mut rendered_usage, None, &mut session_total)?;
+        rendered_usage.seek(SeekFrom::Start(0))?;
+        io::copy(&mut rendered_usage, &mut self.stdout)?;
         Ok(())
     }
 
-    fn usage_lines(
-        &mut self,
+    fn usage_lines<OutputWriter: Write>(
+        stdout: &mut OutputWriter,
         turn: Option<CanonicalUuid>,
         total: &mut UsageAggregate,
     ) -> Result<(), ClientError> {
-        self.usage_line(turn, UsageProvenance::Reported, total.reported)?;
-        self.usage_line(turn, UsageProvenance::Estimated, total.estimated)?;
+        Self::usage_line(stdout, turn, UsageProvenance::Reported, total.reported)?;
+        Self::usage_line(stdout, turn, UsageProvenance::Estimated, total.estimated)?;
         for index in 0..total.costs.capacity {
             let Some((key, cost)) = total.costs.entry_at(index)? else {
                 continue;
@@ -1185,7 +1188,7 @@ impl<'a> Output<'a> {
             );
             let rate_version = control_safe(&key.rate_version, TextField::DelimitedOnLine);
             writeln!(
-                self.stdout,
+                stdout,
                 "{prefix} usage_provenance={} label={} rate_version={} usd={} costed_calls={}",
                 usage_provenance_label(key.provenance),
                 cost_label(key.label),
@@ -1197,8 +1200,8 @@ impl<'a> Output<'a> {
         Ok(())
     }
 
-    fn usage_line(
-        &mut self,
+    fn usage_line<OutputWriter: Write>(
+        stdout: &mut OutputWriter,
         turn: Option<CanonicalUuid>,
         provenance: UsageProvenance,
         total: TokenUsageTotal,
@@ -1208,7 +1211,7 @@ impl<'a> Output<'a> {
             |turn| format!("usage turn={turn}"),
         );
         writeln!(
-            self.stdout,
+            stdout,
             "{prefix} usage_provenance={} terminal_calls={} input_tokens={} \
              input_tokens_present_calls={}/{} \
              output_tokens={} output_tokens_present_calls={}/{} \
@@ -3387,6 +3390,67 @@ mod tests {
         ));
         assert_eq!(retained.amount_usd, large);
         assert_eq!(retained.calls, 1);
+    }
+
+    #[test]
+    fn transcript_usage_is_not_published_when_a_later_total_is_inexact() {
+        let large = Decimal::from_str("10000000000000000000000000000")
+            .expect("fixture dollar amount is representable");
+        let tiny = Decimal::from_str("0.0000000000000000000000000001")
+            .expect("fixture dollar amount is representable");
+        let rate_version = BillingRateVersion::try_new(String::from("rates-v1"))
+            .expect("fixture rate version is valid");
+        let usage = ModelCallTokenUsage {
+            input_tokens: Some(CanonicalU64::new(0)),
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(0),
+                    turn_id: wire_uuid(1),
+                    model_call_id: wire_uuid(11),
+                    usage_provenance: UsageProvenance::Reported,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(large.to_string())
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version: rate_version.clone(),
+                        label: ModelCallCostLabel::Real,
+                    }),
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(1),
+                    turn_id: wire_uuid(2),
+                    model_call_id: wire_uuid(12),
+                    usage_provenance: UsageProvenance::Reported,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(tiny.to_string())
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version,
+                        label: ModelCallCostLabel::Real,
+                    }),
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let error = Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect_err("the inexact session total must be rejected");
+
+        assert!(matches!(
+            error,
+            ClientError::Protocol("dollar cost total was inexact")
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
     }
 
     #[test]

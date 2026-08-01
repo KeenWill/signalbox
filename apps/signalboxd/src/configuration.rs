@@ -24,6 +24,7 @@ use signalbox_model_runtime_codex_cli::{
 };
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
+    process_read::ProcessModelCallInputTokenSemantics,
 };
 use signalbox_process_protocol::{MAX_MODEL_ALIAS_CATALOG_ENTRIES, MAX_RATE_VERSION_UTF8_BYTES};
 use signalbox_tools_basic::WebFetchEgressPolicy;
@@ -99,15 +100,15 @@ impl ModelBillingRates {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ModelCallInputUsage {
     tokens: Option<u64>,
-    includes_cache_tokens: bool,
+    semantics: ProcessModelCallInputTokenSemantics,
 }
 
 impl ModelCallInputUsage {
-    pub(crate) const fn new(tokens: Option<u64>, includes_cache_tokens: bool) -> Self {
-        Self {
-            tokens,
-            includes_cache_tokens,
-        }
+    pub(crate) const fn new(
+        tokens: Option<u64>,
+        semantics: ProcessModelCallInputTokenSemantics,
+    ) -> Self {
+        Self { tokens, semantics }
     }
 }
 
@@ -658,8 +659,8 @@ impl HubModelConfiguration {
     ) -> Option<DerivedModelCallCost> {
         let rates = self.billing_rates.get(&target)?;
         let billing_kind = *self.billing_kinds.get(credential_profile)?;
-        let input_tokens = if input.includes_cache_tokens {
-            match input.tokens {
+        let input_tokens = match input.semantics {
+            ProcessModelCallInputTokenSemantics::CacheInclusive => match input.tokens {
                 Some(total) => Some(
                     total.checked_sub(
                         cache_creation_input_tokens
@@ -668,9 +669,8 @@ impl HubModelConfiguration {
                     )?,
                 ),
                 None => None,
-            }
-        } else {
-            input.tokens
+            },
+            ProcessModelCallInputTokenSemantics::CacheExclusive => input.tokens,
         };
         let amount_usd = fold_reported_cost([
             (input_tokens, rates.input),
@@ -817,10 +817,7 @@ fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
             continue;
         };
         reported = true;
-        let numerator = rate.checked_mul(Decimal::from(tokens))?;
-        if numerator.scale() != rate.scale() {
-            return None;
-        }
+        let numerator = exact_rate_token_product(rate, tokens)?;
         let axis_cost = numerator.checked_div(Decimal::from(TOKENS_PER_MILLION))?;
         if axis_cost.checked_mul(Decimal::from(TOKENS_PER_MILLION))? != numerator {
             return None;
@@ -832,6 +829,34 @@ fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
         amount = next_amount;
     }
     reported.then(|| amount.normalize())
+}
+
+fn exact_rate_token_product(rate: Decimal, tokens: u64) -> Option<Decimal> {
+    let product = rate.checked_mul(Decimal::from(tokens))?;
+    let scale_loss = rate.scale().checked_sub(product.scale())?;
+    if scale_loss == 0 {
+        return Some(product);
+    }
+    let mut rate_mantissa = u128::try_from(rate.mantissa()).ok()?;
+    let mut token_mantissa = u128::from(tokens);
+    for _ in 0..scale_loss {
+        divide_product_factor(&mut rate_mantissa, &mut token_mantissa, 2)?;
+        divide_product_factor(&mut rate_mantissa, &mut token_mantissa, 5)?;
+    }
+    let exact_mantissa = rate_mantissa.checked_mul(token_mantissa)?;
+    (u128::try_from(product.mantissa()).ok()? == exact_mantissa).then_some(product)
+}
+
+fn divide_product_factor(left: &mut u128, right: &mut u128, factor: u128) -> Option<()> {
+    if left.is_multiple_of(factor) {
+        *left /= factor;
+        Some(())
+    } else if right.is_multiple_of(factor) {
+        *right /= factor;
+        Some(())
+    } else {
+        None
+    }
 }
 
 fn parse_tool_mappings(
@@ -1242,8 +1267,10 @@ mod tests {
         sync::Arc,
     };
 
+    use rust_decimal::Decimal;
     use signalbox_domain::{DirectModelSelection, ModelAlias, ModelSelectionRequest};
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
+    use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
     use signalbox_tools_basic::WebFetchEgressPolicy;
     use uuid::Uuid;
 
@@ -1455,7 +1482,10 @@ cache_read_input_usd_per_million_tokens = "4"
             .derive_model_call_cost(
                 configured_target(&configuration),
                 "anthropic-primary",
-                ModelCallInputUsage::new(Some(1_000_000), false),
+                ModelCallInputUsage::new(
+                    Some(1_000_000),
+                    ProcessModelCallInputTokenSemantics::CacheExclusive,
+                ),
                 Some(2),
                 None,
                 Some(10),
@@ -1479,7 +1509,10 @@ cache_read_input_usd_per_million_tokens = "4"
             configuration.derive_model_call_cost(
                 configured_target(&configuration),
                 "anthropic-primary",
-                ModelCallInputUsage::new(Some(1), false),
+                ModelCallInputUsage::new(
+                    Some(1),
+                    ProcessModelCallInputTokenSemantics::CacheExclusive
+                ),
                 None,
                 None,
                 None,
@@ -1500,13 +1533,44 @@ cache_read_input_usd_per_million_tokens = "4"
             configuration.derive_model_call_cost(
                 configured_target(&configuration),
                 "anthropic-primary",
-                ModelCallInputUsage::new(Some(u64::MAX), false),
+                ModelCallInputUsage::new(
+                    Some(u64::MAX),
+                    ProcessModelCallInputTokenSemantics::CacheExclusive
+                ),
                 None,
                 None,
                 None,
             ),
             None
         );
+    }
+
+    #[test]
+    fn exact_rate_multiplication_may_reduce_scale() {
+        let configuration = HubModelConfiguration::parse(&CONFIGURATION.replace(
+            "input_usd_per_million_tokens = \"3\"",
+            "input_usd_per_million_tokens = \"7922816251426433759354395033.5\"",
+        ))
+        .expect("the representable high-precision rate is valid configuration");
+
+        let cost = configuration
+            .derive_model_call_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                ModelCallInputUsage::new(
+                    Some(10),
+                    ProcessModelCallInputTokenSemantics::CacheExclusive,
+                ),
+                None,
+                None,
+                None,
+            )
+            .expect("exact multiplication may reduce decimal scale");
+        let expected = Decimal::MAX
+            .checked_div(Decimal::from(1_000_000_u64))
+            .expect("fixture quotient is representable");
+
+        assert_eq!(cost.amount_usd(), expected);
     }
 
     #[test]
@@ -1525,7 +1589,10 @@ cache_read_input_usd_per_million_tokens = "4"
             configuration.derive_model_call_cost(
                 configured_target(&configuration),
                 "anthropic-primary",
-                ModelCallInputUsage::new(Some(1), false),
+                ModelCallInputUsage::new(
+                    Some(1),
+                    ProcessModelCallInputTokenSemantics::CacheExclusive
+                ),
                 Some(1),
                 Some(1),
                 Some(1),
@@ -1586,7 +1653,10 @@ context_window_tokens = 200000
             .derive_model_call_cost(
                 configured_target(&configuration),
                 "codex-subscription-primary",
-                ModelCallInputUsage::new(Some(1), false),
+                ModelCallInputUsage::new(
+                    Some(1),
+                    ProcessModelCallInputTokenSemantics::CacheExclusive,
+                ),
                 None,
                 None,
                 None,
@@ -1614,7 +1684,10 @@ context_window_tokens = 200000
             .derive_model_call_cost(
                 route.target(),
                 route.credential_profile(),
-                ModelCallInputUsage::new(Some(1), true),
+                ModelCallInputUsage::new(
+                    Some(1),
+                    ProcessModelCallInputTokenSemantics::CacheInclusive,
+                ),
                 None,
                 None,
                 None,
@@ -1644,7 +1717,10 @@ context_window_tokens = 200000
             .derive_model_call_cost(
                 route.target(),
                 route.credential_profile(),
-                ModelCallInputUsage::new(Some(1_000_000), true),
+                ModelCallInputUsage::new(
+                    Some(1_000_000),
+                    ProcessModelCallInputTokenSemantics::CacheInclusive,
+                ),
                 None,
                 Some(100_000),
                 Some(200_000),
@@ -1672,7 +1748,10 @@ context_window_tokens = 200000
             .derive_model_call_cost(
                 route.target(),
                 route.credential_profile(),
-                ModelCallInputUsage::new(Some(1_000_000), false),
+                ModelCallInputUsage::new(
+                    Some(1_000_000),
+                    ProcessModelCallInputTokenSemantics::CacheExclusive,
+                ),
                 None,
                 Some(100_000),
                 Some(200_000),

@@ -448,6 +448,35 @@ pub enum ProcessModelCallUsageProvenance {
     Estimated,
 }
 
+impl ProcessModelCallUsageProvenance {
+    fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "reported" => Some(Self::Reported),
+            "estimated" => Some(Self::Estimated),
+            _ => None,
+        }
+    }
+}
+
+/// Closed meaning of a provider-reported model-call input-token count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessModelCallInputTokenSemantics {
+    /// The input count excludes the separately reported cache axes.
+    CacheExclusive,
+    /// The input count includes the separately reported cache axes.
+    CacheInclusive,
+}
+
+impl ProcessModelCallInputTokenSemantics {
+    const fn from_storage(value: bool) -> Self {
+        if value {
+            Self::CacheInclusive
+        } else {
+            Self::CacheExclusive
+        }
+    }
+}
+
 impl ProcessModelCallTokenUsage {
     /// Returns the input-token count when present.
     pub const fn input_tokens(self) -> Option<u64> {
@@ -477,7 +506,7 @@ pub struct ProcessTranscriptModelCallUsage {
     call: ModelCallId,
     target: ResolvedProviderTarget,
     credential_profile: String,
-    input_includes_cache_tokens: bool,
+    input_token_semantics: ProcessModelCallInputTokenSemantics,
     provenance: ProcessModelCallUsageProvenance,
     usage: ProcessModelCallTokenUsage,
 }
@@ -503,9 +532,9 @@ impl ProcessTranscriptModelCallUsage {
         &self.credential_profile
     }
 
-    /// Reports whether this call's input count includes its cache axes.
-    pub const fn input_includes_cache_tokens(&self) -> bool {
-        self.input_includes_cache_tokens
+    /// Returns the closed meaning of this call's reported input-token count.
+    pub const fn input_token_semantics(&self) -> ProcessModelCallInputTokenSemantics {
+        self.input_token_semantics
     }
 
     /// Returns the closed provenance of this call's token fields.
@@ -1939,16 +1968,14 @@ fn decode_model_call_usage(
         required(row, "acceptance_position")?,
         "model-call turn acceptance position",
     )?;
-    let provenance = match required::<String>(row, "usage_provenance_kind")?.as_str() {
-        "reported" => ProcessModelCallUsageProvenance::Reported,
-        "estimated" => ProcessModelCallUsageProvenance::Estimated,
-        value => {
-            return Err(ProcessReadCorruption::Unsupported {
-                field: "usage_provenance_kind",
-                value: value.to_owned(),
-            }
-            .into());
+    let provenance_value = required::<String>(row, "usage_provenance_kind")?;
+    let Some(provenance) = ProcessModelCallUsageProvenance::from_storage(provenance_value.as_str())
+    else {
+        return Err(ProcessReadCorruption::Unsupported {
+            field: "usage_provenance_kind",
+            value: provenance_value,
         }
+        .into());
     };
     let input_tokens = row
         .try_get::<Option<Decimal>, _>("usage_input_tokens")?
@@ -1976,7 +2003,10 @@ fn decode_model_call_usage(
                 "resolved_provider_model_identity_id",
             )?)),
             credential_profile: required(row, "credential_reference")?,
-            input_includes_cache_tokens: required(row, "usage_input_includes_cache_tokens")?,
+            input_token_semantics: ProcessModelCallInputTokenSemantics::from_storage(required(
+                row,
+                "usage_input_includes_cache_tokens",
+            )?),
             provenance,
             usage: ProcessModelCallTokenUsage {
                 input_tokens,
@@ -3461,7 +3491,7 @@ mod tests {
     use signalbox_domain::TurnId;
     use sqlx::types::Uuid;
 
-    use super::decode_execution_lineage_tip;
+    use super::{ProcessModelCallUsageProvenance, decode_execution_lineage_tip};
 
     fn turn(value: u128) -> TurnId {
         TurnId::from_uuid(Uuid::from_u128(value))
@@ -3485,5 +3515,21 @@ mod tests {
     #[test]
     fn inv032_latest_frontier_rejects_branched_execution_lineage() {
         assert!(decode_execution_lineage_tip(3, 1, 3, 2, true, false, Some(turn(2))).is_err());
+    }
+
+    #[test]
+    fn model_call_usage_provenance_storage_mapping_is_closed() {
+        assert_eq!(
+            ProcessModelCallUsageProvenance::from_storage("reported"),
+            Some(ProcessModelCallUsageProvenance::Reported)
+        );
+        assert_eq!(
+            ProcessModelCallUsageProvenance::from_storage("estimated"),
+            Some(ProcessModelCallUsageProvenance::Estimated)
+        );
+        assert_eq!(
+            ProcessModelCallUsageProvenance::from_storage("inferred"),
+            None
+        );
     }
 }
