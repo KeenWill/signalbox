@@ -1755,7 +1755,7 @@ fn retain_bounded_credential_variant(variants: &mut Vec<String>, candidate: &str
     {
         variants.push(String::from(candidate));
     }
-    let normalized = unicode_case_folded_nfc(candidate);
+    let normalized = unicode_case_folded_nfd(candidate);
     if !normalized.is_empty()
         && normalized.len() <= MAX_BOUND_EVIDENCE_DEBUG_BYTES
         && !variants.iter().any(|retained| retained == &normalized)
@@ -2414,9 +2414,17 @@ impl CredentialScrubber {
                 }
                 std::net::IpAddr::V6(result_ipv6) => {
                     let result_components = result_ipv6.segments();
+                    let result_octets = result_ipv6.octets();
                     return self.reversible_variants().any(|variant| {
                         canonicalized_ipv6_hextet(variant)
                             .is_some_and(|component| result_components.contains(&component))
+                            || canonicalized_ipv4_tail_fragments(variant).into_iter().any(
+                                |fragment| {
+                                    result_octets
+                                        .windows(fragment.len())
+                                        .any(|window| window == fragment)
+                                },
+                            )
                     });
                 }
             }
@@ -2628,32 +2636,32 @@ fn legacy_named_character_reference_prefix(reference: &str) -> bool {
 }
 
 fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
-    let normalized_needle = unicode_case_folded_nfc(needle);
-    !normalized_needle.is_empty() && unicode_case_folded_nfc(haystack).contains(&normalized_needle)
+    let normalized_needle = unicode_case_folded_nfd(needle);
+    !normalized_needle.is_empty() && unicode_case_folded_nfd(haystack).contains(&normalized_needle)
 }
 
 fn unicode_case_insensitive_starts_with(haystack: &str, needle: &str) -> bool {
-    let normalized_needle = unicode_case_folded_nfc(needle);
+    let normalized_needle = unicode_case_folded_nfd(needle);
     !normalized_needle.is_empty()
-        && unicode_case_folded_nfc(haystack).starts_with(&normalized_needle)
+        && unicode_case_folded_nfd(haystack).starts_with(&normalized_needle)
 }
 
 fn unicode_case_insensitive_ends_with(haystack: &str, needle: &str) -> bool {
-    let normalized_needle = unicode_case_folded_nfc(needle);
-    !normalized_needle.is_empty() && unicode_case_folded_nfc(haystack).ends_with(&normalized_needle)
+    let normalized_needle = unicode_case_folded_nfd(needle);
+    !normalized_needle.is_empty() && unicode_case_folded_nfd(haystack).ends_with(&normalized_needle)
 }
 
-fn unicode_case_folded_nfc(text: &str) -> String {
+fn unicode_case_folded_nfd(text: &str) -> String {
     let decomposed = text.nfd().collect::<String>();
     let folded = CaseMapper::new().fold_string(&decomposed);
-    folded.as_ref().nfc().collect()
+    folded.as_ref().nfd().collect()
 }
 
 fn unicode_normalized_contains(haystack: &str, needle: &str) -> bool {
-    let normalized_needle = needle.nfc().collect::<String>();
+    let normalized_needle = needle.nfd().collect::<String>();
     !normalized_needle.is_empty()
         && haystack
-            .nfc()
+            .nfd()
             .collect::<String>()
             .contains(&normalized_needle)
 }
@@ -2999,6 +3007,47 @@ fn canonicalized_ipv6_hextet(value: &str) -> Option<u16> {
     address.segments().first().copied()
 }
 
+fn canonicalized_ipv4_tail_fragments(value: &str) -> Vec<Vec<u8>> {
+    let component_count = value.split('.').count();
+    if component_count > 4 || value.split('.').any(str::is_empty) {
+        return Vec::new();
+    }
+    let mut fragments = Vec::new();
+    for start in 0..=4 - component_count {
+        let prefix = "0.".repeat(start);
+        let suffix = ".0".repeat(4 - start - component_count);
+        let tail = format!("{prefix}{value}{suffix}");
+        if let Some(fragment) =
+            canonicalized_ipv4_tail_fragment(&tail, start..start + component_count)
+        {
+            fragments.push(fragment);
+        }
+    }
+    fragments
+}
+
+fn canonicalized_ipv4_tail_fragment(
+    tail: &str,
+    positions: std::ops::Range<usize>,
+) -> Option<Vec<u8>> {
+    let candidate = format!("http://[::ffff:{tail}]/");
+    let url = Url::parse(&candidate).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let std::net::IpAddr::V6(address) = parse_ip_literal(url.host_str()?)? else {
+        return None;
+    };
+    let positions = positions.start + 12..positions.end + 12;
+    address.octets().get(positions).map(<[u8]>::to_vec)
+}
+
 fn form_decode_once(encoded: &[u8]) -> Vec<u8> {
     let mut decoded = Vec::with_capacity(encoded.len());
     let mut index = 0;
@@ -3069,6 +3118,7 @@ mod tests {
     const FIXTURE_RESULT_TITLE: &str = "Synthetic result";
     const FIXTURE_RESULT_URL: &str = "https://example.com/result";
     const FIXTURE_IPV6_RESULT_URL: &str = "https://[2001:db8::1]/result";
+    const FIXTURE_IPV4_TAIL_IPV6_RESULT_URL: &str = "http://[::ffff:c0a8:1]/";
     const FIXTURE_LEGACY_IPV4_RESULT_URL: &str = "https://2130706433/result";
     const FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.0.1/";
     const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
@@ -3128,6 +3178,7 @@ mod tests {
     const URL_HEX_IPV4_COMPONENT_COLLISION_KEY: &str = "0x7f";
     const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
     const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
+    const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
     const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
     const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
@@ -3191,6 +3242,8 @@ mod tests {
     const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
     const UNICODE_FULL_FOLD_COLLISION_KEY: &str = "STRASSE";
     const UNICODE_FULL_FOLD_COLLISION_VALUE: &str = "Straße";
+    const UNICODE_COMBINING_MARK_COLLISION_KEY: &str = "\u{0301}x";
+    const UNICODE_COMBINING_MARK_COLLISION_VALUE: &str = "éx";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
     const OVERSIZED_CREDENTIAL_TELEMETRY_COLLISION_VALUE: &str =
@@ -6287,6 +6340,29 @@ mod tests {
         );
     }
 
+    /// INV-035: canonical hexadecimal rendering of an embedded dotted IPv4
+    /// tail cannot conceal a credential in an IPv6 provider result host.
+    #[test]
+    fn web_search_rejects_canonicalized_ipv4_tail_credential_in_ipv6_result_host() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_IPV4_TAIL_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("embedded IPv4-tail fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_IPV4_TAIL_IPV6_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// INV-035: WHATWG legacy IPv4 serialization cannot conceal a credential
     /// reflected in a provider result host.
     #[test]
@@ -6525,6 +6601,30 @@ mod tests {
 
         assert!(!content.contains(URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY));
         assert!(!content.contains(URL_UNICODE_HOST_COLLISION_KEY));
+    }
+
+    /// INV-035: decomposition-preserving normalization detects a credential
+    /// substring whose first scalar is a combining mark.
+    #[test]
+    fn web_search_redacts_unicode_combining_mark_boundary_credential() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(UNICODE_COMBINING_MARK_COLLISION_VALUE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("combining-mark fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            UNICODE_COMBINING_MARK_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(UNICODE_COMBINING_MARK_COLLISION_KEY));
+        assert!(!content.contains(UNICODE_COMBINING_MARK_COLLISION_VALUE));
     }
 
     /// INV-035: repeated HTML character-reference decoding cannot conceal a
