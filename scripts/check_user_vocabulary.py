@@ -12,7 +12,7 @@ from pathlib import Path
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
-    r"(?i:\bowners?\b|owners?[_-]|(?<=[_-])owners?\b)|"
+    r"(?i:\bowners?\d*\b|owners?[_-]|(?<=[_-])owners?\d*\b)|"
     r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
     r"\b[A-Za-z0-9_]+Owners?(?:[A-Z][A-Za-z0-9_]*)?"
 )

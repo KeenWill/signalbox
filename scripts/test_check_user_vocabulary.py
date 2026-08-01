@@ -40,7 +40,10 @@ def main() -> int:
         violation.write_text(
             "The owner approves this tool.\n"
             "The owners approve this tool.\n"
-            "session_owners = []\n",
+            "session_owners = []\n"
+            "owner2 = []\n"
+            "Owner2 = []\n"
+            "session_owner2 = []\n",
             encoding="utf-8",
         )
         git(root, "init", "--quiet")
@@ -52,6 +55,9 @@ def main() -> int:
         expected = "docs/spec/example.md:1: The owner approves this tool."
         plural = "docs/spec/example.md:2: The owners approve this tool."
         identifier = "docs/spec/example.md:3: session_owners = []"
+        numeric = "docs/spec/example.md:4: owner2 = []"
+        numeric_capitalized = "docs/spec/example.md:5: Owner2 = []"
+        numeric_identifier = "docs/spec/example.md:6: session_owner2 = []"
         assert expected in rejected.stdout, (
             f"singular violation missing:\n{rejected.stdout}"
         )
@@ -60,6 +66,15 @@ def main() -> int:
         )
         assert identifier in rejected.stdout, (
             f"identifier violation missing:\n{rejected.stdout}"
+        )
+        assert numeric in rejected.stdout, (
+            f"numeric violation missing:\n{rejected.stdout}"
+        )
+        assert numeric_capitalized in rejected.stdout, (
+            f"capitalized numeric violation missing:\n{rejected.stdout}"
+        )
+        assert numeric_identifier in rejected.stdout, (
+            f"numeric identifier violation missing:\n{rejected.stdout}"
         )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
         accepted = run_checker(root)
