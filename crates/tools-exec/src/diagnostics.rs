@@ -312,12 +312,21 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
         if command == CargoDiagnosticsCommand::Test {
             return self.run_test(arguments.timeout_seconds).await;
         }
-        let exec_arguments = cargo_arguments(command, arguments.timeout_seconds, false, "");
+        let exec_arguments = cargo_arguments(
+            command,
+            arguments.timeout_seconds,
+            CargoTestRunnerMode::ConfiguredRunnerPreserved,
+            "",
+        );
         let result = self
             .command_runner
             .run_with_capture(exec_arguments, DIAGNOSTICS_CAPTURE_BYTES)
             .await;
-        structured_result_with_test_helper(command, result, false)
+        structured_result_with_test_runner_mode(
+            command,
+            result,
+            CargoTestRunnerMode::ConfiguredRunnerPreserved,
+        )
     }
 
     async fn run_test(&mut self, timeout_seconds: u64) -> CargoDiagnosticsResult {
@@ -330,10 +339,10 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
             )
             .await;
         let Some(cargo_host) = cargo_host(&host_result).map(String::from) else {
-            let mut result = structured_result_with_test_helper(
+            let mut result = structured_result_with_test_runner_mode(
                 CargoDiagnosticsCommand::Test,
                 host_result,
-                false,
+                CargoTestRunnerMode::ConfiguredRunnerPreserved,
             );
             result.execution.preparation_failure =
                 Some(CargoDiagnosticsPreparationFailure::CargoHostUnavailable);
@@ -343,10 +352,10 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
         if remaining.is_zero() {
             let mut timed_out = host_result;
             timed_out.outcome = ProcessOutcome::TimedOut;
-            return structured_result_with_test_helper(
+            return structured_result_with_test_runner_mode(
                 CargoDiagnosticsCommand::Test,
                 timed_out,
-                false,
+                CargoTestRunnerMode::ConfiguredRunnerPreserved,
             );
         }
         let runner_plan =
@@ -354,17 +363,17 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
         let exec_arguments = cargo_arguments(
             CargoDiagnosticsCommand::Test,
             timeout_seconds,
-            runner_plan.preserve_configured_runner,
+            runner_plan.mode,
             &runner_plan.selected_target,
         );
         let result = self
             .command_runner
             .run_with_capture_timeout(exec_arguments, remaining, DIAGNOSTICS_CAPTURE_BYTES)
             .await;
-        structured_result_with_test_helper(
+        structured_result_with_test_runner_mode(
             CargoDiagnosticsCommand::Test,
             result,
-            !runner_plan.preserve_configured_runner,
+            runner_plan.mode,
         )
     }
 }
@@ -400,7 +409,7 @@ fn cargo_host(result: &ExecResult) -> Option<&str> {
 fn cargo_arguments(
     command: CargoDiagnosticsCommand,
     timeout_seconds: u64,
-    preserve_native_test_runner: bool,
+    test_runner_mode: CargoTestRunnerMode,
     native_target: &str,
 ) -> ExecArguments {
     let arguments = match command {
@@ -425,9 +434,7 @@ fn cargo_arguments(
         ]
         .map(String::from)
         .to_vec(),
-        CargoDiagnosticsCommand::Test => {
-            cargo_test_arguments(preserve_native_test_runner, native_target)
-        }
+        CargoDiagnosticsCommand::Test => cargo_test_arguments(test_runner_mode, native_target),
     };
     ExecArguments {
         program: String::from("cargo"),
@@ -437,13 +444,13 @@ fn cargo_arguments(
     }
 }
 
-fn cargo_test_arguments(preserve_native_runner: bool, native_target: &str) -> Vec<String> {
+fn cargo_test_arguments(test_runner_mode: CargoTestRunnerMode, native_target: &str) -> Vec<String> {
     let mut arguments = vec![
         String::from("test"),
         String::from("--config"),
         String::from("term.quiet=false"),
     ];
-    if !preserve_native_runner {
+    if test_runner_mode == CargoTestRunnerMode::HelperInstalled {
         arguments.push(String::from("--config"));
         arguments.push(cargo_test_runner_config(native_target));
     }
@@ -463,7 +470,13 @@ fn cargo_test_arguments(preserve_native_runner: bool, native_target: &str) -> Ve
 #[derive(Debug, Eq, PartialEq)]
 struct CargoTestRunnerPlan {
     selected_target: String,
-    preserve_configured_runner: bool,
+    mode: CargoTestRunnerMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CargoTestRunnerMode {
+    HelperInstalled,
+    ConfiguredRunnerPreserved,
 }
 
 enum CargoConfigRead {
@@ -476,16 +489,16 @@ fn workspace_test_runner_plan(workspace_root: &Path, cargo_host: &str) -> CargoT
     match read_workspace_cargo_config(workspace_root) {
         CargoConfigRead::Absent => CargoTestRunnerPlan {
             selected_target: String::from(cargo_host),
-            preserve_configured_runner: false,
+            mode: CargoTestRunnerMode::HelperInstalled,
         },
         CargoConfigRead::Contents(contents) => config_text_test_runner_plan(&contents, cargo_host)
             .unwrap_or_else(|| CargoTestRunnerPlan {
                 selected_target: String::from(cargo_host),
-                preserve_configured_runner: true,
+                mode: CargoTestRunnerMode::ConfiguredRunnerPreserved,
             }),
         CargoConfigRead::Opaque => CargoTestRunnerPlan {
             selected_target: String::from(cargo_host),
-            preserve_configured_runner: true,
+            mode: CargoTestRunnerMode::ConfiguredRunnerPreserved,
         },
     }
 }
@@ -582,7 +595,7 @@ fn config_text_test_runner_plan(contents: &str, cargo_host: &str) -> Option<Carg
     {
         return None;
     }
-    let preserve_configured_runner = config
+    let configured_runner_present = config
         .get("target")
         .and_then(toml::Value::as_table)
         .is_some_and(|targets| {
@@ -591,9 +604,14 @@ fn config_text_test_runner_plan(contents: &str, cargo_host: &str) -> Option<Carg
                     && settings.get("runner").is_some()
             })
         });
+    let mode = if configured_runner_present {
+        CargoTestRunnerMode::ConfiguredRunnerPreserved
+    } else {
+        CargoTestRunnerMode::HelperInstalled
+    };
     Some(CargoTestRunnerPlan {
         selected_target,
-        preserve_configured_runner,
+        mode,
     })
 }
 
@@ -664,8 +682,18 @@ pub struct CargoDiagnosticRecords {
     pub values: Vec<CargoDiagnostic>,
     /// Whether additional parsed diagnostics were omitted by the record cap.
     pub limit_reached: bool,
-    /// Whether an underlying stream was truncated before parsing completed.
-    pub source_truncated: bool,
+    /// Provenance of every parsed frame in this collection.
+    pub provenance: CargoEvidenceProvenance,
+    /// Whether truncation is known; false does not establish completeness.
+    pub known_truncated: bool,
+}
+
+/// Provenance shared by Cargo and helper frames decoded from the mixed output channel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CargoEvidenceProvenance {
+    /// Workspace build or test code can add, reorder, or suppress apparent frames.
+    WorkspaceInfluenced,
 }
 
 /// One bounded compiler diagnostic.
@@ -707,8 +735,10 @@ pub struct CargoTestRecords {
     pub values: Vec<CargoTestResult>,
     /// Whether additional parsed test outcomes were omitted by the record cap.
     pub limit_reached: bool,
-    /// Whether complete outcome evidence could not be established.
-    pub source_truncated: bool,
+    /// Provenance of every parsed frame in this collection.
+    pub provenance: CargoEvidenceProvenance,
+    /// Whether truncation is known; false does not establish completeness.
+    pub known_truncated: bool,
 }
 
 /// One bounded libtest outcome.
@@ -807,16 +837,16 @@ fn structured_result(
     command: CargoDiagnosticsCommand,
     result: ExecResult,
 ) -> CargoDiagnosticsResult {
-    structured_result_with_test_helper(command, result, true)
+    structured_result_with_test_runner_mode(command, result, CargoTestRunnerMode::HelperInstalled)
 }
 
-fn structured_result_with_test_helper(
+fn structured_result_with_test_runner_mode(
     command: CargoDiagnosticsCommand,
     result: ExecResult,
-    test_helper_installed: bool,
+    test_runner_mode: CargoTestRunnerMode,
 ) -> CargoDiagnosticsResult {
-    let mut source_truncated = result.stdout.completeness == CaptureCompleteness::Truncated;
-    let mut test_source_truncated = command == CargoDiagnosticsCommand::Test && source_truncated;
+    let mut known_truncated = result.stdout.completeness == CaptureCompleteness::Truncated;
+    let mut test_known_truncated = command == CargoDiagnosticsCommand::Test && known_truncated;
     let mut diagnostics = Vec::new();
     let mut tests = Vec::new();
     let mut diagnostic_limit_reached = false;
@@ -831,21 +861,21 @@ fn structured_result_with_test_helper(
         &mut tests,
         &mut test_limit_reached,
         TestSourceEvidence {
-            truncated: &mut test_source_truncated,
+            truncated: &mut test_known_truncated,
             expected_executables: &mut expected_test_executables,
             completed_executables: &mut completed_test_executables,
-            helper_installed: test_helper_installed,
+            runner_mode: test_runner_mode,
         },
     );
     if !cargo_build.finished {
-        source_truncated = true;
+        known_truncated = true;
     }
     if command == CargoDiagnosticsCommand::Test
-        && (!test_helper_installed
+        && (test_runner_mode == CargoTestRunnerMode::ConfiguredRunnerPreserved
             || !cargo_build.succeeded
             || !expected_test_executables.is_subset(&completed_test_executables))
     {
-        test_source_truncated = true;
+        test_known_truncated = true;
     }
     let has_error_diagnostic = diagnostics
         .iter()
@@ -870,12 +900,14 @@ fn structured_result_with_test_helper(
         diagnostics: CargoDiagnosticRecords {
             values: diagnostics,
             limit_reached: diagnostic_limit_reached,
-            source_truncated,
+            provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+            known_truncated,
         },
         tests: CargoTestRecords {
             values: tests,
             limit_reached: test_limit_reached,
-            source_truncated: test_source_truncated,
+            provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+            known_truncated: test_known_truncated,
         },
     }
 }
@@ -914,26 +946,75 @@ fn cargo_failure_detail(
 fn encode_tool_result(
     mut result: CargoDiagnosticsResult,
 ) -> Result<String, CargoDiagnosticsExecutorError> {
-    loop {
-        let encoded = serde_json::to_string(&result)
-            .map_err(|_| CargoDiagnosticsExecutorError::ResultEncoding)?;
-        match ToolResultText::try_new(encoded) {
-            Ok(admitted) => return Ok(admitted.into_string()),
-            Err(error) => match error.failure() {
-                ToolResultTextFailure::TooLarge { .. } if result.tests.values.pop().is_some() => {
-                    result.tests.limit_reached = true;
-                }
-                ToolResultTextFailure::TooLarge { .. }
-                    if result.diagnostics.values.pop().is_some() =>
-                {
-                    result.diagnostics.limit_reached = true;
-                }
-                ToolResultTextFailure::TooLarge { .. } | ToolResultTextFailure::ContainsNull => {
-                    return Err(CargoDiagnosticsExecutorError::ResultEncoding);
-                }
-            },
+    if let Some(encoded) = admitted_encoding(&result)? {
+        return Ok(encoded);
+    }
+    let tests = std::mem::take(&mut result.tests.values);
+    result.tests.limit_reached |= !tests.is_empty();
+    if let Some(encoded_without_tests) = admitted_encoding(&result)? {
+        return largest_admitted_test_prefix(result, tests, encoded_without_tests);
+    }
+    let diagnostics = std::mem::take(&mut result.diagnostics.values);
+    result.diagnostics.limit_reached |= !diagnostics.is_empty();
+    let encoded_without_records =
+        admitted_encoding(&result)?.ok_or(CargoDiagnosticsExecutorError::ResultEncoding)?;
+    largest_admitted_diagnostic_prefix(result, diagnostics, encoded_without_records)
+}
+
+fn admitted_encoding(
+    result: &CargoDiagnosticsResult,
+) -> Result<Option<String>, CargoDiagnosticsExecutorError> {
+    let encoded =
+        serde_json::to_string(result).map_err(|_| CargoDiagnosticsExecutorError::ResultEncoding)?;
+    match ToolResultText::try_new(encoded) {
+        Ok(admitted) => Ok(Some(admitted.into_string())),
+        Err(error) => match error.failure() {
+            ToolResultTextFailure::TooLarge { .. } => Ok(None),
+            ToolResultTextFailure::ContainsNull => {
+                Err(CargoDiagnosticsExecutorError::ResultEncoding)
+            }
+        },
+    }
+}
+
+fn largest_admitted_test_prefix(
+    mut result: CargoDiagnosticsResult,
+    values: Vec<CargoTestResult>,
+    mut best_encoding: String,
+) -> Result<String, CargoDiagnosticsExecutorError> {
+    let mut admitted = 0;
+    let mut rejected = values.len() + 1;
+    while admitted + 1 < rejected {
+        let candidate = admitted + (rejected - admitted) / 2;
+        result.tests.values = values[..candidate].to_vec();
+        if let Some(encoded) = admitted_encoding(&result)? {
+            admitted = candidate;
+            best_encoding = encoded;
+        } else {
+            rejected = candidate;
         }
     }
+    Ok(best_encoding)
+}
+
+fn largest_admitted_diagnostic_prefix(
+    mut result: CargoDiagnosticsResult,
+    values: Vec<CargoDiagnostic>,
+    mut best_encoding: String,
+) -> Result<String, CargoDiagnosticsExecutorError> {
+    let mut admitted = 0;
+    let mut rejected = values.len() + 1;
+    while admitted + 1 < rejected {
+        let candidate = admitted + (rejected - admitted) / 2;
+        result.diagnostics.values = values[..candidate].to_vec();
+        if let Some(encoded) = admitted_encoding(&result)? {
+            admitted = candidate;
+            best_encoding = encoded;
+        } else {
+            rejected = candidate;
+        }
+    }
+    Ok(best_encoding)
 }
 
 fn parse_stream(
@@ -970,7 +1051,7 @@ fn parse_stream(
         }
         if command == CargoDiagnosticsCommand::Test
             && build_finished
-            && test_source_evidence.helper_installed
+            && test_source_evidence.runner_mode == CargoTestRunnerMode::HelperInstalled
         {
             if parse_test_source_truncated(line).is_some() {
                 *test_source_evidence.truncated = true;
@@ -1000,7 +1081,7 @@ struct TestSourceEvidence<'a> {
     truncated: &'a mut bool,
     expected_executables: &'a mut BTreeSet<String>,
     completed_executables: &'a mut BTreeSet<String>,
-    helper_installed: bool,
+    runner_mode: CargoTestRunnerMode,
 }
 
 fn cargo_build_finished(line: &str) -> Option<bool> {
@@ -1425,12 +1506,14 @@ mod tests {
             diagnostics: CargoDiagnosticRecords {
                 values: vec![diagnostic; MAX_DIAGNOSTICS],
                 limit_reached: false,
-                source_truncated: false,
+                provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+                known_truncated: false,
             },
             tests: CargoTestRecords {
                 values: vec![test; MAX_TESTS],
                 limit_reached: false,
-                source_truncated: false,
+                provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+                known_truncated: false,
             },
         }
     }
@@ -1553,7 +1636,7 @@ mod tests {
             result.execution.stdout.completeness,
             CaptureCompleteness::Truncated
         );
-        assert!(result.tests.source_truncated);
+        assert!(result.tests.known_truncated);
         assert_eq!(result.tests.values.len(), TEST_COUNT);
         assert_eq!(result.tests.values[0].name, PASSING_TEST);
         assert_eq!(result.tests.values[0].executable, TEST_EXECUTABLE);
@@ -1615,8 +1698,8 @@ mod tests {
 
         let result = structured_result(CargoDiagnosticsCommand::Check, execution);
 
-        assert!(result.diagnostics.source_truncated);
-        assert!(!result.tests.source_truncated);
+        assert!(result.diagnostics.known_truncated);
+        assert!(!result.tests.known_truncated);
     }
 
     #[test]
@@ -1626,8 +1709,8 @@ mod tests {
             exited_exec_result(compiler_message()),
         );
 
-        assert!(result.diagnostics.source_truncated);
-        assert!(!result.tests.source_truncated);
+        assert!(result.diagnostics.known_truncated);
+        assert!(!result.tests.known_truncated);
     }
 
     #[test]
@@ -1657,7 +1740,7 @@ mod tests {
 
         assert_eq!(result.diagnostics.values.len(), MAX_DIAGNOSTICS);
         assert!(result.diagnostics.limit_reached);
-        assert!(!result.diagnostics.source_truncated);
+        assert!(!result.diagnostics.known_truncated);
     }
 
     #[test]
@@ -1691,6 +1774,32 @@ mod tests {
         );
 
         assert_eq!(result.diagnostics.values, Vec::new());
+    }
+
+    #[test]
+    fn compiler_frames_are_typed_as_workspace_influenced_evidence() {
+        let stdout = format!("{}\n{}", compiler_message(), build_finished_message());
+        let result = structured_result(CargoDiagnosticsCommand::Check, exited_exec_result(stdout));
+
+        assert_eq!(result.diagnostics.values.len(), 1);
+        assert_eq!(
+            result.diagnostics.provenance,
+            CargoEvidenceProvenance::WorkspaceInfluenced
+        );
+        assert!(!result.diagnostics.known_truncated);
+    }
+
+    #[test]
+    fn workspace_influenced_build_finish_can_suppress_later_diagnostics() {
+        let stdout = format!("{}\n{}", build_finished_message(), compiler_message());
+        let result = structured_result(CargoDiagnosticsCommand::Test, exited_exec_result(stdout));
+
+        assert_eq!(result.diagnostics.values, Vec::new());
+        assert_eq!(
+            result.diagnostics.provenance,
+            CargoEvidenceProvenance::WorkspaceInfluenced
+        );
+        assert!(!result.diagnostics.known_truncated);
     }
 
     #[test]
@@ -1749,8 +1858,8 @@ mod tests {
 
         assert_eq!(failure.message, CARGO_FAILURE_MESSAGE);
         assert_eq!(failure.message_completeness, CaptureCompleteness::Truncated);
-        assert!(result.diagnostics.source_truncated);
-        assert!(!result.tests.source_truncated);
+        assert!(result.diagnostics.known_truncated);
+        assert!(!result.tests.known_truncated);
     }
 
     #[test]
@@ -1836,7 +1945,7 @@ mod tests {
         );
 
         assert_eq!(result.tests.values.len(), 2);
-        assert!(result.tests.source_truncated);
+        assert!(result.tests.known_truncated);
         assert_eq!(result.tests.values[0].name, PASSING_TEST);
         assert_eq!(result.tests.values[0].executable, TEST_EXECUTABLE);
         assert_eq!(result.tests.values[0].outcome, CargoTestOutcome::Passed);
@@ -1870,8 +1979,8 @@ mod tests {
             )),
         );
 
-        assert!(one_completion.tests.source_truncated);
-        assert!(!every_completion.tests.source_truncated);
+        assert!(one_completion.tests.known_truncated);
+        assert!(!every_completion.tests.known_truncated);
     }
 
     #[test]
@@ -1883,7 +1992,7 @@ mod tests {
             )),
         );
 
-        assert!(result.tests.source_truncated);
+        assert!(result.tests.known_truncated);
         assert_eq!(result.tests.values, Vec::new());
     }
 
@@ -1915,7 +2024,7 @@ mod tests {
         let result = structured_result(CargoDiagnosticsCommand::Test, exited_exec_result(forged));
 
         assert_eq!(result.tests.values, Vec::new());
-        assert!(result.tests.source_truncated);
+        assert!(result.tests.known_truncated);
     }
 
     #[test]
@@ -1928,14 +2037,14 @@ mod tests {
             test_source_complete_event(TEST_EXECUTABLE),
         );
 
-        let result = structured_result_with_test_helper(
+        let result = structured_result_with_test_runner_mode(
             CargoDiagnosticsCommand::Test,
             exited_exec_result(stdout),
-            false,
+            CargoTestRunnerMode::ConfiguredRunnerPreserved,
         );
 
         assert_eq!(result.tests.values, Vec::new());
-        assert!(result.tests.source_truncated);
+        assert!(result.tests.known_truncated);
     }
 
     #[test]
@@ -1975,7 +2084,7 @@ mod tests {
         let arguments = cargo_arguments(
             CargoDiagnosticsCommand::Test,
             300,
-            false,
+            CargoTestRunnerMode::HelperInstalled,
             TEST_NATIVE_TARGET,
         );
         let runner_config = cargo_test_runner_config(TEST_NATIVE_TARGET);
@@ -2003,8 +2112,12 @@ mod tests {
 
     #[test]
     fn cargo_test_arguments_preserve_a_configured_native_runner() {
-        let arguments =
-            cargo_arguments(CargoDiagnosticsCommand::Test, 300, true, TEST_NATIVE_TARGET);
+        let arguments = cargo_arguments(
+            CargoDiagnosticsCommand::Test,
+            300,
+            CargoTestRunnerMode::ConfiguredRunnerPreserved,
+            TEST_NATIVE_TARGET,
+        );
 
         assert_eq!(
             arguments.arguments,
@@ -2037,11 +2150,26 @@ mod tests {
         let foreign_plan = config_text_test_runner_plan(foreign, native_target);
         let configured_plan = config_text_test_runner_plan(configured, native_target);
 
-        assert!(native_plan.is_some_and(|plan| plan.preserve_configured_runner));
-        assert!(quoted_plan.is_some_and(|plan| plan.preserve_configured_runner));
-        assert!(dotted_plan.is_some_and(|plan| plan.preserve_configured_runner));
-        assert!(foreign_plan.is_some_and(|plan| !plan.preserve_configured_runner));
-        assert!(configured_plan.is_some_and(|plan| plan.preserve_configured_runner));
+        assert_eq!(
+            native_plan.map(|plan| plan.mode),
+            Some(CargoTestRunnerMode::ConfiguredRunnerPreserved)
+        );
+        assert_eq!(
+            quoted_plan.map(|plan| plan.mode),
+            Some(CargoTestRunnerMode::ConfiguredRunnerPreserved)
+        );
+        assert_eq!(
+            dotted_plan.map(|plan| plan.mode),
+            Some(CargoTestRunnerMode::ConfiguredRunnerPreserved)
+        );
+        assert_eq!(
+            foreign_plan.map(|plan| plan.mode),
+            Some(CargoTestRunnerMode::HelperInstalled)
+        );
+        assert_eq!(
+            configured_plan.map(|plan| plan.mode),
+            Some(CargoTestRunnerMode::ConfiguredRunnerPreserved)
+        );
     }
 
     #[test]
@@ -2054,7 +2182,7 @@ mod tests {
             .expect("bounded static Cargo config");
 
         assert_eq!(plan.selected_target, FOREIGN_TARGET);
-        assert!(plan.preserve_configured_runner);
+        assert_eq!(plan.mode, CargoTestRunnerMode::ConfiguredRunnerPreserved);
     }
 
     #[test]
@@ -2070,7 +2198,7 @@ mod tests {
         let plan = workspace_test_runner_plan(&fixture.root, TEST_NATIVE_TARGET);
 
         assert_eq!(plan.selected_target, TEST_NATIVE_TARGET);
-        assert!(!plan.preserve_configured_runner);
+        assert_eq!(plan.mode, CargoTestRunnerMode::HelperInstalled);
         Ok(())
     }
 
@@ -2084,7 +2212,7 @@ mod tests {
         let plan = workspace_test_runner_plan(&fixture.root, TEST_NATIVE_TARGET);
 
         assert_eq!(plan.selected_target, TEST_NATIVE_TARGET);
-        assert!(plan.preserve_configured_runner);
+        assert_eq!(plan.mode, CargoTestRunnerMode::ConfiguredRunnerPreserved);
         Ok(())
     }
 
@@ -2102,7 +2230,7 @@ mod tests {
         let plan = workspace_test_runner_plan(&fixture.root, TEST_NATIVE_TARGET);
 
         assert_eq!(plan.selected_target, TEST_NATIVE_TARGET);
-        assert!(plan.preserve_configured_runner);
+        assert_eq!(plan.mode, CargoTestRunnerMode::ConfiguredRunnerPreserved);
         Ok(())
     }
 

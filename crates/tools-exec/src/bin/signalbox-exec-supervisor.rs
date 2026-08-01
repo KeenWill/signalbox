@@ -343,8 +343,18 @@ mod linux {
             terminate_child(&mut child);
             return ExitCode::FAILURE;
         };
+        let Ok(flags) = rustix::fs::fcntl_getfl(&test_stdout) else {
+            terminate_child(&mut child);
+            return ExitCode::FAILURE;
+        };
+        if rustix::fs::fcntl_setfl(&test_stdout, flags | rustix::fs::OFlags::NONBLOCK).is_err() {
+            terminate_child(&mut child);
+            return ExitCode::FAILURE;
+        }
+        let leader_exited = Arc::new(AtomicBool::new(false));
+        let reader_leader_exited = Arc::clone(&leader_exited);
         let Ok(output_reader) = spawn_helper_thread("signalbox-exec-test-output", move || {
-            read_cargo_test_output(&mut test_stdout)
+            read_cargo_test_output(&mut test_stdout, Some(&reader_leader_exited))
         }) else {
             terminate_child(&mut child);
             return ExitCode::FAILURE;
@@ -353,9 +363,12 @@ mod linux {
             Ok(status) => status,
             Err(_) => {
                 terminate_child(&mut child);
+                leader_exited.store(true, Ordering::Release);
+                let _ = output_reader.join();
                 return ExitCode::FAILURE;
             }
         };
+        leader_exited.store(true, Ordering::Release);
         let output = match output_reader.join() {
             Ok(Ok(output)) => output,
             Err(_) => return ExitCode::FAILURE,
@@ -381,6 +394,7 @@ mod linux {
 
     fn read_cargo_test_output<Source: Read>(
         source: &mut Source,
+        leader_exited: Option<&AtomicBool>,
     ) -> std::io::Result<CargoTestOutput> {
         let mut events = Vec::new();
         let mut limit_reached = false;
@@ -388,7 +402,23 @@ mod linux {
         let mut line = Vec::new();
         let mut discarding = false;
         loop {
-            let read = source.read(&mut read_buffer)?;
+            let read = match source.read(&mut read_buffer) {
+                Ok(read) => read,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && leader_exited.is_some_and(|exited| exited.load(Ordering::Acquire)) =>
+                {
+                    return Ok(CargoTestOutput {
+                        events,
+                        limit_reached,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(MINIMUM_POLL_INTERVAL);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if read == 0 {
                 if !discarding && let Some(event) = parse_libtest_log_line(&line) {
                     push_cargo_test_event(&mut events, event, &mut limit_reached);
@@ -1666,7 +1696,7 @@ mod linux {
             )
             .into_bytes();
             let mut log = log_bytes.as_slice();
-            let events = read_cargo_test_output(&mut log)?;
+            let events = read_cargo_test_output(&mut log, None)?;
             let mut output = Vec::new();
             emit_cargo_test_events(&events, CARGO_TEST_EXECUTABLE, &mut output)?;
             let first = serde_json::to_string(&CargoTestEvent {
@@ -1701,7 +1731,7 @@ mod linux {
             let log_bytes = format!("ok {CARGO_PASSING_TEST}\n").into_bytes();
             let mut log = log_bytes.as_slice();
 
-            assert_eq!(read_cargo_test_output(&mut log)?.events.len(), 1);
+            assert_eq!(read_cargo_test_output(&mut log, None)?.events.len(), 1);
             Ok(())
         }
 
@@ -1709,7 +1739,7 @@ mod linux {
         fn cargo_test_runner_reports_its_event_cap() -> Result<(), Box<dyn std::error::Error>> {
             let log_bytes = format!("ok {CARGO_PASSING_TEST}\n").repeat(MAX_CARGO_TEST_EVENTS + 1);
             let mut log = log_bytes.as_bytes();
-            let output = read_cargo_test_output(&mut log)?;
+            let output = read_cargo_test_output(&mut log, None)?;
             let mut framed = Vec::new();
 
             emit_cargo_test_events(&output, CARGO_TEST_EXECUTABLE, &mut framed)?;
@@ -1725,7 +1755,7 @@ mod linux {
         -> Result<(), Box<dyn std::error::Error>> {
             let log_bytes = b"custom harness output\n";
             let mut log = log_bytes.as_slice();
-            let events = read_cargo_test_output(&mut log)?;
+            let events = read_cargo_test_output(&mut log, None)?;
             let mut output = Vec::new();
             emit_cargo_test_events(&events, CARGO_TEST_EXECUTABLE, &mut output)?;
             let expected = serde_json::to_string(&CargoTestSourceTruncated {

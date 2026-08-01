@@ -16,7 +16,11 @@
 //!
 //! [`CargoDiagnosticsTool`] builds on the same sandboxed core to run bounded
 //! whole-workspace Cargo check, clippy, and test passes. It returns typed
-//! compiler locations and test outcomes rather than raw terminal output.
+//! compiler locations and test outcomes rather than raw terminal output. Cargo
+//! and helper frames share output channels with workspace build and test code,
+//! so each collection is labeled as workspace-influenced evidence. Its
+//! `known_truncated` flag reports positive truncation evidence; false never
+//! claims that the workspace-influenced collection is complete or authentic.
 //!
 //! This day-one profile does not fence the network or impose resource limits.
 //! It is therefore not an admissible boundary for executing untrusted code.
@@ -38,8 +42,8 @@ pub use diagnostics::{
     CargoDiagnosticsArguments, CargoDiagnosticsCommand, CargoDiagnosticsExecution,
     CargoDiagnosticsExecutor, CargoDiagnosticsExecutorError, CargoDiagnosticsPreparationFailure,
     CargoDiagnosticsResult, CargoDiagnosticsRunner, CargoDiagnosticsStream, CargoDiagnosticsTool,
-    CargoDiagnosticsToolConstructionError, CargoFailureDetail, CargoTestOutcome, CargoTestRecords,
-    CargoTestResult, InvalidCargoDiagnosticsArguments,
+    CargoDiagnosticsToolConstructionError, CargoEvidenceProvenance, CargoFailureDetail,
+    CargoTestOutcome, CargoTestRecords, CargoTestResult, InvalidCargoDiagnosticsArguments,
 };
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,

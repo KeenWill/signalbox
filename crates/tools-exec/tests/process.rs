@@ -32,9 +32,12 @@ const PROCESS_GROUP_KILL_TIME_LIMIT: Duration = Duration::from_secs(5);
 const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
 const INHERITED_STDOUT_FIXTURE_NAME: &str = "inherited_subprocess_stdout_fixture";
 const INHERITED_FORGED_TEST_NAME: &str = "inherited::forged";
+const HELD_STDOUT_FIXTURE_NAME: &str = "held_subprocess_stdout_fixture";
+const HELD_STDOUT_COMMAND: &str = "sleep 4";
+const CARGO_TEST_RUNNER_RETURN_LIMIT: Duration = Duration::from_secs(2);
 
 #[test]
-fn cargo_test_runner_marks_interleaved_subprocess_stdout_incomplete()
+fn cargo_test_runner_marks_workspace_influenced_stdout_incomplete()
 -> Result<(), Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))
@@ -43,17 +46,18 @@ fn cargo_test_runner_marks_interleaved_subprocess_stdout_incomplete()
         .args(["--ignored", "--exact", INHERITED_STDOUT_FIXTURE_NAME])
         .output()?;
     let stdout = String::from_utf8(output.stdout)?;
-    let mut frames = stdout.lines();
-    let truncated: serde_json::Value = serde_json::from_str(
-        frames
-            .next()
-            .expect("the runner marks same-process test evidence incomplete"),
-    )?;
+    let mut terminal_frames = stdout.lines().rev();
     let complete: serde_json::Value = serde_json::from_str(
-        frames
+        terminal_frames
             .next()
             .expect("the runner completes this executable last"),
     )?;
+    let truncated: serde_json::Value = serde_json::from_str(
+        terminal_frames
+            .next()
+            .expect("the runner marks same-process test evidence incomplete"),
+    )?;
+
     assert!(output.status.success());
     assert_eq!(
         truncated,
@@ -69,7 +73,6 @@ fn cargo_test_runner_marks_interleaved_subprocess_stdout_incomplete()
             "executable": executable.to_string_lossy(),
         })
     );
-    assert_eq!(frames.next(), None);
     Ok(())
 }
 
@@ -86,6 +89,34 @@ fn inherited_subprocess_stdout_fixture() -> Result<(), Box<dyn std::error::Error
     assert!(status.success());
     Ok(())
 }
+
+#[test]
+fn cargo_test_runner_stops_reading_after_the_test_leader_exits()
+-> Result<(), Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    let started = std::time::Instant::now();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))
+        .arg(CARGO_TEST_RUNNER_MODE)
+        .arg(&executable)
+        .args(["--ignored", "--exact", HELD_STDOUT_FIXTURE_NAME])
+        .output()?;
+
+    assert!(output.status.success());
+    assert!(started.elapsed() < CARGO_TEST_RUNNER_RETURN_LIMIT);
+    Ok(())
+}
+
+#[test]
+#[ignore = "subprocess fixture holding inherited test stdout"]
+fn held_subprocess_stdout_fixture() -> Result<(), Box<dyn std::error::Error>> {
+    std::process::Command::new(fixture_program("sh")?)
+        .args(["-c", HELD_STDOUT_COMMAND])
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    Ok(())
+}
+
 struct TemporaryPath {
     path: PathBuf,
 }
