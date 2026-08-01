@@ -25,6 +25,7 @@ use git2::{
 use rustix::fs::{
     AtFlags, CWD, Mode, OFlags, RenameFlags, mkdirat, openat, renameat_with, unlinkat,
 };
+use rustix::io::dup;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -81,9 +82,14 @@ const MAX_STAGE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WORKTREE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REPOSITORY_CONFIG_BYTES: usize = 1024 * 1024;
 const MAX_PACKED_REFS_BYTES: usize = 1024 * 1024;
+const MAX_SHALLOW_ENTRIES: usize = 1024;
+const MAX_SHALLOW_BYTES: usize = MAX_SHALLOW_ENTRIES * 41;
 const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_INDEX_ENTRIES: usize = MAX_WORKTREE_INSPECTIONS;
 const MAX_OBJECT_BYTES: usize = 1024 * 1024;
+const MAX_PACK_FILE_BYTES: usize = 64 * MAX_OBJECT_BYTES;
+const MAX_OBJECT_DATABASE_BYTES: usize = 128 * MAX_OBJECT_BYTES;
+const MAX_TREE_BLOB_BYTES: usize = 64 * MAX_OBJECT_BYTES;
 const MAX_WORKTREE_INSPECTIONS: usize = 4096;
 const MAX_MERGE_PARENTS: usize = 64;
 const MAX_MERGE_HEAD_BYTES: usize = MAX_MERGE_PARENTS * 41;
@@ -751,6 +757,7 @@ impl PinnedObjectDatabase {
         fs::create_dir(directory.path().join("pack")).map_err(|_| LocalGitFailure::Operation)?;
         let mut files = Vec::new();
         let mut inspected = 0_usize;
+        let mut captured_bytes = 0_u64;
         for entry in fs::read_dir(descriptor_path_from_fd(&objects))
             .map_err(|_| LocalGitFailure::Repository)?
         {
@@ -777,6 +784,7 @@ impl PinnedObjectDatabase {
                     &directory.path().join("pack"),
                     &mut files,
                     &mut inspected,
+                    &mut captured_bytes,
                     false,
                 )?;
                 continue;
@@ -793,7 +801,14 @@ impl PinnedObjectDatabase {
             .map_err(|_| LocalGitFailure::Repository)?;
             let destination = directory.path().join(&name);
             fs::create_dir(&destination).map_err(|_| LocalGitFailure::Operation)?;
-            pin_object_directory(&loose, &destination, &mut files, &mut inspected, true)?;
+            pin_object_directory(
+                &loose,
+                &destination,
+                &mut files,
+                &mut inspected,
+                &mut captured_bytes,
+                true,
+            )?;
         }
         Ok(Self {
             directory,
@@ -822,6 +837,7 @@ fn pin_object_directory(
     destination: &Path,
     files: &mut Vec<fs::File>,
     inspected: &mut usize,
+    captured_bytes: &mut u64,
     loose: bool,
 ) -> Result<(), LocalGitFailure> {
     for entry in
@@ -847,8 +863,15 @@ fn pin_object_directory(
         .map_err(|_| LocalGitFailure::Repository)?;
         let file = fs::File::from(descriptor);
         let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
+        let per_file_limit = if loose {
+            MAX_OBJECT_BYTES.saturating_mul(2)
+        } else {
+            MAX_PACK_FILE_BYTES
+        } as u64;
+        *captured_bytes = captured_bytes.saturating_add(metadata.len());
         if !metadata.is_file()
-            || (loose && metadata.len() > (MAX_OBJECT_BYTES.saturating_mul(2)) as u64)
+            || metadata.len() > per_file_limit
+            || *captured_bytes > MAX_OBJECT_DATABASE_BYTES as u64
         {
             return Err(LocalGitFailure::Repository);
         }
@@ -947,6 +970,8 @@ fn reject_administrative_symlinks(directory: &Path) -> Result<(), LocalGitToolsC
                     Some(MAX_REVISION_BYTES)
                 } else if relative == Path::new("packed-refs") {
                     Some(MAX_PACKED_REFS_BYTES)
+                } else if relative == Path::new("shallow") {
+                    Some(MAX_SHALLOW_BYTES)
                 } else {
                     None
                 };
@@ -957,7 +982,43 @@ fn reject_administrative_symlinks(directory: &Path) -> Result<(), LocalGitToolsC
                 }) {
                     return Err(LocalGitToolsConstructionError::Repository);
                 }
+                if relative == Path::new("shallow") {
+                    validate_shallow_file(&entry.path())?;
+                }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_shallow_file(path: &Path) -> Result<(), LocalGitToolsConstructionError> {
+    let descriptor = openat(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let mut file = fs::File::from(descriptor);
+    let mut bytes = Vec::with_capacity(MAX_SHALLOW_BYTES);
+    Read::by_ref(&mut file)
+        .take((MAX_SHALLOW_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    if bytes.len() > MAX_SHALLOW_BYTES {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
+    let mut entries = 0_usize;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        entries = entries.saturating_add(1);
+        if entries > MAX_SHALLOW_ENTRIES
+            || line.len() != 40
+            || !line.iter().all(u8::is_ascii_hexdigit)
+        {
+            return Err(LocalGitToolsConstructionError::Repository);
         }
     }
     Ok(())
@@ -1800,6 +1861,293 @@ fn resolve_reference_chain(
             .map_err(|_| LocalGitFailure::Operation)?
             .ok_or(LocalGitFailure::Operation)?
             .to_owned();
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PinnedReferenceValue {
+    Direct(git2::Oid),
+    Symbolic(String),
+    Missing,
+}
+
+struct ReferenceLock {
+    name: String,
+    parent: OwnedFd,
+    leaf: OsString,
+    lock_name: OsString,
+    lock: fs::File,
+    identity: FileIdentity,
+    hierarchy: Vec<(PathBuf, FileIdentity)>,
+    committed: bool,
+}
+
+struct ReferenceParent {
+    directory: OwnedFd,
+    leaf: OsString,
+    hierarchy: Vec<(PathBuf, FileIdentity)>,
+}
+
+impl ReferenceLock {
+    fn acquire(authority: &PinnedRepository, name: &str) -> Result<Self, LocalGitFailure> {
+        let bound = open_reference_parent(authority, name, true)?;
+        let parent = bound.directory;
+        let leaf = bound.leaf;
+        let mut lock_name = OsString::from(&leaf);
+        lock_name.push(".lock");
+        let descriptor = openat(
+            &parent,
+            &lock_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(|_| LocalGitFailure::Operation)?;
+        let lock = fs::File::from(descriptor);
+        let identity = file_identity(&lock.metadata().map_err(|_| LocalGitFailure::Operation)?);
+        Ok(Self {
+            name: name.to_owned(),
+            parent,
+            leaf,
+            lock_name,
+            lock,
+            identity,
+            hierarchy: bound.hierarchy,
+            committed: false,
+        })
+    }
+
+    fn read(&self, authority: &PinnedRepository) -> Result<PinnedReferenceValue, LocalGitFailure> {
+        read_reference_leaf(&self.parent, &self.leaf, authority, &self.name)
+    }
+
+    fn hierarchy_is_current(&self, authority: &PinnedRepository) -> bool {
+        self.hierarchy.iter().all(|(relative, expected)| {
+            open_git_directory_path(authority, relative)
+                .and_then(|directory| {
+                    let metadata = fs::File::from(directory)
+                        .metadata()
+                        .map_err(|_| LocalGitFailure::Operation)?;
+                    Ok(file_identity(&metadata) == *expected)
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    fn commit(
+        mut self,
+        authority: &PinnedRepository,
+        target: git2::Oid,
+    ) -> Result<(), LocalGitFailure> {
+        writeln!(self.lock, "{target}").map_err(|_| LocalGitFailure::Operation)?;
+        self.lock
+            .sync_all()
+            .map_err(|_| LocalGitFailure::Operation)?;
+        if !self.path_still_owned() || !self.hierarchy_is_current(authority) {
+            return Err(LocalGitFailure::Operation);
+        }
+        renameat_with(
+            &self.parent,
+            &self.lock_name,
+            &self.parent,
+            &self.leaf,
+            RenameFlags::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Operation)?;
+        self.committed = true;
+        Ok(())
+    }
+
+    fn path_still_owned(&self) -> bool {
+        let descriptor_identity = self
+            .lock
+            .metadata()
+            .map(|metadata| file_identity(&metadata))
+            .ok();
+        let path_identity = openat(
+            &self.parent,
+            &self.lock_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()
+        .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
+        .map(|metadata| file_identity(&metadata));
+        descriptor_identity == Some(self.identity) && path_identity == Some(self.identity)
+    }
+}
+
+impl Drop for ReferenceLock {
+    fn drop(&mut self) {
+        if !self.committed && self.path_still_owned() {
+            let _ = unlinkat(&self.parent, &self.lock_name, AtFlags::empty());
+        }
+    }
+}
+
+fn open_reference_parent(
+    authority: &PinnedRepository,
+    name: &str,
+    create: bool,
+) -> Result<ReferenceParent, LocalGitFailure> {
+    if name != "HEAD" && (!name.starts_with("refs/") || !git2::Reference::is_valid_name(name)) {
+        return Err(LocalGitFailure::Operation);
+    }
+    let path = Path::new(name);
+    let leaf = path
+        .file_name()
+        .filter(|leaf| !leaf.is_empty())
+        .ok_or(LocalGitFailure::Operation)?
+        .to_owned();
+    let parent_path = path.parent().unwrap_or_else(|| Path::new(""));
+    let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    let mut relative = PathBuf::new();
+    let mut hierarchy = vec![(
+        relative.clone(),
+        file_identity(
+            &fs::File::from(dup(&directory).map_err(|_| LocalGitFailure::Operation)?)
+                .metadata()
+                .map_err(|_| LocalGitFailure::Operation)?,
+        ),
+    )];
+    for component in parent_path.components() {
+        let Component::Normal(component) = component else {
+            return Err(LocalGitFailure::Operation);
+        };
+        directory = if create {
+            open_or_create_ref_directory(&directory, component)?
+        } else {
+            openat(
+                &directory,
+                component,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| LocalGitFailure::Operation)?
+        };
+        relative.push(component);
+        let identity = file_identity(
+            &fs::File::from(dup(&directory).map_err(|_| LocalGitFailure::Operation)?)
+                .metadata()
+                .map_err(|_| LocalGitFailure::Operation)?,
+        );
+        hierarchy.push((relative.clone(), identity));
+    }
+    Ok(ReferenceParent {
+        directory,
+        leaf,
+        hierarchy,
+    })
+}
+
+fn open_git_directory_path(
+    authority: &PinnedRepository,
+    relative: &Path,
+) -> Result<OwnedFd, LocalGitFailure> {
+    let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(LocalGitFailure::Operation);
+        };
+        directory = openat(
+            &directory,
+            component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Operation)?;
+    }
+    Ok(directory)
+}
+
+fn read_pinned_reference(
+    authority: &PinnedRepository,
+    name: &str,
+) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    let bound = match open_reference_parent(authority, name, false) {
+        Ok(bound) => bound,
+        Err(LocalGitFailure::Operation) if name.starts_with("refs/") => {
+            return packed_reference_target(authority, name).map(|target| {
+                target.map_or(PinnedReferenceValue::Missing, PinnedReferenceValue::Direct)
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    read_reference_leaf(&bound.directory, &bound.leaf, authority, name)
+}
+
+fn read_reference_leaf(
+    parent: &OwnedFd,
+    leaf: &OsStr,
+    authority: &PinnedRepository,
+    name: &str,
+) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    let descriptor = match openat(
+        parent,
+        leaf,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(error) if error == rustix::io::Errno::NOENT && name.starts_with("refs/") => {
+            return packed_reference_target(authority, name).map(|target| {
+                target.map_or(PinnedReferenceValue::Missing, PinnedReferenceValue::Direct)
+            });
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => {
+            return Ok(PinnedReferenceValue::Missing);
+        }
+        Err(_) => return Err(LocalGitFailure::Operation),
+    };
+    let mut file = fs::File::from(descriptor);
+    let metadata = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+    if !metadata.is_file() || metadata.len() > MAX_REVISION_BYTES as u64 {
+        return Err(LocalGitFailure::Operation);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take((MAX_REVISION_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+    if let Some(symbolic) = bytes.strip_prefix(b"ref: ") {
+        let symbolic = std::str::from_utf8(symbolic).map_err(|_| LocalGitFailure::Operation)?;
+        if !symbolic.starts_with("refs/") || !git2::Reference::is_valid_name(symbolic) {
+            return Err(LocalGitFailure::Operation);
+        }
+        return Ok(PinnedReferenceValue::Symbolic(symbolic.to_owned()));
+    }
+    let direct = std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|value| git2::Oid::from_str(value).ok())
+        .ok_or(LocalGitFailure::Operation)?;
+    Ok(PinnedReferenceValue::Direct(direct))
+}
+
+fn resolve_pinned_reference_chain(
+    authority: &PinnedRepository,
+    locks: Option<&[ReferenceLock]>,
+) -> Result<(Vec<String>, Option<git2::Oid>), LocalGitFailure> {
+    const MAX_SYMBOLIC_REFERENCE_DEPTH: usize = 16;
+    let mut names = Vec::new();
+    let mut current = "HEAD".to_owned();
+    loop {
+        if names.len() == MAX_SYMBOLIC_REFERENCE_DEPTH || names.contains(&current) {
+            return Err(LocalGitFailure::Operation);
+        }
+        let value = match locks {
+            Some(locks) => locks
+                .iter()
+                .find(|lock| lock.name == current)
+                .ok_or(LocalGitFailure::Operation)?
+                .read(authority)?,
+            None => read_pinned_reference(authority, &current)?,
+        };
+        names.push(current);
+        match value {
+            PinnedReferenceValue::Direct(oid) => return Ok((names, Some(oid))),
+            PinnedReferenceValue::Symbolic(target) => current = target,
+            PinnedReferenceValue::Missing => return Ok((names, None)),
+        }
     }
 }
 
@@ -2739,6 +3087,7 @@ fn validate_tree_discovery(
     let mut pending = vec![(root.id(), PathBuf::new())];
     let mut inspected = 0_usize;
     let mut inspected_path_bytes = 0_usize;
+    let mut inspected_blob_bytes = 0_usize;
     while let Some((oid, prefix)) = pending.pop() {
         let (size, kind) = object_database
             .read_header(oid)
@@ -2769,7 +3118,11 @@ fn validate_tree_discovery(
                     let (size, kind) = object_database
                         .read_header(entry.id())
                         .map_err(|_| LocalGitFailure::Operation)?;
-                    if kind != git2::ObjectType::Blob || size > MAX_OBJECT_BYTES {
+                    inspected_blob_bytes = inspected_blob_bytes.saturating_add(size);
+                    if kind != git2::ObjectType::Blob
+                        || size > MAX_OBJECT_BYTES
+                        || inspected_blob_bytes > MAX_TREE_BLOB_BYTES
+                    {
                         return Err(LocalGitFailure::Operation);
                     }
                 }
@@ -2847,10 +3200,7 @@ fn resolve_bounded_commit<'repository>(
     repository: &'repository Repository,
     revision: &str,
 ) -> Result<git2::Commit<'repository>, LocalGitFailure> {
-    let mut oid = repository
-        .revparse_single(revision)
-        .map_err(|_| LocalGitFailure::Operation)?
-        .id();
+    let mut oid = resolve_exact_revision_oid(repository, revision)?;
     for _depth in 0..16 {
         match validate_object_header(repository, oid)? {
             git2::ObjectType::Commit => return find_bounded_commit(repository, oid),
@@ -2870,10 +3220,7 @@ fn resolve_bounded_tree<'repository>(
     repository: &'repository Repository,
     revision: &str,
 ) -> Result<git2::Tree<'repository>, LocalGitFailure> {
-    let mut oid = repository
-        .revparse_single(revision)
-        .map_err(|_| LocalGitFailure::Operation)?
-        .id();
+    let mut oid = resolve_exact_revision_oid(repository, revision)?;
     for _depth in 0..16 {
         match validate_object_header(repository, oid)? {
             git2::ObjectType::Commit => return tree_for_commit(repository, oid),
@@ -2888,6 +3235,17 @@ fn resolve_bounded_tree<'repository>(
         }
     }
     Err(LocalGitFailure::Operation)
+}
+
+fn resolve_exact_revision_oid(
+    repository: &Repository,
+    revision: &str,
+) -> Result<git2::Oid, LocalGitFailure> {
+    if let Ok(oid) = git2::Oid::from_str(revision) {
+        return Ok(oid);
+    }
+    let (_, target) = resolve_reference_chain(repository, revision)?;
+    target.ok_or(LocalGitFailure::Operation)
 }
 
 fn bounded_text(value: &str, max_bytes: usize) -> (String, bool) {
@@ -2932,17 +3290,13 @@ fn commit(
     } else {
         Vec::new()
     };
-    let (reference_chain, _parent) = resolve_reference_chain(repository, "HEAD")?;
-    let mut transaction = repository
-        .transaction()
-        .map_err(|_| LocalGitFailure::Operation)?;
-    for reference in &reference_chain {
-        transaction
-            .lock_ref(reference)
-            .map_err(|_| LocalGitFailure::Operation)?;
-    }
-    let (locked_chain, parent) = resolve_reference_chain(repository, "HEAD")?;
-    if locked_chain != reference_chain {
+    let (reference_chain, initial_parent) = resolve_pinned_reference_chain(authority, None)?;
+    let mut reference_locks = reference_chain
+        .iter()
+        .map(|reference| ReferenceLock::acquire(authority, reference))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (locked_chain, parent) = resolve_pinned_reference_chain(authority, Some(&reference_locks))?;
+    if locked_chain != reference_chain || parent != initial_parent {
         return Err(LocalGitFailure::Operation);
     }
     let mut parent_ids = parent.into_iter().collect::<Vec<_>>();
@@ -2978,33 +3332,85 @@ fn commit(
         &[PackRoot::Commit(oid)],
     )?;
     let update_reference = locked_chain.last().ok_or(LocalGitFailure::Operation)?;
-    let head_symbolic_target = locked_chain.get(1);
-    transaction
-        .set_target(
-            update_reference,
-            oid,
-            Some(&signature),
-            "commit: fixer agent",
-        )
-        .map_err(|_| LocalGitFailure::Operation)?;
-    if let Some(head_symbolic_target) = head_symbolic_target {
-        transaction
-            .set_symbolic_target(
-                "HEAD",
-                head_symbolic_target,
-                Some(&signature),
-                "commit: fixer agent",
-            )
-            .map_err(|_| LocalGitFailure::Operation)?;
+    if reference_locks
+        .iter()
+        .any(|lock| !lock.hierarchy_is_current(authority))
+    {
+        return Err(LocalGitFailure::Operation);
     }
-    transaction
-        .commit()
-        .map_err(|_| LocalGitFailure::Operation)?;
+    let (current_chain, current_parent) =
+        resolve_pinned_reference_chain(authority, Some(&reference_locks))?;
+    if current_chain != locked_chain || current_parent != parent {
+        return Err(LocalGitFailure::Operation);
+    }
+    let update_lock = reference_locks
+        .iter()
+        .position(|lock| lock.name == *update_reference)
+        .map(|position| reference_locks.swap_remove(position))
+        .ok_or(LocalGitFailure::Operation)?;
+    update_lock.commit(authority, oid)?;
+    let old = parent.unwrap_or(git2::Oid::ZERO_SHA1);
+    let _ = append_reference_log(authority, "HEAD", old, oid, &signature);
+    if update_reference != "HEAD" {
+        let _ = append_reference_log(authority, update_reference, old, oid, &signature);
+    }
     let state_cleaned = state != RepositoryState::Merge || repository.cleanup_state().is_ok();
     Ok(CommitResult {
         commit: oid.to_string(),
         state_cleaned,
     })
+}
+
+fn append_reference_log(
+    authority: &PinnedRepository,
+    reference: &str,
+    old: git2::Oid,
+    new: git2::Oid,
+    signature: &Signature<'_>,
+) -> Result<(), LocalGitFailure> {
+    let git_directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    let logs = open_or_create_ref_directory(&git_directory, OsStr::new("logs"))?;
+    let path = Path::new(reference);
+    let leaf = path.file_name().ok_or(LocalGitFailure::Operation)?;
+    let mut directory = logs;
+    if let Some(parent) = path.parent() {
+        for component in parent.components() {
+            let Component::Normal(component) = component else {
+                return Err(LocalGitFailure::Operation);
+            };
+            directory = open_or_create_ref_directory(&directory, component)?;
+        }
+    }
+    let descriptor = openat(
+        &directory,
+        leaf,
+        OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    let mut log = fs::File::from(descriptor);
+    if !log
+        .metadata()
+        .map_err(|_| LocalGitFailure::Operation)?
+        .is_file()
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    let time = signature.when();
+    let offset = time.offset_minutes();
+    let sign = if offset < 0 { '-' } else { '+' };
+    let absolute_offset = offset.unsigned_abs();
+    writeln!(
+        log,
+        "{old} {new} {} <{}> {} {sign}{:02}{:02}\tcommit: fixer agent",
+        signature.name().map_err(|_| LocalGitFailure::Operation)?,
+        signature.email().map_err(|_| LocalGitFailure::Operation)?,
+        time.seconds(),
+        absolute_offset / 60,
+        absolute_offset % 60,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    log.sync_all().map_err(|_| LocalGitFailure::Operation)
 }
 
 #[derive(Clone, Copy)]
@@ -3179,6 +3585,32 @@ fn packed_reference_exists(
     authority: &PinnedRepository,
     reference_name: &str,
 ) -> Result<bool, LocalGitFailure> {
+    for (_, existing) in read_packed_references(authority)? {
+        let requested = reference_name.as_bytes();
+        let requested_prefix = [requested, b"/"].concat();
+        let existing_prefix = [existing.as_slice(), b"/"].concat();
+        if existing == requested
+            || existing.starts_with(&requested_prefix)
+            || requested.starts_with(&existing_prefix)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn packed_reference_target(
+    authority: &PinnedRepository,
+    reference_name: &str,
+) -> Result<Option<git2::Oid>, LocalGitFailure> {
+    Ok(read_packed_references(authority)?
+        .into_iter()
+        .find_map(|(oid, name)| (name == reference_name.as_bytes()).then_some(oid)))
+}
+
+fn read_packed_references(
+    authority: &PinnedRepository,
+) -> Result<Vec<(git2::Oid, Vec<u8>)>, LocalGitFailure> {
     let descriptor = match openat(
         &authority.git_directory,
         "packed-refs",
@@ -3186,7 +3618,7 @@ fn packed_reference_exists(
         Mode::empty(),
     ) {
         Ok(descriptor) => descriptor,
-        Err(error) if error == rustix::io::Errno::NOENT => return Ok(false),
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(Vec::new()),
         Err(_) => return Err(LocalGitFailure::Operation),
     };
     let mut file = fs::File::from(descriptor);
@@ -3202,6 +3634,7 @@ fn packed_reference_exists(
     if bytes.len() > MAX_PACKED_REFS_BYTES {
         return Err(LocalGitFailure::Operation);
     }
+    let mut references = Vec::new();
     for line in bytes.split(|byte| *byte == b'\n') {
         if line.is_empty() || matches!(line.first(), Some(b'#' | b'^')) {
             continue;
@@ -3214,21 +3647,19 @@ fn packed_reference_exists(
             .ok()
             .and_then(|oid| git2::Oid::from_str(oid).ok())
             .ok_or(LocalGitFailure::Operation)?;
-        let _ = oid;
         let existing = line
             .get(separator + 1..)
             .ok_or(LocalGitFailure::Operation)?;
-        let requested = reference_name.as_bytes();
-        let requested_prefix = [requested, b"/"].concat();
-        let existing_prefix = [existing, b"/"].concat();
-        if existing == requested
-            || existing.starts_with(&requested_prefix)
-            || requested.starts_with(&existing_prefix)
+        if existing.is_empty()
+            || std::str::from_utf8(existing)
+                .ok()
+                .is_none_or(|name| !git2::Reference::is_valid_name(name))
         {
-            return Ok(true);
+            return Err(LocalGitFailure::Operation);
         }
+        references.push((oid, existing.to_vec()));
     }
-    Ok(false)
+    Ok(references)
 }
 
 fn create_loose_branch_reference(
@@ -3748,6 +4179,19 @@ mod tests {
         paths
     }
 
+    fn plant_sparse_pack(root: &Path, name: &str, bytes: u64) {
+        let path = root.join(".git/objects/pack").join(name);
+        fs::File::create(path)
+            .expect("pack-budget fixture file creates")
+            .set_len(bytes)
+            .expect("pack-budget fixture length sets");
+    }
+
+    fn plant_shallow_entries(root: &Path, oid: Oid, count: usize) {
+        fs::write(root.join(".git/shallow"), format!("{oid}\n").repeat(count))
+            .expect("shallow-budget fixture writes");
+    }
+
     fn plant_status_over_byte_budget(fixture: &Fixture) {
         plant_aggregate_stage_files(fixture.root());
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -3879,6 +4323,24 @@ mod tests {
                 &[&parent],
             )
             .expect("over-budget tree commit writes")
+    }
+
+    fn aggregate_blob_tree_commit(repository: &Repository, parent: Oid) -> Oid {
+        let bytes = vec![b'x'; MAX_OBJECT_BYTES];
+        let blob = repository
+            .blob(&bytes)
+            .expect("aggregate-tree fixture blob writes");
+        let mut builder = repository
+            .treebuilder(None)
+            .expect("aggregate-tree builder opens");
+        let count = MAX_TREE_BLOB_BYTES / MAX_OBJECT_BYTES + 1;
+        for sequence in 0..count {
+            builder
+                .insert(format!("large-{sequence:02}.bin"), blob, 0o100644)
+                .expect("aggregate-tree entry inserts");
+        }
+        let tree = builder.write().expect("aggregate-tree writes");
+        raw_commit_with_tree(repository, tree, parent)
     }
 
     fn oversized_root_tree_commit(repository: &Repository, parent: Oid) -> Oid {
@@ -4790,6 +5252,17 @@ mod tests {
     }
 
     #[test]
+    fn construction_rejects_a_shallow_file_over_the_entry_budget() {
+        let fixture = Fixture::new();
+        plant_shallow_entries(fixture.root(), fixture.initial, MAX_SHALLOW_ENTRIES + 1);
+
+        let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+            .expect_err("over-budget shallow boundary rejects");
+
+        assert!(matches!(error, LocalGitToolsConstructionError::Repository));
+    }
+
+    #[test]
     fn log_never_emits_an_ancestor_before_a_direct_merge_parent() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -4845,6 +5318,23 @@ mod tests {
                 max_entries: 1,
             }))
             .expect_err("oversized commit object rejects");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+    }
+
+    #[test]
+    fn log_rejects_an_exact_oid_before_loading_an_oversized_commit() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let oversized = oversized_commit_object(&repository, fixture.initial);
+        let executor = fixture.executor();
+
+        let failure = executor
+            .execute_operation(LocalOperation::Log(GitLogArguments {
+                revision: oversized.to_string(),
+                max_entries: 1,
+            }))
+            .expect_err("exact oversized commit object rejects");
 
         assert_eq!(failure, LocalGitFailure::Operation);
     }
@@ -5371,6 +5861,53 @@ mod tests {
             repository.head().expect("HEAD exists").target(),
             Some(fixture.initial)
         );
+    }
+
+    #[test]
+    fn commit_reference_publication_rejects_a_replaced_refs_hierarchy() {
+        let fixture = Fixture::new();
+        let executor = fixture.executor();
+        let (chain, _) = resolve_pinned_reference_chain(&executor.repository_authority, None)
+            .expect("fixture reference chain resolves");
+        let mut locks = chain
+            .iter()
+            .map(|name| ReferenceLock::acquire(&executor.repository_authority, name))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture reference locks acquire");
+        let target_name = chain
+            .last()
+            .expect("fixture branch target exists")
+            .to_owned();
+        let target_position = locks
+            .iter()
+            .position(|lock| lock.name == target_name)
+            .expect("fixture branch lock exists");
+        let target_lock = locks.swap_remove(target_position);
+        let retired_refs = fixture.root().join(".git/refs-retired");
+        fs::rename(fixture.root().join(".git/refs"), &retired_refs).expect("fixture refs retire");
+        let outside = tempfile::tempdir().expect("outside refs root constructs");
+        fs::create_dir(outside.path().join("heads")).expect("outside heads directory constructs");
+        symlink(outside.path(), fixture.root().join(".git/refs"))
+            .expect("replacement refs symlink constructs");
+
+        let failure = target_lock
+            .commit(&executor.repository_authority, fixture.initial)
+            .expect_err("replacement refs hierarchy rejects publication");
+        let relative_target = target_name
+            .strip_prefix("refs/")
+            .expect("fixture target is under refs");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            fs::read_to_string(retired_refs.join(relative_target))
+                .expect("retired fixture branch reads"),
+            format!("{}\n", fixture.initial)
+        );
+        assert!(!outside.path().join(relative_target).exists());
+        drop(locks);
+        fs::remove_file(fixture.root().join(".git/refs"))
+            .expect("replacement refs symlink removes");
+        fs::rename(retired_refs, fixture.root().join(".git/refs")).expect("fixture refs restore");
     }
 
     #[test]
@@ -6119,6 +6656,38 @@ mod tests {
                 },
             )
             .expect_err("over-budget checkout tree rejects");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            repository.head().expect("fixture HEAD remains").target(),
+            Some(fixture.initial)
+        );
+    }
+
+    #[test]
+    fn branch_switch_rejects_target_tree_blob_bytes_over_the_aggregate_budget() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let oversized = aggregate_blob_tree_commit(&repository, fixture.initial);
+        let oversized = repository
+            .find_commit(oversized)
+            .expect("aggregate-tree fixture commit exists");
+        repository
+            .branch(FIX_BRANCH, &oversized, false)
+            .expect("aggregate-tree fixture branch creates");
+        let executor = fixture.executor();
+
+        let failure = executor
+            .branch_switch(
+                &executor
+                    .repository_authority
+                    .repository()
+                    .expect("pinned fixture repository opens"),
+                GitBranchSwitchArguments {
+                    name: FIX_BRANCH.to_owned(),
+                },
+            )
+            .expect_err("aggregate target-tree bytes reject");
 
         assert_eq!(failure, LocalGitFailure::Operation);
         assert_eq!(
@@ -6893,6 +7462,47 @@ mod tests {
             .expect_err("oversized repository config rejects");
 
         assert!(matches!(error, LocalGitToolsConstructionError::Repository));
+    }
+
+    #[test]
+    fn oversized_pack_file_is_rejected_before_object_database_attachment() {
+        let fixture = Fixture::new();
+        plant_sparse_pack(
+            fixture.root(),
+            "oversized.pack",
+            (MAX_PACK_FILE_BYTES + 1) as u64,
+        );
+
+        let executor = fixture.executor();
+
+        let failure = executor
+            .execute_operation(LocalOperation::Status)
+            .expect_err("oversized captured pack rejects");
+
+        assert_eq!(failure, LocalGitFailure::Repository);
+    }
+
+    #[test]
+    fn aggregate_object_database_bytes_are_rejected_before_attachment() {
+        let fixture = Fixture::new();
+        plant_sparse_pack(
+            fixture.root(),
+            "aggregate-a.pack",
+            MAX_PACK_FILE_BYTES as u64,
+        );
+        plant_sparse_pack(
+            fixture.root(),
+            "aggregate-b.pack",
+            MAX_PACK_FILE_BYTES as u64,
+        );
+
+        let executor = fixture.executor();
+
+        let failure = executor
+            .execute_operation(LocalOperation::Status)
+            .expect_err("aggregate captured object bytes reject");
+
+        assert_eq!(failure, LocalGitFailure::Repository);
     }
 
     #[test]
