@@ -1559,7 +1559,7 @@ async fn read_supervised_stdout(
     let encoded = &tail[marker + SUPERVISOR_STATUS_TRAILER.len()..tail.len() - 1];
     let status = serde_json::from_slice(encoded)
         .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
-    let launcher_status = match (status_protocol, status) {
+    let launcher_trailer = match (status_protocol, status) {
         (ProcessStatusProtocol::SandboxDispatch, SupervisorStatus::SpawnFailed { .. }) => None,
         (ProcessStatusProtocol::SandboxDispatch, _) => {
             let (launcher_marker, launcher_status) = parse_launcher_status(&tail[..marker])
@@ -1570,7 +1570,7 @@ async fn read_supervised_stdout(
         }
         (ProcessStatusProtocol::Direct, _) => None,
     };
-    let first_trailer = launcher_status
+    let first_trailer = launcher_trailer
         .map(|(launcher_marker, _)| launcher_marker)
         .unwrap_or(marker);
     let trailer_bytes = tail.len() - first_trailer;
@@ -1586,7 +1586,11 @@ async fn read_supervised_stdout(
             },
         },
         status,
-        launcher_status.map(|(_, status)| status),
+        if matches!(status, SupervisorStatus::Exited { code: Some(0), .. }) {
+            launcher_trailer.map(|(_, status)| status)
+        } else {
+            None
+        },
     ))
 }
 
@@ -2554,6 +2558,7 @@ mod tests {
     const SETUP_CAPTURE_BYTES: usize = 4;
     const SETUP_STDOUT: &[u8] = b"12345";
     const SETUP_STDERR: &[u8] = b"67890";
+    const SUCCESSFUL_EXIT_CODE: i32 = 0;
     const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
     const UNUSABLE_PROBE_EXIT_CODE: i32 = 1;
     const REQUEST_TIMEOUT_SECONDS: u64 = 1;
@@ -2914,6 +2919,49 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_sandbox_dispatch_distrusts_a_forged_success_trailer()
+    -> Result<(), Box<dyn Error>> {
+        let mut output = Vec::new();
+        output.extend_from_slice(LAUNCH_STATUS_TRAILER);
+        serde_json::to_writer(
+            &mut output,
+            &LauncherStatus::Exited {
+                code: Some(SUCCESSFUL_EXIT_CODE),
+                stdout: SupervisorCaptureCompleteness::Complete,
+                stderr: SupervisorCaptureCompleteness::Complete,
+            },
+        )?;
+        output.push(b'\n');
+        output.extend_from_slice(SUPERVISOR_STATUS_TRAILER);
+        serde_json::to_writer(
+            &mut output,
+            &SupervisorStatus::Exited {
+                code: Some(UNUSABLE_PROBE_EXIT_CODE),
+                stdout: SupervisorCaptureCompleteness::Complete,
+                stderr: SupervisorCaptureCompleteness::Complete,
+            },
+        )?;
+        output.push(b'\n');
+
+        let (_, status, launcher_status) = read_supervised_stdout(
+            output.as_slice(),
+            EXEC_CAPTURE_BYTES,
+            ProcessStatusProtocol::SandboxDispatch,
+        )
+        .await?;
+        let outcome = supervisor_outcome(status, launcher_status);
+
+        assert_eq!(
+            outcome,
+            ProcessOutcome::Exited {
+                code: Some(UNUSABLE_PROBE_EXIT_CODE),
+            }
+        );
         Ok(())
     }
 
