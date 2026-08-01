@@ -72,6 +72,8 @@ const SUPERVISOR_OUTER_MODE: &str = "--outer";
 const OUTER_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 #[cfg(target_os = "linux")]
 const OUTER_PROCESS_CLEANUP_DEADLINE: Duration = Duration::from_secs(1);
+#[cfg(target_os = "linux")]
+const OUTER_PROCESS_GRACEFUL_WAIT: Duration = Duration::from_millis(500);
 
 fn default_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
@@ -1509,15 +1511,16 @@ async fn read_supervised_stdout(
     let encoded = &tail[marker + SUPERVISOR_STATUS_TRAILER.len()..tail.len() - 1];
     let status = serde_json::from_slice(encoded)
         .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
-    let launcher_status = match status_protocol {
-        ProcessStatusProtocol::SandboxDispatch => {
+    let launcher_status = match (status_protocol, status) {
+        (ProcessStatusProtocol::SandboxDispatch, SupervisorStatus::SpawnFailed { .. }) => None,
+        (ProcessStatusProtocol::SandboxDispatch, _) => {
             let (launcher_marker, launcher_status) = parse_launcher_status(&tail[..marker])
                 .ok_or_else(|| {
                     std::io::Error::other("sandbox launcher status trailer is malformed")
                 })?;
             Some((launcher_marker, launcher_status))
         }
-        ProcessStatusProtocol::Direct => None,
+        (ProcessStatusProtocol::Direct, _) => None,
     };
     let first_trailer = launcher_status
         .map(|(launcher_marker, _)| launcher_marker)
@@ -1636,18 +1639,16 @@ impl OuterProcessTreeGuard {
         outer_pidfd_has_exited(&root.pidfd)
     }
 
-    fn kill_all(&mut self) {
+    fn kill_all(&mut self, deadline: Instant) {
         self.stop_watcher();
-        let deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
         if outer_observe_descendants(self.root, &self.descendants, None, Some(deadline)).is_err() {
             self.process_tree_supported.store(false, Ordering::Release);
         }
         self.kill_tracked();
     }
 
-    fn finish(&mut self) -> OuterCleanupStatus {
+    fn finish(&mut self, deadline: Instant) -> OuterCleanupStatus {
         self.stop_watcher();
-        let deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
         loop {
             let observation =
                 outer_observe_descendants(self.root, &self.descendants, None, Some(deadline));
@@ -1728,7 +1729,7 @@ fn outer_all_tracked_absent(
 impl Drop for OuterProcessTreeGuard {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self.finish();
+            let _ = self.finish(Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE);
         }
     }
 }
@@ -2077,8 +2078,8 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let supervisor_pid = match child.id() {
         Some(supervisor_pid) => supervisor_pid,
         None => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let cleanup_deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
+            terminate_child_until(&mut child, cleanup_deadline).await;
             return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Cleanup,
             });
@@ -2087,9 +2088,9 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let mut outer_tree = match OuterProcessTreeGuard::new(supervisor_pid) {
         Ok(tree) => tree,
         Err(()) => {
+            let cleanup_deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
             kill_supervisor_process_group(supervisor_pid);
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            terminate_child_until(&mut child, cleanup_deadline).await;
             return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Cleanup,
             });
@@ -2101,8 +2102,9 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         Some(stdout) => stdout,
         None => {
             drop(control);
-            outer_tree.kill_all();
-            let _ = child.wait().await;
+            let cleanup_deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
+            outer_tree.kill_all(cleanup_deadline);
+            terminate_child_until(&mut child, cleanup_deadline).await;
             return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stdout,
             });
@@ -2112,8 +2114,9 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         Some(stderr) => stderr,
         None => {
             drop(control);
-            outer_tree.kill_all();
-            let _ = child.wait().await;
+            let cleanup_deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
+            outer_tree.kill_all(cleanup_deadline);
+            terminate_child_until(&mut child, cleanup_deadline).await;
             return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stderr,
             });
@@ -2133,11 +2136,11 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     if !matches!(startup, Ok(Ok(()))) {
         let timed_out = startup.is_err();
         drop(control);
+        let cleanup_deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
         kill_supervisor_process_group(supervisor_pid);
-        outer_tree.kill_all();
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        let cleanup = outer_tree.finish();
+        outer_tree.kill_all(cleanup_deadline);
+        terminate_child_until(&mut child, cleanup_deadline).await;
+        let cleanup = outer_tree.finish(cleanup_deadline);
         stdout_task.abort();
         stderr_task.abort();
         return discarded_process_result(if timed_out && cleanup == OuterCleanupStatus::Complete {
@@ -2161,13 +2164,20 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let request_timed_out = root_exit.is_err();
     let observation_failed = matches!(root_exit, Ok(Err(())));
     drop(control);
-    let graceful_deadline = tokio::time::Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
-    let mut waited = tokio::time::timeout_at(graceful_deadline, child.wait()).await;
+    let cleanup_started = Instant::now();
+    let cleanup_deadline = cleanup_started + OUTER_PROCESS_CLEANUP_DEADLINE;
+    let graceful_deadline = cleanup_started + OUTER_PROCESS_GRACEFUL_WAIT;
+    let async_cleanup_deadline = tokio::time::Instant::from_std(cleanup_deadline);
+    let mut waited = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(graceful_deadline),
+        child.wait(),
+    )
+    .await;
     if waited.is_err() {
         kill_supervisor_process_group(supervisor_pid);
-        outer_tree.kill_all();
-        let _ = child.kill().await;
-        waited = tokio::time::timeout(OUTER_PROCESS_CLEANUP_DEADLINE, child.wait()).await;
+        outer_tree.kill_all(cleanup_deadline);
+        let _ = child.start_kill();
+        waited = tokio::time::timeout_at(async_cleanup_deadline, child.wait()).await;
     }
     let mut wait_failure = if request_timed_out {
         Some(ProcessOutcome::TimedOut)
@@ -2184,8 +2194,8 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             reason: ProcessSupervisionFailure::Wait,
         }),
         Err(_) => {
-            outer_tree.kill_all();
-            let _ = child.kill().await;
+            outer_tree.kill_all(cleanup_deadline);
+            let _ = child.start_kill();
             Some(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Wait,
             })
@@ -2194,12 +2204,12 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     if wait_failure.is_none() {
         wait_failure = waited_cleanly;
     }
-    if outer_tree.finish() != OuterCleanupStatus::Complete {
+    if outer_tree.finish(cleanup_deadline) != OuterCleanupStatus::Complete {
         wait_failure = Some(ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Cleanup,
         });
     }
-    let captures = tokio::time::timeout(OUTER_PROCESS_CLEANUP_DEADLINE, async {
+    let captures = tokio::time::timeout_at(async_cleanup_deadline, async {
         let stdout = (&mut stdout_task).await;
         let stderr = (&mut stderr_task).await;
         (stdout, stderr)
@@ -2252,6 +2262,12 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
 }
 
 #[cfg(target_os = "linux")]
+async fn terminate_child_until(child: &mut tokio::process::Child, deadline: Instant) {
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), child.wait()).await;
+}
+
+#[cfg(target_os = "linux")]
 fn kill_supervisor_process_group(raw_pid: u32) {
     if let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
@@ -2263,11 +2279,10 @@ fn supervisor_outcome(
     status: SupervisorStatus,
     launcher_status: Option<LauncherStatus>,
 ) -> ProcessOutcome {
-    if let Some(launcher_status) = launcher_status {
-        return launcher_outcome(launcher_status);
-    }
     match status {
-        SupervisorStatus::Exited { code, .. } => ProcessOutcome::Exited { code },
+        SupervisorStatus::Exited { code, .. } => launcher_status
+            .map(launcher_outcome)
+            .unwrap_or(ProcessOutcome::Exited { code }),
         SupervisorStatus::TimedOut => ProcessOutcome::TimedOut,
         SupervisorStatus::SpawnFailed { reason } => process_spawn_failure(reason),
         SupervisorStatus::Cancelled => ProcessOutcome::SupervisionFailed {
@@ -2422,6 +2437,28 @@ mod tests {
                 stage: SupervisorFailureStage::Cleanup,
             },
             None,
+        );
+
+        assert_eq!(
+            outcome,
+            ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Cleanup,
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_supervision_failure_overrides_a_nested_success() {
+        let outcome = supervisor_outcome(
+            SupervisorStatus::SupervisionFailed {
+                stage: SupervisorFailureStage::Cleanup,
+            },
+            Some(LauncherStatus::Exited {
+                code: Some(0),
+                stdout: SupervisorCaptureCompleteness::Complete,
+                stderr: SupervisorCaptureCompleteness::Complete,
+            }),
         );
 
         assert_eq!(
@@ -2633,6 +2670,37 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandbox_dispatch_preserves_pre_dispatch_spawn_failure_without_launcher_status()
+    -> Result<(), Box<dyn Error>> {
+        let mut output = Vec::new();
+        output.extend_from_slice(SUPERVISOR_STATUS_TRAILER);
+        serde_json::to_writer(
+            &mut output,
+            &SupervisorStatus::SpawnFailed {
+                reason: SupervisorSpawnFailure::NotFound,
+            },
+        )?;
+        output.push(b'\n');
+
+        let (_, status, launcher_status) = read_supervised_stdout(
+            output.as_slice(),
+            EXEC_CAPTURE_BYTES,
+            ProcessStatusProtocol::SandboxDispatch,
+        )
+        .await?;
+
+        assert_eq!(
+            status,
+            SupervisorStatus::SpawnFailed {
+                reason: SupervisorSpawnFailure::NotFound,
+            }
+        );
+        assert_eq!(launcher_status, None);
         Ok(())
     }
 
