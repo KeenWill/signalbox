@@ -4,9 +4,9 @@
 commissioned goal attached to a session: its immutable statements, event-sourced
 state, user commands, model declarations, scheduler continuation, process wire,
 and terminal-client verbs. The domain and persistence surface was verified
-through PR #383 (`agent/goal-mode`). This bottom specification diff owns both
-stack slices. The scheduling, model-tool, process, and terminal surfaces were
-verified through PR #384 (`agent/goal-mode-runtime`). Identity and
+through PR #384 (`agent/goal-mode-runtime`). This bottom specification diff owns
+both stack slices. The scheduling, model-tool, process, and terminal surfaces
+were verified through PR #384 (`agent/goal-mode-runtime`). Identity and
 durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
