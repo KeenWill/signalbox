@@ -92,6 +92,7 @@ const COMMIT_REFLOG_ACTION: &str = "commit";
 const MAX_OBJECT_BYTES: usize = 1024 * 1024;
 const MAX_PACK_FILE_BYTES: usize = MAX_OBJECT_DATABASE_BYTES;
 const MAX_OBJECT_DATABASE_BYTES: usize = 128 * MAX_OBJECT_BYTES;
+const OBJECT_PUBLICATION_LOCK: &str = "signalbox-publication.lock";
 const MAX_TREE_BLOB_BYTES: usize = 64 * MAX_OBJECT_BYTES;
 const MAX_REFLOG_BYTES: usize = 64 * MAX_OBJECT_BYTES;
 const MAX_WORKTREE_INSPECTIONS: usize = 4096;
@@ -2734,17 +2735,28 @@ impl ReferenceLock {
     }
 
     fn publish(
+        self,
+        authority: &PinnedRepository,
+        expected: &PinnedReferenceValue,
+    ) -> Result<(), LocalGitFailure> {
+        self.publish_with_hook(authority, expected, || {})
+    }
+
+    fn publish_with_hook<Hook: FnOnce()>(
         mut self,
         authority: &PinnedRepository,
         expected: &PinnedReferenceValue,
+        before_absent_publish: Hook,
     ) -> Result<(), LocalGitFailure> {
         if !self.path_still_owned() || !self.hierarchy_is_current(authority) {
             return Err(LocalGitFailure::Operation);
         }
         if !descriptor_entry_exists(&self.parent, &self.leaf)? {
+            let expected_packed = packed_reference_target(authority, &self.name)?;
             if self.read(authority)? != *expected {
                 return Err(LocalGitFailure::Operation);
             }
+            before_absent_publish();
             renameat_with(
                 &self.parent,
                 &self.lock_name,
@@ -2753,6 +2765,14 @@ impl ReferenceLock {
                 RenameFlags::NOREPLACE,
             )
             .map_err(|_| LocalGitFailure::Operation)?;
+            let packed_is_current = packed_reference_target(authority, &self.name)
+                .is_ok_and(|current| current == expected_packed);
+            if !packed_is_current {
+                if self.published_path_still_owned() {
+                    let _ = unlinkat(&self.parent, &self.leaf, AtFlags::empty());
+                }
+                return Err(LocalGitFailure::Operation);
+            }
             self.committed = true;
             return Ok(());
         }
@@ -2811,6 +2831,24 @@ impl ReferenceLock {
         let path_identity = openat(
             &self.parent,
             &self.lock_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()
+        .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
+        .map(|metadata| file_identity(&metadata));
+        descriptor_identity == Some(self.identity) && path_identity == Some(self.identity)
+    }
+
+    fn published_path_still_owned(&self) -> bool {
+        let descriptor_identity = self
+            .lock
+            .metadata()
+            .map(|metadata| file_identity(&metadata))
+            .ok();
+        let path_identity = openat(
+            &self.parent,
+            &self.leaf,
             OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
@@ -5378,10 +5416,18 @@ fn persist_objects(
         .packbuilder()
         .map_err(|_| LocalGitFailure::Operation)?;
     let mut inserted = HashSet::new();
+    let mut budget = PackTraversalBudget::default();
     for root in roots {
         match root {
             PackRoot::Object(oid) => {
-                insert_missing_pack_object(persistent_objects, &mut builder, &mut inserted, *oid)?;
+                insert_missing_pack_object(
+                    repository,
+                    persistent_objects,
+                    &mut builder,
+                    &mut inserted,
+                    &mut budget,
+                    *oid,
+                )?;
             }
             PackRoot::Commit(oid) => {
                 insert_missing_commit_graph(
@@ -5389,8 +5435,8 @@ fn persist_objects(
                     persistent_objects,
                     &mut builder,
                     &mut inserted,
+                    &mut budget,
                     *oid,
-                    &read_shallow_boundaries(authority)?,
                 )?;
             }
         }
@@ -5420,40 +5466,62 @@ fn persist_objects(
     let generated_bytes = generated_pack_bytes
         .checked_add(generated_index_bytes)
         .ok_or(LocalGitFailure::Operation)?;
+    let publication = ObjectPublicationLock::acquire(authority)?;
     live_object_database_bytes(authority)?
         .checked_add(generated_bytes)
         .filter(|bytes| *bytes <= MAX_OBJECT_DATABASE_BYTES as u64)
         .ok_or(LocalGitFailure::Operation)?;
-    let objects = openat(
-        &authority.git_directory,
-        "objects",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
+    let installation_mode = pack_installation_mode(&publication.directory)?;
+    install_packed_object_pair(
+        &publication.directory,
+        &generated_pack,
+        &generated_index,
+        installation_mode,
     )
-    .map_err(|_| LocalGitFailure::Repository)?;
-    let pack = openat(
-        &objects,
-        "pack",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| LocalGitFailure::Repository)?;
-    let installation_mode = pack_installation_mode(&pack)?;
-    install_packed_object_pair(&pack, &generated_pack, &generated_index, installation_mode)
+}
+
+#[derive(Default)]
+struct PackTraversalBudget {
+    inspections: usize,
+    bytes: usize,
+}
+
+impl PackTraversalBudget {
+    fn charge(&mut self, repository: &Repository, oid: git2::Oid) -> Result<(), LocalGitFailure> {
+        let (bytes, _) = repository
+            .odb()
+            .and_then(|object_database| object_database.read_header(oid))
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.inspections = self
+            .inspections
+            .checked_add(1)
+            .filter(|inspections| *inspections <= MAX_WORKTREE_INSPECTIONS)
+            .ok_or(LocalGitFailure::Operation)?;
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= MAX_OBJECT_DATABASE_BYTES)
+            .ok_or(LocalGitFailure::Operation)?;
+        Ok(())
+    }
 }
 
 fn insert_missing_pack_object(
+    repository: &Repository,
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
     inserted: &mut HashSet<git2::Oid>,
+    budget: &mut PackTraversalBudget,
     oid: git2::Oid,
-) -> Result<(), LocalGitFailure> {
+) -> Result<bool, LocalGitFailure> {
     if !persistent_objects.exists(oid) && inserted.insert(oid) {
+        budget.charge(repository, oid)?;
         builder
             .insert_object(oid, None)
             .map_err(|_| LocalGitFailure::Operation)?;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 fn insert_missing_commit_graph(
@@ -5461,27 +5529,35 @@ fn insert_missing_commit_graph(
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
     inserted: &mut HashSet<git2::Oid>,
+    budget: &mut PackTraversalBudget,
     root: git2::Oid,
-    shallow: &HashSet<git2::Oid>,
 ) -> Result<(), LocalGitFailure> {
     let mut pending = vec![root];
     while let Some(oid) = pending.pop() {
-        if persistent_objects.exists(oid) || !inserted.insert(oid) {
+        if !insert_missing_pack_object(
+            repository,
+            persistent_objects,
+            builder,
+            inserted,
+            budget,
+            oid,
+        )? {
             continue;
         }
-        builder
-            .insert_object(oid, None)
-            .map_err(|_| LocalGitFailure::Operation)?;
         let commit = find_bounded_commit(repository, oid)?;
         insert_missing_tree_graph(
             repository,
             persistent_objects,
             builder,
             inserted,
+            budget,
             commit.tree_id(),
         )?;
-        if !shallow.contains(&oid) {
-            pending.extend(commit.parent_ids());
+        let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
+        for parent in commit.parent_ids() {
+            if persistent_objects.exists(parent) || object_database.exists(parent) {
+                pending.push(parent);
+            }
         }
     }
     Ok(())
@@ -5492,16 +5568,21 @@ fn insert_missing_tree_graph(
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
     inserted: &mut HashSet<git2::Oid>,
+    budget: &mut PackTraversalBudget,
     root: git2::Oid,
 ) -> Result<(), LocalGitFailure> {
     let mut pending = vec![root];
     while let Some(oid) = pending.pop() {
-        if persistent_objects.exists(oid) || !inserted.insert(oid) {
+        if !insert_missing_pack_object(
+            repository,
+            persistent_objects,
+            builder,
+            inserted,
+            budget,
+            oid,
+        )? {
             continue;
         }
-        builder
-            .insert_object(oid, None)
-            .map_err(|_| LocalGitFailure::Operation)?;
         let tree = repository
             .find_tree(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -5509,7 +5590,14 @@ fn insert_missing_tree_graph(
             match entry.kind() {
                 Some(git2::ObjectType::Tree) => pending.push(entry.id()),
                 Some(git2::ObjectType::Blob) => {
-                    insert_missing_pack_object(persistent_objects, builder, inserted, entry.id())?
+                    insert_missing_pack_object(
+                        repository,
+                        persistent_objects,
+                        builder,
+                        inserted,
+                        budget,
+                        entry.id(),
+                    )?;
                 }
                 Some(git2::ObjectType::Commit) if entry.filemode() == GITLINK_MODE as i32 => {}
                 _ => return Err(LocalGitFailure::Operation),
@@ -5517,6 +5605,62 @@ fn insert_missing_tree_graph(
         }
     }
     Ok(())
+}
+
+struct ObjectPublicationLock {
+    directory: OwnedFd,
+    descriptor: fs::File,
+    identity: FileIdentity,
+}
+
+impl ObjectPublicationLock {
+    fn acquire(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
+        let objects = openat(
+            &authority.git_directory,
+            "objects",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Repository)?;
+        let directory = openat(
+            &objects,
+            "pack",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Repository)?;
+        let descriptor = openat(
+            &directory,
+            OBJECT_PUBLICATION_LOCK,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map(fs::File::from)
+        .map_err(|_| LocalGitFailure::Operation)?;
+        let identity = file_identity(
+            &descriptor
+                .metadata()
+                .map_err(|_| LocalGitFailure::Operation)?,
+        );
+        Ok(Self {
+            directory,
+            descriptor,
+            identity,
+        })
+    }
+}
+
+impl Drop for ObjectPublicationLock {
+    fn drop(&mut self) {
+        if pack_entry_is_owned(
+            &self.directory,
+            OsStr::new(OBJECT_PUBLICATION_LOCK),
+            &self.descriptor,
+            self.identity,
+        ) {
+            let _ = unlinkat(&self.directory, OBJECT_PUBLICATION_LOCK, AtFlags::empty());
+        }
+    }
 }
 
 fn pack_installation_mode(pack_directory: &OwnedFd) -> Result<Mode, LocalGitFailure> {
@@ -5976,7 +6120,9 @@ where
         lock.sync_all().map_err(|_| LocalGitFailure::Operation)?;
         post_write();
         let reference_name = format!("refs/heads/{branch}");
-        if packed_reference_exists(authority, &reference_name)? {
+        let packed_is_absent =
+            packed_reference_exists(authority, &reference_name).is_ok_and(|exists| !exists);
+        if !packed_is_absent {
             return Err(LocalGitFailure::Operation);
         }
         let path_identity = fs::symlink_metadata(&lock_path)
@@ -5996,7 +6142,16 @@ where
             &leaf,
             RenameFlags::NOREPLACE,
         )
-        .map_err(|_| LocalGitFailure::Operation)
+        .map_err(|_| LocalGitFailure::Operation)?;
+        let packed_still_absent =
+            packed_reference_exists(authority, &reference_name).is_ok_and(|exists| !exists);
+        if !packed_still_absent {
+            if pack_entry_is_owned(&directory, &leaf, &lock, identity) {
+                let _ = unlinkat(&directory, &leaf, AtFlags::empty());
+            }
+            return Err(LocalGitFailure::Operation);
+        }
+        Ok(())
     })();
     let still_owned = fs::symlink_metadata(&lock_path)
         .map(|metadata| file_identity(&metadata) == identity)
@@ -10044,7 +10199,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_create_persists_pruned_target_ancestry_after_object_capture() {
+    fn branch_create_persists_pruned_ancestry_across_a_removed_shallow_boundary() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
         let tree = repository
@@ -10081,6 +10236,8 @@ mod tests {
             .join(&parent_text[2..]);
         fs::remove_file(loose_target).expect("live target object prunes");
         fs::remove_file(loose_parent).expect("live parent object prunes");
+        let shallow = fixture.root().join(".git/shallow");
+        fs::write(&shallow, format!("{target}\n")).expect("temporary shallow boundary writes");
 
         branch_create(
             &pinned_repository,
@@ -10090,7 +10247,10 @@ mod tests {
                 name: FIX_BRANCH.to_owned(),
                 start: target_text,
             },
-            || Ok(()),
+            || {
+                fs::remove_file(&shallow).expect("temporary shallow boundary removes");
+                Ok(())
+            },
         )
         .expect("captured target persists before branch publication");
         drop(pinned_repository);
@@ -10118,6 +10278,25 @@ mod tests {
                 .tree_id(),
             tree
         );
+    }
+
+    #[test]
+    fn branch_create_rejects_captured_ancestry_over_the_traversal_budget() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let newest =
+            plant_linear_history(&repository, fixture.initial, MAX_WORKTREE_INSPECTIONS + 1);
+        let executor = fixture.executor();
+
+        let failure = executor
+            .execute_operation(LocalOperation::BranchCreate(GitBranchCreateArguments {
+                name: FIX_BRANCH.to_owned(),
+                start: newest.to_string(),
+            }))
+            .expect_err("over-budget captured ancestry rejects");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert!(!fixture.root().join(".git/refs/heads/agent/fix").exists());
     }
 
     #[test]
@@ -12370,6 +12549,64 @@ mod tests {
     }
 
     #[test]
+    fn object_publication_lock_serializes_budget_check_and_installation() {
+        let fixture = Fixture::new();
+        let executor = fixture.executor();
+        let pinned_objects = PinnedObjectDatabase::capture(&executor.repository_authority)
+            .expect("fixture objects pin");
+        let persistent_object_database =
+            Odb::new().expect("fixture persistent object database constructs");
+        pinned_objects
+            .add_to(&persistent_object_database)
+            .expect("persistent fixture objects attach");
+        let object_database = Odb::new().expect("fixture object database constructs");
+        pinned_objects
+            .add_to(&object_database)
+            .expect("fixture objects attach");
+        let _mempack = object_database
+            .add_new_mempack_backend(1000)
+            .expect("fixture memory pack attaches");
+        let repository = executor
+            .repository_authority
+            .repository()
+            .expect("pinned fixture repository opens");
+        repository
+            .set_odb(&object_database)
+            .expect("fixture object database installs");
+        let object = repository
+            .blob(UNTRACKED_CONTENT.as_bytes())
+            .expect("fixture memory object writes");
+        let publication = ObjectPublicationLock::acquire(&executor.repository_authority)
+            .expect("first publication locks budget and installation");
+        let pack_entries_before = fs::read_dir(fixture.root().join(".git/objects/pack"))
+            .expect("fixture pack directory reads")
+            .count();
+
+        let failure = persist_objects(
+            &executor.repository_authority,
+            &repository,
+            &persistent_object_database,
+            &object_database,
+            &[PackRoot::Object(object)],
+        )
+        .expect_err("concurrent publication rejects before installation");
+        let pack_entries_after = fs::read_dir(fixture.root().join(".git/objects/pack"))
+            .expect("fixture pack directory rereads")
+            .count();
+        drop(publication);
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(pack_entries_after, pack_entries_before);
+        assert!(
+            !fixture
+                .root()
+                .join(".git/objects/pack")
+                .join(OBJECT_PUBLICATION_LOCK)
+                .exists()
+        );
+    }
+
+    #[test]
     fn fifo_repository_config_is_rejected_without_blocking() {
         let fixture = Fixture::new();
         let config_path = fixture.root().join(".git/config");
@@ -12849,6 +13086,61 @@ mod tests {
         assert_eq!(
             fs::read_to_string(reference_path).expect("concurrent reference reads"),
             format!("{replacement}\n")
+        );
+    }
+
+    #[test]
+    fn reference_publication_preserves_a_concurrent_packed_destination() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let tree = repository
+            .find_commit(fixture.initial)
+            .expect("fixture commit opens")
+            .tree_id();
+        let new = raw_commit_with_tree(&repository, tree, fixture.initial);
+        let replacement = commit_with_parents(
+            &repository,
+            &[fixture.initial],
+            "concurrent packed replacement",
+        );
+        let executor = fixture.executor();
+        let (chain, _) = resolve_pinned_reference_chain(&executor.repository_authority, None)
+            .expect("fixture reference chain resolves");
+        let update_reference = chain.last().expect("fixture branch target exists");
+        let reference_path = fixture.root().join(".git").join(update_reference);
+        let packed_references = fixture.root().join(".git/packed-refs");
+        fs::write(
+            &packed_references,
+            format!("{} {update_reference}\n", fixture.initial),
+        )
+        .expect("initial packed destination writes");
+        fs::remove_file(&reference_path).expect("loose destination removes");
+        let mut update_lock =
+            ReferenceLock::acquire(&executor.repository_authority, update_reference)
+                .expect("packed destination locks");
+        let expected = update_lock
+            .read(&executor.repository_authority)
+            .expect("packed destination reads");
+        update_lock
+            .prepare(&executor.repository_authority, new)
+            .expect("replacement reference prepares");
+
+        let failure = update_lock
+            .publish_with_hook(&executor.repository_authority, &expected, || {
+                fs::write(
+                    &packed_references,
+                    format!("{replacement} {update_reference}\n"),
+                )
+                .expect("concurrent packed destination writes");
+            })
+            .expect_err("concurrent packed destination rejects publication");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert!(!reference_path.exists());
+        assert_eq!(
+            packed_reference_target(&executor.repository_authority, update_reference)
+                .expect("concurrent packed destination reads"),
+            Some(replacement)
         );
     }
 
