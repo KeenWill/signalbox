@@ -2035,10 +2035,6 @@ fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
     !normalized_needle.is_empty() && unicode_case_folded_nfc(haystack).contains(&normalized_needle)
 }
 
-fn unicode_case_insensitive_eq(left: &str, right: &str) -> bool {
-    !left.is_empty() && unicode_case_folded_nfc(left) == unicode_case_folded_nfc(right)
-}
-
 fn unicode_case_folded_nfc(text: &str) -> String {
     let decomposed = text.nfd().collect::<String>();
     let folded = CaseMapper::new().fold_string(&decomposed);
@@ -2144,13 +2140,27 @@ fn fixed_bound_evidence_token_collides(scrubber: &CredentialScrubber) -> bool {
         ToolExecutorEvidence::Ambiguous,
     ];
     evidence.iter().any(|evidence| {
-        let token = fixed_bound_evidence_debug_token(evidence);
-        unicode_case_insensitive_eq(token, &scrubber.exact)
+        fixed_bound_evidence_token_contains_credential(evidence, &scrubber.exact)
             || scrubber
                 .decoded_variants
                 .iter()
-                .any(|variant| unicode_case_insensitive_eq(token, variant))
+                .any(|variant| fixed_bound_evidence_token_contains_credential(evidence, variant))
     })
+}
+
+fn fixed_bound_evidence_token_contains_credential(
+    evidence: &ToolExecutorEvidence,
+    credential: &str,
+) -> bool {
+    let token = fixed_bound_evidence_debug_token(evidence);
+    let collision = unicode_case_insensitive_contains(token, credential);
+    let definitive_failure_word_collision = match evidence {
+        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => false,
+        ToolExecutorEvidence::KnownFailed { .. } => {
+            unicode_case_insensitive_contains("Failed", credential)
+        }
+    };
+    collision && !definitive_failure_word_collision
 }
 
 fn fixed_bound_evidence_debug_token(evidence: &ToolExecutorEvidence) -> &'static str {
@@ -2303,6 +2313,7 @@ mod tests {
     const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
     const EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY: &str = "completedtext";
     const EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY: &str = "knownfailed";
+    const EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY: &str = "known";
     const EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY: &str = "completedtext(";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY: &str = "requestfailed";
@@ -3411,6 +3422,52 @@ mod tests {
         assert!(!unicode_case_insensitive_contains(
             &rendered,
             EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY,
+        ));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: a credential matching a substring of the fixed `KnownFailed`
+    /// Debug token is rejected before dispatch and omitted from the public
+    /// executor result.
+    #[tokio::test]
+    async fn web_search_bound_known_failure_token_omits_credential_substring_collision() {
+        let diagnostic = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&diagnostic);
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY,
+        };
+        let transport = RequestFailedTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("static web_search tool compiles")
+            .into_parts();
+        let executor = FormattingExecutor {
+            inner: executor,
+            diagnostic: captured,
+        };
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let rendered = diagnostic
+            .lock()
+            .expect("captured executor diagnostic lock is available")
+            .clone();
+
+        assert!(result.is_err());
+        assert!(!unicode_case_insensitive_contains(
+            &rendered,
+            EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY,
         ));
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
