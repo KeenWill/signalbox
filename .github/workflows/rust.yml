@@ -22,7 +22,7 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  validate:
+  validate-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -97,10 +97,9 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
   # The workspace test binaries build and run here rather than at the end of
-  # `validate`, so their compilation overlaps validate's instead of following
-  # it. The duplicated dependency build is the accepted cost; separate jobs
-  # cannot share a target directory, so this job carries its own rust-cache
-  # entry.
+  # `validate-checks`, so the two compilations overlap instead of queueing. The
+  # duplicated dependency build is the accepted cost; separate jobs cannot
+  # share a target directory, so this job carries its own rust-cache entry.
   workspace-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -120,6 +119,25 @@ jobs:
       # sealing proofs need this separate run.
       - name: Run doctests
         run: cargo test --no-fail-fast --workspace --all-features --doc
+
+  # Preserve the existing required-check name while the checks and the
+  # workspace tests run as separate jobs. A status check is identified by its
+  # job name alone, so splitting the work without this job would leave
+  # `validate` naming only half of what it named before.
+  validate:
+    name: validate
+    if: ${{ always() }}
+    needs: [validate-checks, workspace-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Confirm the checks and the workspace tests passed
+        env:
+          CHECKS_RESULT: ${{ needs.validate-checks.result }}
+          TESTS_RESULT: ${{ needs.workspace-tests.result }}
+        run: |
+          test "$CHECKS_RESULT" = success
+          test "$TESTS_RESULT" = success
 
   # Report-only by owner decision: this job publishes deterministic counts
   # for human comparison but can never fail the workflow or gate a merge.
