@@ -4,18 +4,40 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
-OWNER = re.compile(
-    r"[A-Za-z0-9_]*owner[A-Za-z0-9_]*", re.IGNORECASE
-)
+IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
+OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
+CROSS_FRAGMENT_OWNER = re.compile(r"(?:Unknown|Known)(?:Error|Rejection)")
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
+REVIEWED_ALLOWLIST_SHA256 = (
+    "8984981505747a951e89b29a5e8005dc04caed29991e22275c1f850c9aec6a34"
+)
+
+
+def owner_matches(line: str) -> Iterator[re.Match[str]]:
+    for identifier in IDENTIFIER.finditer(line):
+        token = identifier.group()
+        fragments = tuple(OWNER_FRAGMENT.finditer(token))
+        cross_fragments = tuple(CROSS_FRAGMENT_OWNER.finditer(token))
+        if any(
+            not any(
+                cross.start() <= fragment.start()
+                and cross.end() >= fragment.end()
+                for cross in cross_fragments
+            )
+            for fragment in fragments
+        ):
+            yield identifier
+
 
 @dataclass(frozen=True)
 class Allowance:
@@ -24,19 +46,19 @@ class Allowance:
     name: str
     paths: re.Pattern[str]
     lines: re.Pattern[str]
-    enclosing_impls: Mapping[str, str] | None = None
+    enclosing_blocks: Mapping[str, str] | None = None
     enclosing_functions: Mapping[str, frozenset[str]] | None = None
     previous_line: re.Pattern[str] | None = None
 
     @staticmethod
-    def _inside_impl(
-        source_lines: list[str], index: int, expected_impl: str
+    def _inside_block(
+        source_lines: list[str], index: int, expected_block: str
     ) -> bool:
         start = next(
             (
                 candidate
                 for candidate in range(index - 1, -1, -1)
-                if source_lines[candidate].strip() == expected_impl
+                if source_lines[candidate].strip() == expected_block
             ),
             None,
         )
@@ -80,10 +102,10 @@ class Allowance:
         if self.paths.search(path) is None:
             return False
         line = source_lines[index]
-        if self.enclosing_impls is not None:
-            expected_impl = self.enclosing_impls.get(path)
-            if expected_impl is None or not self._inside_impl(
-                source_lines, index, expected_impl
+        if self.enclosing_blocks is not None:
+            expected_block = self.enclosing_blocks.get(path)
+            if expected_block is None or not self._inside_block(
+                source_lines, index, expected_block
             ):
                 return False
         if self.enclosing_functions is not None:
@@ -278,15 +300,27 @@ ALLOWLIST = (
     ),
     Allowance(
         "imported-conversation record owner identifiers",
-        re.compile(r"^crates/(?:application/src/conversation_import|domain/src/imported_conversation)[.]rs$"),
         re.compile(
-            r"returned_owner|"
+            r"^crates/(?:application/src/conversation_import|"
+            r"domain/src/imported_conversation)[.]rs$"
+        ),
+        re.compile(
             r"^\s*owner:\s*ImportedConversationId,\s*$|"
             r"^\s*self[.]owner,\s*$|"
             r"^\s*let owner = conversation\(\d+\);\s*$|"
             r"self[.]observed[.]push\(\(owner, source[.]to_vec\(\)\)\);|"
             r"self[.]returned_owner[.]unwrap_or\(owner\)|"
             r"self[.]convert\(owner, source, next_entry_id\)\?",
+        ),
+    ),
+    Allowance(
+        "imported-conversation converter fixture owner members",
+        re.compile(r"^crates/application/src/conversation_import[.]rs$"),
+        re.compile(
+            r"^\s*returned_owner: Option<ImportedConversationId>,\s*$|"
+            r"^\s*self[.]returned_owner[.]unwrap_or\(owner\),\s*$|"
+            r"^\s*returned_owner: None,\s*$|"
+            r"^\s*service[.]converter[.]returned_owner = Some\(converted\);\s*$"
         ),
     ),
     Allowance(
@@ -347,8 +381,31 @@ ALLOWLIST = (
             r"SignalboxSnapshot(?:Required)?ModelCallOwnership|"
             r"(?:unmatchedTerminal|forbidden)ModelCallOwners|"
             r"unmatchedTerminalModelCallOwnerIDs|"
-            r"terminal owner, merely permit historical calls|"
-            r"case owner\b|[.]required\([.]owner\)"
+            r"terminal owner, merely permit historical calls"
+        ),
+    ),
+    Allowance(
+        "native model-call usage ownership enum case",
+        re.compile(
+            r"^clients/native/Sources/SignalboxClient/"
+            r"SessionSynchronization[.]swift$"
+        ),
+        re.compile(r"^\s*case owner\s*$"),
+        enclosing_blocks={
+            "clients/native/Sources/SignalboxClient/SessionSynchronization.swift":
+                "private enum SignalboxSnapshotRequiredModelCallOwnership {"
+        },
+    ),
+    Allowance(
+        "native model-call usage ownership expressions",
+        re.compile(
+            r"^clients/native/Sources/SignalboxClient/"
+            r"SessionSynchronization[.]swift$"
+        ),
+        re.compile(
+            r"^\s*case [.]required\([.]owner\):\s*$|"
+            r"^\s*return [.]required\([.]owner\)\s*$|"
+            r"^\s*case [.]impossible, [.]permitted, [.]required\([.]owner\):\s*$"
         ),
     ),
     Allowance(
@@ -379,18 +436,44 @@ ALLOWLIST = (
         ),
     ),
     Allowance(
-        "legacy PostgreSQL actor encodings",
+        "legacy PostgreSQL actor decoder fields",
         re.compile(
-            r"^(?:crates/persistence/src/(?:session_metadata|submit_input)[.]rs|"
-            r"crates/persistence/tests/(?:postgres_integration|"
-            r"session_metadata_postgres)[.]rs|"
-            r"docs/spec/identity-and-commands[.]md)$"
+            r"^crates/persistence/src/(?:session_metadata|submit_input)[.]rs$"
         ),
         re.compile(
-            r"\(\"owner\", (?:None|Some\(_\))(?:, None)?\)|"
-            r"\"owner\" \| \"model\"|"
-            r"expected_issuer\s*=\s*\(\"owner\"|"
-            r"\(`owner`/(?:`model`|`tool`)"
+            r'^\s*\("owner", None, None\) => Ok\(Actor::User\),\s*$|'
+            r'^\s*\("owner" \| "model" \| "recovery" \| "tool", _, _\) => \{\s*$'
+        ),
+        enclosing_functions={
+            "crates/persistence/src/session_metadata.rs": frozenset({"decode_actor"}),
+            "crates/persistence/src/submit_input.rs": frozenset({"decode_actor"}),
+        },
+    ),
+    Allowance(
+        "legacy PostgreSQL command issuer decoder fields",
+        re.compile(r"^crates/persistence/src/session_metadata[.]rs$"),
+        re.compile(
+            r'^\s*\("owner", None\) => ReplaceSessionMetadata::new\('
+            r"command_id, session, content\),\s*$|"
+            r'^\s*\("owner", Some\(_\)\) \| \("tool", None\) => \{\s*$'
+        ),
+        enclosing_functions={
+            "crates/persistence/src/session_metadata.rs": frozenset({"decode_command"})
+        },
+    ),
+    Allowance(
+        "legacy PostgreSQL actor encoding specification",
+        re.compile(r"^docs/spec/identity-and-commands[.]md$"),
+        re.compile(
+            r"^\(`owner`/`model`/`recovery`/`tool`\) plus `actor_turn_id` and$|"
+            r"^receipts additionally carry constructor-selected `issuer_kind` \(`owner`/`tool`\)$"
+        ),
+    ),
+    Allowance(
+        "legacy PostgreSQL actor fixture",
+        re.compile(r"^crates/persistence/tests/session_metadata_postgres[.]rs$"),
+        re.compile(
+            r'^\s*let expected_issuer = \("owner"[.]to_owned\(\), None\);\s*$'
         ),
     ),
     Allowance(
@@ -408,18 +491,6 @@ ALLOWLIST = (
             r"session_metadata_postgres)[.]rs$"
         ),
         re.compile(r"(?:^|,|=\s*)\s*'owner'(?=\s*[,)]|$)"),
-    ),
-    Allowance(
-        "non-owner cross-fragment identifiers",
-        re.compile(
-            r"^clients/native/Tests/(?:SignalboxAppTests/ViewModelTests|"
-            r"SignalboxModelsTests/ProcessProtocolTests)[.]swift$"
-        ),
-        re.compile(
-            r"\b(?:sendOutcomeUnknownError|"
-            r"testExpandedKnownErrorDetailDegradesBeforeProtocolProjection|"
-            r"testUnknownRejectionDetailDegradesKnownError)\b"
-        ),
     ),
     Allowance(
         "Rust borrow/ownership phrasing",
@@ -466,7 +537,7 @@ ALLOWLIST = (
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
             r"cross_wired_attempt_owner|cross_wired_defaults_owner|"
             r"foreign_attachment_owner|foreign_event_owner|foreign_observation_owner|"
-            r"foreign_owner|different_owner|returned_owner|"
+            r"foreign_owner|different_owner|"
             r"s29_inv040_finding_history_rejects_foreign_event_owner|"
             r"inv040_external_link_rejects_foreign_observation_owner|"
             r"inv041_external_link_rejects_foreign_attachment_owner|"
@@ -531,8 +602,9 @@ def tracked_files(root: Path) -> list[Path]:
         raise InventoryError("git ls-files returned no vocabulary inputs")
     return [root / label for label in labels]
 
-def violations(root: Path) -> list[str]:
+def audit(root: Path) -> tuple[list[str], str]:
     failures: list[str] = []
+    allowed_inventory: list[str] = []
     for path in tracked_files(root):
         relative = path.relative_to(root).as_posix()
         try:
@@ -542,7 +614,7 @@ def violations(root: Path) -> list[str]:
         lines = text.splitlines()
         for index, line in enumerate(lines):
             number = index + 1
-            matches = tuple(OWNER.finditer(line))
+            matches = tuple(owner_matches(line))
             if not matches:
                 continue
             if all(
@@ -552,27 +624,52 @@ def violations(root: Path) -> list[str]:
                 )
                 for match in matches
             ):
+                previous_line = lines[index - 1] if index > 0 else ""
+                next_line = lines[index + 1] if index + 1 < len(lines) else ""
+                allowed_inventory.extend(
+                    f"{relative}\0{number}\0{previous_line}\0{line}\0{next_line}\0"
+                    f"{match.start()}\0{match.end()}"
+                    for match in matches
+                )
                 continue
             failures.append(f"{relative}:{number}: {line.strip()}")
         for match in BARE_USER_MESSAGE.finditer(text):
             number = text.count("\n", 0, match.start()) + 1
             failures.append(f"{relative}:{number}: {lines[number - 1].strip()}")
-    return failures
+    inventory = "\n".join(sorted(allowed_inventory)).encode()
+    return failures, hashlib.sha256(inventory).hexdigest()
+
 
 def main() -> int:
+    repository_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--root", type=Path, default=repository_root)
     parser.add_argument("--show-allowlist", action="store_true")
+    parser.add_argument("--show-allowlist-hash", action="store_true")
+    parser.add_argument("--expected-allowlist-sha256")
     args = parser.parse_args()
     if args.show_allowlist:
         for allowance in ALLOWLIST:
             print(allowance.name)
         return 0
+    root = args.root.resolve()
     try:
-        failures = violations(args.root.resolve())
+        failures, observed_inventory = audit(root)
     except (InventoryError, OSError) as error:
         print(f"user-vocabulary check failed: {error}", file=sys.stderr)
         return 1
+    if args.show_allowlist_hash:
+        print(observed_inventory)
+        return 0
+    expected_inventory = args.expected_allowlist_sha256
+    if expected_inventory is None and root == repository_root:
+        expected_inventory = REVIEWED_ALLOWLIST_SHA256
+    if expected_inventory is not None and observed_inventory != expected_inventory:
+        print(
+            "reviewed owner allowlist inventory changed: "
+            f"expected {expected_inventory}, observed {observed_inventory}"
+        )
+        failures.append("reviewed allowlist inventory digest mismatch")
     if failures:
         print("retired or ambiguous role vocabulary is forbidden:")
         for failure in failures:

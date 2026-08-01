@@ -26,7 +26,9 @@ The registration-only executable slice is verified through PR #376
 idempotent enrollment receipts, exact resume and replacement-advertisement
 registration, the `signalbox-runner` binary, explicit credential/repository
 availability, and heartbeat liveness exchange with durable connection epochs,
-shutdown, suspect, and loss facts. Recovery inventory, workspaces, leases,
+shutdown, suspect, and loss facts. Its fatal stale-shutdown close, complete
+rejection correlations, and lifecycle observability are re-verified through PR
+#382 (`agent/runner-honesty`). Recovery inventory, workspaces, leases,
 execution, and model calls remain unimplemented as labeled below. Remote
 transport and dynamic policy stay under [Open edges](#open-edges).
 
