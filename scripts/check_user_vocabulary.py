@@ -8,18 +8,33 @@ import hashlib
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
-OWNER = re.compile(
-    r"[A-Za-z0-9_]*owner[A-Za-z0-9_]*", re.IGNORECASE
-)
+IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
+OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 REVIEWED_ALLOWLIST_SHA256 = (
-    "a82805bf3fc775c95d06fe9e14847a304afa5146680bb0b37f914f118ab5da80"
+    "c104549dca69ce29de6c3ac8b026bc9e58ac67761880bd7079e840713a36e770"
 )
+
+
+def owner_matches(line: str) -> Iterator[re.Match[str]]:
+    for identifier in IDENTIFIER.finditer(line):
+        token = identifier.group()
+        fragments = tuple(OWNER_FRAGMENT.finditer(token))
+        if any(
+            not (
+                token[fragment.start() : fragment.start() + 3] == "own"
+                and token[fragment.start() + 3].isupper()
+            )
+            for fragment in fragments
+        ):
+            yield identifier
+
 
 @dataclass(frozen=True)
 class Allowance:
@@ -28,19 +43,19 @@ class Allowance:
     name: str
     paths: re.Pattern[str]
     lines: re.Pattern[str]
-    enclosing_impls: Mapping[str, str] | None = None
+    enclosing_blocks: Mapping[str, str] | None = None
     enclosing_functions: Mapping[str, frozenset[str]] | None = None
     previous_line: re.Pattern[str] | None = None
 
     @staticmethod
-    def _inside_impl(
-        source_lines: list[str], index: int, expected_impl: str
+    def _inside_block(
+        source_lines: list[str], index: int, expected_block: str
     ) -> bool:
         start = next(
             (
                 candidate
                 for candidate in range(index - 1, -1, -1)
-                if source_lines[candidate].strip() == expected_impl
+                if source_lines[candidate].strip() == expected_block
             ),
             None,
         )
@@ -84,10 +99,10 @@ class Allowance:
         if self.paths.search(path) is None:
             return False
         line = source_lines[index]
-        if self.enclosing_impls is not None:
-            expected_impl = self.enclosing_impls.get(path)
-            if expected_impl is None or not self._inside_impl(
-                source_lines, index, expected_impl
+        if self.enclosing_blocks is not None:
+            expected_block = self.enclosing_blocks.get(path)
+            if expected_block is None or not self._inside_block(
+                source_lines, index, expected_block
             ):
                 return False
         if self.enclosing_functions is not None:
@@ -282,15 +297,27 @@ ALLOWLIST = (
     ),
     Allowance(
         "imported-conversation record owner identifiers",
-        re.compile(r"^crates/(?:application/src/conversation_import|domain/src/imported_conversation)[.]rs$"),
         re.compile(
-            r"returned_owner|"
+            r"^crates/(?:application/src/conversation_import|"
+            r"domain/src/imported_conversation)[.]rs$"
+        ),
+        re.compile(
             r"^\s*owner:\s*ImportedConversationId,\s*$|"
             r"^\s*self[.]owner,\s*$|"
             r"^\s*let owner = conversation\(\d+\);\s*$|"
             r"self[.]observed[.]push\(\(owner, source[.]to_vec\(\)\)\);|"
             r"self[.]returned_owner[.]unwrap_or\(owner\)|"
             r"self[.]convert\(owner, source, next_entry_id\)\?",
+        ),
+    ),
+    Allowance(
+        "imported-conversation converter fixture owner members",
+        re.compile(r"^crates/application/src/conversation_import[.]rs$"),
+        re.compile(
+            r"^\s*returned_owner: Option<ImportedConversationId>,\s*$|"
+            r"^\s*self[.]returned_owner[.]unwrap_or\(owner\),\s*$|"
+            r"^\s*returned_owner: None,\s*$|"
+            r"^\s*service[.]converter[.]returned_owner = Some\(converted\);\s*$"
         ),
     ),
     Allowance(
@@ -351,8 +378,31 @@ ALLOWLIST = (
             r"SignalboxSnapshot(?:Required)?ModelCallOwnership|"
             r"(?:unmatchedTerminal|forbidden)ModelCallOwners|"
             r"unmatchedTerminalModelCallOwnerIDs|"
-            r"terminal owner, merely permit historical calls|"
-            r"case owner\b|[.]required\([.]owner\)"
+            r"terminal owner, merely permit historical calls"
+        ),
+    ),
+    Allowance(
+        "native model-call usage ownership enum case",
+        re.compile(
+            r"^clients/native/Sources/SignalboxClient/"
+            r"SessionSynchronization[.]swift$"
+        ),
+        re.compile(r"^\s*case owner\s*$"),
+        enclosing_blocks={
+            "clients/native/Sources/SignalboxClient/SessionSynchronization.swift":
+                "private enum SignalboxSnapshotRequiredModelCallOwnership {"
+        },
+    ),
+    Allowance(
+        "native model-call usage ownership expressions",
+        re.compile(
+            r"^clients/native/Sources/SignalboxClient/"
+            r"SessionSynchronization[.]swift$"
+        ),
+        re.compile(
+            r"^\s*case [.]required\([.]owner\):\s*$|"
+            r"^\s*return [.]required\([.]owner\)\s*$|"
+            r"^\s*case [.]impossible, [.]permitted, [.]required\([.]owner\):\s*$"
         ),
     ),
     Allowance(
@@ -440,18 +490,6 @@ ALLOWLIST = (
         re.compile(r"(?:^|,|=\s*)\s*'owner'(?=\s*[,)]|$)"),
     ),
     Allowance(
-        "non-owner cross-fragment identifiers",
-        re.compile(
-            r"^clients/native/Tests/(?:SignalboxAppTests/ViewModelTests|"
-            r"SignalboxModelsTests/ProcessProtocolTests)[.]swift$"
-        ),
-        re.compile(
-            r"\b(?:sendOutcomeUnknownError|"
-            r"testExpandedKnownErrorDetailDegradesBeforeProtocolProjection|"
-            r"testUnknownRejectionDetailDegradesKnownError)\b"
-        ),
-    ),
-    Allowance(
         "Rust borrow/ownership phrasing",
         re.compile(r"^(?:crates|apps|clients|docs/spec)/"),
         re.compile(
@@ -496,7 +534,7 @@ ALLOWLIST = (
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
             r"cross_wired_attempt_owner|cross_wired_defaults_owner|"
             r"foreign_attachment_owner|foreign_event_owner|foreign_observation_owner|"
-            r"foreign_owner|different_owner|returned_owner|"
+            r"foreign_owner|different_owner|"
             r"s29_inv040_finding_history_rejects_foreign_event_owner|"
             r"inv040_external_link_rejects_foreign_observation_owner|"
             r"inv041_external_link_rejects_foreign_attachment_owner|"
@@ -573,7 +611,7 @@ def audit(root: Path) -> tuple[list[str], str]:
         lines = text.splitlines()
         for index, line in enumerate(lines):
             number = index + 1
-            matches = tuple(OWNER.finditer(line))
+            matches = tuple(owner_matches(line))
             if not matches:
                 continue
             if all(

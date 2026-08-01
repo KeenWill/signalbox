@@ -157,7 +157,10 @@ def main() -> int:
             "CHECK (cause = 'owner_initiated');",
             "human_owner TEXT;",
         )
-        native_lines = ('let sessionOwner = "human who approves tools"',)
+        native_lines = (
+            'let sessionOwner = "human who approves tools"',
+            "enum HumanPrincipal { case owner }",
+        )
         reviewed_domain_lines = (
             "The foreign owner approves this tool.",
             "human_foreign_owner names the person who approves tools.",
@@ -207,6 +210,7 @@ def main() -> int:
             "define_human_role!(",
             "    owner,",
             ")",
+            'let returned_owner = "human who approves tools";',
         )
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
@@ -369,7 +373,7 @@ def main() -> int:
             *expected_diagnostics(
                 "crates/application/src/conversation_import.rs",
                 application_import_lines,
-                (application_import_lines[2],),
+                (application_import_lines[2], application_import_lines[4]),
             ),
             *expected_diagnostics(
                 "crates/domain/src/session.rs", domain_record_lines
@@ -443,7 +447,10 @@ def main() -> int:
             "    consume(\n"
             "        owner,\n"
             "    );\n"
-            "}\n",
+            "}\n"
+            "let converter = FakeConverter {\n"
+            "    returned_owner: None,\n"
+            "};\n",
             encoding="utf-8",
         )
         frozen_migration.write_text(
@@ -486,7 +493,13 @@ def main() -> int:
             encoding="utf-8",
         )
         native_path.write_text(
-            "private enum SignalboxSnapshotModelCallOwnership {}\n",
+            "private enum SignalboxSnapshotRequiredModelCallOwnership {\n"
+            "  case identity(SignalboxCanonicalUUID)\n"
+            "  case owner\n"
+            "}\n"
+            "case .required(.owner):\n"
+            "  return .required(.owner)\n"
+            "case .impossible, .permitted, .required(.owner):\n",
             encoding="utf-8",
         )
         reviewed_domain_path.write_text(
