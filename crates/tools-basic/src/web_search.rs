@@ -1054,10 +1054,13 @@ fn fixed_result_debug_contains_credential(credential: &str) -> bool {
     text_contains_credential_variant(&format!("{result:?}"), credential)
 }
 
-const DYNAMIC_SUCCESS_VALUE_MARKERS: [&str; 3] = [
-    "SIGNALBOX_DYNAMIC_TITLE_MARKER",
-    "SIGNALBOX_DYNAMIC_URL_MARKER",
-    "SIGNALBOX_DYNAMIC_SNIPPET_MARKER",
+const DYNAMIC_SUCCESS_VALUE_MARKERS: [&str; 6] = [
+    "SIGNALBOX_DYNAMIC_TITLE_MARKER_ONE",
+    "SIGNALBOX_DYNAMIC_URL_MARKER_ONE",
+    "SIGNALBOX_DYNAMIC_SNIPPET_MARKER_ONE",
+    "SIGNALBOX_DYNAMIC_TITLE_MARKER_TWO",
+    "SIGNALBOX_DYNAMIC_URL_MARKER_TWO",
+    "SIGNALBOX_DYNAMIC_SNIPPET_MARKER_TWO",
 ];
 
 fn dynamic_success_field_boundary_may_collide(
@@ -1080,11 +1083,18 @@ fn dynamic_success_field_boundary_may_collide(
 
 fn dynamic_success_payload_probe() -> Option<String> {
     serde_json::to_string(&serde_json::json!({
-        "results": [RenderedSearchResult {
-            title: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[0]),
-            url: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[1]),
-            snippet: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[2]),
-        }],
+        "results": [
+            RenderedSearchResult {
+                title: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[0]),
+                url: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[1]),
+                snippet: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[2]),
+            },
+            RenderedSearchResult {
+                title: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[3]),
+                url: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[4]),
+                snippet: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[5]),
+            },
+        ],
         "truncated": false,
     }))
     .ok()
@@ -1094,19 +1104,33 @@ fn dynamic_success_value_boundary_may_collide(
     rendered: &str,
     scrubber: &CredentialScrubber,
 ) -> bool {
-    DYNAMIC_SUCCESS_VALUE_MARKERS.iter().any(|marker| {
+    let mut marker_spans = Vec::with_capacity(DYNAMIC_SUCCESS_VALUE_MARKERS.len());
+    for marker in DYNAMIC_SUCCESS_VALUE_MARKERS {
         let Some((prefix, suffix)) = rendered.split_once(marker) else {
             return true;
         };
         if suffix.contains(marker) {
             return true;
         }
-        scrubber.output_collision_variants().any(|credential| {
+        if scrubber.output_collision_variants().any(|credential| {
             credential.char_indices().skip(1).any(|(split, _)| {
                 unicode_case_insensitive_ends_with(prefix, &credential[..split])
                     || unicode_case_insensitive_starts_with(suffix, &credential[split..])
             })
-        })
+        }) {
+            return true;
+        }
+        marker_spans.push((prefix.len(), prefix.len() + marker.len()));
+    }
+    marker_spans.sort_unstable_by_key(|span| span.0);
+    marker_spans.windows(2).any(|adjacent| {
+        rendered
+            .get(adjacent[0].1..adjacent[1].0)
+            .is_none_or(|separator| {
+                scrubber
+                    .output_collision_variants()
+                    .any(|credential| unicode_case_insensitive_contains(credential, separator))
+            })
     })
 }
 
@@ -1461,7 +1485,16 @@ where
             };
         };
         let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-        if fixed_populated_failure_detail_collides(&scrubber, &self.credential_unavailable_detail) {
+        if fixed_populated_failure_detail_collides(
+            &scrubber,
+            correlation,
+            &[
+                &self.credential_unavailable_detail,
+                &self.request_failed_detail,
+                &self.provider_rejected_detail,
+                &self.invalid_response_detail,
+            ],
+        ) {
             return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Credentialed {
                 evidence: ToolExecutorEvidence::KnownFailed { detail: None },
                 credential,
@@ -2751,14 +2784,15 @@ fn fixed_bound_evidence_token_collides(scrubber: &CredentialScrubber) -> bool {
 
 fn fixed_populated_failure_detail_collides(
     scrubber: &CredentialScrubber,
-    detail: &ToolExecutionErrorDetail,
+    correlation: &ToolAttemptDispatchCorrelation,
+    details: &[&ToolExecutionErrorDetail],
 ) -> bool {
-    let evidence = ToolExecutorEvidence::KnownFailed {
-        detail: Some(detail.clone()),
-    };
-    let rendered = format!("{evidence:?}");
-    !scrubber.contains_case_normalized_credential("Failed")
-        && scrubber.contains_case_normalized_credential(&rendered)
+    details.iter().any(|detail| {
+        let evidence = ToolExecutorEvidence::KnownFailed {
+            detail: Some((*detail).clone()),
+        };
+        bound_wrapper_evidence_collides(scrubber, correlation, &evidence)
+    })
 }
 
 fn fixed_bound_wrapper_token_collides(
@@ -2976,6 +3010,12 @@ mod tests {
     const SUCCESS_FIELD_TRAILING_BOUNDARY_COLLISION_VALUE: &str = "Boundary Synthetic";
     const SUCCESS_SNIPPET_TITLE_BOUNDARY_COLLISION_KEY: &str = r#"Synthetic","title"#;
     const SUCCESS_SNIPPET_TITLE_BOUNDARY_COLLISION_VALUE: &str = "Boundary Synthetic";
+    const SUCCESS_DYNAMIC_FIELD_BOUNDARY_COLLISION_KEY: &str = r#"AAA","title":"BBB"#;
+    const SUCCESS_DYNAMIC_FIELD_BOUNDARY_TITLE: &str = "BBB boundary title";
+    const SUCCESS_DYNAMIC_FIELD_BOUNDARY_SNIPPET: &str = "boundary snippet AAA";
+    const SUCCESS_DYNAMIC_RESULT_BOUNDARY_COLLISION_KEY: &str = r#"AAA"},{"snippet":"BBB"#;
+    const SUCCESS_DYNAMIC_RESULT_BOUNDARY_URL: &str = "https://example.com/AAA";
+    const SUCCESS_DYNAMIC_RESULT_BOUNDARY_SNIPPET: &str = "BBB boundary snippet";
     const BOUND_WRAPPER_DYNAMIC_PREFIX_COLLISION_KEY: &str =
         r#"CompletedText("{\"results\":[{\"snippet\":\"Synthetic"#;
     const BOUND_WRAPPER_DYNAMIC_PREFIX_COLLISION_VALUE: &str = "Synthetic boundary snippet";
@@ -3045,6 +3085,8 @@ mod tests {
     const EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY: &str = "knownfailed";
     const EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY: &str = "known";
     const EXECUTOR_POPULATED_FAILURE_COLLISION_KEY: &str = "Some";
+    const EXECUTOR_INVALID_RESPONSE_POPULATED_COLLISION_KEY: &str =
+        r#"Some(ToolExecutionErrorDetail("web search provider returned"#;
     const EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY: &str = "completedtext(";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const EXECUTOR_OK_WRAPPER_COLLISION_KEY: &str = "ok";
@@ -3109,6 +3151,37 @@ mod tests {
         searches: Arc<AtomicUsize>,
         title: &'static str,
         snippet: &'static str,
+    }
+
+    struct SuccessResultBoundaryTransport {
+        searches: Arc<AtomicUsize>,
+    }
+
+    impl WebSearchTransport for SuccessResultBoundaryTransport {
+        async fn search(
+            &mut self,
+            _request: WebSearchRequest,
+            credential: &CredentialValue,
+        ) -> WebSearchTransportOutcome {
+            self.searches.fetch_add(1, Ordering::Relaxed);
+            let first = WebSearchResult::try_new(WebSearchResultFields {
+                title: String::from(FIXTURE_RESULT_TITLE),
+                url: String::from(SUCCESS_DYNAMIC_RESULT_BOUNDARY_URL),
+                snippet: String::from(FIXTURE_RESULT_SNIPPET),
+            })
+            .expect("first result-boundary fixture is admitted");
+            let second = WebSearchResult::try_new(WebSearchResultFields {
+                title: String::from(FIXTURE_RESULT_TITLE),
+                url: String::from(FIXTURE_RESULT_URL),
+                snippet: String::from(SUCCESS_DYNAMIC_RESULT_BOUNDARY_SNIPPET),
+            })
+            .expect("second result-boundary fixture is admitted");
+            WebSearchTransportOutcome::completed(
+                WebSearchResponse::new(vec![first, second], WebSearchPageCompleteness::Complete)
+                    .expect("result-boundary fixture response is admitted"),
+                credential,
+            )
+        }
     }
 
     impl WebSearchTransport for SuccessFieldBoundaryTransport {
@@ -3224,6 +3297,24 @@ mod tests {
 
     struct ProviderRejectedTransport {
         searches: Arc<AtomicUsize>,
+    }
+
+    struct InvalidResponseTransport {
+        searches: Arc<AtomicUsize>,
+    }
+
+    impl WebSearchTransport for InvalidResponseTransport {
+        async fn search(
+            &mut self,
+            _request: WebSearchRequest,
+            credential: &CredentialValue,
+        ) -> WebSearchTransportOutcome {
+            self.searches.fetch_add(1, Ordering::Relaxed);
+            WebSearchTransportOutcome::failed(
+                WebSearchTransportFailure::InvalidResponse,
+                credential,
+            )
+        }
     }
 
     impl WebSearchTransport for ProviderRejectedTransport {
@@ -4491,6 +4582,62 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
+    /// INV-035: a credential split across two provider-controlled values and
+    /// their complete serialized field separator is rejected before dispatch.
+    #[tokio::test]
+    async fn web_search_rejects_dynamic_field_boundary_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: SUCCESS_DYNAMIC_FIELD_BOUNDARY_COLLISION_KEY,
+        };
+        let transport = SuccessFieldBoundaryTransport {
+            searches: Arc::clone(&searches),
+            title: SUCCESS_DYNAMIC_FIELD_BOUNDARY_TITLE,
+            snippet: SUCCESS_DYNAMIC_FIELD_BOUNDARY_SNIPPET,
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("dynamic field-boundary collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: a credential split across adjacent provider results and their
+    /// complete serialized result separator is rejected before dispatch.
+    #[tokio::test]
+    async fn web_search_rejects_dynamic_result_boundary_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: SUCCESS_DYNAMIC_RESULT_BOUNDARY_COLLISION_KEY,
+        };
+        let transport = SuccessResultBoundaryTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("dynamic result-boundary collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
     /// INV-035: fixed bound-wrapper and payload prefixes are checked together
     /// with every possible provider-controlled value prefix before dispatch.
     #[tokio::test]
@@ -5093,6 +5240,33 @@ mod tests {
             .await
             .into_result()
             .expect("populated detail collision is definitive pre-dispatch evidence");
+
+        assert_eq!(known_failure_detail(evidence), None);
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: every populated fixed failure detail is checked inside the
+    /// complete bound wrapper before dispatch and falls back to detail-free evidence.
+    #[tokio::test]
+    async fn web_search_invalid_response_detail_collision_commits_before_dispatch() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: EXECUTOR_INVALID_RESPONSE_POPULATED_COLLISION_KEY,
+        };
+        let transport = InvalidResponseTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("invalid-response detail collision is definitive pre-dispatch evidence");
 
         assert_eq!(known_failure_detail(evidence), None);
         assert_eq!(searches.load(Ordering::Relaxed), 0);
