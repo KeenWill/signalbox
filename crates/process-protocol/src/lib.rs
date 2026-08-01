@@ -1839,6 +1839,190 @@ fn validate_review_orchestration_snapshot(
     Ok(())
 }
 
+/// Closed durable goal-command rejection vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalCommandRejection {
+    /// The target session does not exist.
+    SessionNotFound,
+    /// A goal is already pursuing or blocked.
+    GoalAlreadyAttached,
+    /// The session has no goal lineage.
+    GoalNotAttached,
+    /// Resume requires a blocked current generation.
+    RequiresBlocked,
+    /// Stop or supersede requires a pursuing or blocked generation.
+    RequiresPursuingOrBlocked,
+    /// No successor generation can be represented.
+    GenerationExhausted,
+    /// No successor event position can be represented.
+    EventOrdinalExhausted,
+}
+
+/// Closed blocked-reason vocabulary at the process boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalBlockedReason {
+    /// Progress requires information or a decision from the user.
+    UserInputRequired,
+    /// Progress requires an external state change.
+    ExternalChangeRequired,
+    /// Progress requires authority the session does not hold.
+    AuthorizationRequired,
+    /// The preceding goal turn failed and was not retried.
+    ExecutionFailure,
+}
+
+/// Provenance for one blocked event at the process boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoalBlockedProvenance {
+    /// The model declared the blocked transition through its correlated tool.
+    Model {
+        /// Exact invoking turn.
+        turn_id: CanonicalUuid,
+        /// Exact invoking tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The scheduler observed one unsuccessfully terminalized goal turn.
+    ExecutionFailure {
+        /// Exact failed turn.
+        turn_id: CanonicalUuid,
+    },
+}
+
+/// One generation's derived lifecycle state at the process boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoalLifecycleState {
+    /// Autonomous scheduling continues.
+    Pursuing {},
+    /// Autonomous scheduling pauses pending an explicit user transition.
+    Blocked {
+        /// Closed blocked reason.
+        reason: GoalBlockedReason,
+        /// Exact statement of what is needed.
+        need: String,
+    },
+    /// The model declared completion.
+    Achieved {
+        /// Turn containing the final-report declaration.
+        turn_id: CanonicalUuid,
+        /// Tool request whose arguments carry the final report.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The user explicitly ended this generation.
+    UserStopped {},
+    /// Another immutable statement replaced this generation.
+    Superseded {
+        /// Successor generation commissioned by the same event.
+        by_generation: CanonicalU64,
+    },
+}
+
+/// One append-only goal event payload at the process boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoalHistoryEvent {
+    /// The user commissioned an immutable statement.
+    Commissioned {
+        /// Exact immutable statement.
+        statement: String,
+        /// Durable user command provenance.
+        command_id: CommandId,
+    },
+    /// Pursuit paused with a typed reason and exact need.
+    Blocked {
+        /// Closed reason.
+        reason: GoalBlockedReason,
+        /// Exact statement of what is needed.
+        need: String,
+        /// Typed transition provenance.
+        provenance: GoalBlockedProvenance,
+    },
+    /// The user resumed blocked pursuit.
+    Resumed {
+        /// Optional exact next-turn guidance.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        guidance: Option<String>,
+        /// Durable user command provenance.
+        command_id: CommandId,
+    },
+    /// The model declared achievement with its final report.
+    Achieved {
+        /// Exact final report.
+        report: String,
+        /// Invoking turn.
+        turn_id: CanonicalUuid,
+        /// Invoking tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The user explicitly ended the generation.
+    UserStopped {
+        /// Durable user command provenance.
+        command_id: CommandId,
+    },
+    /// The user atomically replaced the active statement.
+    Superseded {
+        /// Newly commissioned immutable statement.
+        replacement_statement: String,
+        /// Durable user command provenance.
+        command_id: CommandId,
+    },
+}
+
+fn validate_goal_text(value: &str) -> Result<(), FrameValidationError> {
+    if value.is_empty() || value.len() > MAX_CONTENT_FRAGMENT_BYTES || value.contains('\0') {
+        return Err(FrameValidationError::GoalShape);
+    }
+    Ok(())
+}
+
+fn validate_goal_state(state: &GoalLifecycleState) -> Result<(), FrameValidationError> {
+    match state {
+        GoalLifecycleState::Blocked { need, .. } => validate_goal_text(need),
+        GoalLifecycleState::Superseded { by_generation } if by_generation.value() == 0 => {
+            Err(FrameValidationError::GoalShape)
+        }
+        GoalLifecycleState::Pursuing {}
+        | GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => Ok(()),
+    }
+}
+
+fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationError> {
+    match event {
+        GoalHistoryEvent::Commissioned { statement, .. } => validate_goal_text(statement),
+        GoalHistoryEvent::Blocked {
+            reason,
+            need,
+            provenance,
+        } => {
+            validate_goal_text(need)?;
+            let scheduler_reason = *reason == GoalBlockedReason::ExecutionFailure;
+            let scheduler_provenance =
+                matches!(provenance, GoalBlockedProvenance::ExecutionFailure { .. });
+            if scheduler_reason != scheduler_provenance {
+                return Err(FrameValidationError::GoalShape);
+            }
+            Ok(())
+        }
+        GoalHistoryEvent::Resumed {
+            guidance: Some(guidance),
+            ..
+        } => validate_goal_text(guidance),
+        GoalHistoryEvent::Achieved { report, .. } => validate_goal_text(report),
+        GoalHistoryEvent::Superseded {
+            replacement_statement,
+            ..
+        } => validate_goal_text(replacement_statement),
+        GoalHistoryEvent::Resumed { guidance: None, .. } | GoalHistoryEvent::UserStopped { .. } => {
+            Ok(())
+        }
+    }
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1865,6 +2049,46 @@ pub enum ClientRequest {
     ListTemplates {},
     /// List current sessions.
     ListSessions {},
+    /// Attach one immutable commissioned goal statement.
+    AttachGoal {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Exact immutable statement.
+        statement: String,
+    },
+    /// Read the current goal projection and complete ordered event history.
+    ReadGoal {
+        /// Target session.
+        session_id: CanonicalUuid,
+    },
+    /// Resume a blocked goal with optional next-turn guidance.
+    ResumeGoal {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Optional exact next-turn guidance.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        guidance: Option<String>,
+    },
+    /// Explicitly stop a pursuing or blocked goal.
+    StopGoal {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+    },
+    /// Atomically replace the active immutable statement.
+    SupersedeGoal {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Newly commissioned immutable statement.
+        statement: String,
+    },
     /// Submit user input with an admitted delivery treatment.
     SubmitInput {
         /// Durable mutation identity.
@@ -2229,6 +2453,27 @@ pub enum ToolDecision {
 
 impl ClientRequest {
     fn validate(&self) -> Result<(), FrameValidationError> {
+        match self {
+            Self::AttachGoal { statement, .. } | Self::SupersedeGoal { statement, .. } => {
+                validate_goal_text(statement)?;
+            }
+            Self::ResumeGoal {
+                guidance: Some(guidance),
+                ..
+            } => validate_goal_text(guidance)?,
+            Self::CreateSession { .. }
+            | Self::CreateSessionFromTemplate { .. }
+            | Self::ListTemplates {}
+            | Self::ListSessions {}
+            | Self::ReadGoal { .. }
+            | Self::ResumeGoal { guidance: None, .. }
+            | Self::StopGoal { .. }
+            | Self::SubmitInput { .. }
+            | Self::CompactSession { .. }
+            | Self::ReadTranscript { .. }
+            | Self::FollowSession { .. } => {}
+            _ => {}
+        }
         if let Self::SubmitInput {
             expected_defaults_version,
             delivery,
@@ -2611,6 +2856,13 @@ pub enum RejectionDetail {
     SessionNotFound {
         /// Absent target.
         session_id: CanonicalUuid,
+    },
+    /// A durable goal command was rejected by current goal state.
+    GoalCommandRejected {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Closed goal-specific reason.
+        reason: GoalCommandRejection,
     },
     /// A turn already held the session slot.
     ActiveTurnPresent {
@@ -3702,6 +3954,40 @@ pub enum ServerMessage {
         /// Exact active turn the steering is bound to.
         source_turn_id: CanonicalUuid,
     },
+    /// A durable user goal command appended one event.
+    GoalTransitionApplied {
+        /// Owning session.
+        session_id: CanonicalUuid,
+        /// Appended event position.
+        event_ordinal: CanonicalU64,
+        /// Generation acted on by the event.
+        generation: CanonicalU64,
+    },
+    /// Begins one complete goal-history snapshot.
+    GoalHistoryStart {
+        /// Owning session.
+        session_id: CanonicalUuid,
+        /// Current immutable statement generation.
+        current_generation: CanonicalU64,
+        /// Current immutable statement.
+        current_statement: String,
+        /// Current derived lifecycle state.
+        current_state: GoalLifecycleState,
+    },
+    /// One ordered event in a goal-history snapshot.
+    GoalHistoryItem {
+        /// Positive contiguous event position.
+        event_ordinal: CanonicalU64,
+        /// Statement generation acted on by the event.
+        generation: CanonicalU64,
+        /// Exact event payload and provenance.
+        event: GoalHistoryEvent,
+    },
+    /// Completes one goal-history snapshot.
+    GoalHistoryEnd {
+        /// Number of preceding history items.
+        event_count: CanonicalU64,
+    },
     /// Begins a session-summary sequence.
     SessionsStart {},
     /// One current session summary.
@@ -4116,6 +4402,34 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::GoalTransitionApplied {
+                event_ordinal,
+                generation,
+                ..
+            }
+            | Self::GoalHistoryItem {
+                event_ordinal,
+                generation,
+                ..
+            } if event_ordinal.value() == 0 || generation.value() == 0 => {
+                return Err(FrameValidationError::GoalShape);
+            }
+            Self::GoalHistoryStart {
+                current_generation,
+                current_statement,
+                current_state,
+                ..
+            } => {
+                if current_generation.value() == 0 {
+                    return Err(FrameValidationError::GoalShape);
+                }
+                validate_goal_text(current_statement)?;
+                validate_goal_state(current_state)?;
+            }
+            Self::GoalHistoryItem { event, .. } => validate_goal_event(event)?,
+            Self::GoalHistoryEnd { event_count } if event_count.value() == 0 => {
+                return Err(FrameValidationError::GoalShape);
+            }
             Self::SessionMetadataSummary {
                 title,
                 tags,
@@ -4378,6 +4692,8 @@ pub enum FrameValidationError {
     TemplateShape,
     /// A review lifecycle or orchestration frame carried an invalid shape.
     ReviewShape,
+    /// A goal request, state, or event carried an invalid shape.
+    GoalShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -4404,6 +4720,7 @@ impl fmt::Display for FrameValidationError {
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
             Self::TemplateShape => "session-template frame shape is inconsistent",
             Self::ReviewShape => "review workflow frame shape is inconsistent",
+            Self::GoalShape => "commissioned-goal frame shape is inconsistent",
         })
     }
 }
@@ -4814,7 +5131,8 @@ mod tests {
         ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
         CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
         FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, ImportedContentKind,
+        FrameEncodeError, FrameValidationError, GoalBlockedProvenance, GoalBlockedReason,
+        GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
         ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
         ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
@@ -5004,6 +5322,117 @@ mod tests {
         assert_eq!(String::from_utf8(encoded.clone())?, expected);
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
+    }
+
+    #[test]
+    fn inv033_goal_requests_and_history_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::AttachGoal {
+                command_id: command(2)?,
+                session_id: uuid(3),
+                statement: String::from("ship goal mode"),
+            },
+            r#"{"type":"attach_goal","command_id":"00000000-0000-0000-0000-000000000002","session_id":"00000000-0000-0000-0000-000000000003","statement":"ship goal mode"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(4)?,
+            ClientRequest::ResumeGoal {
+                command_id: command(5)?,
+                session_id: uuid(3),
+                guidance: Some(String::from("use the owner decision")),
+            },
+            r#"{"type":"resume_goal","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000003","guidance":"use the owner decision"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(6)?,
+            ClientRequest::SupersedeGoal {
+                command_id: command(7)?,
+                session_id: uuid(3),
+                statement: String::from("ship clarified goal mode"),
+            },
+            r#"{"type":"supersede_goal","command_id":"00000000-0000-0000-0000-000000000007","session_id":"00000000-0000-0000-0000-000000000003","statement":"ship clarified goal mode"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(8)?,
+            ServerMessage::GoalHistoryStart {
+                session_id: uuid(3),
+                current_generation: CanonicalU64::new(2),
+                current_statement: String::from("ship clarified goal mode"),
+                current_state: GoalLifecycleState::Pursuing {},
+            },
+            r#"{"type":"goal_history_start","session_id":"00000000-0000-0000-0000-000000000003","current_generation":"2","current_statement":"ship clarified goal mode","current_state":{"type":"pursuing"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(9)?,
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(3),
+                generation: CanonicalU64::new(2),
+                event: GoalHistoryEvent::Blocked {
+                    reason: GoalBlockedReason::ExecutionFailure,
+                    need: String::from("repair execution"),
+                    provenance: GoalBlockedProvenance::ExecutionFailure { turn_id: uuid(10) },
+                },
+            },
+            r#"{"type":"goal_history_item","event_ordinal":"3","generation":"2","event":{"type":"blocked","reason":"execution_failure","need":"repair execution","provenance":{"type":"execution_failure","turn_id":"00000000-0000-0000-0000-00000000000a"}}}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(11)?,
+            ClientRequest::ReadGoal {
+                session_id: uuid(3),
+            },
+            r#"{"type":"read_goal","session_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(12)?,
+            ClientRequest::StopGoal {
+                command_id: command(13)?,
+                session_id: uuid(3),
+            },
+            r#"{"type":"stop_goal","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(14)?,
+            ServerMessage::GoalTransitionApplied {
+                session_id: uuid(3),
+                event_ordinal: CanonicalU64::new(4),
+                generation: CanonicalU64::new(2),
+            },
+            r#"{"type":"goal_transition_applied","session_id":"00000000-0000-0000-0000-000000000003","event_ordinal":"4","generation":"2"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(15)?,
+            ServerMessage::GoalHistoryEnd {
+                event_count: CanonicalU64::new(4),
+            },
+            r#"{"type":"goal_history_end","event_count":"4"}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_goal_history_rejects_model_provenance_for_execution_failure() {
+        let mismatched = ServerMessage::GoalHistoryItem {
+            event_ordinal: CanonicalU64::new(2),
+            generation: CanonicalU64::new(1),
+            event: GoalHistoryEvent::Blocked {
+                reason: GoalBlockedReason::ExecutionFailure,
+                need: String::from("repair execution"),
+                provenance: GoalBlockedProvenance::Model {
+                    turn_id: uuid(3),
+                    tool_request_id: uuid(4),
+                },
+            },
+        };
+
+        assert_eq!(
+            ServerFrame::try_new(
+                RequestId::try_new(1).expect("fixture request identity is admitted"),
+                mismatched,
+            )
+            .expect_err("scheduler-only reason rejects model provenance"),
+            FrameValidationError::GoalShape
+        );
     }
 
     #[test]

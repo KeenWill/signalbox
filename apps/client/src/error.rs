@@ -2,7 +2,7 @@ use std::{error::Error, fmt, io};
 
 use signalbox_process_protocol::{
     ErrorCode, ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError,
-    RejectionDetail,
+    GoalCommandRejection, RejectionDetail,
 };
 
 #[derive(Debug)]
@@ -242,6 +242,18 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
     }
 }
 
+const fn goal_command_rejection_name(reason: GoalCommandRejection) -> &'static str {
+    match reason {
+        GoalCommandRejection::SessionNotFound => "session_not_found",
+        GoalCommandRejection::GoalAlreadyAttached => "goal_already_attached",
+        GoalCommandRejection::GoalNotAttached => "goal_not_attached",
+        GoalCommandRejection::RequiresBlocked => "requires_blocked",
+        GoalCommandRejection::RequiresPursuingOrBlocked => "requires_pursuing_or_blocked",
+        GoalCommandRejection::GenerationExhausted => "generation_exhausted",
+        GoalCommandRejection::EventOrdinalExhausted => "event_ordinal_exhausted",
+    }
+}
+
 struct RejectionDisplay(RejectionDetail);
 
 impl fmt::Display for RejectionDisplay {
@@ -250,6 +262,11 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
+            RejectionDetail::GoalCommandRejected { session_id, reason } => write!(
+                formatter,
+                "goal_command_rejected session={session_id} reason={}",
+                goal_command_rejection_name(reason)
+            ),
             RejectionDetail::ActiveTurnPresent {
                 session_id,
                 active_turn_id,

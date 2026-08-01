@@ -10,8 +10,8 @@ use std::{
 };
 
 use arguments::{
-    Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome, ReviewCommand,
-    SendDeliveryArgument, SystemPromptArgument, ThroughPositionArgument,
+    Command, DangerousToolAutoApprovalArgument, GoalCommand, ImportSourceArgument, ParseOutcome,
+    ReviewCommand, SendDeliveryArgument, SystemPromptArgument, ThroughPositionArgument,
 };
 use connection::ProcessClient;
 use error::ClientError;
@@ -282,6 +282,7 @@ async fn execute(
         Command::Create { .. }
         | Command::Continue { .. }
         | Command::Compact { .. }
+        | Command::Goal(_)
         | Command::Imported { .. }
         | Command::List
         | Command::Templates
@@ -310,6 +311,7 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::Compact { .. }
+        | Command::Goal(_)
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -392,6 +394,7 @@ async fn execute(
         Command::Imported {
             imported_conversation_id,
         } => imported(&mut client, &mut output, imported_conversation_id).await,
+        Command::Goal(command) => goal(&mut client, &mut output, command).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
@@ -1403,6 +1406,204 @@ async fn read_imported_conversation(
             }
         }
     }
+}
+
+async fn goal(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    command: GoalCommand,
+) -> Result<(), ClientError> {
+    match command {
+        GoalCommand::Attach {
+            session_id,
+            statement,
+            command_id,
+        } => {
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::AttachGoal {
+                    command_id,
+                    session_id,
+                    statement,
+                }
+            })
+            .await
+        }
+        GoalCommand::Show { session_id } => goal_show(client, output, session_id).await,
+        GoalCommand::Resume {
+            session_id,
+            guidance,
+            command_id,
+        } => {
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::ResumeGoal {
+                    command_id,
+                    session_id,
+                    guidance,
+                }
+            })
+            .await
+        }
+        GoalCommand::Stop {
+            session_id,
+            command_id,
+        } => {
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::StopGoal {
+                    command_id,
+                    session_id,
+                }
+            })
+            .await
+        }
+        GoalCommand::Supersede {
+            session_id,
+            statement,
+            command_id,
+        } => {
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::SupersedeGoal {
+                    command_id,
+                    session_id,
+                    statement,
+                }
+            })
+            .await
+        }
+    }
+}
+
+async fn goal_mutation<BuildRequest>(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    expected_session: CanonicalUuid,
+    command_id: Option<CommandId>,
+    build_request: BuildRequest,
+) -> Result<(), ClientError>
+where
+    BuildRequest: FnOnce(CommandId) -> ClientRequest,
+{
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client.mutation_request(build_request(command_id)).await?;
+    let receipt = decode_goal_mutation_receipt(
+        expected_session,
+        connection.message().await.map_err(ClientError::mutation)?,
+    )?;
+    output
+        .goal_transition_applied(receipt.0, receipt.1, receipt.2)
+        .map_err(ClientError::from)
+}
+
+fn decode_goal_mutation_receipt(
+    expected_session: CanonicalUuid,
+    message: ServerMessage,
+) -> Result<(CanonicalUuid, u64, u64), ClientError> {
+    match message {
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal,
+            generation,
+        } if session_id == expected_session => {
+            Ok((session_id, event_ordinal.value(), generation.value()))
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("goal mutation returned an unexpected response").mutation()),
+    }
+}
+
+async fn goal_show(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+) -> Result<(), ClientError> {
+    let mut connection = client
+        .request(ClientRequest::ReadGoal { session_id })
+        .await?;
+    let first = connection.frame().await?;
+    match first.message() {
+        ServerMessage::GoalHistoryStart {
+            session_id: observed,
+            ..
+        } if *observed == session_id => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "goal history did not begin with its selected session",
+            ));
+        }
+    }
+    let mut spool = tempfile::tempfile()?;
+    spool.write_all(&encode_server_line(&first)?)?;
+    let mut event_count = 0_u64;
+    loop {
+        let frame = connection.frame().await?;
+        match frame.message() {
+            ServerMessage::GoalHistoryItem { event_ordinal, .. }
+                if event_ordinal.value() == event_count.saturating_add(1) =>
+            {
+                event_count = event_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("goal event count overflowed"))?;
+                spool.write_all(&encode_server_line(&frame)?)?;
+            }
+            ServerMessage::GoalHistoryEnd {
+                event_count: declared,
+            } if declared.value() == event_count => break,
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "goal history sequence or count was invalid",
+                ));
+            }
+        }
+    }
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::GoalHistoryStart {
+                session_id,
+                current_generation,
+                current_statement,
+                current_state,
+            } => output.goal_current(
+                *session_id,
+                current_generation.value(),
+                current_statement,
+                current_state,
+            )?,
+            ServerMessage::GoalHistoryItem {
+                event_ordinal,
+                generation,
+                event,
+            } => output.goal_history_event(event_ordinal.value(), generation.value(), event)?,
+            _ => {
+                return Err(ClientError::Protocol(
+                    "goal-history spool contained an unexpected frame",
+                ));
+            }
+        }
+        line.clear();
+    }
+    Ok(())
 }
 
 async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
@@ -3672,9 +3873,9 @@ mod tests {
         ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest, SnapshotSelection,
         SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
         await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
-        decide, imported, model_call_recovery_transition, open_scanned_import_source, read_input,
-        read_review_json_file, read_system_prompt_file, reconcile_turn, review,
-        review_concern_state_is_coherent, review_finding_event_status,
+        decide, decode_goal_mutation_receipt, imported, model_call_recovery_transition,
+        open_scanned_import_source, read_input, read_review_json_file, read_system_prompt_file,
+        reconcile_turn, review, review_concern_state_is_coherent, review_finding_event_status,
         review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
         review_pass_completion_is_coherent, review_publication_state_is_coherent,
         review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
@@ -3682,6 +3883,22 @@ mod tests {
         terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    #[test]
+    fn goal_mutation_receipt_rejects_a_cross_wired_session() {
+        let selected_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let message = ServerMessage::GoalTransitionApplied {
+            session_id: foreign_session,
+            event_ordinal: CanonicalU64::new(1),
+            generation: CanonicalU64::new(1),
+        };
+
+        let error = decode_goal_mutation_receipt(selected_session, message)
+            .expect_err("foreign session receipt is rejected");
+
+        assert!(error.is_ambiguous_mutation());
+    }
 
     #[tokio::test]
     async fn review_findings_file_decodes_an_empty_complete_inventory()

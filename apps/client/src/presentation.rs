@@ -6,6 +6,7 @@ use std::{
 
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallCause, FailedModelCallDisposition,
+    GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent, GoalLifecycleState,
     ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
     MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ReviewDiffSide,
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
@@ -340,6 +341,153 @@ impl<'a> Output<'a> {
 
     pub(crate) fn session_created(&mut self, session_id: CanonicalUuid) -> io::Result<()> {
         writeln!(self.stdout, "{session_id}")
+    }
+
+    pub(crate) fn goal_transition_applied(
+        &mut self,
+        session_id: CanonicalUuid,
+        event_ordinal: u64,
+        generation: u64,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "session={session_id} goal_event={event_ordinal} generation={generation}"
+        )
+    }
+
+    pub(crate) fn goal_current(
+        &mut self,
+        session_id: CanonicalUuid,
+        generation: u64,
+        statement: &str,
+        state: &GoalLifecycleState,
+    ) -> io::Result<()> {
+        match state {
+            GoalLifecycleState::Pursuing {} => writeln!(
+                self.stdout,
+                "goal session={session_id} generation={generation} state=pursuing"
+            )?,
+            GoalLifecycleState::Blocked { reason, .. } => writeln!(
+                self.stdout,
+                "goal session={session_id} generation={generation} state=blocked reason={}",
+                goal_blocked_reason_label(*reason)
+            )?,
+            GoalLifecycleState::Achieved {
+                turn_id,
+                tool_request_id,
+            } => writeln!(
+                self.stdout,
+                "goal session={session_id} generation={generation} state=achieved turn={turn_id} request={tool_request_id}"
+            )?,
+            GoalLifecycleState::UserStopped {} => writeln!(
+                self.stdout,
+                "goal session={session_id} generation={generation} state=user_stopped"
+            )?,
+            GoalLifecycleState::Superseded { by_generation } => writeln!(
+                self.stdout,
+                "goal session={session_id} generation={generation} state=superseded by_generation={}",
+                by_generation.value()
+            )?,
+        }
+        self.goal_text_field("statement", statement)?;
+        if let GoalLifecycleState::Blocked { need, .. } = state {
+            self.goal_text_field("need", need)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn goal_history_event(
+        &mut self,
+        ordinal: u64,
+        generation: u64,
+        event: &GoalHistoryEvent,
+    ) -> io::Result<()> {
+        match event {
+            GoalHistoryEvent::Commissioned {
+                statement,
+                command_id,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "event={ordinal} generation={generation} type=commissioned command={}",
+                    command_id.into_uuid().hyphenated()
+                )?;
+                self.goal_text_field("statement", statement)
+            }
+            GoalHistoryEvent::Blocked {
+                reason,
+                need,
+                provenance,
+            } => {
+                match provenance {
+                    GoalBlockedProvenance::Model {
+                        turn_id,
+                        tool_request_id,
+                    } => writeln!(
+                        self.stdout,
+                        "event={ordinal} generation={generation} type=blocked reason={} source=model turn={turn_id} request={tool_request_id}",
+                        goal_blocked_reason_label(*reason)
+                    )?,
+                    GoalBlockedProvenance::ExecutionFailure { turn_id } => writeln!(
+                        self.stdout,
+                        "event={ordinal} generation={generation} type=blocked reason={} source=scheduler turn={turn_id}",
+                        goal_blocked_reason_label(*reason)
+                    )?,
+                }
+                self.goal_text_field("need", need)
+            }
+            GoalHistoryEvent::Resumed {
+                guidance,
+                command_id,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "event={ordinal} generation={generation} type=resumed command={} guidance_present={}",
+                    command_id.into_uuid().hyphenated(),
+                    guidance.is_some()
+                )?;
+                match guidance {
+                    Some(guidance) => self.goal_text_field("guidance", guidance),
+                    None => Ok(()),
+                }
+            }
+            GoalHistoryEvent::Achieved {
+                report,
+                turn_id,
+                tool_request_id,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "event={ordinal} generation={generation} type=achieved turn={turn_id} request={tool_request_id}"
+                )?;
+                self.goal_text_field("report", report)
+            }
+            GoalHistoryEvent::UserStopped { command_id } => writeln!(
+                self.stdout,
+                "event={ordinal} generation={generation} type=user_stopped command={}",
+                command_id.into_uuid().hyphenated()
+            ),
+            GoalHistoryEvent::Superseded {
+                replacement_statement,
+                command_id,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "event={ordinal} generation={generation} type=superseded command={}",
+                    command_id.into_uuid().hyphenated()
+                )?;
+                self.goal_text_field("replacement_statement", replacement_statement)
+            }
+        }
+    }
+
+    fn goal_text_field(&mut self, name: &str, value: &str) -> io::Result<()> {
+        write!(self.stdout, "{name}=")?;
+        self.stdout.write_all(
+            self.render_field(value, TextField::TrailingOnLine)
+                .as_bytes(),
+        )?;
+        self.stdout.write_all(b"\n")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1738,6 +1886,15 @@ const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
         FailedModelCallCause::Overloaded => "overloaded",
         FailedModelCallCause::ProviderInternal => "provider_internal",
         FailedModelCallCause::Unrecognized => "unrecognized",
+    }
+}
+
+const fn goal_blocked_reason_label(reason: GoalBlockedReason) -> &'static str {
+    match reason {
+        GoalBlockedReason::UserInputRequired => "user_input_required",
+        GoalBlockedReason::ExternalChangeRequired => "external_change_required",
+        GoalBlockedReason::AuthorizationRequired => "authorization_required",
+        GoalBlockedReason::ExecutionFailure => "execution_failure",
     }
 }
 

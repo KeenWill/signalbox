@@ -5953,6 +5953,35 @@ pub trait EligibilityPass {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
 }
 
+pub trait GoalPassDisposition {
+    type Error;
+    fn reconcile_success(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+    fn block_execution_failure(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+}
+
+pub enum GoalAwareEligibilityPassError<PassError, GoalError> {
+    Pass {
+        source: PassError,
+        blocking: Option<GoalError>,
+    },
+    Reconciliation(GoalError),
+}
+// impl Display + std::error::Error + ClassifyOperatorFailure
+
+pub struct GoalAwareEligibilityPass<Pass, Disposition> { /* private */ }
+impl<Pass, Disposition> GoalAwareEligibilityPass<Pass, Disposition> {
+    pub const fn new(pass: Pass, disposition: Disposition) -> Self;
+    pub fn into_parts(self) -> (Pass, Disposition);
+}
+// impl EligibilityPass when Pass: EligibilityPass, Disposition: GoalPassDisposition
+
 pub struct InProcessEligibilityNudge { /* private */ }
 // Clone; impl EligibilityNudge
 
@@ -7898,10 +7927,10 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
 | application: review_workflow                       | 9 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
-| application: scheduler                             | 12 (incl. 4 traits)  |
+| application: scheduler                             | 15 (incl. 5 traits)  |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)   |
 | application: startup_scan                          | 7 (incl. 2 traits)   |
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **197**              |
+| **signalbox-application total**                    | **200**              |

@@ -191,6 +191,11 @@ that variant.
 | `create_session_from_template`          | `command_id` (canonical UUID string), `template_name` (template-name string), `runner_placement` (proposed; placement object or null)                                                                                                                                    | Resolve one daemon-held template and copy its complete bundle into a user-initiated session's defaults version one.                                                                                                                                                                                                                                                             |
 | `list_sessions`                         | none                                                                                                                                                                                                                                                                     | Read all current sessions as basic summaries, ordered by session identity.                                                                                                                                                                                                                                                                                                      |
 | `list_templates`                        | none                                                                                                                                                                                                                                                                     | Read every available template's name and version in name order.                                                                                                                                                                                                                                                                                                                 |
+| `attach_goal`                           | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Attach the first immutable commissioned statement and begin pursuing it.                                                                                                                                                                                                                                                                                                        |
+| `read_goal`                             | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read the current goal projection and complete ordered lineage.                                                                                                                                                                                                                                                                                                                  |
+| `resume_goal`                           | `command_id` and `session_id` (canonical UUID strings), `guidance` (string or null)                                                                                                                                                                                      | Resume the blocked current generation, optionally using exact guidance as its next turn input.                                                                                                                                                                                                                                                                                  |
+| `stop_goal`                             | `command_id` and `session_id` (canonical UUID strings)                                                                                                                                                                                                                   | Terminalize the pursuing or blocked current generation by explicit user action.                                                                                                                                                                                                                                                                                                 |
+| `supersede_goal`                        | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Atomically supersede the current generation and begin pursuing a new immutable statement in the same lineage.                                                                                                                                                                                                                                                                   |
 | `submit_input`                          | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string, or null only for steering), and optional `delivery`                                                                                   | Submit exact user text with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                                                                                                                                                           |
 | `read_transcript`                       | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                                                                                                                                                  |
 | `follow_session`                        | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; also receive ephemeral provider-text deltas.                                                                                                                                                                 |
@@ -677,6 +682,16 @@ that variant. Every accepted non-review mutation request — `create_session`,
   `enrollment_id`, and `registration_revision`; it names no session, because
   promotion changes no session placement; or
 - `error` with a stable `code` and a non-sensitive `message`.
+
+**Implemented behavior.** An accepted goal mutation returns
+`goal_transition_applied { session_id, event_ordinal, generation }`. A
+successful `read_goal` returns `goal_history_start` with the current generation,
+immutable statement, and state; zero or more contiguous `goal_history_item`
+messages with event ordinal, generation, event, and provenance; then
+`goal_history_end { event_count }`. The client validates the complete sequence
+and count before presenting any line. Goal text uses the ordinary bounded text
+grammar; the closed lifecycle, event, reason, and provenance correlations are
+owned by [goal mode](goal-mode.md).
 
 Review mutations return exactly one stable acknowledgement:
 
@@ -1546,6 +1561,11 @@ below. The client accepts a global `--socket <path>` override or reads
 - `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `conversations [--title <substring>] [--origin <native|imported|all>] [--include-archived] [--limit <decimal>] [--after <native|imported>:<uuid>]`;
 - `compact <session-uuid> [--through-position <positive-decimal>] [--command-id <uuid>]`;
+- `goal attach <session-uuid> --statement <text> [--command-id <uuid>]`;
+- `goal show <session-uuid>`;
+- `goal resume <session-uuid> [--guidance <text>] [--command-id <uuid>]`;
+- `goal stop <session-uuid> [--command-id <uuid>]`;
+- `goal supersede <session-uuid> --statement <text> [--command-id <uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `send <session-uuid> --queue [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `steer <session-uuid> [--command-id <uuid> --turn <uuid>]`;
@@ -1799,6 +1819,14 @@ listing surface.
 process argument: the client reads one bounded file snapshot before socket I/O
 and rejects an empty, oversized, non-UTF-8, or U+0000-bearing prompt locally,
 then sends the exact text.
+
+**Implemented behavior.** The `goal` verbs expose only commission, inspection,
+resume, stop, and supersession. Mutations print a generated command identity
+before socket I/O and validate the applied event ordinal and generation receipt.
+`goal show` validates and spools the complete history before printing the
+current projection and every event with terminal-safe statement, need, guidance,
+and report text. Guidance that does not replace scope remains a resume or the
+existing `steer` verb; no edit-in-place command exists.
 
 `reconcile` reads its successor content the same way and names the parked turn
 the operator observed in the session transcript. It prints the same command and

@@ -60,6 +60,7 @@ pub(crate) enum Command {
     Imported {
         imported_conversation_id: CanonicalUuid,
     },
+    Goal(GoalCommand),
     List,
     Templates,
     Search(SessionMetadataPageRequest),
@@ -118,6 +119,32 @@ pub(crate) enum Command {
         session_id: CanonicalUuid,
         tool_request_id: CanonicalUuid,
         reason: String,
+        command_id: Option<CommandId>,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum GoalCommand {
+    Attach {
+        session_id: CanonicalUuid,
+        statement: String,
+        command_id: Option<CommandId>,
+    },
+    Show {
+        session_id: CanonicalUuid,
+    },
+    Resume {
+        session_id: CanonicalUuid,
+        guidance: Option<String>,
+        command_id: Option<CommandId>,
+    },
+    Stop {
+        session_id: CanonicalUuid,
+        command_id: Option<CommandId>,
+    },
+    Supersede {
+        session_id: CanonicalUuid,
+        statement: String,
         command_id: Option<CommandId>,
     },
 }
@@ -318,6 +345,8 @@ enum CliCommand {
     Compact(CompactArguments),
     /// Print one imported conversation's selectable entry positions.
     Imported(ImportedArguments),
+    /// Commission, inspect, or transition one session goal.
+    Goal(GoalArguments),
     /// List current sessions.
     List,
     /// List available session templates.
@@ -352,6 +381,62 @@ enum CliCommand {
     Approve(DecideArguments),
     /// Deny one pending tool request with an explicit reason.
     Deny(DenyArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct GoalArguments {
+    #[command(subcommand)]
+    command: GoalSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum GoalSubcommand {
+    /// Attach one immutable statement and start autonomous pursuit.
+    Attach(GoalStatementArguments),
+    /// Show current state and the complete ordered event history.
+    Show(SessionArguments),
+    /// Resume a blocked goal with optional next-turn guidance.
+    Resume(GoalResumeArguments),
+    /// Explicitly end a pursuing or blocked goal.
+    Stop(GoalMutationArguments),
+    /// Replace the active statement with a new immutable generation.
+    Supersede(GoalStatementArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct GoalStatementArguments {
+    /// Session whose goal lineage is changed.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Exact immutable commissioned statement.
+    #[arg(long, value_name = "TEXT")]
+    statement: String,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct GoalResumeArguments {
+    /// Session whose blocked goal resumes.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Exact guidance delivered as the next goal turn's input.
+    #[arg(long, value_name = "TEXT")]
+    guidance: Option<String>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct GoalMutationArguments {
+    /// Session whose current goal is changed.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -1228,6 +1313,30 @@ pub(crate) fn parse(
         CliCommand::Imported(arguments) => Command::Imported {
             imported_conversation_id: arguments.imported_conversation_id,
         },
+        CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
+            GoalSubcommand::Attach(arguments) => GoalCommand::Attach {
+                session_id: arguments.session_id,
+                statement: arguments.statement,
+                command_id: arguments.command_id,
+            },
+            GoalSubcommand::Show(arguments) => GoalCommand::Show {
+                session_id: arguments.session_id,
+            },
+            GoalSubcommand::Resume(arguments) => GoalCommand::Resume {
+                session_id: arguments.session_id,
+                guidance: arguments.guidance,
+                command_id: arguments.command_id,
+            },
+            GoalSubcommand::Stop(arguments) => GoalCommand::Stop {
+                session_id: arguments.session_id,
+                command_id: arguments.command_id,
+            },
+            GoalSubcommand::Supersede(arguments) => GoalCommand::Supersede {
+                session_id: arguments.session_id,
+                statement: arguments.statement,
+                command_id: arguments.command_id,
+            },
+        }),
         CliCommand::List => Command::List,
         CliCommand::Templates => Command::Templates,
         CliCommand::Search(arguments) => {
@@ -1947,8 +2056,8 @@ mod tests {
 
     use super::{
         Arguments, Command, ConversationsPageRequest, DangerousToolAutoApprovalArgument,
-        ImportSourceArgument, ParseOutcome, SendDeliveryArgument, SessionMetadataPageRequest,
-        ThroughPositionArgument, UsageError, parse,
+        GoalCommand, ImportSourceArgument, ParseOutcome, SendDeliveryArgument,
+        SessionMetadataPageRequest, ThroughPositionArgument, UsageError, parse,
     };
 
     #[derive(Clone, Copy)]
@@ -3328,6 +3437,88 @@ mod tests {
         .expect("the explicit supported format and scan directory parse");
 
         assert_codex_scan_import(parsed, Path::new("conversation-directory"));
+    }
+
+    #[test]
+    fn goal_supersede_parses_a_new_immutable_statement() {
+        const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+        const COMMAND_ID: &str = "00000000-0000-0000-0000-000000000002";
+        const STATEMENT: &str = "Ship the replacement scope";
+
+        let parsed = parse(
+            [
+                "goal",
+                "supersede",
+                SESSION_ID,
+                "--statement",
+                STATEMENT,
+                "--command-id",
+                COMMAND_ID,
+            ]
+            .map(Into::into),
+        );
+
+        assert_goal_supersede_parse(parsed, SESSION_ID, STATEMENT, COMMAND_ID);
+    }
+
+    #[test]
+    fn goal_resume_preserves_absent_guidance() {
+        const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+        let parsed = parse(["goal", "resume", SESSION_ID].map(Into::into));
+
+        assert_goal_resume_without_guidance_parse(parsed, SESSION_ID);
+    }
+
+    #[track_caller]
+    fn assert_goal_supersede_parse(
+        parsed: Result<ParseOutcome, UsageError>,
+        expected_session: &str,
+        expected_statement: &str,
+        expected_command: &str,
+    ) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the successful goal supersede parse runs the client");
+        };
+        let Command::Goal(GoalCommand::Supersede {
+            session_id,
+            statement,
+            command_id: Some(command_id),
+        }) = arguments.command
+        else {
+            panic!("the successful goal supersede parse selects goal supersede");
+        };
+        assert_eq!(
+            session_id.into_uuid().hyphenated().to_string(),
+            expected_session
+        );
+        assert_eq!(statement, expected_statement);
+        assert_eq!(
+            command_id.into_uuid().hyphenated().to_string(),
+            expected_command
+        );
+    }
+
+    #[track_caller]
+    fn assert_goal_resume_without_guidance_parse(
+        parsed: Result<ParseOutcome, UsageError>,
+        expected_session: &str,
+    ) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the successful goal resume parse runs the client");
+        };
+        let Command::Goal(GoalCommand::Resume {
+            session_id,
+            guidance: None,
+            command_id: None,
+        }) = arguments.command
+        else {
+            panic!("the successful goal resume parse selects goal resume");
+        };
+        assert_eq!(
+            session_id.into_uuid().hyphenated().to_string(),
+            expected_session
+        );
     }
 
     #[test]

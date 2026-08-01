@@ -85,7 +85,8 @@ pub use review_workflow::{
 };
 pub use scheduler::{
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep,
-    EligibilitySweepBatch, EligibilityWorkSource, InProcessEligibilityNudge,
+    EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
+    GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityNudge,
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
 };

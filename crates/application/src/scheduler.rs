@@ -185,6 +185,170 @@ where
     }
 }
 
+/// Durable goal disposition owed after one authoritative eligibility pass.
+pub trait GoalPassDisposition: Clone + Send + 'static {
+    /// Adapter failure while reading or changing durable goal state.
+    type Error: Send + 'static;
+
+    /// Reconciles the current generation's latest turn after a successful pass.
+    fn reconcile_success(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+
+    /// Blocks pursuit after a pass failed with one exact selected turn.
+    fn block_execution_failure(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+}
+
+/// Failure from an underlying eligibility pass plus goal disposition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GoalAwareEligibilityPassError<PassError, GoalError> {
+    /// The pass failed; optional secondary evidence records failed blocking.
+    Pass {
+        /// Original authoritative pass failure.
+        source: PassError,
+        /// Goal blocking also failed after the pass selected a turn.
+        blocking: Option<GoalError>,
+    },
+    /// A successful pass could not reconcile durable goal continuation.
+    Reconciliation(GoalError),
+}
+
+impl<PassError, GoalError> fmt::Display for GoalAwareEligibilityPassError<PassError, GoalError>
+where
+    PassError: fmt::Display,
+    GoalError: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pass {
+                source,
+                blocking: None,
+            } => write!(formatter, "{source}"),
+            Self::Pass {
+                source,
+                blocking: Some(_),
+            } => write!(
+                formatter,
+                "{source}; goal execution-failure blocking also failed"
+            ),
+            Self::Reconciliation(error) => {
+                write!(
+                    formatter,
+                    "goal continuation reconciliation failed: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl<PassError, GoalError> Error for GoalAwareEligibilityPassError<PassError, GoalError>
+where
+    PassError: Error + 'static,
+    GoalError: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Pass { source, .. } => Some(source),
+            Self::Reconciliation(error) => Some(error),
+        }
+    }
+}
+
+impl<PassError, GoalError> ClassifyOperatorFailure
+    for GoalAwareEligibilityPassError<PassError, GoalError>
+where
+    PassError: ClassifyOperatorFailure,
+    GoalError: ClassifyOperatorFailure,
+{
+    fn operator_failure_class(&self) -> crate::OperatorFailureClass {
+        match self {
+            Self::Pass { source, .. } => source.operator_failure_class(),
+            Self::Reconciliation(error) => error.operator_failure_class(),
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Pass { source, .. } => source.operator_failure_cause_code(),
+            Self::Reconciliation(error) => error.operator_failure_cause_code(),
+        }
+    }
+}
+
+/// Eligibility pass wrapper that makes goal continuation and failure blocking
+/// part of the same scheduler disposition path.
+#[derive(Clone, Debug)]
+pub struct GoalAwareEligibilityPass<Pass, Disposition> {
+    pass: Pass,
+    disposition: Disposition,
+}
+
+impl<Pass, Disposition> GoalAwareEligibilityPass<Pass, Disposition> {
+    /// Binds one authoritative pass to its durable goal disposition adapter.
+    pub const fn new(pass: Pass, disposition: Disposition) -> Self {
+        Self { pass, disposition }
+    }
+
+    /// Returns both owned composition roles.
+    pub fn into_parts(self) -> (Pass, Disposition) {
+        (self.pass, self.disposition)
+    }
+}
+
+impl<Pass, Disposition> EligibilityPass for GoalAwareEligibilityPass<Pass, Disposition>
+where
+    Pass: EligibilityPass + Send + 'static,
+    Pass::Error: Send + 'static,
+    Disposition: GoalPassDisposition,
+{
+    type Error = GoalAwareEligibilityPassError<Pass::Error, Disposition::Error>;
+
+    fn failure_stage(error: &Self::Error) -> &'static str {
+        match error {
+            GoalAwareEligibilityPassError::Pass { source, .. } => Pass::failure_stage(source),
+            GoalAwareEligibilityPassError::Reconciliation(_) => "goal_reconciliation",
+        }
+    }
+
+    fn failure_turn(error: &Self::Error) -> Option<TurnId> {
+        match error {
+            GoalAwareEligibilityPassError::Pass { source, .. } => Pass::failure_turn(source),
+            GoalAwareEligibilityPassError::Reconciliation(_) => None,
+        }
+    }
+
+    fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let pass = self.pass.run(session);
+        let disposition = self.disposition.clone();
+        async move {
+            match pass.await {
+                Ok(()) => disposition
+                    .reconcile_success(session)
+                    .await
+                    .map_err(GoalAwareEligibilityPassError::Reconciliation),
+                Err(source) => {
+                    let blocking = match Pass::failure_turn(&source) {
+                        Some(turn) => disposition
+                            .block_execution_failure(session, turn)
+                            .await
+                            .err(),
+                        None => None,
+                    };
+                    Err(GoalAwareEligibilityPassError::Pass { source, blocking })
+                }
+            }
+        }
+    }
+}
+
 /// Cloneable same-process post-commit nudge hook.
 #[derive(Clone, Debug)]
 pub struct InProcessEligibilityNudge {
@@ -725,9 +889,10 @@ mod tests {
 
     use super::{
         ClassifyOperatorFailure, EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass,
-        EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource,
-        InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
-        ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+        EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
+        GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityWorkSource,
+        InvalidReconciliationSweepInterval, ReconciliationSweepInterval, SchedulerLoop,
+        SchedulerLoopExit,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1179,6 +1344,109 @@ mod tests {
             }
             ready(response)
         }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct GoalFixturePass {
+        result: Result<(), FakeSweepError>,
+    }
+
+    impl EligibilityPass for GoalFixturePass {
+        type Error = FakeSweepError;
+
+        fn failure_stage(_error: &Self::Error) -> &'static str {
+            "execution"
+        }
+
+        fn failure_turn(_error: &Self::Error) -> Option<signalbox_domain::TurnId> {
+            Some(signalbox_domain::TurnId::from_uuid(Uuid::from_u128(52)))
+        }
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(self.result)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum GoalDispositionCall {
+        Reconcile(SessionId),
+        Block(SessionId, signalbox_domain::TurnId),
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingGoalDisposition {
+        calls: Arc<Mutex<Vec<GoalDispositionCall>>>,
+    }
+
+    impl GoalPassDisposition for RecordingGoalDisposition {
+        type Error = FakeSweepError;
+
+        fn reconcile_success(
+            &self,
+            session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            self.calls
+                .lock()
+                .expect("goal disposition calls are available")
+                .push(GoalDispositionCall::Reconcile(session));
+            ready(Ok(()))
+        }
+
+        fn block_execution_failure(
+            &self,
+            session: SessionId,
+            turn: signalbox_domain::TurnId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            self.calls
+                .lock()
+                .expect("goal disposition calls are available")
+                .push(GoalDispositionCall::Block(session, turn));
+            ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn inv048_successful_pass_reconciles_goal_continuation_once() {
+        let selected_session = session(51);
+        let disposition = RecordingGoalDisposition::default();
+        let calls = Arc::clone(&disposition.calls);
+        let mut pass =
+            GoalAwareEligibilityPass::new(GoalFixturePass { result: Ok(()) }, disposition);
+
+        assert_eq!(pass.run(selected_session).await, Ok(()));
+        assert_eq!(
+            *calls.lock().expect("goal disposition calls are available"),
+            vec![GoalDispositionCall::Reconcile(selected_session)]
+        );
+    }
+
+    #[tokio::test]
+    async fn inv048_failed_selected_turn_blocks_goal_without_retrying_the_pass() {
+        let selected_session = session(51);
+        let selected_turn = signalbox_domain::TurnId::from_uuid(Uuid::from_u128(52));
+        let disposition = RecordingGoalDisposition::default();
+        let calls = Arc::clone(&disposition.calls);
+        let mut pass = GoalAwareEligibilityPass::new(
+            GoalFixturePass {
+                result: Err(FakeSweepError::Unavailable),
+            },
+            disposition,
+        );
+
+        assert_eq!(
+            pass.run(selected_session).await,
+            Err(GoalAwareEligibilityPassError::Pass {
+                source: FakeSweepError::Unavailable,
+                blocking: None,
+            })
+        );
+        assert_eq!(
+            *calls.lock().expect("goal disposition calls are available"),
+            vec![GoalDispositionCall::Block(selected_session, selected_turn)]
+        );
     }
 
     #[tokio::test]
