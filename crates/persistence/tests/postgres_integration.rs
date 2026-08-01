@@ -21658,6 +21658,201 @@ async fn session_plan_projection_rechecks_cycle_after_append_guard_bypass()
     Ok(())
 }
 
+/// The projection trigger rejects a corrupt reachable cycle even when the
+/// proposed edge does not itself close that cycle.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_projection_rejects_a_preexisting_reachable_cycle()
+-> Result<(), Box<dyn Error>> {
+    const OUTSIDE_ENTRY_ORDINAL: u64 = 1;
+    const FIRST_CYCLE_ENTRY_ORDINAL: u64 = 2;
+    const SECOND_CYCLE_ENTRY_ORDINAL: u64 = 3;
+    const FIRST_DEPENDENCY_EVENT_ORDINAL: u64 = 4;
+    const CORRUPT_EVENT_ORDINAL: u64 = 5;
+    const PROPOSED_EVENT_ORDINAL: u64 = 6;
+    const EXPECTED_MUTATED_ROW_COUNT: u64 = 1;
+    const OUTSIDE_TEXT: &str = "outside the corrupt component";
+    const FIRST_CYCLE_TEXT: &str = "first corrupt component entry";
+    const SECOND_CYCLE_TEXT: &str = "second corrupt component entry";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
+        .expect("the outside fixture identity is positive");
+    let first_cycle = PlanEntryId::try_from_u64(FIRST_CYCLE_ENTRY_ORDINAL)
+        .expect("the first cycle fixture identity is positive");
+    let second_cycle = PlanEntryId::try_from_u64(SECOND_CYCLE_ENTRY_ORDINAL)
+        .expect("the second cycle fixture identity is positive");
+    let arguments = vec![
+        create_plan_arguments(OUTSIDE_TEXT),
+        create_plan_arguments(FIRST_CYCLE_TEXT),
+        create_plan_arguments(SECOND_CYCLE_TEXT),
+        depends_plan_arguments(first_cycle, second_cycle),
+        depends_plan_arguments(second_cycle, first_cycle),
+        depends_plan_arguments(outside, first_cycle),
+    ];
+    let (session, mut batch) = authorize_plan_writes(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    append_plan_write(
+        &mut batch,
+        &repository,
+        PlanEventDraft::Create {
+            text: plan_text(OUTSIDE_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut batch,
+        &repository,
+        PlanEventDraft::Create {
+            text: plan_text(FIRST_CYCLE_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut batch,
+        &repository,
+        PlanEventDraft::Create {
+            text: plan_text(SECOND_CYCLE_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut batch,
+        &repository,
+        PlanEventDraft::DependsOn {
+            entry: first_cycle,
+            dependency: second_cycle,
+        },
+    )
+    .await?;
+    let mut fixture = DependencyPlanFixture {
+        session,
+        batch,
+        repository,
+        prerequisite: first_cycle,
+        dependent: second_cycle,
+    };
+    let corrupt_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_advances_projection",
+    )
+    .execute(&pool)
+    .await?;
+    insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &corrupt_attempt,
+        FIRST_DEPENDENCY_EVENT_ORDINAL,
+        CORRUPT_EVENT_ORDINAL,
+        second_cycle,
+        first_cycle,
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_advances_projection",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let projected = sqlx::query(
+        "INSERT INTO session_plan_current_dependency
+            (session_id, entry_ordinal, dependency_ordinal,
+             first_event_ordinal, prior_first_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(second_cycle.as_u64()))
+    .bind(Decimal::from(first_cycle.as_u64()))
+    .bind(Decimal::from(CORRUPT_EVENT_ORDINAL))
+    .bind(Decimal::from(FIRST_DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_head
+         DISABLE TRIGGER session_plan_head_maintenance_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let advanced = sqlx::query(
+        "UPDATE session_plan_head
+            SET event_ordinal = $1,
+                dependency_event_ordinal = $1
+          WHERE session_id = $2",
+    )
+    .bind(Decimal::from(CORRUPT_EVENT_ORDINAL))
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_head
+         ENABLE TRIGGER session_plan_head_maintenance_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(corrupt_attempt).await?;
+    let proposed_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let trigger_error = insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &proposed_attempt,
+        CORRUPT_EVENT_ORDINAL,
+        PROPOSED_EVENT_ORDINAL,
+        outside,
+        first_cycle,
+    )
+    .await
+    .expect_err("the projection trigger rejects the pre-existing cycle");
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(projected.rows_affected(), EXPECTED_MUTATED_ROW_COUNT);
+    assert_eq!(advanced.rows_affected(), EXPECTED_MUTATED_ROW_COUNT);
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_graph_cycle")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Dependency append validates both creation roots before graph traversal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

@@ -309,6 +309,7 @@ DECLARE
     target_shape_valid boolean;
     target_authorized boolean;
     closes_cycle boolean;
+    graph_cyclic boolean;
     dependency_count bigint;
 BEGIN
     PERFORM 1
@@ -496,21 +497,48 @@ BEGIN
             END IF;
         END IF;
 
-        WITH RECURSIVE dependency_node(node) AS (
-            SELECT NEW.dependency_ordinal
+        WITH RECURSIVE relevant_node(node) AS (
+            SELECT root.node
+              FROM (
+                  VALUES (NEW.entry_ordinal), (NEW.dependency_ordinal)
+              ) AS root(node)
             UNION
             SELECT edge.dependency_ordinal
-              FROM dependency_node
+              FROM relevant_node
               JOIN session_plan_current_dependency AS edge
                 ON edge.session_id = NEW.session_id
-               AND edge.entry_ordinal = dependency_node.node
+               AND edge.entry_ordinal = relevant_node.node
+        ),
+        dependency_path(origin, node) AS (
+            SELECT edge.entry_ordinal, edge.dependency_ordinal
+              FROM relevant_node
+              JOIN session_plan_current_dependency AS edge
+                ON edge.session_id = NEW.session_id
+               AND edge.entry_ordinal = relevant_node.node
+            UNION
+            SELECT dependency_path.origin, edge.dependency_ordinal
+              FROM dependency_path
+              JOIN session_plan_current_dependency AS edge
+                ON edge.session_id = NEW.session_id
+               AND edge.entry_ordinal = dependency_path.node
         )
         SELECT EXISTS (
-            SELECT 1
-              FROM dependency_node
-             WHERE node = NEW.entry_ordinal
-        )
-          INTO closes_cycle;
+                   SELECT 1
+                     FROM dependency_path
+                    WHERE origin = node
+               ),
+               EXISTS (
+                   SELECT 1
+                     FROM dependency_path
+                    WHERE origin = NEW.dependency_ordinal
+                      AND node = NEW.entry_ordinal
+               )
+          INTO graph_cyclic, closes_cycle;
+        IF graph_cyclic THEN
+            RAISE EXCEPTION 'session plan dependency graph is already cyclic'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_graph_cycle';
+        END IF;
         IF closes_cycle THEN
             RAISE EXCEPTION 'session plan dependency would create a cycle'
                 USING ERRCODE = '23514',
@@ -536,6 +564,7 @@ DECLARE
     target_shape_valid boolean;
     target_authorized boolean;
     closes_cycle boolean;
+    graph_cyclic boolean;
     projected boolean := FALSE;
 BEGIN
     SELECT dependency_event_ordinal
@@ -607,21 +636,48 @@ BEGIN
                         CONSTRAINT = 'session_plan_dependency_limit';
             END IF;
 
-            WITH RECURSIVE dependency_node(node) AS (
-                SELECT NEW.dependency_ordinal
+            WITH RECURSIVE relevant_node(node) AS (
+                SELECT root.node
+                  FROM (
+                      VALUES (NEW.entry_ordinal), (NEW.dependency_ordinal)
+                  ) AS root(node)
                 UNION
                 SELECT edge.dependency_ordinal
-                  FROM dependency_node
+                  FROM relevant_node
                   JOIN session_plan_current_dependency AS edge
                     ON edge.session_id = NEW.session_id
-                   AND edge.entry_ordinal = dependency_node.node
+                   AND edge.entry_ordinal = relevant_node.node
+            ),
+            dependency_path(origin, node) AS (
+                SELECT edge.entry_ordinal, edge.dependency_ordinal
+                  FROM relevant_node
+                  JOIN session_plan_current_dependency AS edge
+                    ON edge.session_id = NEW.session_id
+                   AND edge.entry_ordinal = relevant_node.node
+                UNION
+                SELECT dependency_path.origin, edge.dependency_ordinal
+                  FROM dependency_path
+                  JOIN session_plan_current_dependency AS edge
+                    ON edge.session_id = NEW.session_id
+                   AND edge.entry_ordinal = dependency_path.node
             )
             SELECT EXISTS (
-                SELECT 1
-                  FROM dependency_node
-                 WHERE node = NEW.entry_ordinal
-            )
-              INTO closes_cycle;
+                       SELECT 1
+                         FROM dependency_path
+                        WHERE origin = node
+                   ),
+                   EXISTS (
+                       SELECT 1
+                         FROM dependency_path
+                        WHERE origin = NEW.dependency_ordinal
+                          AND node = NEW.entry_ordinal
+                   )
+              INTO graph_cyclic, closes_cycle;
+            IF graph_cyclic THEN
+                RAISE EXCEPTION 'session plan dependency graph is already cyclic'
+                    USING ERRCODE = '23514',
+                        CONSTRAINT = 'session_plan_dependency_graph_cycle';
+            END IF;
             IF closes_cycle THEN
                 RAISE EXCEPTION 'session plan dependency would create a cycle'
                     USING ERRCODE = '23514',
