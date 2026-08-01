@@ -601,6 +601,16 @@ fn pin_supervisor_program(
         "/proc/self/fd/{}",
         rustix::fd::AsRawFd::as_raw_fd(&supervisor)
     ));
+    rustix::fs::accessat(
+        rustix::fs::CWD,
+        &pinned_program,
+        rustix::fs::Access::EXEC_OK,
+        rustix::fs::AtFlags::EACCESS,
+    )
+    .map_err(|source| ExecToolConstructionError::SupervisorProgram {
+        path: supplied_path.to_owned(),
+        source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+    })?;
     let canonical = pinned_program.canonicalize().map_err(|source| {
         ExecToolConstructionError::SupervisorProgram {
             path: supplied_path.to_owned(),
@@ -819,7 +829,9 @@ impl WorkspaceIdentity {
     fn capture(path: &Path) -> Result<Self, ExecToolConstructionError> {
         let directory = rustix::fs::open(
             path,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW,
             rustix::fs::Mode::empty(),
         )
         .map_err(|source| ExecToolConstructionError::WorkspaceRoot {
@@ -1037,6 +1049,18 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
 
 #[cfg(not(target_os = "linux"))]
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, ExecToolConstructionError> {
+    let supplied_metadata =
+        root.symlink_metadata()
+            .map_err(|source| ExecToolConstructionError::WorkspaceRoot {
+                path: root.to_owned(),
+                source: Some(source),
+            })?;
+    if supplied_metadata.file_type().is_symlink() {
+        return Err(ExecToolConstructionError::WorkspaceRoot {
+            path: root.to_owned(),
+            source: None,
+        });
+    }
     let canonical =
         root.canonicalize()
             .map_err(|source| ExecToolConstructionError::WorkspaceRoot {
@@ -1639,12 +1663,16 @@ impl OuterProcessTreeGuard {
         outer_pidfd_has_exited(&root.pidfd)
     }
 
-    fn kill_all(&mut self, deadline: Instant) {
+    fn watcher_is_supported(&self) -> Result<(), ()> {
+        outer_watcher_is_supported(&self.process_tree_supported)
+    }
+
+    fn kill_all(&mut self, deadline: Instant) -> Result<(), ()> {
         self.stop_watcher();
         if outer_observe_descendants(self.root, &self.descendants, None, Some(deadline)).is_err() {
             self.process_tree_supported.store(false, Ordering::Release);
         }
-        self.kill_tracked();
+        self.kill_tracked(deadline)
     }
 
     fn finish(&mut self, deadline: Instant) -> OuterCleanupStatus {
@@ -1655,9 +1683,12 @@ impl OuterProcessTreeGuard {
             if observation.is_err() {
                 self.process_tree_supported.store(false, Ordering::Release);
             }
-            self.kill_tracked();
-            outer_reap_tracked(&self.descendants);
             if observation == Ok(OuterObservationStatus::Interrupted) {
+                return OuterCleanupStatus::Failed;
+            }
+            if self.kill_tracked(deadline).is_err()
+                || outer_reap_tracked(&self.descendants, deadline).is_err()
+            {
                 return OuterCleanupStatus::Failed;
             }
             match self.all_tracked_absent(deadline) {
@@ -1679,15 +1710,8 @@ impl OuterProcessTreeGuard {
         }
     }
 
-    fn kill_tracked(&self) {
-        let descendants = self
-            .descendants
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        for process in descendants.values() {
-            let _ =
-                rustix::process::pidfd_send_signal(&process.pidfd, rustix::process::Signal::KILL);
-        }
+    fn kill_tracked(&self, deadline: Instant) -> Result<(), ()> {
+        outer_kill_tracked(&self.descendants, deadline)
     }
 
     fn all_tracked_absent(&self, deadline: Instant) -> Result<bool, ()> {
@@ -1702,6 +1726,29 @@ impl OuterProcessTreeGuard {
             self.process_tree_supported.store(false, Ordering::Release);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn outer_watcher_is_supported(process_tree_supported: &AtomicBool) -> Result<(), ()> {
+    process_tree_supported
+        .load(Ordering::Acquire)
+        .then_some(())
+        .ok_or(())
+}
+
+#[cfg(target_os = "linux")]
+fn outer_kill_tracked(
+    descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
+    deadline: Instant,
+) -> Result<(), ()> {
+    let descendants = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+    for process in descendants.values() {
+        if Instant::now() >= deadline {
+            return Err(());
+        }
+        let _ = rustix::process::pidfd_send_signal(&process.pidfd, rustix::process::Signal::KILL);
+    }
+    (Instant::now() < deadline).then_some(()).ok_or(())
 }
 
 #[cfg(target_os = "linux")]
@@ -2007,13 +2054,20 @@ fn outer_process_children(pid: u32) -> Result<Vec<u32>, OuterProcessChildrenErro
 }
 
 #[cfg(target_os = "linux")]
-fn outer_reap_tracked(descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>) {
+fn outer_reap_tracked(
+    descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
+    deadline: Instant,
+) -> Result<(), ()> {
     let descendants = descendants.lock().unwrap_or_else(PoisonError::into_inner);
     for raw_pid in descendants.keys() {
+        if Instant::now() >= deadline {
+            return Err(());
+        }
         if let Some(pid) = rustix::process::Pid::from_raw(*raw_pid as i32) {
             let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
         }
     }
+    (Instant::now() < deadline).then_some(()).ok_or(())
 }
 
 async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
@@ -2103,7 +2157,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         None => {
             drop(control);
             let cleanup_deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
-            outer_tree.kill_all(cleanup_deadline);
+            let _ = outer_tree.kill_all(cleanup_deadline);
             terminate_child_until(&mut child, cleanup_deadline).await;
             return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stdout,
@@ -2115,7 +2169,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         None => {
             drop(control);
             let cleanup_deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
-            outer_tree.kill_all(cleanup_deadline);
+            let _ = outer_tree.kill_all(cleanup_deadline);
             terminate_child_until(&mut child, cleanup_deadline).await;
             return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stderr,
@@ -2138,7 +2192,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         drop(control);
         let cleanup_deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
         kill_supervisor_process_group(supervisor_pid);
-        outer_tree.kill_all(cleanup_deadline);
+        let _ = outer_tree.kill_all(cleanup_deadline);
         terminate_child_until(&mut child, cleanup_deadline).await;
         let cleanup = outer_tree.finish(cleanup_deadline);
         stdout_task.abort();
@@ -2153,6 +2207,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     }
     let root_exit = tokio::time::timeout_at(request_deadline, async {
         loop {
+            outer_tree.watcher_is_supported()?;
             match outer_tree.root_exited() {
                 Ok(true) => return Ok(()),
                 Ok(false) => tokio::time::sleep(OUTER_PROCESS_POLL_INTERVAL).await,
@@ -2168,14 +2223,21 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let cleanup_deadline = cleanup_started + OUTER_PROCESS_CLEANUP_DEADLINE;
     let graceful_deadline = cleanup_started + OUTER_PROCESS_GRACEFUL_WAIT;
     let async_cleanup_deadline = tokio::time::Instant::from_std(cleanup_deadline);
-    let mut waited = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(graceful_deadline),
-        child.wait(),
-    )
-    .await;
+    let mut waited = if observation_failed {
+        kill_supervisor_process_group(supervisor_pid);
+        let _ = outer_tree.kill_all(cleanup_deadline);
+        let _ = child.start_kill();
+        tokio::time::timeout_at(async_cleanup_deadline, child.wait()).await
+    } else {
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(graceful_deadline),
+            child.wait(),
+        )
+        .await
+    };
     if waited.is_err() {
         kill_supervisor_process_group(supervisor_pid);
-        outer_tree.kill_all(cleanup_deadline);
+        let _ = outer_tree.kill_all(cleanup_deadline);
         let _ = child.start_kill();
         waited = tokio::time::timeout_at(async_cleanup_deadline, child.wait()).await;
     }
@@ -2194,7 +2256,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             reason: ProcessSupervisionFailure::Wait,
         }),
         Err(_) => {
-            outer_tree.kill_all(cleanup_deadline);
+            let _ = outer_tree.kill_all(cleanup_deadline);
             let _ = child.start_kill();
             Some(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Wait,
@@ -2668,6 +2730,47 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn command_runners_reject_a_final_symlink_workspace_root() -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let symlinked = workspace.path.with_extension("symlink");
+        symlink(&workspace.path, &symlinked)?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_process(b"must remain unused"),
+        );
+
+        let sandboxed = SandboxedCommandRunner::try_new(runner.clone(), &symlinked);
+        let unsandboxed = UnsandboxedCommandRunner::try_new(runner, &symlinked);
+        std::fs::remove_file(&symlinked)?;
+
+        assert!(matches!(
+            sandboxed,
+            Err(ExecToolConstructionError::WorkspaceRoot { .. })
+        ));
+        assert!(matches!(
+            unsandboxed,
+            Err(ExecToolConstructionError::WorkspaceRoot { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_runner_rejects_a_non_executable_supervisor() -> Result<(), Box<dyn Error>> {
+        let supervisor = ReplacementSupervisor::new()?;
+        std::fs::set_permissions(&supervisor.path, std::fs::Permissions::from_mode(0o600))?;
+
+        let result = TokioProcessRunner::try_new(&supervisor.path);
+
+        assert!(matches!(
+            result,
+            Err(ExecToolConstructionError::SupervisorProgram { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn sandbox_dispatch_rejects_a_missing_launcher_status_after_nonzero_exit()
     -> Result<(), Box<dyn Error>> {
@@ -2773,6 +2876,31 @@ mod tests {
 
         assert_eq!(result, Err(()));
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn signaling_and_reaping_honor_an_elapsed_cleanup_deadline() -> Result<(), Box<dyn Error>> {
+        let process = outer_pin_process(std::process::id())
+            .map_err(|()| std::io::Error::other("pin current process"))?
+            .ok_or_else(|| std::io::Error::other("current process disappeared"))?;
+        let descendants = Arc::new(Mutex::new(BTreeMap::from([(std::process::id(), process)])));
+        let deadline = Instant::now();
+
+        let signaling = outer_kill_tracked(&descendants, deadline);
+        let reaping = outer_reap_tracked(&descendants, deadline);
+
+        assert_eq!(signaling, Err(()));
+        assert_eq!(reaping, Err(()));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watcher_support_loss_is_fail_closed() {
+        let process_tree_supported = AtomicBool::new(false);
+
+        assert_eq!(outer_watcher_is_supported(&process_tree_supported), Err(()));
     }
 
     impl Drop for ReplacementWorkspace {
