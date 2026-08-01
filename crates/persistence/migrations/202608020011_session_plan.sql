@@ -114,7 +114,9 @@ BEGIN
     BEGIN
         RETURN arguments_text::jsonb;
     EXCEPTION
-        WHEN invalid_text_representation THEN
+        -- Every JSONB conversion failure makes the request unsuitable as
+        -- append authority, including escaped NUL and numeric overflow.
+        WHEN data_exception THEN
             RETURN NULL;
     END;
 END;
