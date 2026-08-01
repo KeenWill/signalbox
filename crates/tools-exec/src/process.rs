@@ -2342,15 +2342,22 @@ fn supervisor_capture_completeness(
         SupervisorStatus::Exited { stdout, stderr, .. } => (stdout, stderr),
         SupervisorStatus::TimedOut
         | SupervisorStatus::Cancelled
-        | SupervisorStatus::SpawnFailed { .. }
         | SupervisorStatus::SupervisionFailed { .. } => (
+            SupervisorCaptureCompleteness::Incomplete,
+            SupervisorCaptureCompleteness::Incomplete,
+        ),
+        SupervisorStatus::SpawnFailed { .. } => (
             SupervisorCaptureCompleteness::Complete,
             SupervisorCaptureCompleteness::Complete,
         ),
     };
     let nested = match launcher_status {
         Some(LauncherStatus::Exited { stdout, stderr, .. }) => (stdout, stderr),
-        Some(LauncherStatus::SpawnFailed { .. } | LauncherStatus::SupervisionFailed) | None => (
+        Some(LauncherStatus::SupervisionFailed) => (
+            SupervisorCaptureCompleteness::Incomplete,
+            SupervisorCaptureCompleteness::Incomplete,
+        ),
+        Some(LauncherStatus::SpawnFailed { .. }) | None => (
             SupervisorCaptureCompleteness::Complete,
             SupervisorCaptureCompleteness::Complete,
         ),
@@ -2477,6 +2484,20 @@ mod tests {
             ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Cleanup,
             }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_supervision_marks_both_captures_incomplete() {
+        let completeness = supervisor_capture_completeness(SupervisorStatus::TimedOut, None);
+
+        assert_eq!(
+            completeness,
+            (
+                SupervisorCaptureCompleteness::Incomplete,
+                SupervisorCaptureCompleteness::Incomplete,
+            )
         );
     }
 
