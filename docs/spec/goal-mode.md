@@ -94,23 +94,26 @@ state remains pursuing. Goal state is the only continuation stopping condition:
 there is no goal turn count, elapsed-time budget, verdict counter, or silent
 model fallback. If current defaults still name the predecessor's alias, restart
 reconciliation may reuse that turn's frozen definition when the catalog entry
-has disappeared. A changed current alias with no definition never falls back;
-the same atomic scheduler disposition blocks pursuit with `execution_failure`.
-If the session's positive accepted-input ordinal is already exhausted, that
-disposition likewise blocks pursuit instead of leaving the completed turn
-eligible for another sweep.
+has disappeared. A changed current alias with no definition returns a typed
+`UnknownModelAlias` continuation outcome and never falls back or becomes durable
+corruption. If the session's positive accepted-input ordinal is exhausted,
+continuation returns typed `AcceptancePositionExhausted` without appending a
+successor. If scheduler failure blocking cannot append because the positive
+goal-event ordinal is exhausted, it returns typed `EventOrdinalExhausted`
+instead of classifying valid durable state as corrupt.
 
-**Implemented behavior.** A failed goal turn, unavailable changed alias, or
-exhausted successor position is not retried. In the same scheduler disposition
-path, the daemon appends `blocked` with reason `execution_failure`, need text
-describing the execution repair required, and the exact source-turn provenance.
-That scheduler-turn provenance is single-use. A delayed replay of an
-already-recorded failure returns that blocked transition without appending a
-second event, including after resume. An unrecorded failure from an older turn
-returns `NotCurrentGoalTurn` once resume has made a successor turn current, so
-it cannot block the resumed pursuit. Continuation stops on blocked, achieved,
-user-stopped, and a superseded generation; supersession's successor is pursuing
-and therefore independently eligible to continue.
+**Implemented behavior.** A failed goal turn is not retried. In the same
+scheduler disposition path, the daemon appends `blocked` with reason
+`execution_failure`, need text describing the execution repair required, and the
+exact failed-turn provenance. That scheduler-turn provenance is single-use and
+durably requires the current goal turn to have an unsuccessful terminal
+disposition. A delayed replay of an already-recorded failure returns that
+blocked transition without appending a second event, including after resume. An
+unrecorded failure from an older turn returns `NotCurrentGoalTurn` once resume
+has made a successor turn current, so it cannot block the resumed pursuit.
+Continuation stops on blocked, achieved, user-stopped, and a superseded
+generation; supersession's successor is pursuing and therefore independently
+eligible to continue.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
@@ -124,16 +127,17 @@ generation and schedules its first turn. Resuming schedules exactly one next
 turn and supplies guidance as that turn's accepted input when present. A queued
 turn whose goal generation becomes blocked, achieved, user-stopped, or
 superseded remains immutable history but is ineligible for activation and is
-excluded from queue predecessor selection. When such a retired origin falls
-inside an active turn's accepted-input tail, the runtime projection retains its
-immutable acceptance position with an explicit retired-goal-origin marker while
-omitting it from the process transcript's turn inventory; tail completeness and
-the session acceptance high-water mark therefore remain exact. A stop or
-supersede that retires queued goal work appends a durable `goal_turn_retired`
-update before any replacement input acceptance. A live follower clears only that
-exact queued identity, so obsolete work cannot mask a replacement activation.
-Durable event and input correlation makes retrying command delivery idempotent
-rather than duplicating continuation work.
+excluded from queue predecessor selection and periodic reconciliation hints.
+When such a retired origin falls inside an active turn's accepted-input tail,
+the runtime projection retains its immutable acceptance position with an
+explicit retired-goal-origin marker while omitting it from the process
+transcript's turn inventory; tail completeness and the session acceptance
+high-water mark therefore remain exact. A stop or supersede that retires queued
+goal work appends a durable `goal_turn_retired` update before any replacement
+input acceptance. A live follower clears only that exact queued identity, so
+obsolete work cannot mask a replacement activation. Durable event and input
+correlation makes retrying command delivery idempotent rather than duplicating
+continuation work.
 
 ## Persistence and process surfaces
 
@@ -149,11 +153,13 @@ pursuit-starting commands. Every pursuit-starting user event reverse-correlates
 to exactly one queued goal turn, whose requested and frozen configuration
 derives from its exact defaults epoch. Model-declaration requests and
 scheduler-failure turns are single-use; composite foreign keys enforce
-user-command, model-invocation, and scheduler-turn provenance, while a deferred
-constraint binds each model event to the exact `goal_declare` name and canonical
-arguments of its request and the immediately preceding assistant-text part.
-Loads replay complete rows through the domain aggregate rather than reading a
-mutable current-state projection (INV-048).
+user-command, model-invocation, and scheduler-turn provenance, while deferred
+constraints bind each model event to the current goal turn, the exact
+`goal_declare` name and canonical arguments of its request, and the immediately
+preceding assistant-text part. They bind every scheduler failure event to the
+current unsuccessfully terminal goal turn. Loads replay complete rows through
+the domain aggregate rather than reading a mutable current-state projection
+(INV-048).
 
 **Implemented behavior.** The process protocol exposes attach, show, resume,
 stop, and supersede requests. Show returns the current generation and complete

@@ -259,6 +259,35 @@ ALTER TABLE goal_event
 
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
+CREATE FUNCTION goal_event_names_current_goal_turn(
+    checked_session uuid,
+    checked_generation numeric,
+    checked_turn uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    current_turn uuid;
+BEGIN
+    PERFORM 1 FROM session
+     WHERE session_id = checked_session
+     FOR NO KEY UPDATE;
+    SELECT goal.turn_id
+      INTO current_turn
+      FROM goal_turn AS goal
+      JOIN accepted_input AS accepted
+        ON accepted.accepted_input_id = goal.accepted_input_id
+       AND accepted.session_id = goal.session_id
+       AND accepted.origin_turn_id = goal.turn_id
+     WHERE goal.session_id = checked_session
+       AND goal.goal_generation = checked_generation
+     ORDER BY accepted.acceptance_position DESC
+     LIMIT 1;
+    RETURN current_turn IS NOT NULL AND checked_turn = current_turn;
+END;
+$$;
+
 CREATE FUNCTION enforce_goal_model_declaration_request()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -272,6 +301,14 @@ DECLARE
 BEGIN
     IF NEW.model_tool_request_id IS NULL THEN
         RETURN NEW;
+    END IF;
+
+    IF NOT goal_event_names_current_goal_turn(
+        NEW.session_id, NEW.generation, NEW.model_turn_id
+    ) THEN
+        RAISE EXCEPTION 'goal model event must name the current goal turn'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'goal_event_model_current_turn';
     END IF;
 
     SELECT
@@ -328,6 +365,45 @@ AFTER INSERT OR UPDATE ON goal_event
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION enforce_goal_model_declaration_request();
+
+CREATE FUNCTION enforce_goal_scheduler_failure_turn()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    failure_is_valid boolean;
+BEGIN
+    IF NEW.scheduler_turn_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT goal_event_names_current_goal_turn(
+               NEW.session_id, NEW.generation, NEW.scheduler_turn_id
+           )
+           AND lifecycle.state_kind = 'terminal'
+           AND lifecycle.terminal_disposition_kind IN (
+               'refused', 'failed', 'cancelled', 'reconciliation_required'
+           )
+      INTO failure_is_valid
+      FROM turn_lifecycle AS lifecycle
+     WHERE lifecycle.session_id = NEW.session_id
+       AND lifecycle.turn_id = NEW.scheduler_turn_id
+     FOR SHARE;
+
+    IF failure_is_valid IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'goal scheduler event requires the current unsuccessful goal turn'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'goal_event_scheduler_failure_turn';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER goal_event_scheduler_failure_turn
+AFTER INSERT OR UPDATE ON goal_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION enforce_goal_scheduler_failure_turn();
 
 -- Queued goal turns remain immutable history after their generation ends, but
 -- only the queued turn of the current pursuing generation participates in

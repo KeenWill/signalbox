@@ -17,13 +17,13 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
     CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockedReasonKind,
-    GoalCommandRejection, GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind,
-    GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
-    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest,
-    PreparedCreateSession, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
-    ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalCommandRejection,
+    GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
+    GoalReport, GoalSchedulerProvenance, GoalStatement, GoalUserAction, GoalUserCommand,
+    GoalUserProvenance, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput, ToolRequestId,
+    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -373,6 +373,15 @@ async fn set_goal_turn_acceptance_position(
 }
 
 #[track_caller]
+fn assert_database_constraint(error: sqlx::Error, constraint: &str) {
+    let database = error
+        .as_database_error()
+        .expect("deferred goal correlation reports a database constraint");
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(database.constraint(), Some(constraint));
+}
+
+#[track_caller]
 fn assert_model_declaration_request_rejected(error: GoalRepositoryError) {
     let GoalRepositoryError::Database(error) = error else {
         panic!("declaration-request mismatch must be a database rejection");
@@ -403,6 +412,66 @@ async fn mark_goal_turn_completed(pool: &PgPool, turn: TurnId) -> Result<(), Box
     .bind(turn.into_uuid())
     .bind(Uuid::from_u128(0xd75))
     .bind(Uuid::from_u128(0xe75))
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn completed_goal_with_successor(
+    pool: &PgPool,
+    attached: GoalTurnCandidates,
+    successor: GoalTurnCandidates,
+) -> Result<(), Box<dyn Error>> {
+    let repository = GoalRepository::new(pool.clone());
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH_COMMAND),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("continue through a successor")),
+                ),
+                Some(attached),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(activate_goal_turn(pool, 0xd58).await?, attached.turn());
+    mark_goal_turn_completed(pool, attached.turn()).await?;
+    assert_eq!(
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                successor,
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::Scheduled {
+            turn: successor.turn()
+        }
+    );
+    Ok(())
+}
+
+async fn mark_completed_goal_turn_failed(
+    pool: &PgPool,
+    turn: TurnId,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET terminal_disposition_kind = 'failed'
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
     .execute(pool)
     .await?;
     sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
@@ -979,6 +1048,56 @@ async fn inv048_stop_retires_queued_work_without_blocking_reattach() -> Result<(
     Ok(())
 }
 
+/// INV-048: a stopped queued goal turn is immutable history and does not
+/// remain a periodic reconciliation hint.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_stopped_queued_goal_is_absent_from_reconciliation_hints()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH_COMMAND),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("retire the queued goal")),
+                ),
+                Some(turn_candidates(0xb48)),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(STOP_COMMAND),
+                    session(SESSION),
+                    GoalUserAction::Stop,
+                ),
+                None,
+                |_| None,
+            )
+            .await?,
+    );
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+
+    assert!(sessions.is_empty());
+    assert!(!continuation);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-048: retiring a queued replacement keeps its immutable tail position
 /// while excluding its turn from runtime scheduling.
 #[tokio::test(flavor = "multi_thread")]
@@ -1262,11 +1381,11 @@ async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Resul
     Ok(())
 }
 
-/// INV-048: exhausting the session acceptance ordinal durably blocks pursuit and
-/// leaves later user-command rejection replayable.
+/// INV-048: exhausting the session acceptance ordinal yields typed scheduler
+/// backpressure and a durable, replayable user-command rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_turn_acceptance_position_exhaustion_blocks_without_retry()
+async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1295,45 +1414,23 @@ async fn inv048_goal_turn_acceptance_position_exhaustion_blocks_without_retry()
         attached_turn.turn()
     );
     mark_goal_turn_completed(&pool, attached_turn.turn()).await?;
-    let failure_need =
-        GoalNeed::try_new(String::from("repair execution")).expect("fixture need is admitted");
-
-    let outcome = repository
-        .reconcile_current_after_execution(
-            session(SESSION),
-            turn_candidates(0xb82),
-            failure_need.clone(),
-            |_| None,
-        )
-        .await?;
     let history_before_rejection = repository
         .load_goal(session(SESSION))
         .await?
-        .expect("the blocked lineage remains");
-    let blocked_event = history_before_rejection
-        .events()
-        .last()
-        .expect("the scheduler block event exists");
+        .expect("the attached lineage exists");
 
     assert_eq!(
-        outcome,
-        GoalTurnContinuationOutcome::Blocked {
-            event: blocked_event.ordinal()
-        }
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                turn_candidates(0xb82),
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::AcceptancePositionExhausted { last: maximum }
     );
-    assert_eq!(
-        history_before_rejection.current().state(),
-        &GoalState::Blocked {
-            reason: GoalBlockedReasonKind::ExecutionFailure,
-            need: failure_need,
-        }
-    );
-    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
-    assert!(sessions.is_empty());
-    assert!(!continuation);
 
     let supersede = GoalUserCommand::new(
         command(0x982),
@@ -1461,6 +1558,138 @@ async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
             .fetch_one(&pool)
             .await?;
     assert_eq!(scheduler_blocks, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: a direct model event cannot name an older turn from the current
+/// goal generation after a successor has become current.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_model_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached = turn_candidates(0xb58);
+    let successor = turn_candidates(0xb59);
+    completed_goal_with_successor(&pool, attached, successor).await?;
+    let request = tool_request(0xf58);
+    insert_goal_tool_request(
+        &pool,
+        attached.turn(),
+        request,
+        "goal_declare",
+        r#"{"reason":"user_input_required","transition":"blocked"}"#,
+        "stale model need",
+    )
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, blocked_reason,
+             need, model_turn_id, model_tool_request_id)
+         VALUES ($1, 2, 1, 'blocked', 'user_input_required', $2, $3, $4)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind("stale model need")
+    .bind(attached.turn().into_uuid())
+    .bind(request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("an older same-generation turn cannot source a model event");
+
+    assert_database_constraint(error, "goal_event_model_current_turn");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: a direct scheduler event cannot name an unsuccessful older turn
+/// after a same-generation successor has become current.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_scheduler_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached = turn_candidates(0xb5a);
+    let successor = turn_candidates(0xb5b);
+    completed_goal_with_successor(&pool, attached, successor).await?;
+    mark_completed_goal_turn_failed(&pool, attached.turn()).await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, blocked_reason,
+             need, scheduler_turn_id)
+         VALUES ($1, 2, 1, 'blocked', 'execution_failure', $2, $3)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind("repair the stale failed turn")
+    .bind(attached.turn().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("an older same-generation turn cannot source a scheduler event");
+
+    assert_database_constraint(error, "goal_event_scheduler_failure_turn");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: a direct scheduler failure event must name a terminal turn whose
+/// disposition is unsuccessful.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_scheduler_event_requires_an_unsuccessful_terminal_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let queued = turn_candidates(0xb5c);
+    assert_applied_command(
+        GoalRepository::new(pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH_COMMAND),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("reject premature scheduler blocking")),
+                ),
+                Some(queued),
+                |_| None,
+            )
+            .await?,
+    );
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, blocked_reason,
+             need, scheduler_turn_id)
+         VALUES ($1, 2, 1, 'blocked', 'execution_failure', $2, $3)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind("turn has not failed")
+    .bind(queued.turn().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("a queued turn cannot source scheduler failure blocking");
+
+    assert_database_constraint(error, "goal_event_scheduler_failure_turn");
 
     pool.close().await;
     drop(container);
@@ -1650,12 +1879,12 @@ async fn inv048_model_goal_declaration_request_is_single_use() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: a changed current alias unavailable at reconciliation blocks pursuit
-/// without falling back or re-entering the durable sweep.
+/// INV-048: a changed current alias that is unavailable at reconciliation is
+/// a typed continuation outcome, not durable-state corruption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_changed_unknown_alias_blocks_without_fallback_or_retry()
--> Result<(), Box<dyn Error>> {
+async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let first_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa21));
     let changed_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa22));
@@ -1700,45 +1929,20 @@ async fn inv048_changed_unknown_alias_blocks_without_fallback_or_retry()
         .bind(Uuid::from_u128(SESSION))
         .execute(&pool)
         .await?;
-    let failure_need =
-        GoalNeed::try_new(String::from("repair execution")).expect("fixture need is admitted");
-
-    let outcome = repository
-        .reconcile_current_after_execution(
-            session(SESSION),
-            turn_candidates(0xb72),
-            failure_need.clone(),
-            |_| None,
-        )
-        .await?;
-    let blocked = repository
-        .load_goal(session(SESSION))
-        .await?
-        .expect("the blocked lineage remains");
-    let blocked_event = blocked
-        .events()
-        .last()
-        .expect("the scheduler block event exists");
-
     assert_eq!(
-        outcome,
-        GoalTurnContinuationOutcome::Blocked {
-            event: blocked_event.ordinal()
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                turn_candidates(0xb72),
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::UnknownModelAlias {
+            alias: changed_alias
         }
     );
-    assert_eq!(
-        blocked.current().state(),
-        &GoalState::Blocked {
-            reason: GoalBlockedReasonKind::ExecutionFailure,
-            need: failure_need,
-        }
-    );
-    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
-    assert!(sessions.is_empty());
-    assert!(!continuation);
 
     pool.close().await;
     drop(container);

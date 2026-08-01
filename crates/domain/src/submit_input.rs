@@ -2752,6 +2752,13 @@ struct ValidatedTurnOrigin {
     turns: HashSet<TurnId>,
 }
 
+fn goal_turn_source_references_turn(source: GoalTurnSource, turn: TurnId) -> bool {
+    match source {
+        GoalTurnSource::UserEvent(_) => false,
+        GoalTurnSource::SuccessfulTurn(predecessor) => predecessor == turn,
+    }
+}
+
 fn validate_turn_origin_reconstitution_input(
     input: &SubmitInputTurnOriginReconstitutionInput,
 ) -> Option<ValidatedTurnOrigin> {
@@ -2783,7 +2790,7 @@ fn validate_turn_origin_reconstitution_input(
                 || facts.queue_session != goal.session
                 || facts.queue_turn != goal.turn
                 || facts.queue_order != AcceptedInputQueueOrder::ordinary(goal.acceptance_position)
-                || matches!(goal.source, GoalTurnSource::SuccessfulTurn(turn) if turn == goal.turn)
+                || goal_turn_source_references_turn(goal.source, goal.turn)
             {
                 return None;
             }

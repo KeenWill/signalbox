@@ -428,6 +428,10 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 GoalTurnContinuationOutcome::NotTerminal
                 | GoalTurnContinuationOutcome::Blocked { .. }
                 | GoalTurnContinuationOutcome::NotPursuing
+                | GoalTurnContinuationOutcome::NotCurrentGoalTurn
+                | GoalTurnContinuationOutcome::UnknownModelAlias { .. }
+                | GoalTurnContinuationOutcome::EventOrdinalExhausted
+                | GoalTurnContinuationOutcome::AcceptancePositionExhausted { .. }
                 | GoalTurnContinuationOutcome::AlreadyScheduled => {}
             }
             Ok(())

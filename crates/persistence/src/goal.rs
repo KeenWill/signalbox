@@ -251,9 +251,11 @@ impl GoalRepository {
         } else {
             apply_user_command(&mut transaction, &command).await?
         };
-        let turn_admission = if let GoalCommandResult::Applied(event) = &result
-            && event_starts_pursuit(event)
-        {
+        let starts_pursuit = match &result {
+            GoalCommandResult::Applied(event) => event_starts_pursuit(event),
+            GoalCommandResult::Rejected(_) => false,
+        };
+        let turn_admission = if starts_pursuit {
             match current_origin_configuration(
                 &mut transaction,
                 command.session(),
@@ -276,7 +278,7 @@ impl GoalRepository {
                         }
                     }
                 }
-                CurrentOriginConfiguration::UnknownAlias => {
+                CurrentOriginConfiguration::UnknownAlias(_) => {
                     result = GoalCommandResult::Rejected(GoalCommandRejection::UnknownModelAlias);
                     None
                 }
@@ -285,43 +287,46 @@ impl GoalRepository {
             None
         };
         insert_command(&mut transaction, &command, &result).await?;
-        if let GoalCommandResult::Applied(event) = &result {
-            insert_event(&mut transaction, command.session(), event).await?;
-            if event_may_retire_queued_turn(event)
-                && let Some(retired) =
-                    retired_queued_goal_turn_without_outbox(&mut transaction, command.session())
+        match &result {
+            GoalCommandResult::Applied(event) => {
+                insert_event(&mut transaction, command.session(), event).await?;
+                if event_may_retire_queued_turn(event)
+                    && let Some(retired) =
+                        retired_queued_goal_turn_without_outbox(&mut transaction, command.session())
+                            .await?
+                {
+                    outbox::append(
+                        &mut transaction,
+                        OutboxEvent::GoalTurnRetired {
+                            session: command.session(),
+                            turn: retired,
+                        },
+                    )
+                    .await?;
+                }
+                if event_starts_pursuit(event) {
+                    let candidates = candidates.ok_or(GoalCorruption::Missing(
+                        "turn candidates for pursuing command",
+                    ))?;
+                    let (configuration, position) = turn_admission.ok_or(
+                        GoalCorruption::Missing("turn admission for pursuing command"),
+                    )?;
+                    let goal = load_goal_from_connection(&mut transaction, command.session())
                         .await?
-            {
-                outbox::append(
-                    &mut transaction,
-                    OutboxEvent::GoalTurnRetired {
-                        session: command.session(),
-                        turn: retired,
-                    },
-                )
-                .await?;
+                        .ok_or(GoalCorruption::Missing("scheduled command goal"))?;
+                    insert_goal_turn(
+                        &mut transaction,
+                        command.session(),
+                        goal.current().generation(),
+                        GoalTurnSource::UserEvent(event.ordinal()),
+                        pursuit_input(&goal, event)?,
+                        &configuration,
+                        GoalTurnInsertion::new(position, candidates),
+                    )
+                    .await?;
+                }
             }
-            if event_starts_pursuit(event) {
-                let candidates = candidates.ok_or(GoalCorruption::Missing(
-                    "turn candidates for pursuing command",
-                ))?;
-                let (configuration, position) = turn_admission.ok_or(GoalCorruption::Missing(
-                    "turn admission for pursuing command",
-                ))?;
-                let goal = load_goal_from_connection(&mut transaction, command.session())
-                    .await?
-                    .ok_or(GoalCorruption::Missing("scheduled command goal"))?;
-                insert_goal_turn(
-                    &mut transaction,
-                    command.session(),
-                    goal.current().generation(),
-                    GoalTurnSource::UserEvent(event.ordinal()),
-                    pursuit_input(&goal, event)?,
-                    &configuration,
-                    GoalTurnInsertion::new(position, candidates),
-                )
-                .await?;
-            }
+            GoalCommandResult::Rejected(_) => {}
         }
         commit(transaction).await?;
         Ok(GoalCommandHandlingOutcome::Recorded(result))
@@ -449,28 +454,16 @@ impl GoalRepository {
         .await?
         {
             CurrentOriginConfiguration::Selected(configuration) => configuration,
-            CurrentOriginConfiguration::UnknownAlias => {
-                return block_goal_continuation(
-                    transaction,
-                    session,
-                    goal,
-                    failure_need,
-                    predecessor,
-                )
-                .await;
+            CurrentOriginConfiguration::UnknownAlias(alias) => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::UnknownModelAlias { alias });
             }
         };
         let position = match next_goal_turn_acceptance_position(&mut transaction, session).await? {
             GoalTurnAcceptancePosition::Available(position) => position,
-            GoalTurnAcceptancePosition::Exhausted { .. } => {
-                return block_goal_continuation(
-                    transaction,
-                    session,
-                    goal,
-                    failure_need,
-                    predecessor,
-                )
-                .await;
+            GoalTurnAcceptancePosition::Exhausted { last } => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::AcceptancePositionExhausted { last });
             }
         };
         insert_goal_turn(
@@ -632,6 +625,23 @@ fn event_may_retire_queued_turn(event: &GoalEvent) -> bool {
     }
 }
 
+fn scheduler_failure_rejection(
+    failure: GoalTransitionFailure,
+) -> Result<GoalTurnContinuationOutcome, GoalCorruption> {
+    match failure {
+        GoalTransitionFailure::EventOrdinalExhausted => {
+            Ok(GoalTurnContinuationOutcome::EventOrdinalExhausted)
+        }
+        GoalTransitionFailure::RequiresPursuing
+        | GoalTransitionFailure::RequiresBlocked
+        | GoalTransitionFailure::RequiresPursuingOrBlocked
+        | GoalTransitionFailure::RequiresNoActiveGoal
+        | GoalTransitionFailure::GenerationExhausted => Err(GoalCorruption::Inconsistent(
+            "pursuing goal rejected scheduler failure blocking",
+        )),
+    }
+}
+
 fn event_starts_pursuit(event: &GoalEvent) -> bool {
     match event.kind() {
         GoalEventKind::Commissioned { .. }
@@ -674,7 +684,7 @@ fn select_definition_with_frozen_fallback(
 
 enum CurrentOriginConfiguration {
     Selected(OriginConfiguration),
-    UnknownAlias,
+    UnknownAlias(ModelAlias),
 }
 
 async fn current_origin_configuration<SelectDefinition>(
@@ -703,7 +713,7 @@ where
     Ok(
         match OriginConfiguration::freeze(checked, select_definition) {
             Ok(configuration) => CurrentOriginConfiguration::Selected(configuration),
-            Err(_) => CurrentOriginConfiguration::UnknownAlias,
+            Err(error) => CurrentOriginConfiguration::UnknownAlias(error.alias()),
         },
     )
 }
@@ -827,11 +837,14 @@ async fn block_goal_continuation(
     need: GoalNeed,
     predecessor: TurnId,
 ) -> Result<GoalTurnContinuationOutcome, GoalRepositoryError> {
-    let transitioned = goal
-        .block_execution_failure(need, GoalSchedulerProvenance::new(predecessor))
-        .map_err(|_| {
-            GoalCorruption::Inconsistent("pursuing goal rejected scheduler failure blocking")
-        })?;
+    let transitioned =
+        match goal.block_execution_failure(need, GoalSchedulerProvenance::new(predecessor)) {
+            Ok(goal) => goal,
+            Err(error) => {
+                transaction.rollback().await?;
+                return scheduler_failure_rejection(error.failure()).map_err(Into::into);
+            }
+        };
     let event = latest_event(&transitioned)?;
     insert_event(&mut transaction, session, &event).await?;
     commit(transaction).await?;
@@ -1333,6 +1346,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inv048_scheduler_event_ordinal_exhaustion_is_a_typed_continuation_outcome() {
+        let outcome = scheduler_failure_rejection(GoalTransitionFailure::EventOrdinalExhausted)
+            .expect("event ordinal exhaustion is typed, not corruption");
+
+        assert_eq!(outcome, GoalTurnContinuationOutcome::EventOrdinalExhausted);
+    }
 
     #[test]
     fn successful_continuation_reuses_frozen_alias_when_catalog_entry_is_absent() {
