@@ -1267,7 +1267,12 @@ where
                 credential,
             };
         }
-        if query_contains_credential(request.query(), credential_text) {
+        if query_contains_credential(request.query(), credential_text)
+            || fixed_request_metadata_contains_credential(
+                request.provider.endpoint(),
+                credential_text,
+            )
+        {
             let outcome = known_failure_evidence(self.request_failed_detail.clone(), &scrubber);
             return match outcome {
                 Ok(evidence) => {
@@ -1947,7 +1952,7 @@ impl CredentialScrubber {
         if self.reversible_variants().any(|variant| {
             let slash_normalized = variant.replace('\\', "/");
             slash_normalized != variant
-                && (text.contains(&slash_normalized)
+                && (unicode_case_insensitive_contains(text, &slash_normalized)
                     || encoded_contains_credential(text, &slash_normalized))
         }) {
             return true;
@@ -2402,6 +2407,7 @@ mod tests {
     const URL_LEGACY_IPV4_COLLISION_KEY: &str = "2130706433";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
     const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
+    const URL_DECODED_CASE_BACKSLASH_COLLISION_KEY: &str = "ABC%5CDEF";
     const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
     const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
     const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
@@ -3330,6 +3336,37 @@ mod tests {
             .await
             .into_result()
             .expect("query collision is definitive pre-dispatch evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: fixed provider request metadata is checked before the
+    /// injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_fixed_request_metadata_before_injected_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: ACCEPT_HEADER_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(FIXTURE_QUERY),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("fixed metadata collision is definitive evidence");
 
         assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
         assert_eq!(searches.load(Ordering::Relaxed), 0);
@@ -4371,6 +4408,29 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_DECODED_BACKSLASH_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: Unicode case folding is composed with reversible decoding and
+    /// URL backslash normalization before completed evidence is retained.
+    #[test]
+    fn web_search_rejects_case_folded_decoded_backslash_credential_in_result_url() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_BACKSLASH_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("case-folded decoded backslash fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_DECODED_CASE_BACKSLASH_COLLISION_KEY.as_bytes().to_vec(),
         ))
         .expect("fixture credential is usable");
 
