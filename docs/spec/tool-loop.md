@@ -1053,8 +1053,8 @@ detail.
 
 ### Session plan tools
 
-This catalog family is verified through PR #387 (`agent/tool-exercise-smoke`)
-at implementation ref `6ca4e31dffcb5b88d9f149cf1c347f8aa34843a3`.
+This catalog family is verified through PR #387 (`agent/tool-exercise-smoke`) at
+implementation ref `6ca4e31dffcb5b88d9f149cf1c347f8aa34843a3`.
 
 The process-lifetime daemon catalog always includes `plan_write` and `plan_read`
 in both base and fully mapped production composition. `signalboxd` binds their
@@ -1084,8 +1084,9 @@ instead of returning oversized evidence.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
-preexisting names, the two session-plan names, and the sixteen code-host names; disagreement between the
-advertised catalog and executor is classified as a daemon defect.
+preexisting names, the two session-plan names, and the sixteen code-host names;
+disagreement between the advertised catalog and executor is classified as a
+daemon defect.
 
 ## Persistence boundaries
 
