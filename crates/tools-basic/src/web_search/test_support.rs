@@ -1,0 +1,220 @@
+use signalbox_application::ToolExecutorEvidence;
+use signalbox_model_runtime::CredentialValue;
+
+use super::{egress::*, redaction::*, result::*};
+
+pub(super) const SYNTHETIC_KEY: &str = "fixture-search-key";
+
+pub(super) const FIXTURE_RESULT_TITLE: &str = "Synthetic result";
+
+pub(super) const FIXTURE_RESULT_URL: &str = "https://example.com/result";
+
+pub(super) const FIXTURE_IPV6_RESULT_URL: &str = "https://[2001:db8::1]/result";
+
+pub(super) const FIXTURE_MULTI_HEXTET_IPV6_RESULT_URL: &str = "https://[2001:db8:0:1::]/";
+
+pub(super) const FIXTURE_IPV4_TAIL_IPV6_RESULT_URL: &str = "http://[::ffff:c0a8:1]/";
+
+pub(super) const FIXTURE_LEGACY_IPV4_RESULT_URL: &str = "https://2130706433/result";
+
+pub(super) const FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.0.1/";
+
+pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
+
+pub(super) const FIXTURE_TAB_NORMALIZED_RESULT_URL: &str = "http://example.com/abcd";
+
+pub(super) const FIXTURE_UPPERCASE_SCHEME_RESULT_URL: &str = "HTTPS://example.com/result";
+
+pub(super) const FIXTURE_BACKSLASH_RESULT_URL: &str = "https://example.com/abc\\def";
+
+pub(super) const FIXTURE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-ABCDEF.example/result";
+
+pub(super) const FIXTURE_UNICODE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-bücher.example/result";
+
+pub(super) const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
+
+pub(super) const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
+
+pub(super) const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";
+
+pub(super) const FIXTURE_ORIGIN_ONLY_RESULT_URL: &str = "https://example.com";
+
+pub(super) const FIXTURE_CANONICAL_ORIGIN_RESULT_URL: &str = "https://example.com/";
+
+pub(super) const SUCCESS_PAYLOAD_COLLISION_KEY: &str = "results";
+
+pub(super) const URL_SCHEME_COLLISION_KEY: &str = "https";
+
+pub(super) const URL_DOT_SEGMENT_COLLISION_KEY: &str = "abc/./def";
+
+pub(super) const URL_DOT_SEGMENT_NORMALIZED_VALUE: &str = "abc/def";
+
+pub(super) const URL_SCHEME_CASE_COLLISION_KEY: &str = "HTTPS";
+
+pub(super) const URL_ENCODED_COLLISION_KEY: &str = "secret/key";
+
+pub(super) const URL_ENCODED_COLLISION_VALUE: &str = "secret%2Fkey";
+
+pub(super) const URL_FORM_COLLISION_KEY: &str = "secret key";
+
+pub(super) const URL_FORM_COLLISION_VALUE: &str = "secret+key";
+
+pub(super) const URL_IDNA_COLLISION_KEY: &str = "bücher";
+
+pub(super) const URL_IDNA_COLLISION_VALUE: &str = "https://bücher.example/";
+
+pub(super) const URL_HOST_CASE_COLLISION_KEY: &str = "EXAMPLE.COM";
+
+pub(super) const URL_IPV6_COLLISION_KEY: &str = "2001:0db8:0:0:0:0:0:1";
+
+pub(super) const URL_LEGACY_IPV4_COLLISION_KEY: &str = "2130706433";
+
+pub(super) const URL_OCTAL_IPV4_COMPONENT_COLLISION_KEY: &str = "0177";
+
+pub(super) const URL_HEX_IPV4_COMPONENT_COLLISION_KEY: &str = "0x7f";
+
+pub(super) const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
+
+pub(super) const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
+
+pub(super) const URL_IPV6_MULTI_HEXTET_COLLISION_KEY: &str = "0db8:0000";
+
+pub(super) const URL_IPV6_BRACKET_BOUND_COLLISION_KEY: &str = "[2001:0db8";
+
+pub(super) const URL_IPV6_COMPRESSED_FRAGMENT_COLLISION_KEY: &str = "0db8::1";
+
+pub(super) const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
+
+pub(super) const URL_MIXED_COMPRESSED_IPV6_TAIL_COLLISION_KEY: &str = "::ffff:192.168";
+
+pub(super) const URL_SEPARATOR_ONLY_IPV6_TAIL_COLLISION_KEY: &str = ":192.168";
+
+pub(super) const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
+
+pub(super) const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
+
+pub(super) const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
+
+pub(super) const URL_DECODED_CASE_BACKSLASH_COLLISION_KEY: &str = "ABC%5CDEF";
+
+pub(super) const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
+
+pub(super) const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
+
+pub(super) const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
+
+pub(super) const URL_PORT_COLLISION_KEY: &str = ":08081";
+
+pub(super) const URL_BARE_PORT_COLLISION_KEY: &str = "08081";
+
+pub(super) const URL_PORT_COLLISION_VALUE: &str = "http://example.com:8081/";
+
+pub(super) const URL_COMPLETE_DEFAULT_PORT_COLLISION_KEY: &str = "https://example.com:443/";
+
+pub(super) const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
+
+pub(super) const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
+
+pub(super) const UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY: &str = "*";
+
+pub(super) const UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE: &str = "&ast;";
+
+pub(super) const HTML_NUMERIC_C1_COLLISION_KEY: &str = "€";
+
+pub(super) const HTML_NUMERIC_C1_COLLISION_VALUE: &str = "&#x80;";
+
+pub(super) const SEMICOLONLESS_NUMERIC_HTML_COLLISION_KEY: &str = ">";
+
+pub(super) const SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE: &str = "&#62";
+
+pub(super) const SEMICOLONLESS_NAMED_HTML_COLLISION_KEY: &str = "<";
+
+pub(super) const SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE: &str = "&lt";
+
+pub(super) const RUST_DEBUG_UNICODE_COLLISION_KEY: &str = r"\u{85}";
+
+pub(super) const RUST_DEBUG_UNICODE_COLLISION_VALUE: &str = "\u{85}";
+
+pub(super) const OVER_WINDOW_NUMERIC_HTML_COLLISION_KEY: &str = "ZXQ";
+
+pub(super) const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
+
+pub(super) const FORM_HTML_COLLISION_VALUE: &str = "abc%26amp%3Bdef";
+
+pub(super) const REVERSE_ENCODED_COLLISION_KEY: &str = "abc%26def";
+
+pub(super) const REVERSE_ENCODED_COLLISION_VALUE: &str = "abc&def";
+
+pub(super) const JSON_UNICODE_COLLISION_KEY: &str = "abc";
+
+pub(super) const JSON_UNICODE_COLLISION_VALUE: &str = r"\u0061\u0062\u0063";
+
+pub(super) const JSON_SOLIDUS_COLLISION_KEY: &str = r"abc\/def";
+
+pub(super) const JSON_SOLIDUS_COLLISION_VALUE: &str = "abc/def";
+
+pub(super) const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
+
+pub(super) const UNICODE_FULL_FOLD_COLLISION_KEY: &str = "STRASSE";
+
+pub(super) const UNICODE_FULL_FOLD_COLLISION_VALUE: &str = "Straße";
+
+pub(super) const UNICODE_COMBINING_MARK_COLLISION_KEY: &str = "\u{0301}x";
+
+pub(super) const UNICODE_COMBINING_MARK_COLLISION_VALUE: &str = "éx";
+
+pub(super) const PROVIDER_REJECTION_STATUS: u16 = 429;
+
+pub(super) fn configuration() -> WebSearchConfiguration {
+    WebSearchConfiguration::new(WebSearchProvider::Brave)
+}
+
+pub(super) fn result(title: impl Into<String>) -> WebSearchResult {
+    WebSearchResult::try_new(WebSearchResultFields {
+        title: title.into(),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("fixture result is admitted")
+}
+
+pub(super) fn response_with_result_count(count: usize) -> WebSearchResponse {
+    let results = (0..count)
+        .map(|index| result(format!("recorded result {index}")))
+        .collect();
+    WebSearchResponse::new(results, WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted")
+}
+
+pub(super) fn scrubber() -> CredentialScrubber {
+    CredentialScrubber::try_new(&CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec()))
+        .expect("fixture credential is usable")
+}
+
+pub(super) fn completed_text(evidence: ToolExecutorEvidence) -> String {
+    match evidence {
+        ToolExecutorEvidence::CompletedText(content) => content,
+        other => panic!("expected completed text, got {other:?}"),
+    }
+}
+
+pub(super) fn html_multibyte_boundary_reflection() -> String {
+    format!("{HTML_ENTITY_COLLISION_VALUE}{}é", "x".repeat(55))
+}
+
+pub(super) fn distant_html_reference_terminator() -> String {
+    format!("{};", "&".repeat(MAX_PROVIDER_RESPONSE_BYTES - 1))
+}
+
+pub(super) fn over_window_numeric_html_reflection() -> String {
+    let leading_zeroes = "0".repeat(64);
+    format!("&#{leading_zeroes}90;&#{leading_zeroes}88;&#{leading_zeroes}81;")
+}
+
+pub(super) fn content_over_tool_result_bound() -> String {
+    "x".repeat(
+        MAX_RETURNED_RESULTS
+            * (MAX_RESULT_TITLE_BYTES + MAX_RESULT_SNIPPET_BYTES)
+            * "\\u0001".len(),
+    )
+}
