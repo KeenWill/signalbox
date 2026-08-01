@@ -721,6 +721,18 @@ mod linux {
 
     impl ProcessTreeGuard {
         fn new(root: u32, supervisor: u32) -> Result<Self, ()> {
+            Self::new_with_watcher(root, supervisor, |watcher| {
+                std::thread::Builder::new()
+                    .name(String::from("signalbox-exec-inner-watcher"))
+                    .spawn(watcher)
+                    .map_err(|_| ())
+            })
+        }
+
+        fn new_with_watcher<Spawn>(root: u32, supervisor: u32, spawn: Spawn) -> Result<Self, ()>
+        where
+            Spawn: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>, ()>,
+        {
             let root_process = pin_process(root)?.ok_or(())?;
             let descendants = Arc::new(Mutex::new(BTreeMap::from([(root, root_process)])));
             let stop = Arc::new(AtomicBool::new(false));
@@ -728,7 +740,7 @@ mod linux {
             let watcher_stop = Arc::clone(&stop);
             let process_tree_supported = Arc::new(AtomicBool::new(true));
             let watcher_process_tree_supported = Arc::clone(&process_tree_supported);
-            let watcher = std::thread::spawn(move || {
+            let watcher = spawn(Box::new(move || {
                 let mut interval = MINIMUM_POLL_INTERVAL;
                 while !watcher_stop.load(Ordering::Acquire) {
                     let changed = match observe_descendants(
@@ -751,7 +763,7 @@ mod linux {
                     };
                     std::thread::sleep(interval);
                 }
-            });
+            }))?;
             Ok(Self {
                 root,
                 supervisor,
@@ -1318,6 +1330,21 @@ mod linux {
                     .map_err(|()| std::io::Error::other("poll preflight pidfd"))?;
 
                 assert!(!exited);
+                Ok(())
+            })
+        }
+
+        #[test]
+        fn inner_watcher_spawn_failure_is_returned_instead_of_panicking()
+        -> Result<(), Box<dyn std::error::Error>> {
+            with_procfs_children_support(|| {
+                let result = ProcessTreeGuard::new_with_watcher(
+                    std::process::id(),
+                    std::process::id(),
+                    |_| Err(()),
+                );
+
+                assert!(result.is_err());
                 Ok(())
             })
         }
