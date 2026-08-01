@@ -2387,9 +2387,23 @@ impl CredentialScrubber {
             return true;
         }
         if let Some(result_host) = parse_ip_literal(host) {
-            return self
+            if self
                 .reversible_variants()
-                .any(|variant| parse_ip_literal(variant).is_some_and(|key| key == result_host));
+                .any(|variant| parse_ip_literal(variant).is_some_and(|key| key == result_host))
+            {
+                return true;
+            }
+            if let std::net::IpAddr::V4(result_ipv4) = result_host {
+                let result_components = result_ipv4.octets();
+                return self.reversible_variants().any(|variant| {
+                    canonicalized_ipv4_component_values(variant).is_some_and(|components| {
+                        components
+                            .into_iter()
+                            .any(|component| result_components.contains(&component))
+                    })
+                });
+            }
+            return false;
         }
         if self.reversible_variants().any(|variant| {
             idna::domain_to_ascii(variant)
@@ -2913,6 +2927,34 @@ fn parse_ip_literal(value: &str) -> Option<std::net::IpAddr> {
     unbracketed.parse().ok()
 }
 
+fn canonicalized_ipv4_component_values(value: &str) -> Option<[u8; 4]> {
+    let first = canonicalized_ipv4_component(&format!("{value}.0.0.1"), 0)?;
+    let second = canonicalized_ipv4_component(&format!("0.{value}.0.1"), 1)?;
+    let third = canonicalized_ipv4_component(&format!("0.0.{value}.1"), 2)?;
+    let fourth = canonicalized_ipv4_component(&format!("0.0.0.{value}"), 3)?;
+    Some([first, second, third, fourth])
+}
+
+fn canonicalized_ipv4_component(host: &str, position: usize) -> Option<u8> {
+    let candidate = format!("http://{host}/");
+    let url = Url::parse(&candidate).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    url.host_str()?
+        .parse::<std::net::Ipv4Addr>()
+        .ok()?
+        .octets()
+        .get(position)
+        .copied()
+}
+
 fn form_decode_once(encoded: &[u8]) -> Vec<u8> {
     let mut decoded = Vec::with_capacity(encoded.len());
     let mut index = 0;
@@ -2984,6 +3026,7 @@ mod tests {
     const FIXTURE_RESULT_URL: &str = "https://example.com/result";
     const FIXTURE_IPV6_RESULT_URL: &str = "https://[2001:db8::1]/result";
     const FIXTURE_LEGACY_IPV4_RESULT_URL: &str = "https://2130706433/result";
+    const FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.0.1/";
     const FIXTURE_UPPERCASE_SCHEME_RESULT_URL: &str = "HTTPS://example.com/result";
     const FIXTURE_BACKSLASH_RESULT_URL: &str = "https://example.com/abc\\def";
     const FIXTURE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-ABCDEF.example/result";
@@ -3035,6 +3078,8 @@ mod tests {
     const URL_HOST_CASE_COLLISION_KEY: &str = "EXAMPLE.COM";
     const URL_IPV6_COLLISION_KEY: &str = "2001:0db8:0:0:0:0:0:1";
     const URL_LEGACY_IPV4_COLLISION_KEY: &str = "2130706433";
+    const URL_OCTAL_IPV4_COMPONENT_COLLISION_KEY: &str = "0177";
+    const URL_HEX_IPV4_COMPONENT_COLLISION_KEY: &str = "0x7f";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
     const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
     const URL_DECODED_CASE_BACKSLASH_COLLISION_KEY: &str = "ABC%5CDEF";
@@ -6161,6 +6206,52 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_LEGACY_IPV4_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: a legacy octal credential is canonicalized in IPv4 component
+    /// context before comparison with an already-canonical provider result host.
+    #[test]
+    fn web_search_rejects_octal_credential_in_canonical_ipv4_component() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("canonical IPv4 fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_OCTAL_IPV4_COMPONENT_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: a legacy hexadecimal credential is canonicalized in IPv4
+    /// component context before comparison with a provider result host.
+    #[test]
+    fn web_search_rejects_hex_credential_in_canonical_ipv4_component() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("canonical IPv4 fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_HEX_IPV4_COMPONENT_COLLISION_KEY.as_bytes().to_vec(),
         ))
         .expect("fixture credential is usable");
 
