@@ -3,12 +3,12 @@
 **Implemented behavior.** This page owns the cross-crate contract for one
 commissioned goal attached to a session: its immutable statements, event-sourced
 state, user commands, model declarations, scheduler continuation, process wire,
-and terminal-client verbs. The domain and PostgreSQL foundation is verified
-against `agent/goal-mode`; the scheduling and process surfaces are verified
-against its implementing child stack. Identity and durable-command mechanics
-remain owned by [identity and commands](identity-and-commands.md), turn
-execution by [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md),
-tool dispatch by [tool loop](tool-loop.md), and framing by
+and terminal-client verbs. The complete implementing stack is verified through
+PR #383 (`agent/goal-mode`), whose bottom specification diff owns the child
+scheduling and process behavior. Identity and durable-command mechanics remain
+owned by [identity and commands](identity-and-commands.md), turn execution by
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
+by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
 family indexed by [the invariant test index](../invariants.md).
 
