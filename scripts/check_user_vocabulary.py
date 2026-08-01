@@ -9,6 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
@@ -28,10 +29,45 @@ class Allowance:
     name: str
     paths: re.Pattern[str]
     lines: re.Pattern[str]
+    enclosing_impls: Mapping[str, str] | None = None
 
-    def covers(self, path: str, line: str, match: re.Match[str]) -> bool:
+    @staticmethod
+    def _inside_impl(
+        source_lines: list[str], index: int, expected_impl: str
+    ) -> bool:
+        start = next(
+            (
+                candidate
+                for candidate in range(index - 1, -1, -1)
+                if source_lines[candidate].strip() == expected_impl
+            ),
+            None,
+        )
+        if start is None:
+            return False
+        depth = 0
+        for candidate in source_lines[start : index + 1]:
+            depth += candidate.count("{") - candidate.count("}")
+            if depth <= 0:
+                return False
+        return True
+
+    def covers(
+        self,
+        path: str,
+        source_lines: list[str],
+        index: int,
+        match: re.Match[str],
+    ) -> bool:
         if self.paths.search(path) is None:
             return False
+        line = source_lines[index]
+        if self.enclosing_impls is not None:
+            expected_impl = self.enclosing_impls.get(path)
+            if expected_impl is None or not self._inside_impl(
+                source_lines, index, expected_impl
+            ):
+                return False
         token_start = match.start()
         while token_start > 0 and (
             line[token_start - 1].isalnum() or line[token_start - 1] == "_"
@@ -86,6 +122,11 @@ ALLOWLIST = (
         re.compile(
             r"^\s*(?:fn|pub[(]super[)] fn) owner[(]&self[)] -> &str [{]\s*$"
         ),
+        {
+            "crates/tools-github/src/lib.rs": "impl GitHubRepository {",
+            "crates/tools-code-host/src/code_host/arguments.rs":
+                "impl CodeHostRepository {",
+        },
     ),
     Allowance(
         "GitHub fixture author usernames",
@@ -360,17 +401,21 @@ def violations(root: Path) -> list[str]:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        for number, line in enumerate(text.splitlines(), 1):
+        lines = text.splitlines()
+        for index, line in enumerate(lines):
+            number = index + 1
             matches = tuple(OWNER.finditer(line))
             if not matches:
                 continue
             if all(
-                any(allowance.covers(relative, line, match) for allowance in ALLOWLIST)
+                any(
+                    allowance.covers(relative, lines, index, match)
+                    for allowance in ALLOWLIST
+                )
                 for match in matches
             ):
                 continue
             failures.append(f"{relative}:{number}: {line.strip()}")
-        lines = text.splitlines()
         for match in BARE_USER_MESSAGE.finditer(text):
             number = text.count("\n", 0, match.start()) + 1
             failures.append(f"{relative}:{number}: {lines[number - 1].strip()}")

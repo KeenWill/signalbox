@@ -168,6 +168,13 @@ def main() -> int:
             'const REPOSITORY: &str = "owner/repository";',
             "let approval = session.owner();",
             'fn owner(&self) -> &str { "human who approves tools" }',
+            "impl Session {",
+            "fn owner(&self) -> &str {",
+            '    "human who approves tools"',
+            "}",
+            "impl GitHubRepository {",
+            "}",
+            "    fn owner(&self) -> &str {",
         )
         reviewed_author_lines = ('author: Some(String::from("owner")),',)
         author_violation_lines = (
@@ -256,7 +263,12 @@ def main() -> int:
             *expected_diagnostics(
                 "crates/tools-github/src/lib.rs",
                 github_accessor_lines,
-                github_accessor_lines[1:],
+                (
+                    github_accessor_lines[1],
+                    github_accessor_lines[2],
+                    github_accessor_lines[4],
+                    github_accessor_lines[9],
+                ),
             ),
             *expected_diagnostics(
                 "crates/tools-code-host/src/code_host/review_slog/example.rs",
@@ -288,7 +300,10 @@ def main() -> int:
         allowed.write_text(
             'const REPOSITORY: &str = "owner/repository";\n'
             "segments.push(repository.owner());\n"
-            "fn owner(&self) -> &str {\n",
+            "impl GitHubRepository {\n"
+            "fn owner(&self) -> &str {\n"
+            "    &self.value[..self.owner_end]\n"
+            "}\n",
             encoding="utf-8",
         )
         author_violation.write_text(
