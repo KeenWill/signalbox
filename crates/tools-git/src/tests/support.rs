@@ -2,7 +2,7 @@
 
 use std::{fs, path::Path};
 
-use git2::{IndexAddOption, Oid, Repository, Signature};
+use git2::{IndexAddOption, ObjectType, Oid, Repository, Signature};
 use tempfile::TempDir;
 
 pub(super) const AUTHOR_NAME: &str = "Signalbox Fixer";
@@ -10,6 +10,8 @@ pub(super) const AUTHOR_NAME: &str = "Signalbox Fixer";
 pub(super) const AUTHOR_EMAIL: &str = "fixer@example.test";
 
 pub(super) const INITIAL_MESSAGE: &str = "initial";
+
+pub(super) const FIX_BRANCH: &str = "agent/fix";
 
 pub(super) const TRACKED_PATH: &str = "tracked.txt";
 
@@ -65,4 +67,15 @@ pub(super) fn commit_index(repository: &Repository, message: &str) -> Oid {
             &parents,
         )
         .expect("fixture commit writes")
+}
+
+pub(super) fn raw_commit_with_tree(repository: &Repository, tree: Oid, parent: Oid) -> Oid {
+    let raw = format!(
+        "tree {tree}\nparent {parent}\nauthor Signalbox <fixer@example.test> 0 +0000\ncommitter Signalbox <fixer@example.test> 0 +0000\n\ndeep tree\n"
+    );
+    repository
+        .odb()
+        .expect("fixture object database opens")
+        .write(ObjectType::Commit, raw.as_bytes())
+        .expect("fixture commit object writes")
 }
