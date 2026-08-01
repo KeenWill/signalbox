@@ -196,7 +196,12 @@ async fn production_runner_clears_ambient_environment_when_requested()
 
         let result = production_runner()?.run(request).await;
 
-        assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::Exited {
+                code: Some(SUCCESSFUL_EXIT_CODE),
+            }
+        );
         assert_eq!(
             result.stdout.bytes,
             explicit_environment_output().as_bytes()
@@ -353,6 +358,43 @@ async fn production_runner_kills_descendants_on_timeout() -> Result<(), Box<dyn 
 
         assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         assert!(!std::path::Path::new(&format!("/proc/{descendant}")).exists());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn production_runner_deadline_expires_before_supervisor_dispatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let dispatch_marker = TemporaryPath::new("signalbox-exec-deadline-dispatch")?;
+        let script = format!("printf started > {}", dispatch_marker.as_path().display());
+        let request = shell_request(&script, Duration::ZERO, std::env::current_dir()?)?;
+
+        let result = production_runner()?.run(request).await;
+
+        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
+        assert!(!dispatch_marker.as_path().exists());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn production_runner_does_not_retain_process_wide_subreaper_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let result = production_runner()?
+            .run(shell_request(
+                "exit 0",
+                Duration::from_secs(5),
+                std::env::current_dir()?,
+            )?)
+            .await;
+        let orphan_parent = orphan_parent_after_runner_completion()?;
+
+        assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
+        assert_ne!(orphan_parent, std::process::id());
         Ok(())
     })
     .await
@@ -650,6 +692,25 @@ async fn await_pid_file(path: &std::path::Path) -> Result<u32, Box<dyn std::erro
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Err(std::io::Error::other("descendant pid fixture was not written").into())
+}
+
+fn orphan_parent_after_runner_completion() -> Result<u32, Box<dyn std::error::Error>> {
+    let shell = fixture_program("sh")?;
+    let setsid = fixture_program("setsid")?;
+    let script = format!(
+        "{} '/^PPid:/ {{print $2}}' /proc/$$/status",
+        fixture_program("awk")?.display()
+    );
+    let output = std::process::Command::new(setsid)
+        .arg("--fork")
+        .arg(shell)
+        .arg("-c")
+        .arg(script)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other("orphan fixture failed to start").into());
+    }
+    Ok(std::str::from_utf8(&output.stdout)?.trim().parse::<u32>()?)
 }
 
 fn explicit_environment_output() -> String {

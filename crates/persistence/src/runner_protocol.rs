@@ -4303,6 +4303,7 @@ const fn encode_permission(permission: ToolPermissionDefault) -> &'static str {
     match permission {
         ToolPermissionDefault::Auto => "auto",
         ToolPermissionDefault::Confirm => "confirm",
+        ToolPermissionDefault::AlwaysConfirm => "always_confirm",
     }
 }
 
@@ -4310,6 +4311,7 @@ fn decode_permission(value: String) -> Result<ToolPermissionDefault, RunnerProto
     match value.as_str() {
         "auto" => Ok(ToolPermissionDefault::Auto),
         "confirm" => Ok(ToolPermissionDefault::Confirm),
+        "always_confirm" => Ok(ToolPermissionDefault::AlwaysConfirm),
         _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     }
 }
@@ -4847,5 +4849,20 @@ impl From<RunnerProtocolCorruption> for RunnerProtocolStoreError {
 impl From<RunnerEnrollmentRequestFailure> for RunnerProtocolStoreError {
     fn from(error: RunnerEnrollmentRequestFailure) -> Self {
         Self::EnrollmentRequest(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn always_confirm_permission_encoding_round_trips() {
+        let encoded = encode_permission(ToolPermissionDefault::AlwaysConfirm);
+        let decoded = decode_permission(encoded.to_owned())
+            .expect("the additive permission encoding is canonical");
+
+        assert_eq!(encoded, "always_confirm");
+        assert_eq!(decoded, ToolPermissionDefault::AlwaysConfirm);
     }
 }

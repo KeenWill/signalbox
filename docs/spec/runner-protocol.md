@@ -27,6 +27,9 @@ shutdown, suspect, and loss facts. Recovery inventory, workspaces, leases,
 execution, and model calls remain unimplemented as labeled below. Remote
 transport and dynamic policy stay under [Open edges](#open-edges).
 
+The additive persisted `AlwaysConfirm` declaration vocabulary is verified
+through PR #366 (`agent/exec-tools`).
+
 ## Version-one executable boundary
 
 Version one runs one `signalbox-runner` on the same Ubuntu host and under the
@@ -786,7 +789,8 @@ Each `RunnerToolDeclaration` contains:
 - the existing checked `ToolName`;
 - one checked `RunnerToolModelDefinition`, containing a nonempty bounded
   model-facing description and a canonical JSON-object argument schema;
-- one required `ToolPermissionDefault`;
+- one required `ToolPermissionDefault`, whose additive `always_confirm` storage
+  encoding round-trips the daemon-local non-overridable approval posture;
 - one required `RunnerToolEffectClass`; and
 - one nonempty `ToolAdmissibleLoci` value.
 
