@@ -899,7 +899,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     if source.kind() == std::io::ErrorKind::NotFound
                         && index.get_path(&path, 0).is_some() =>
                 {
-                    validate_missing_path_parent(&self.filesystem, &self.root, &path)?;
                     index
                         .remove_path(&path)
                         .map_err(|_| LocalGitFailure::Operation)?;
@@ -953,18 +952,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             branch: arguments.name,
             head: target.to_string(),
         })
-    }
-}
-
-fn validate_missing_path_parent<FileSystem: WorkspaceFileSystem>(
-    filesystem: &FileSystem,
-    root: &WorkspaceRoot,
-    path: &Path,
-) -> Result<(), LocalGitFailure> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    match filesystem.entry_kind(root, parent) {
-        Ok(WorkspaceEntryKind::Directory) => Ok(()),
-        Ok(_) | Err(_) => Err(LocalGitFailure::Path),
     }
 }
 
@@ -1094,7 +1081,7 @@ fn diff(
     .map_err(|_| LocalGitFailure::Operation)?;
     let mut bytes = Vec::new();
     let mut truncated = false;
-    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+    let printed = diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
         let prefix = match line.origin() {
             '+' | '-' | ' ' => Some(line.origin() as u8),
             _ => None,
@@ -1111,9 +1098,11 @@ fn diff(
             bytes.extend_from_slice(&content[..remaining]);
             truncated = true;
         }
-        true
-    })
-    .map_err(|_| LocalGitFailure::Operation)?;
+        !truncated
+    });
+    if printed.is_err_and(|error| !truncated || error.code() != ErrorCode::User) {
+        return Err(LocalGitFailure::Operation);
+    }
     Ok(DiffResult {
         patch: String::from_utf8_lossy(&bytes).into_owned(),
         truncated,
@@ -1245,6 +1234,8 @@ mod tests {
     const TRACKED_PATH: &str = "tracked.txt";
     const INITIAL_CONTENT: &str = "before\n";
     const CHANGED_CONTENT: &str = "after\n";
+    const NESTED_TRACKED_DIRECTORY: &str = "removed";
+    const NESTED_TRACKED_PATH: &str = "removed/tracked.txt";
 
     struct Fixture {
         directory: TempDir,
@@ -1480,6 +1471,34 @@ mod tests {
         assert_eq!(commit.author().email(), Ok(AUTHOR_EMAIL));
         assert_eq!(commit.committer().name(), Ok(AUTHOR_NAME));
         assert_eq!(commit.committer().email(), Ok(AUTHOR_EMAIL));
+    }
+
+    #[test]
+    fn stage_records_deletion_after_tracked_parent_directory_is_removed() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.root().join(NESTED_TRACKED_DIRECTORY))
+            .expect("nested fixture directory constructs");
+        fs::write(fixture.root().join(NESTED_TRACKED_PATH), INITIAL_CONTENT)
+            .expect("nested tracked file writes");
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        commit_all(&repository, INITIAL_MESSAGE);
+        fs::remove_dir_all(fixture.root().join(NESTED_TRACKED_DIRECTORY))
+            .expect("tracked parent directory removes");
+        let executor = fixture.executor();
+
+        execute(
+            &executor,
+            LocalOperation::Stage(GitStageArguments {
+                paths: vec![NESTED_TRACKED_PATH.to_owned()],
+            }),
+        );
+        let updated_repository =
+            Repository::open(fixture.root()).expect("updated fixture repository opens");
+        let index = updated_repository
+            .index()
+            .expect("updated fixture index opens");
+
+        assert!(index.get_path(Path::new(NESTED_TRACKED_PATH), 0).is_none());
     }
 
     #[test]
