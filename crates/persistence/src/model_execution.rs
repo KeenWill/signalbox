@@ -2972,7 +2972,7 @@ async fn load_origin_contents(
                 }
             }
             (Some(_), true) | (None, false) => {
-                return Err(ModelCallCorruption::Inconsistent("accepted input owner").into());
+                return Err(ModelCallCorruption::Inconsistent("accepted input provenance").into());
             }
         }
     }

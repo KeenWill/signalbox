@@ -88,13 +88,13 @@ const REJECTED: &str = "rejected";
 pub(crate) type StoredTurnOriginKey = (Uuid, Uuid);
 
 struct StoredTurnOriginLink {
-    owner: StoredTurnOriginOwner,
+    provenance: StoredTurnOriginProvenance,
     kind: StoredTurnOriginKind,
     accepted_input: AcceptedInputId,
     queue_order: AcceptedInputQueueOrder,
 }
 
-enum StoredTurnOriginOwner {
+enum StoredTurnOriginProvenance {
     Submit(DurableCommandId),
     Goal {
         generation: GoalGeneration,
@@ -4638,16 +4638,19 @@ fn related_turn_origin_key(
     Ok(Some((required(row, "result_session_id")?, source_turn)))
 }
 
-fn decode_stored_turn_origin_owner(
+fn decode_stored_turn_origin_provenance(
     row: &PgRow,
-) -> Result<(StoredTurnOriginOwner, Option<Uuid>), SubmitInputRepositoryError> {
+) -> Result<(StoredTurnOriginProvenance, Option<Uuid>), SubmitInputRepositoryError> {
     let command: Option<Uuid> = row.try_get("origin_command_id")?;
     let generation: Option<Decimal> = row.try_get("origin_goal_generation")?;
     match (command, generation) {
         (Some(command), None) => {
             let command_id = durable_command_id_from_uuid(command)
                 .map_err(|_| SubmitInputCorruption::Inconsistent("turn origin command identity"))?;
-            Ok((StoredTurnOriginOwner::Submit(command_id), Some(command)))
+            Ok((
+                StoredTurnOriginProvenance::Submit(command_id),
+                Some(command),
+            ))
         }
         (None, Some(generation)) => {
             let generation = positive_u64_from_numeric(generation).map_err(|reason| {
@@ -4686,7 +4689,7 @@ fn decode_stored_turn_origin_owner(
                 "goal origin content",
             )?;
             Ok((
-                StoredTurnOriginOwner::Goal {
+                StoredTurnOriginProvenance::Goal {
                     generation: GoalGeneration::new(generation),
                     source,
                     content,
@@ -4695,7 +4698,7 @@ fn decode_stored_turn_origin_owner(
             ))
         }
         (Some(_), Some(_)) | (None, None) => {
-            Err(SubmitInputCorruption::Inconsistent("turn origin owner").into())
+            Err(SubmitInputCorruption::Inconsistent("turn origin provenance").into())
         }
     }
 }
@@ -4855,7 +4858,7 @@ pub(crate) async fn load_turn_origin_graph(
             required(&row, "origin_session_id")?,
             required(&row, "origin_turn_id")?,
         );
-        let (owner, command_uuid) = decode_stored_turn_origin_owner(&row)?;
+        let (provenance, command_uuid) = decode_stored_turn_origin_provenance(&row)?;
         let accepted_input =
             accepted_input_id_from_uuid(required(&row, "origin_accepted_input_id")?);
         let queue_position = decode_position(&row, "origin_acceptance_position")?;
@@ -4888,8 +4891,8 @@ pub(crate) async fn load_turn_origin_graph(
         let reclassified_source: Option<Uuid> = row.try_get("reclassified_source_turn_id")?;
         let source_state: Option<String> = row.try_get("source_state_kind")?;
         let source_disposition: Option<String> = row.try_get("source_terminal_disposition_kind")?;
-        let kind = match &owner {
-            StoredTurnOriginOwner::Goal { .. } => {
+        let kind = match &provenance {
+            StoredTurnOriginProvenance::Goal { .. } => {
                 if disposition_kind != "origin_of"
                     || delivery_kind.is_some()
                     || predecessor_turn.is_some()
@@ -4902,7 +4905,7 @@ pub(crate) async fn load_turn_origin_graph(
                 }
                 StoredTurnOriginKind::Direct { predecessor: None }
             }
-            StoredTurnOriginOwner::Submit(_) => match (
+            StoredTurnOriginProvenance::Submit(_) => match (
                 disposition_kind.as_str(),
                 delivery_kind
                     .as_deref()
@@ -5002,7 +5005,7 @@ pub(crate) async fn load_turn_origin_graph(
             .insert(
                 key,
                 StoredTurnOriginLink {
-                    owner,
+                    provenance,
                     kind,
                     accepted_input,
                     queue_order,
@@ -5067,9 +5070,9 @@ pub(crate) async fn load_turn_origin_graph(
         let link = links
             .remove(&ready)
             .ok_or(SubmitInputCorruption::Missing("related turn origin"))?;
-        let command_id = match link.owner {
-            StoredTurnOriginOwner::Submit(command_id) => command_id,
-            StoredTurnOriginOwner::Goal {
+        let command_id = match link.provenance {
+            StoredTurnOriginProvenance::Submit(command_id) => command_id,
+            StoredTurnOriginProvenance::Goal {
                 generation,
                 source,
                 content,
