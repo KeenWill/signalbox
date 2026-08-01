@@ -11,7 +11,7 @@ use signalbox_domain::{
 use signalbox_tools_plan::{
     PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntry, PlanEntryId, PlanEvent,
     PlanEventDraft, PlanEventKind, PlanEventOrdinal, PlanEventProvenance, PlanHistoryPage,
-    PlanPageCompleteness, PlanReadPage, PlanReadRequest, PlanText, SessionPlanPort,
+    PlanPageCompleteness, PlanReadPage, PlanReadRequest, PlanStatus, PlanText, SessionPlanPort,
 };
 use sqlx::{PgPool, Row, postgres::PgRow};
 
@@ -21,25 +21,30 @@ const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE R
 
 const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_ordinal,
        created.entry_ordinal AS entry_ordinal,
-       COALESCE((
-           SELECT revision.entry_text
-             FROM session_plan_event AS revision
-            WHERE revision.session_id = created.session_id
-              AND revision.entry_ordinal = created.event_ordinal
-              AND revision.event_kind = 'text_revised'
-            ORDER BY revision.event_ordinal DESC
-            LIMIT 1
-       ), created.entry_text) AS current_text,
-       COALESCE((
-           SELECT movement.entry_status
-             FROM session_plan_event AS movement
-            WHERE movement.session_id = created.session_id
-              AND movement.entry_ordinal = created.event_ordinal
-              AND movement.event_kind = 'status_changed'
-            ORDER BY movement.event_ordinal DESC
-            LIMIT 1
-       ), 'pending') AS current_status
+       created.entry_text AS created_text,
+       revision.event_ordinal AS revision_event_ordinal,
+       revision.entry_text AS revised_text,
+       movement.event_ordinal AS status_event_ordinal,
+       movement.entry_status AS moved_status
   FROM session_plan_event AS created
+  LEFT JOIN LATERAL (
+      SELECT event_ordinal, entry_text
+        FROM session_plan_event
+       WHERE session_id = created.session_id
+         AND entry_ordinal = created.event_ordinal
+         AND event_kind = 'text_revised'
+       ORDER BY event_ordinal DESC
+       LIMIT 1
+  ) AS revision ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT event_ordinal, entry_status
+        FROM session_plan_event
+       WHERE session_id = created.session_id
+         AND entry_ordinal = created.event_ordinal
+         AND event_kind = 'status_changed'
+       ORDER BY event_ordinal DESC
+       LIMIT 1
+  ) AS movement ON TRUE
  WHERE created.session_id = $1
    AND created.event_kind = 'created'
    AND ($2::numeric IS NULL OR created.event_ordinal > $2)
@@ -309,7 +314,12 @@ impl SessionPlanRepository {
             }
             None => None,
         };
-        let page = PlanReadPage::new(entries, page_completeness(has_more_entries), history);
+        let page = PlanReadPage::new(
+            request.session(),
+            entries,
+            page_completeness(has_more_entries),
+            history,
+        );
         transaction.commit().await?;
         Ok(page)
     }
@@ -399,15 +409,60 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     if entry.creation_ordinal() != creation_ordinal {
         return Err(SessionPlanCorruption::MismatchedIdentity("current entry identity").into());
     }
-    let text: String = required(row, "current_text")?;
-    let text = PlanText::try_new(text).map_err(|_| SessionPlanCorruption::InvalidText)?;
-    let status_text: String = required(row, "current_status")?;
-    let status = mapping::plan_status_from_str(&status_text).ok_or({
-        SessionPlanCorruption::Unsupported {
-            field: "current status",
-            value: status_text,
+    let created_text: String = required(row, "created_text")?;
+    let revision_ordinal: Option<Decimal> = row.try_get("revision_event_ordinal")?;
+    let revised_text: Option<String> = row.try_get("revised_text")?;
+    let text = match (revision_ordinal, revised_text) {
+        (None, None) => created_text,
+        (Some(revision_ordinal), Some(revised_text)) => {
+            let revision_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
+                revision_ordinal,
+                "revision event ordinal",
+            )?)
+            .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+                "revision event ordinal",
+            ))?;
+            if revision_ordinal <= creation_ordinal {
+                return Err(
+                    SessionPlanCorruption::MismatchedIdentity("current revision ordering").into(),
+                );
+            }
+            revised_text
         }
-    })?;
+        (None, Some(_)) | (Some(_), None) => {
+            return Err(SessionPlanCorruption::InvalidEventPayload("current text revision").into());
+        }
+    };
+    let text = PlanText::try_new(text).map_err(|_| SessionPlanCorruption::InvalidText)?;
+
+    let status_ordinal: Option<Decimal> = row.try_get("status_event_ordinal")?;
+    let moved_status: Option<String> = row.try_get("moved_status")?;
+    let status = match (status_ordinal, moved_status) {
+        (None, None) => PlanStatus::Pending,
+        (Some(status_ordinal), Some(moved_status)) => {
+            let status_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
+                status_ordinal,
+                "status event ordinal",
+            )?)
+            .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+                "status event ordinal",
+            ))?;
+            if status_ordinal <= creation_ordinal {
+                return Err(
+                    SessionPlanCorruption::MismatchedIdentity("current status ordering").into(),
+                );
+            }
+            mapping::plan_status_from_str(&moved_status).ok_or({
+                SessionPlanCorruption::Unsupported {
+                    field: "current status",
+                    value: moved_status,
+                }
+            })?
+        }
+        (None, Some(_)) | (Some(_), None) => {
+            return Err(SessionPlanCorruption::InvalidEventPayload("current status change").into());
+        }
+    };
     Ok(PlanEntry::new(entry, text, status))
 }
 

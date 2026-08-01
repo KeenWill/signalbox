@@ -563,6 +563,7 @@ impl PlanHistoryPage {
 /// One bounded folded-plan page returned by the port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanReadPage {
+    session: SessionId,
     entries: Vec<PlanEntry>,
     completeness: PlanPageCompleteness,
     history: Option<PlanHistoryPage>,
@@ -571,15 +572,22 @@ pub struct PlanReadPage {
 impl PlanReadPage {
     /// Supplies current entries and optional history.
     pub fn new(
+        session: SessionId,
         entries: Vec<PlanEntry>,
         completeness: PlanPageCompleteness,
         history: Option<PlanHistoryPage>,
     ) -> Self {
         Self {
+            session,
             entries,
             completeness,
             history,
         }
+    }
+
+    /// Returns the owning session carried by the port response.
+    pub const fn session(&self) -> SessionId {
+        self.session
     }
 
     /// Borrows current entries.
@@ -617,6 +625,7 @@ impl PlanReadPage {
             )
         });
         Self::new(
+            self.session,
             self.entries[..entry_units].to_vec(),
             retained_completeness(self.completeness, entry_units, self.entries.len()),
             history,
@@ -1103,7 +1112,8 @@ fn validate_read_page<PortError>(
     request: PlanReadRequest,
     page: &PlanReadPage,
 ) -> Result<(), PlanExecutorError<PortError>> {
-    if page.entries().len() > request.max_entries()
+    if page.session() != request.session()
+        || page.entries().len() > request.max_entries()
         || (page.completeness().is_truncated() && page.entries().is_empty())
         || page.history().is_some() != request.history_limit().is_some()
     {
