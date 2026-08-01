@@ -26,6 +26,8 @@ jobs:
           persist-credentials: false
       - name: Install Bubblewrap
         run: sudo apt-get install --yes bubblewrap
+      - name: Enable unprivileged user namespaces for Bubblewrap
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Check generated invariant index
         run: python3 scripts/generate_invariants.py --check
       - name: Check domain spine sync
