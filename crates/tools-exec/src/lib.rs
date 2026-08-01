@@ -36,8 +36,8 @@ mod supervisor_protocol;
 pub use diagnostics::{
     CARGO_DIAGNOSTICS_NAME, CargoDiagnostic, CargoDiagnosticRecords, CargoDiagnosticSpan,
     CargoDiagnosticsArguments, CargoDiagnosticsCommand, CargoDiagnosticsExecution,
-    CargoDiagnosticsExecutor, CargoDiagnosticsExecutorError, CargoDiagnosticsResult,
-    CargoDiagnosticsRunner, CargoDiagnosticsStream, CargoDiagnosticsTool,
+    CargoDiagnosticsExecutor, CargoDiagnosticsExecutorError, CargoDiagnosticsPreparationFailure,
+    CargoDiagnosticsResult, CargoDiagnosticsRunner, CargoDiagnosticsStream, CargoDiagnosticsTool,
     CargoDiagnosticsToolConstructionError, CargoFailureDetail, CargoTestOutcome, CargoTestRecords,
     CargoTestResult, InvalidCargoDiagnosticsArguments,
 };

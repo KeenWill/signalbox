@@ -25,8 +25,8 @@ use signalbox_tool_contract::{
 use crate::process::{BWRAP_PROGRAM, SANDBOX_DISPATCH_MARKER};
 use crate::{
     CaptureCompleteness, ExecArguments, ExecResult, ExecToolConstructionError,
-    ExecutionConfinement, OutputEncoding, ProcessOutcome, ProcessRunner, ProcessSpawnFailure,
-    SandboxedCommandRunner, TokioProcessRunner,
+    ExecutionConfinement, OutputEncoding, ProcessOutcome, ProcessRunner, SandboxedCommandRunner,
+    TokioProcessRunner,
 };
 
 /// Catalog name for structured Cargo diagnostics.
@@ -330,15 +330,22 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
             )
             .await;
         let Some(cargo_host) = cargo_host(&host_result).map(String::from) else {
-            return structured_result_with_test_helper(
+            let mut result = structured_result_with_test_helper(
                 CargoDiagnosticsCommand::Test,
-                cargo_host_failure(host_result),
+                host_result,
                 false,
             );
+            result.execution.preparation_failure =
+                Some(CargoDiagnosticsPreparationFailure::CargoHostUnavailable);
+            return result;
         };
         let Some(remaining_seconds) = Duration::from_secs(timeout_seconds)
             .checked_sub(started.elapsed())
-            .map(|remaining| remaining.as_secs())
+            .map(|remaining| {
+                remaining
+                    .as_secs()
+                    .saturating_add(u64::from(remaining.subsec_nanos() != 0))
+            })
             .filter(|remaining| *remaining > 0)
         else {
             let mut timed_out = host_result;
@@ -397,15 +404,6 @@ fn cargo_host(result: &ExecResult) -> Option<&str> {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         })
     })
-}
-
-fn cargo_host_failure(mut result: ExecResult) -> ExecResult {
-    if result.outcome == (ProcessOutcome::Exited { code: Some(0) }) {
-        result.outcome = ProcessOutcome::SpawnFailed {
-            reason: ProcessSpawnFailure::Other,
-        };
-    }
-    result
 }
 
 fn cargo_arguments(
@@ -547,6 +545,16 @@ pub struct CargoDiagnosticsExecution {
     pub stderr: CargoDiagnosticsStream,
     /// Bounded Cargo-level failure text when no structured compiler diagnostic explained failure.
     pub cargo_failure: Option<CargoFailureDetail>,
+    /// Typed failure of diagnostics preparation before the requested Cargo pass.
+    pub preparation_failure: Option<CargoDiagnosticsPreparationFailure>,
+}
+
+/// Why diagnostics preparation could not reach the requested Cargo pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CargoDiagnosticsPreparationFailure {
+    /// Runtime Cargo did not provide one complete, valid host triple.
+    CargoHostUnavailable,
 }
 
 /// Bounded text explaining a Cargo-level failure before structured diagnostics were available.
@@ -766,6 +774,7 @@ fn structured_result_with_test_helper(
                 encoding: result.stderr.encoding,
             },
             cargo_failure,
+            preparation_failure: None,
         },
         diagnostics: CargoDiagnosticRecords {
             values: diagnostics,
@@ -982,14 +991,24 @@ fn parse_test_source_truncated(line: &str) -> Option<String> {
 }
 
 fn bounded_text(value: &str, max_bytes: usize) -> (String, CaptureCompleteness) {
-    if value.len() <= max_bytes {
-        return (String::from(value), CaptureCompleteness::Complete);
+    let contains_null = value.contains('\0');
+    let sanitized = value.replace('\0', "\u{fffd}");
+    if sanitized.len() <= max_bytes {
+        let completeness = if contains_null {
+            CaptureCompleteness::Truncated
+        } else {
+            CaptureCompleteness::Complete
+        };
+        return (sanitized, completeness);
     }
     let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
+    while !sanitized.is_char_boundary(end) {
         end -= 1;
     }
-    (String::from(&value[..end]), CaptureCompleteness::Truncated)
+    (
+        String::from(&sanitized[..end]),
+        CaptureCompleteness::Truncated,
+    )
 }
 
 #[cfg(test)]
@@ -1034,6 +1053,7 @@ mod tests {
     struct FakeRunner {
         requests: Arc<Mutex<Vec<ProcessRequest>>>,
         result: ProcessRunResult,
+        host_result: ProcessRunResult,
     }
 
     impl FakeRunner {
@@ -1041,6 +1061,19 @@ mod tests {
             Self {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 result,
+                host_result: process_result(
+                    ProcessOutcome::Exited { code: Some(0) },
+                    &format!("cargo 1.0.0\nhost: {TEST_NATIVE_TARGET}\n"),
+                    CaptureCompleteness::Complete,
+                ),
+            }
+        }
+
+        fn returning_with_host(result: ProcessRunResult, host_result: ProcessRunResult) -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                result,
+                host_result,
             }
         }
 
@@ -1068,11 +1101,7 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(request);
             if is_cargo_host_query {
-                process_result(
-                    ProcessOutcome::Exited { code: Some(0) },
-                    &format!("cargo 1.0.0\nhost: {TEST_NATIVE_TARGET}\n"),
-                    CaptureCompleteness::Complete,
-                )
+                self.host_result.clone()
             } else {
                 self.result.clone()
             }
@@ -1216,6 +1245,7 @@ mod tests {
                     encoding: OutputEncoding::Utf8,
                 },
                 cargo_failure: None,
+                preparation_failure: None,
             },
             diagnostics: CargoDiagnosticRecords {
                 values: vec![diagnostic; MAX_DIAGNOSTICS],
@@ -1366,6 +1396,41 @@ mod tests {
 
         assert_eq!(text, &BOUNDED_TEXT_FIXTURE[..3]);
         assert_eq!(completeness, CaptureCompleteness::Truncated);
+    }
+
+    #[test]
+    fn bounded_text_replaces_null_and_reports_incomplete_evidence() {
+        let (text, completeness) = bounded_text("before\0after", MAX_MESSAGE_BYTES);
+
+        assert_eq!(text, "before\u{fffd}after");
+        assert_eq!(completeness, CaptureCompleteness::Truncated);
+    }
+
+    #[test]
+    fn null_bearing_diagnostic_is_admitted_with_honest_completeness() -> Result<(), Box<dyn Error>>
+    {
+        let stdout = serde_json::to_string(&serde_json::json!({
+            "reason": "compiler-message",
+            "message": {
+                "level": DIAGNOSTIC_LEVEL,
+                "message": "before\0after",
+                "spans": [],
+            },
+        }))?;
+        let result = structured_result(CargoDiagnosticsCommand::Check, exited_exec_result(stdout));
+        let encoded = encode_tool_result(result)?;
+        let decoded: serde_json::Value = serde_json::from_str(&encoded)?;
+
+        assert_eq!(
+            decoded["diagnostics"]["values"][0]["message"],
+            "before\u{fffd}after"
+        );
+        assert_eq!(
+            decoded["diagnostics"]["values"][0]["message_completeness"],
+            "truncated"
+        );
+        assert!(ToolResultText::try_new(encoded).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -1752,5 +1817,74 @@ mod tests {
         let host = cargo_host(&result);
 
         assert_eq!(host, Some(TEST_NATIVE_TARGET));
+    }
+
+    #[tokio::test]
+    async fn one_second_timeout_preserves_positive_test_run_remainder() -> Result<(), Box<dyn Error>>
+    {
+        let fake = FakeRunner::returning(process_result(
+            ProcessOutcome::Exited { code: Some(0) },
+            &test_output(),
+            CaptureCompleteness::Complete,
+        ));
+        let observation = fake.clone();
+        let mut runner = CargoDiagnosticsRunner::try_new(fake, std::env::current_dir()?)?;
+
+        let result = runner
+            .try_run(CargoDiagnosticsArguments {
+                command: CargoDiagnosticsCommand::Test,
+                timeout_seconds: 1,
+            })
+            .await?;
+        let requests = observation.requests();
+        let test_request = requests
+            .last()
+            .ok_or_else(|| std::io::Error::other("cargo test request"))?;
+
+        assert_eq!(
+            result.execution.outcome,
+            ProcessOutcome::Exited { code: Some(0) }
+        );
+        assert!(test_request.arguments.contains(&OsString::from("test")));
+        assert!(!test_request.timeout.is_zero());
+        assert!(test_request.timeout <= Duration::from_secs(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unusable_host_output_preserves_exit_and_names_preparation_failure()
+    -> Result<(), Box<dyn Error>> {
+        let expected_outcome = ProcessOutcome::Exited { code: Some(0) };
+        let fake = FakeRunner::returning_with_host(
+            process_result(
+                ProcessOutcome::Exited { code: Some(0) },
+                &test_output(),
+                CaptureCompleteness::Complete,
+            ),
+            process_result(
+                expected_outcome,
+                "cargo 1.0.0\n",
+                CaptureCompleteness::Complete,
+            ),
+        );
+        let observation = fake.clone();
+        let mut runner = CargoDiagnosticsRunner::try_new(fake, std::env::current_dir()?)?;
+
+        let result = runner
+            .try_run(CargoDiagnosticsArguments {
+                command: CargoDiagnosticsCommand::Test,
+                timeout_seconds: DIAGNOSTIC_TIMEOUT_SECONDS,
+            })
+            .await?;
+        let requests = observation.requests();
+
+        assert_eq!(result.execution.outcome, expected_outcome);
+        assert_eq!(
+            result.execution.preparation_failure,
+            Some(CargoDiagnosticsPreparationFailure::CargoHostUnavailable)
+        );
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].arguments.contains(&OsString::from("-vV")));
+        Ok(())
     }
 }
