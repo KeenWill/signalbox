@@ -437,7 +437,10 @@ mod linux {
             Err(()) => {
                 terminate_child(&mut child);
                 cleanup_untracked_children(std::process::id());
-                let _ = emit_launcher_stdout(launcher_reader, false);
+                let _ = emit_launcher_stdout(
+                    launcher_reader,
+                    LauncherOutputTrust::UntrustedTargetBytes,
+                );
                 return SupervisorStatus::SupervisionFailed {
                     stage: SupervisorFailureStage::Cleanup,
                 };
@@ -445,7 +448,8 @@ mod linux {
         };
         if read_control_byte().is_err() || launcher_control.write_all(&[1]).is_err() {
             let cleanup = tree.finish(&mut child);
-            let _ = emit_launcher_stdout(launcher_reader, false);
+            let _ =
+                emit_launcher_stdout(launcher_reader, LauncherOutputTrust::UntrustedTargetBytes);
             return match cleanup {
                 CleanupStatus::Complete { .. } => SupervisorStatus::Cancelled,
                 CleanupStatus::ProcessTreeUnsupported { .. } | CleanupStatus::Failed { .. } => {
@@ -495,7 +499,12 @@ mod linux {
         let cleanup = tree.finish(&mut child);
         match cleanup {
             CleanupStatus::Complete { root_success } => {
-                let launcher_status = emit_launcher_stdout(launcher_reader, root_success);
+                let output_trust = if root_success {
+                    LauncherOutputTrust::TrustedSupervisorTrailer
+                } else {
+                    LauncherOutputTrust::UntrustedTargetBytes
+                };
+                let launcher_status = emit_launcher_stdout(launcher_reader, output_trust);
                 match status {
                     SupervisionCompletion::LauncherExited { success: true } => launcher_status
                         .ok()
@@ -517,7 +526,12 @@ mod linux {
             }
             CleanupStatus::ProcessTreeUnsupported { root_success }
             | CleanupStatus::Failed { root_success } => {
-                let _ = emit_launcher_stdout(launcher_reader, root_success);
+                let output_trust = if root_success {
+                    LauncherOutputTrust::TrustedSupervisorTrailer
+                } else {
+                    LauncherOutputTrust::UntrustedTargetBytes
+                };
+                let _ = emit_launcher_stdout(launcher_reader, output_trust);
                 SupervisorStatus::SupervisionFailed {
                     stage: SupervisorFailureStage::Cleanup,
                 }
@@ -561,16 +575,23 @@ mod linux {
             .map(|status| (marker, status))
     }
 
+    #[derive(Clone, Copy)]
+    enum LauncherOutputTrust {
+        UntrustedTargetBytes,
+        TrustedSupervisorTrailer,
+    }
+
     fn emit_launcher_stdout(
         reader: JoinHandle<std::io::Result<LauncherRead>>,
-        trusted: bool,
+        trust: LauncherOutputTrust,
     ) -> Result<Option<LauncherStatus>, ()> {
         let read = reader.join().map_err(|_| ())?.map_err(|_| ())?;
-        let (output_bytes, status) = if trusted {
-            let (marker, status) = read.parsed.ok_or(())?;
-            (&read.tail[..marker], Some(status))
-        } else {
-            (read.tail.as_slice(), None)
+        let (output_bytes, status) = match trust {
+            LauncherOutputTrust::UntrustedTargetBytes => (read.tail.as_slice(), None),
+            LauncherOutputTrust::TrustedSupervisorTrailer => {
+                let (marker, status) = read.parsed.ok_or(())?;
+                (&read.tail[..marker], Some(status))
+            }
         };
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(output_bytes).map_err(|_| ())?;

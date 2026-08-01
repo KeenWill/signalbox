@@ -507,9 +507,6 @@ pub struct TokioProcessRunner {
 fn inherited_descriptor_above_standard_streams(
     descriptor: rustix::fd::OwnedFd,
 ) -> Result<rustix::fd::OwnedFd, rustix::io::Errno> {
-    if rustix::fd::AsRawFd::as_raw_fd(&descriptor) >= 3 {
-        return Ok(descriptor);
-    }
     let mut lower_descriptors = vec![descriptor];
     loop {
         let duplicate = rustix::io::dup(&lower_descriptors[0])?;
@@ -943,6 +940,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
         let execution_directory = match self
             .workspace_identity
             .pin_relative_directory(&arguments.working_directory)
+            .and_then(WorkspaceDirectoryIdentity::inherit)
         {
             Ok(directory) => directory,
             Err(reason) => {
