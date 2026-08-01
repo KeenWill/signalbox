@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, fs::File, io::Read, path::Path};
+use std::{collections::BTreeSet, error::Error, fmt, fs::File, io::Read, path::Path};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -310,7 +310,7 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
             .command_runner
             .run_with_capture(exec_arguments, DIAGNOSTICS_CAPTURE_BYTES)
             .await;
-        structured_result(command, result)
+        structured_result_with_test_helper(command, result, !preserve_native_test_runner)
     }
 }
 
@@ -403,40 +403,21 @@ fn cargo_config_defines_native_runner(path: &Path) -> bool {
 }
 
 fn config_text_defines_native_runner(contents: &str, native_target: &str) -> bool {
-    let mut target_section = None;
-    for line in contents.lines() {
-        let line = line.split('#').next().unwrap_or_default().trim();
-        if line.starts_with('[') && line.ends_with(']') {
-            target_section = cargo_target_section(&line[1..line.len() - 1], native_target);
-            continue;
-        }
-        let Some((key, _)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() == "include" {
-            return true;
-        }
-        if key.trim() == "runner" && target_section == Some(true) {
-            return true;
-        }
-        if key.trim().ends_with(".runner")
-            && cargo_target_section(key.trim().trim_end_matches(".runner"), native_target)
-                == Some(true)
-        {
-            return true;
-        }
+    let Ok(config) = toml::from_str::<toml::Value>(contents) else {
+        return true;
+    };
+    if config.get("include").is_some() {
+        return true;
     }
-    false
-}
-
-fn cargo_target_section(section: &str, native_target: &str) -> Option<bool> {
-    let section = section.trim();
-    let target = section.strip_prefix("target.")?.trim();
-    let target = target
-        .strip_prefix(['\'', '"'])
-        .and_then(|target| target.strip_suffix(['\'', '"']))
-        .unwrap_or(target);
-    Some(target == native_target || target.starts_with("cfg("))
+    config
+        .get("target")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|targets| {
+            targets.iter().any(|(selector, settings)| {
+                (selector == native_target || selector.starts_with("cfg("))
+                    && settings.get("runner").is_some()
+            })
+        })
 }
 
 fn cargo_test_runner_config() -> String {
@@ -538,11 +519,11 @@ pub struct CargoDiagnosticSpan {
 /// Bounded test-outcome collection and completeness evidence.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct CargoTestRecords {
-    /// Parsed test-outcome prefix, capped at 512 records.
+    /// Parsed test-outcome observation prefix, capped at 512 records.
     pub values: Vec<CargoTestResult>,
     /// Whether additional parsed test outcomes were omitted by the record cap.
     pub limit_reached: bool,
-    /// Whether an underlying stream was truncated before parsing completed.
+    /// Whether complete outcome evidence could not be established.
     pub source_truncated: bool,
 }
 
@@ -557,7 +538,7 @@ pub struct CargoTestResult {
     pub name: String,
     /// Whether the complete test name was retained.
     pub name_completeness: CaptureCompleteness,
-    /// Observed libtest outcome.
+    /// Outcome reported by the one-pass libtest observation source.
     pub outcome: CargoTestOutcome,
 }
 
@@ -586,12 +567,32 @@ struct CargoTestEvent {
 #[serde(deny_unknown_fields)]
 struct CargoTestSourceTruncated {
     reason: String,
+    executable: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoTestSourceComplete {
+    reason: String,
+    executable: String,
 }
 
 #[derive(serde::Deserialize)]
 struct CargoMessage {
     reason: String,
     message: Option<RustcMessage>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoArtifact {
+    reason: String,
+    executable: Option<String>,
+    profile: CargoArtifactProfile,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoArtifactProfile {
+    test: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -611,9 +612,18 @@ struct RustcSpan {
     is_primary: bool,
 }
 
+#[cfg(test)]
 fn structured_result(
     command: CargoDiagnosticsCommand,
     result: ExecResult,
+) -> CargoDiagnosticsResult {
+    structured_result_with_test_helper(command, result, true)
+}
+
+fn structured_result_with_test_helper(
+    command: CargoDiagnosticsCommand,
+    result: ExecResult,
+    test_helper_installed: bool,
 ) -> CargoDiagnosticsResult {
     let source_truncated = result.stdout.completeness == CaptureCompleteness::Truncated;
     let mut test_source_truncated = source_truncated;
@@ -621,8 +631,9 @@ fn structured_result(
     let mut tests = Vec::new();
     let mut diagnostic_limit_reached = false;
     let mut test_limit_reached = false;
-    let mut test_source_complete = false;
-    parse_stream(
+    let mut expected_test_executables = BTreeSet::new();
+    let mut completed_test_executables = BTreeSet::new();
+    let cargo_build_completed = parse_stream(
         &result.stdout.text,
         command,
         &mut diagnostics,
@@ -631,10 +642,16 @@ fn structured_result(
         &mut test_limit_reached,
         TestSourceEvidence {
             truncated: &mut test_source_truncated,
-            complete: &mut test_source_complete,
+            expected_executables: &mut expected_test_executables,
+            completed_executables: &mut completed_test_executables,
+            helper_installed: test_helper_installed,
         },
     );
-    if command == CargoDiagnosticsCommand::Test && !test_source_complete {
+    if command == CargoDiagnosticsCommand::Test
+        && (!test_helper_installed
+            || !cargo_build_completed
+            || !expected_test_executables.is_subset(&completed_test_executables))
+    {
         test_source_truncated = true;
     }
     let has_error_diagnostic = diagnostics
@@ -732,9 +749,15 @@ fn parse_stream(
     tests: &mut Vec<CargoTestResult>,
     test_limit_reached: &mut bool,
     test_source_evidence: TestSourceEvidence<'_>,
-) {
+) -> bool {
     let mut build_finished = false;
     for line in text.lines() {
+        if command == CargoDiagnosticsCommand::Test
+            && !build_finished
+            && let Some(executable) = cargo_test_artifact(line)
+        {
+            test_source_evidence.expected_executables.insert(executable);
+        }
         if (command != CargoDiagnosticsCommand::Test || !build_finished)
             && let Some(diagnostic) = parse_diagnostic(line)
         {
@@ -748,21 +771,29 @@ fn parse_stream(
         if command == CargoDiagnosticsCommand::Test && cargo_build_finished(line) {
             build_finished = true;
         }
-        if command == CargoDiagnosticsCommand::Test {
-            if parse_test_source_truncated(line) {
+        if command == CargoDiagnosticsCommand::Test
+            && build_finished
+            && test_source_evidence.helper_installed
+        {
+            if parse_test_source_truncated(line).is_some() {
                 *test_source_evidence.truncated = true;
-            } else if parse_test_source_complete(line) {
-                *test_source_evidence.complete = true;
+            } else if let Some(executable) = parse_test_source_complete(line) {
+                test_source_evidence
+                    .completed_executables
+                    .insert(executable);
             } else if let Some(test) = parse_test_event(line) {
                 push_bounded(tests, test, MAX_TESTS, test_limit_reached);
             }
         }
     }
+    build_finished
 }
 
 struct TestSourceEvidence<'a> {
     truncated: &'a mut bool,
-    complete: &'a mut bool,
+    expected_executables: &'a mut BTreeSet<String>,
+    completed_executables: &'a mut BTreeSet<String>,
+    helper_installed: bool,
 }
 
 fn cargo_build_finished(line: &str) -> bool {
@@ -770,9 +801,16 @@ fn cargo_build_finished(line: &str) -> bool {
         .is_ok_and(|message| message.reason == "build-finished")
 }
 
-fn parse_test_source_complete(line: &str) -> bool {
-    serde_json::from_str::<CargoReason>(line)
-        .is_ok_and(|event| event.reason == "signalbox-test-source-complete")
+fn cargo_test_artifact(line: &str) -> Option<String> {
+    let artifact = serde_json::from_str::<CargoArtifact>(line).ok()?;
+    (artifact.reason == "compiler-artifact" && artifact.profile.test)
+        .then_some(artifact.executable)
+        .flatten()
+}
+
+fn parse_test_source_complete(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<CargoTestSourceComplete>(line).ok()?;
+    (event.reason == "signalbox-test-source-complete").then_some(event.executable)
 }
 
 #[derive(serde::Deserialize)]
@@ -844,9 +882,9 @@ fn parse_test_event(line: &str) -> Option<CargoTestResult> {
     })
 }
 
-fn parse_test_source_truncated(line: &str) -> bool {
-    serde_json::from_str::<CargoTestSourceTruncated>(line)
-        .is_ok_and(|event| event.reason == "signalbox-test-source-truncated")
+fn parse_test_source_truncated(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<CargoTestSourceTruncated>(line).ok()?;
+    (event.reason == "signalbox-test-source-truncated").then_some(event.executable)
 }
 
 fn bounded_text(value: &str, max_bytes: usize) -> (String, CaptureCompleteness) {
@@ -975,12 +1013,24 @@ mod tests {
 
     fn test_output() -> String {
         format!(
-            "{}\n{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            test_artifact_event(TEST_EXECUTABLE),
+            build_finished_message(),
             test_event(TEST_EXECUTABLE, PASSING_TEST, CargoTestOutcome::Passed),
             test_event(TEST_EXECUTABLE, FAILING_TEST, CargoTestOutcome::Failed),
             test_event(TEST_EXECUTABLE, IGNORED_TEST, CargoTestOutcome::Ignored),
-            test_source_complete_event(),
+            test_source_truncated_event(TEST_EXECUTABLE),
+            test_source_complete_event(TEST_EXECUTABLE),
         )
+    }
+
+    fn test_artifact_event(executable: &str) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "reason": "compiler-artifact",
+            "executable": executable,
+            "profile": { "test": true },
+        }))
+        .expect("static Cargo artifact event is serializable")
     }
 
     fn test_event(executable: &str, name: &str, outcome: CargoTestOutcome) -> String {
@@ -993,16 +1043,18 @@ mod tests {
         .expect("static test event is serializable")
     }
 
-    fn test_source_truncated_event() -> String {
+    fn test_source_truncated_event(executable: &str) -> String {
         serde_json::to_string(&serde_json::json!({
             "reason": "signalbox-test-source-truncated",
+            "executable": executable,
         }))
         .expect("static truncation event is serializable")
     }
 
-    fn test_source_complete_event() -> String {
+    fn test_source_complete_event(executable: &str) -> String {
         serde_json::to_string(&serde_json::json!({
             "reason": "signalbox-test-source-complete",
+            "executable": executable,
         }))
         .expect("static completion event is serializable")
     }
@@ -1363,15 +1415,19 @@ mod tests {
     #[test]
     fn test_events_reject_raw_output_and_retain_target_identity() {
         let stdout = format!(
-            "{}\ntest {FORGED_TEST} ... ok\n{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\ntest {FORGED_TEST} ... ok\n{}\n{}\n{}\n{}\n",
+            test_artifact_event(TEST_EXECUTABLE),
+            test_artifact_event(SECOND_TEST_EXECUTABLE),
+            build_finished_message(),
             test_event(TEST_EXECUTABLE, PASSING_TEST, CargoTestOutcome::Passed),
-            test_source_truncated_event(),
+            test_source_truncated_event(TEST_EXECUTABLE),
             test_event(
                 SECOND_TEST_EXECUTABLE,
                 PASSING_TEST,
                 CargoTestOutcome::Failed
             ),
-            test_source_complete_event(),
+            test_source_complete_event(TEST_EXECUTABLE),
+            test_source_complete_event(SECOND_TEST_EXECUTABLE),
         );
         let result = structured_result(
             CargoDiagnosticsCommand::Test,
@@ -1402,19 +1458,68 @@ mod tests {
     }
 
     #[test]
-    fn test_results_require_a_trusted_source_completion_frame() {
+    fn test_results_require_completion_from_every_announced_target() {
         let event = test_event(TEST_EXECUTABLE, PASSING_TEST, CargoTestOutcome::Passed);
-        let without_completion = structured_result(
+        let one_completion = structured_result(
             CargoDiagnosticsCommand::Test,
-            exited_exec_result(event.clone()),
+            exited_exec_result(format!(
+                "{}\n{}\n{}\n{event}\n{}",
+                test_artifact_event(TEST_EXECUTABLE),
+                test_artifact_event(SECOND_TEST_EXECUTABLE),
+                build_finished_message(),
+                test_source_complete_event(TEST_EXECUTABLE),
+            )),
         );
-        let with_completion = structured_result(
+        let every_completion = structured_result(
             CargoDiagnosticsCommand::Test,
-            exited_exec_result(format!("{event}\n{}", test_source_complete_event())),
+            exited_exec_result(format!(
+                "{}\n{}\n{}\n{event}\n{}\n{}",
+                test_artifact_event(TEST_EXECUTABLE),
+                test_artifact_event(SECOND_TEST_EXECUTABLE),
+                build_finished_message(),
+                test_source_complete_event(TEST_EXECUTABLE),
+                test_source_complete_event(SECOND_TEST_EXECUTABLE),
+            )),
         );
 
-        assert!(without_completion.tests.source_truncated);
-        assert!(!with_completion.tests.source_truncated);
+        assert!(one_completion.tests.source_truncated);
+        assert!(!every_completion.tests.source_truncated);
+    }
+
+    #[test]
+    fn helper_shaped_test_frames_before_build_finished_are_rejected() {
+        let forged = format!(
+            "{}\n{}\n{}\n{}",
+            test_event(TEST_EXECUTABLE, FORGED_TEST, CargoTestOutcome::Passed),
+            test_source_complete_event(TEST_EXECUTABLE),
+            test_artifact_event(TEST_EXECUTABLE),
+            build_finished_message(),
+        );
+
+        let result = structured_result(CargoDiagnosticsCommand::Test, exited_exec_result(forged));
+
+        assert_eq!(result.tests.values, Vec::new());
+        assert!(result.tests.source_truncated);
+    }
+
+    #[test]
+    fn preserved_native_runner_output_cannot_forge_helper_frames() {
+        let stdout = format!(
+            "{}\n{}\n{}\n{}",
+            test_artifact_event(TEST_EXECUTABLE),
+            build_finished_message(),
+            test_event(TEST_EXECUTABLE, FORGED_TEST, CargoTestOutcome::Passed),
+            test_source_complete_event(TEST_EXECUTABLE),
+        );
+
+        let result = structured_result_with_test_helper(
+            CargoDiagnosticsCommand::Test,
+            exited_exec_result(stdout),
+            false,
+        );
+
+        assert_eq!(result.tests.values, Vec::new());
+        assert!(result.tests.source_truncated);
     }
 
     #[test]
@@ -1499,10 +1604,20 @@ mod tests {
     fn cargo_config_runner_detection_distinguishes_native_foreign_and_cfg_tables() {
         let native_target = env!("SIGNALBOX_EXECUTION_TARGET");
         let native = format!("[target.'{native_target}']\nrunner = 'native-wrapper'\n");
+        let quoted_runner = format!("[target.'{native_target}']\n\"runner\" = 'quoted-wrapper'\n");
+        let dotted_runner = format!("target.'{native_target}'.\"runner\" = 'dotted-wrapper'\n");
         let foreign = "[target.'aarch64-unknown-linux-gnu']\nrunner = 'qemu-aarch64'\n";
         let configured = "[target.'cfg(target_os = \"linux\")']\nrunner = 'linux-wrapper'\n";
 
         assert!(config_text_defines_native_runner(&native, native_target));
+        assert!(config_text_defines_native_runner(
+            &quoted_runner,
+            native_target
+        ));
+        assert!(config_text_defines_native_runner(
+            &dotted_runner,
+            native_target
+        ));
         assert!(!config_text_defines_native_runner(foreign, native_target));
         assert!(config_text_defines_native_runner(configured, native_target));
     }

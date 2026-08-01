@@ -42,10 +42,22 @@ fn cargo_test_runner_rejects_inherited_subprocess_stdout_end_to_end()
         .args(["--ignored", "--exact", INHERITED_STDOUT_FIXTURE_NAME])
         .output()?;
     let stdout = String::from_utf8(output.stdout)?;
-    let (actual, complete) = stdout
-        .split_once('\n')
-        .expect("the runner emits one result followed by its completion frame");
-    let actual: serde_json::Value = serde_json::from_str(actual)?;
+    let mut frames = stdout.lines();
+    let actual: serde_json::Value = serde_json::from_str(
+        frames
+            .next()
+            .expect("the runner emits the observed test result first"),
+    )?;
+    let truncated: serde_json::Value = serde_json::from_str(
+        frames
+            .next()
+            .expect("the runner marks same-process test evidence incomplete"),
+    )?;
+    let complete: serde_json::Value = serde_json::from_str(
+        frames
+            .next()
+            .expect("the runner completes this executable last"),
+    )?;
     let expected = serde_json::json!({
         "reason": "signalbox-test-result",
         "executable": executable.to_string_lossy(),
@@ -56,9 +68,20 @@ fn cargo_test_runner_rejects_inherited_subprocess_stdout_end_to_end()
     assert!(output.status.success());
     assert_eq!(actual, expected);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(complete.trim())?,
-        serde_json::json!({"reason": "signalbox-test-source-complete"})
+        truncated,
+        serde_json::json!({
+            "reason": "signalbox-test-source-truncated",
+            "executable": executable.to_string_lossy(),
+        })
     );
+    assert_eq!(
+        complete,
+        serde_json::json!({
+            "reason": "signalbox-test-source-complete",
+            "executable": executable.to_string_lossy(),
+        })
+    );
+    assert_eq!(frames.next(), None);
     Ok(())
 }
 
