@@ -63,8 +63,10 @@ exact triple to name the request. The request must name `goal_declare`, carry
 canonical JSON, and its exact transition, reason, need, or report values must
 match the event it causes. A request from another tool or with different
 arguments cannot commit. A tool-request identity can cause at most one goal
-declaration event. An achieved event stores the exact final report and derives
-its transcript reference from that same invocation.
+declaration event. Only the current goal turn may declare; an otherwise valid
+request from an older turn returns `NotCurrentGoalTurn` without appending an
+event. An achieved event stores the exact final report and derives its
+transcript reference from that same invocation.
 
 **Implemented behavior.** Model-selectable blocked reasons are
 `user_input_required`, `external_change_required`, and `authorization_required`.

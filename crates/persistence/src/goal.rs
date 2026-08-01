@@ -499,9 +499,8 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
         }
-        if matches!(transition, SystemTransition::ExecutionFailure { .. })
-            && current_goal_turn(&mut transaction, session, goal.current().generation()).await?
-                != Some(transition.turn())
+        if current_goal_turn(&mut transaction, session, goal.current().generation()).await?
+            != Some(transition.turn())
         {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);

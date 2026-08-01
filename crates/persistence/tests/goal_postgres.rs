@@ -1217,11 +1217,11 @@ async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
     Ok(())
 }
 
-/// INV-048: an unrecorded execution failure from an older turn cannot block a
-/// resumed generation whose newer goal turn is now current.
+/// INV-048: neither a delayed model declaration nor an unrecorded scheduler
+/// failure from an older turn can block a resumed goal whose newer turn is current.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_delayed_unrecorded_failure_does_not_block_the_resumed_turn()
+async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1282,6 +1282,18 @@ async fn inv048_delayed_unrecorded_failure_does_not_block_the_resumed_turn()
             .await?,
     );
 
+    assert_eq!(
+        repository
+            .declare_blocked(
+                session(SESSION),
+                GoalModelBlockedReasonKind::UserInputRequired,
+                GoalNeed::try_new(String::from("stale model need"))
+                    .expect("fixture need is admitted"),
+                GoalModelProvenance::new(failed_turn.turn(), request),
+            )
+            .await?,
+        GoalTransitionOutcome::NotCurrentGoalTurn
+    );
     assert_eq!(
         repository
             .block_execution_failure(
