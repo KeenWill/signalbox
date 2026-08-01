@@ -9,7 +9,7 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionReconstitutionFailure, SessionReconstitutionInput,
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    TranscriptAncestry,
+    TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -190,6 +190,9 @@ pub(crate) async fn load_session_from_connection(
             seed_frontier.owning_session_id AS seed_frontier_session_id,
             seed_frontier.context_frontier_id AS seed_frontier_id,
             seed_frontier.member_count AS seed_frontier_member_count
+            ,placement.version AS current_placement_version
+            ,placement.placement_path AS current_placement_path
+            ,placement.root_global_read_intent AS current_placement_root_intent
          FROM session AS s
          LEFT JOIN session_current_defaults AS p
            ON p.session_id = s.session_id
@@ -204,6 +207,11 @@ pub(crate) async fn load_session_from_connection(
            ON seed_frontier.owning_session_id = seed.session_id
           AND seed_frontier.context_frontier_id =
                   seed.seed_context_frontier_id
+         LEFT JOIN session_current_placement AS placement_head
+           ON placement_head.session_id = s.session_id
+         LEFT JOIN session_placement_event AS placement
+           ON placement.session_id = placement_head.session_id
+          AND placement.version = placement_head.current_version
          WHERE s.session_id = $1",
     )
     .bind(session_id_to_uuid(requested_session))
@@ -241,10 +249,24 @@ fn decode_complete(
             )
             .into());
         }
+        let placement_version =
+            crate::session_placement::decode_version(required(&row, "current_placement_version")?)
+                .map_err(|_| SessionCorruption::Inconsistent("current placement version"))?;
+        let placement = crate::session_placement::decode_placement(
+            row.try_get("current_placement_path")?,
+            required(&row, "current_placement_root_intent")?,
+        )
+        .map_err(|_| SessionCorruption::Inconsistent("current placement"))?;
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
         )
+        .map(|session| {
+            session.with_reconstituted_placement(VersionedSessionPlacement::reconstitute(
+                placement_version,
+                placement,
+            ))
+        })
         .map_err(map_imported_error);
     }
     if row.try_get::<Option<Uuid>, _>("seed_session_id")?.is_some() {
@@ -278,8 +300,16 @@ fn decode_complete(
         required(&row, "dangerous_tool_auto_approval")?,
         row.try_get("system_prompt")?,
     )?;
+    let placement_version =
+        crate::session_placement::decode_version(required(&row, "current_placement_version")?)
+            .map_err(|_| SessionCorruption::Inconsistent("current placement version"))?;
+    let placement = crate::session_placement::decode_placement(
+        row.try_get("current_placement_path")?,
+        required(&row, "current_placement_root_intent")?,
+    )
+    .map_err(|_| SessionCorruption::Inconsistent("current placement"))?;
 
-    SessionReconstitutionInput::new_with_template_provenance(
+    SessionReconstitutionInput::new_with_template_and_placement(
         requested_session,
         stored_session,
         provenance,
@@ -289,6 +319,7 @@ fn decode_complete(
         defaults_session,
         defaults_version,
         defaults,
+        VersionedSessionPlacement::reconstitute(placement_version, placement),
     )
     .reconstitute()
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())

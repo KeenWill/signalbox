@@ -35,6 +35,8 @@ pub(crate) enum DurableCommandKind {
     CompactSession,
     /// Session goal command.
     Goal,
+    /// Session placement update.
+    UpdateSessionPlacement,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -52,6 +54,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
         DurableCommandKind::Goal => "goal",
+        DurableCommandKind::UpdateSessionPlacement => "update_session_placement",
     }
 }
 
@@ -70,6 +73,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),
         "goal" => Some(DurableCommandKind::Goal),
+        "update_session_placement" => Some(DurableCommandKind::UpdateSessionPlacement),
         _ => None,
     }
 }

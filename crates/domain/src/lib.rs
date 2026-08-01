@@ -28,6 +28,7 @@ mod runner;
 mod semantic_entry;
 mod session;
 mod session_metadata;
+mod session_placement;
 mod session_template;
 mod submit_input;
 mod tool;
@@ -218,6 +219,13 @@ pub use session_metadata::{
     ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
     ReplaceSessionMetadataSessionNotFound, SessionMetadataContent, SessionMetadataContentError,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SessionMetadataUpdatedAt,
+};
+pub use session_placement::{
+    RootPlacementGlobalReadIntent, SessionPlacement, SessionPlacementDirectory,
+    SessionPlacementError, SessionPlacementEvent, SessionPlacementEventKind, SessionPlacementPath,
+    SessionPlacementPathError, SessionPlacementVersion, SessionReadRefusalReason,
+    SessionReadScopeDecision, SessionReadScopeRefusal, UpdateSessionPlacement,
+    UpdateSessionPlacementRejection, UpdateSessionPlacementResult, VersionedSessionPlacement,
 };
 pub use session_template::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateNameError,

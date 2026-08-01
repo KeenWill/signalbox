@@ -27,6 +27,10 @@ a law is cited as `INV-NNN`, the generated
 [invariant test index](../invariants.md) resolves it; where mechanics owned by
 another contract are summarized, the owning sibling page is linked inline.
 
+The path-scoped session-placement paragraphs are the foundation proposal at the
+bottom of their implementing stack and become verified only with its
+read-introspection and process-surface child pull request.
+
 ## Session identity and creation provenance
 
 A session is one durable, independently browsable conversation with its own
@@ -69,15 +73,15 @@ INV-039).
 ## Session creation
 
 `CreateSession` carries the durable command identity, the provenance pair, one
-complete unversioned initial defaults value, and one optional complete session
-runner placement, plus its explicit or template-derived creation mode.
-Structural equality excludes the command identifier. Explicit mode compares
-provenance, the complete defaults, and the placement; template-derived mode
-compares provenance, the placement, and the caller-supplied template name while
-excluding the copied defaults and content digest. The two modes are never equal
-(INV-012, INV-047). Three topics are owned by
-[identity-and-commands](identity-and-commands.md): durable-command storage, the
-structural-equality doctrine, and identity generation, supply, and encoding.
+complete unversioned initial defaults value, one path-scoped placement decision,
+and one optional complete session runner placement, plus its explicit or
+template-derived creation mode. Structural equality excludes the command
+identifier. Explicit mode compares provenance, the complete defaults, and the
+placement; template-derived mode compares provenance, the placement, and the
+caller-supplied template name while excluding the copied defaults and content
+digest. The two modes are never equal (INV-012, INV-047). Three topics are owned
+by [identity-and-commands](identity-and-commands.md): durable-command storage,
+the structural-equality doctrine, and identity generation, supply, and encoding.
 
 The placement is absent for a daemon-only session. When present it is the
 complete immutable request — runner selector, working-directory selection,
@@ -138,6 +142,35 @@ resolution follow the shared durable-command contract owned by
 `crates/persistence/src/create_session.rs`. The session-specific consequence:
 equal replay returns the recorded receipt, which may name a different session
 than the freshly minted candidate; the unused candidate is simply discarded.
+
+### Path-scoped session placement
+
+Path placement is opt-in. `Pathless` is the compatibility value and preserves
+today's cross-session read behavior exactly. A placed session carries one
+validated dotted path whose nonempty ASCII label segments admit letters, digits,
+hyphen, and underscore; each segment is at most 64 bytes and a path is at most
+64 segments. The initial value is pinned by creation. Only the explicit
+`UpdateSessionPlacement` durable command changes it, appending a versioned
+`Updated` event that names its predecessor and command identity; creation itself
+appends version-one `Created`, so no update rewrites history.
+
+A placed requester's readable scope is its parent directory's subtree. The
+decision computes the requesting path's parent prefix once and performs one
+prefix comparison against the target placement: siblings and descendants are
+allowed; ancestors, pathless targets, and disjoint subtrees are refused. A
+refusal is typed evidence containing that requesting directory and the closed
+reason `OutsideRequestingDirectorySubtree`, never an empty successful result.
+The child pull request enforces this decision where the conversation
+introspection adapter opens a selected native transcript. Conversation-list
+inventory is discovery rather than a selected transcript read, and imported
+conversations are not sessions; neither surface is filtered by this rule.
+
+A one-segment placement sits in the root directory and therefore has global
+conversation read, including pathless sessions. It is legal only through the
+loud `RootGlobalRead` variant carrying
+`RootPlacementGlobalReadIntent::Acknowledged`. The creation command, typed
+record, and version-one event all preserve both its path and the explicit
+global-read-intent bit. Ordinary scoped construction rejects a root path.
 
 Why (append-only, one exception): provenance, defaults versions, command
 receipts, and scheduler registration are historical facts; in-place mutation

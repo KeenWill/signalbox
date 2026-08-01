@@ -28,6 +28,8 @@ pub(crate) const REVIEW_ORCHESTRATION_KIND: &str =
 pub(crate) const COMPACT_SESSION_KIND: &str =
     durable_command_kind_to_str(CommandKind::CompactSession);
 pub(crate) const GOAL_KIND: &str = durable_command_kind_to_str(CommandKind::Goal);
+pub(crate) const UPDATE_SESSION_PLACEMENT_KIND: &str =
+    durable_command_kind_to_str(CommandKind::UpdateSessionPlacement);
 
 #[derive(Clone, Copy)]
 struct CommandKindDefinition {
@@ -38,7 +40,7 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 10] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 11] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -106,6 +108,13 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 10] = [
         kind: CommandKind::Goal,
         spelling: GOAL_KIND,
         typed_table: "goal_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::UpdateSessionPlacement,
+        spelling: UPDATE_SESSION_PLACEMENT_KIND,
+        typed_table: "update_session_placement_command",
         minimum_version: 1,
         maximum_version: 1,
     },
