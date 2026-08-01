@@ -58,11 +58,11 @@ const MAX_WORKING_DIRECTORY_BYTES: usize = MAX_WORKING_DIRECTORY_CHARACTERS * 4;
 pub(crate) const EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 const PROCESS_CAPTURE_BYTES_LIMIT: usize = 1024 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
-const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
+pub(crate) const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
 const SANDBOX_DISPATCH_PROGRAM: &str = "/signalbox-exec-dispatch";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
+pub(crate) const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
 #[cfg(target_os = "linux")]
@@ -751,12 +751,33 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         Ok(self.run_with_capture(arguments, EXEC_CAPTURE_BYTES).await)
     }
 
+    pub(crate) fn pinned_workspace_root(&self) -> &Path {
+        #[cfg(target_os = "linux")]
+        {
+            &self.workspace_identity.bind_source
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            &self.workspace_root
+        }
+    }
+
     pub(crate) async fn run_with_capture(
         &mut self,
         arguments: ExecArguments,
         capture_bytes: usize,
     ) -> ExecResult {
         let requested_timeout = Duration::from_secs(arguments.timeout_seconds);
+        self.run_with_capture_timeout(arguments, requested_timeout, capture_bytes)
+            .await
+    }
+
+    pub(crate) async fn run_with_capture_timeout(
+        &mut self,
+        arguments: ExecArguments,
+        requested_timeout: Duration,
+        capture_bytes: usize,
+    ) -> ExecResult {
         let deadline = tokio::time::Instant::now() + requested_timeout;
         #[cfg(target_os = "linux")]
         if !self.workspace_identity.matches(&self.workspace_root) {
