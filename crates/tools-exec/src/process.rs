@@ -39,7 +39,7 @@ use tokio::{
 
 #[cfg(target_os = "linux")]
 use crate::supervisor_protocol::{
-    SupervisorFailureStage, SupervisorSpawnFailure, SupervisorStatus,
+    SupervisorCaptureCompleteness, SupervisorFailureStage, SupervisorSpawnFailure, SupervisorStatus,
 };
 
 pub const SANDBOXED_EXEC_NAME: &str = "sandboxed_exec";
@@ -2027,17 +2027,26 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         }
     };
     match (stdout, stderr) {
-        (Ok(Ok((stdout, status))), Ok(Ok(stderr))) => ProcessRunResult {
-            outcome: wait_failure.unwrap_or_else(|| supervisor_outcome(status)),
-            stdout: ProcessOutput {
-                bytes: stdout.bytes,
-                completeness: stdout.completeness,
-            },
-            stderr: ProcessOutput {
-                bytes: stderr.bytes,
-                completeness: stderr.completeness,
-            },
-        },
+        (Ok(Ok((stdout, status))), Ok(Ok(stderr))) => {
+            let (supervised_stdout, supervised_stderr) = supervisor_capture_completeness(status);
+            ProcessRunResult {
+                outcome: wait_failure.unwrap_or_else(|| supervisor_outcome(status)),
+                stdout: ProcessOutput {
+                    bytes: stdout.bytes,
+                    completeness: combined_capture_completeness(
+                        stdout.completeness,
+                        supervised_stdout,
+                    ),
+                },
+                stderr: ProcessOutput {
+                    bytes: stderr.bytes,
+                    completeness: combined_capture_completeness(
+                        stderr.completeness,
+                        supervised_stderr,
+                    ),
+                },
+            }
+        }
         (Ok(Err(_)) | Err(_), _) => {
             empty_process_result(wait_failure.unwrap_or(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stdout,
@@ -2061,7 +2070,7 @@ fn kill_supervisor_process_group(raw_pid: u32) {
 #[cfg(target_os = "linux")]
 fn supervisor_outcome(status: SupervisorStatus) -> ProcessOutcome {
     match status {
-        SupervisorStatus::Exited { code } => ProcessOutcome::Exited { code },
+        SupervisorStatus::Exited { code, .. } => ProcessOutcome::Exited { code },
         SupervisorStatus::TimedOut => ProcessOutcome::TimedOut,
         SupervisorStatus::SpawnFailed { reason } => ProcessOutcome::SpawnFailed {
             reason: match reason {
@@ -2082,6 +2091,36 @@ fn supervisor_outcome(status: SupervisorStatus) -> ProcessOutcome {
                 SupervisorFailureStage::Cleanup => ProcessSupervisionFailure::Cleanup,
             },
         },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_capture_completeness(
+    status: SupervisorStatus,
+) -> (SupervisorCaptureCompleteness, SupervisorCaptureCompleteness) {
+    match status {
+        SupervisorStatus::Exited { stdout, stderr, .. } => (stdout, stderr),
+        SupervisorStatus::TimedOut
+        | SupervisorStatus::Cancelled
+        | SupervisorStatus::SpawnFailed { .. }
+        | SupervisorStatus::SupervisionFailed { .. } => (
+            SupervisorCaptureCompleteness::Complete,
+            SupervisorCaptureCompleteness::Complete,
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn combined_capture_completeness(
+    bounded: CaptureCompleteness,
+    supervised: SupervisorCaptureCompleteness,
+) -> CaptureCompleteness {
+    match (bounded, supervised) {
+        (CaptureCompleteness::Complete, SupervisorCaptureCompleteness::Complete) => {
+            CaptureCompleteness::Complete
+        }
+        (CaptureCompleteness::Complete, SupervisorCaptureCompleteness::Incomplete)
+        | (CaptureCompleteness::Truncated, _) => CaptureCompleteness::Truncated,
     }
 }
 

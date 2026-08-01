@@ -1,10 +1,24 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum SupervisorStatus {
-    Exited { code: Option<i32> },
+    Exited {
+        code: Option<i32>,
+        stdout: SupervisorCaptureCompleteness,
+        stderr: SupervisorCaptureCompleteness,
+    },
     TimedOut,
     Cancelled,
-    SpawnFailed { reason: SupervisorSpawnFailure },
-    SupervisionFailed { stage: SupervisorFailureStage },
+    SpawnFailed {
+        reason: SupervisorSpawnFailure,
+    },
+    SupervisionFailed {
+        stage: SupervisorFailureStage,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SupervisorCaptureCompleteness {
+    Complete,
+    Incomplete,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
