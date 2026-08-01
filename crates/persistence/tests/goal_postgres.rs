@@ -11,8 +11,8 @@ use signalbox_application::StartEligibleTurnOutcome;
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, CancelledModelCallTurnIdentities,
     ContextFrontierId, CreateSession, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    Goal, GoalCommandResult, GoalStatement, GoalUserAction, GoalUserCommand, GoalUserProvenance,
-    ModelSelectionRequest, PreparedCreateSession, SemanticTranscriptEntryId,
+    Goal, GoalCommandResult, GoalNeed, GoalStatement, GoalUserAction, GoalUserCommand,
+    GoalUserProvenance, ModelSelectionRequest, PreparedCreateSession, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
     SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
@@ -20,7 +20,7 @@ use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
     create_session::CreateSessionRepository,
     goal::{GoalCommandHandlingOutcome, GoalRepository},
-    goal_turn::GoalTurnCandidates,
+    goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
@@ -159,6 +159,20 @@ async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
         .await?;
 
     assert_eq!(activated_turn(activation), candidates.turn());
+
+    assert_eq!(
+        GoalRepository::new(pool.clone())
+            .reconcile_after_execution(
+                session(SESSION),
+                candidates.turn(),
+                turn_candidates(0xc01),
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::NotTerminal
+    );
 
     SubmitInputRepository::new(pool.clone())
         .handle_with_candidates(

@@ -23,13 +23,27 @@ pub struct GoalTurnCandidates {
     turn: TurnId,
 }
 
-/// Result of reconciling one successfully terminalized turn with goal mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GoalTurnTerminalState {
+    NotTerminal,
+    Completed,
+    Unsuccessful,
+}
+
+/// Result of reconciling one goal turn after a daemon execution pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GoalTurnContinuationOutcome {
     /// A new goal-owned turn was durably queued.
     Scheduled {
         /// The queued successor turn.
         turn: TurnId,
+    },
+    /// The goal turn remains queued or active and requires no disposition.
+    NotTerminal,
+    /// An unsuccessfully terminalized goal turn durably blocked pursuit.
+    Blocked {
+        /// The appended blocked event ordinal.
+        event: signalbox_domain::GoalEventOrdinal,
     },
     /// The current goal state is absent or scheduler-terminal.
     NotPursuing,
@@ -207,6 +221,41 @@ pub(crate) async fn goal_turn_generation(
         "positive goal generation decoded as zero",
     ))?;
     Ok(Some(GoalGeneration::new(generation)))
+}
+
+pub(crate) async fn goal_turn_terminal_state(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<GoalTurnTerminalState, GoalRepositoryError> {
+    let stored = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT lifecycle.state_kind, lifecycle.terminal_disposition_kind
+           FROM goal_turn AS goal
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = goal.session_id
+            AND lifecycle.turn_id = goal.turn_id
+          WHERE goal.session_id = $1 AND goal.turn_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(GoalCorruption::Missing("goal turn lifecycle"))?;
+    match (stored.0.as_str(), stored.1.as_deref()) {
+        ("queued" | "active", None) => Ok(GoalTurnTerminalState::NotTerminal),
+        ("terminal", Some("completed")) => Ok(GoalTurnTerminalState::Completed),
+        ("terminal", Some("refused" | "failed" | "cancelled" | "reconciliation_required")) => {
+            Ok(GoalTurnTerminalState::Unsuccessful)
+        }
+        ("queued" | "active" | "terminal", _) => {
+            Err(GoalCorruption::Inconsistent("goal turn terminal shape").into())
+        }
+        _ => Err(GoalCorruption::Unsupported {
+            field: "goal turn lifecycle state",
+            value: stored.0,
+        }
+        .into()),
+    }
 }
 
 pub(crate) async fn continuation_exists(

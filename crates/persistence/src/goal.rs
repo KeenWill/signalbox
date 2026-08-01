@@ -21,8 +21,8 @@ use crate::{
     command_registry::{self, CommandKind, GOAL_KIND, RegistryCorruption, RegistryInspectionError},
     commit_failure_is_ambiguous,
     goal_turn::{
-        GoalTurnCandidates, GoalTurnContinuationOutcome, continuation_exists, goal_turn_generation,
-        insert_goal_turn,
+        GoalTurnCandidates, GoalTurnContinuationOutcome, GoalTurnTerminalState,
+        continuation_exists, goal_turn_generation, goal_turn_terminal_state, insert_goal_turn,
     },
     mapping::{
         DurableCommandIdMappingError, PositiveOrdinalMappingError, durable_command_id_from_uuid,
@@ -279,12 +279,17 @@ impl GoalRepository {
         load_goal_from_connection(&mut connection, session).await
     }
 
-    /// Queues one successor after a successfully completed current goal turn.
-    pub async fn continue_after_success<SelectDefinition>(
+    /// Reconciles one current goal turn's durable terminal disposition.
+    ///
+    /// Nonterminal work is left alone, completion queues one idempotent
+    /// successor, and every unsuccessful terminal disposition blocks pursuit
+    /// with scheduler-only execution-failure provenance.
+    pub async fn reconcile_after_execution<SelectDefinition>(
         &self,
         session: SessionId,
         predecessor: TurnId,
         candidates: GoalTurnCandidates,
+        failure_need: GoalNeed,
         select_definition: SelectDefinition,
     ) -> Result<GoalTurnContinuationOutcome, GoalRepositoryError>
     where
@@ -311,6 +316,31 @@ impl GoalRepository {
         if generation != goal.current().generation() {
             transaction.rollback().await?;
             return Ok(GoalTurnContinuationOutcome::NotCurrentGoalTurn);
+        }
+        match goal_turn_terminal_state(&mut transaction, session, predecessor).await? {
+            GoalTurnTerminalState::NotTerminal => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::NotTerminal);
+            }
+            GoalTurnTerminalState::Unsuccessful => {
+                let transitioned = goal
+                    .block_execution_failure(
+                        failure_need,
+                        GoalSchedulerProvenance::new(predecessor),
+                    )
+                    .map_err(|_| {
+                        GoalCorruption::Inconsistent(
+                            "pursuing goal rejected scheduler failure blocking",
+                        )
+                    })?;
+                let event = latest_event(&transitioned)?;
+                insert_event(&mut transaction, session, &event).await?;
+                commit(transaction).await?;
+                return Ok(GoalTurnContinuationOutcome::Blocked {
+                    event: event.ordinal(),
+                });
+            }
+            GoalTurnTerminalState::Completed => {}
         }
         if continuation_exists(&mut transaction, session, predecessor).await? {
             transaction.rollback().await?;
