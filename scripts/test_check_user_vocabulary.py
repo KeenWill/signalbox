@@ -87,6 +87,14 @@ def main() -> int:
             / "SignalboxClient"
             / "SessionSynchronization.swift"
         )
+        cross_fragment_path = (
+            root
+            / "clients"
+            / "native"
+            / "Tests"
+            / "SignalboxAppTests"
+            / "ViewModelTests.swift"
+        )
         violation = root / "docs" / "spec" / "example.md"
         ambiguous_message = root / "docs" / "spec" / "user-message.md"
         reviewed_domain_path = root / "docs" / "spec" / "review-workflows.md"
@@ -119,6 +127,13 @@ def main() -> int:
             "SESSIONOWNER = []",
             "OWNERID = nil",
             "Ownerid = nil",
+            "ownershipowner names the human who approves tools.",
+            "ownerownership names the human who approves tools.",
+            "OWNERSHIPOWNER names the human who approves tools.",
+            "ownershipoWnEr names the human who approves tools.",
+            "session_ownerid = nil",
+            "SESSION_OWNERID = nil",
+            "The oWnEr approves this tool.",
         )
         mixed_storage_lines = (
             'const PROCESS_ACTOR: &str = "owner";',
@@ -138,6 +153,7 @@ def main() -> int:
             "A request by an owner, member, or collaborator approves tools.",
             'author_association = "HUMAN_OWNER"',
             'The protocol emits {"owner": "the human who approves tools"}.',
+            "Merge pull request after the owner approves owner/repository.",
         )
         reviewed_identity_lines = (
             "The process protocol still accepts the human actor 'owner'.",
@@ -163,18 +179,22 @@ def main() -> int:
         mixed_storage_path.parent.mkdir(parents=True)
         frozen_migration.parent.mkdir(parents=True)
         native_path.parent.mkdir(parents=True)
+        cross_fragment_path.parent.mkdir(parents=True)
         violation.parent.mkdir(parents=True)
         github_accessor_lines = (
             'const REPOSITORY: &str = "owner/repository";',
             "let approval = session.owner();",
             'fn owner(&self) -> &str { "human who approves tools" }',
             "impl Session {",
-            "fn owner(&self) -> &str {",
+            "    fn owner(&self) -> &str {",
             '    "human who approves tools"',
+            "    }",
             "}",
             "impl GitHubRepository {",
+            "// unmatched non-code brace: {",
             "}",
-            "    fn owner(&self) -> &str {",
+            "impl Session {",
+            "        fn owner(&self) -> &str {",
         )
         reviewed_author_lines = ('author: Some(String::from("owner")),',)
         author_violation_lines = (
@@ -205,6 +225,10 @@ def main() -> int:
             fixture_text(future_migration_lines), encoding="utf-8"
         )
         native_path.write_text(fixture_text(native_lines), encoding="utf-8")
+        cross_fragment_path.write_text(
+            "ImportedContinuationRetryFixture.sendOutcomeUnknownError,\n",
+            encoding="utf-8",
+        )
         reviewed_domain_path.write_text(
             fixture_text(reviewed_domain_lines), encoding="utf-8"
         )
@@ -230,6 +254,7 @@ def main() -> int:
             "crates/persistence/migrations/202607180001_create_session.sql",
             "crates/persistence/migrations/202608020009_user_vocabulary.sql",
             "clients/native/Sources/SignalboxClient/SessionSynchronization.swift",
+            "clients/native/Tests/SignalboxAppTests/ViewModelTests.swift",
             "docs/spec/example.md",
             "docs/spec/user-message.md",
             "docs/spec/identity-and-commands.md",
@@ -267,7 +292,7 @@ def main() -> int:
                     github_accessor_lines[1],
                     github_accessor_lines[2],
                     github_accessor_lines[4],
-                    github_accessor_lines[9],
+                    github_accessor_lines[12],
                 ),
             ),
             *expected_diagnostics(

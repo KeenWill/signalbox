@@ -13,12 +13,7 @@ from typing import Mapping
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
-    r"\b(?![A-Za-z0-9]*(?:ownership|OWNERSHIP|Ownership)[A-Za-z0-9]*\b)"
-    r"[A-Za-z0-9]*(?:owner|OWNER|Owner)[A-Za-z0-9]*\b|"
-    r"(?i:\bowners?\d*(?:\b|[_-])|owners?[_-]|(?<=[_-])owners?\d*(?:\b|[_-]))|"
-    r"\b[Oo]wners?\d+[A-Z][A-Za-z0-9_]*|"
-    r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
-    r"\b[A-Za-z0-9_]+Owners?(?:[A-Z][A-Za-z0-9_]*)?"
+    r"[A-Za-z0-9_]*owner[A-Za-z0-9_]*", re.IGNORECASE
 )
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 
@@ -45,12 +40,10 @@ class Allowance:
         )
         if start is None:
             return False
-        depth = 0
-        for candidate in source_lines[start : index + 1]:
-            depth += candidate.count("{") - candidate.count("}")
-            if depth <= 0:
-                return False
-        return True
+        return not any(
+            re.fullmatch(r"}\s*(?://.*)?", candidate)
+            for candidate in source_lines[start + 1 : index]
+        )
 
     def covers(
         self,
@@ -108,8 +101,7 @@ ALLOWLIST = (
             r"association is `OWNER`, `MEMBER`, or `COLLABORATOR`|"
             r"matches!\(association, \"OWNER\" \| \"MEMBER\" \| \"COLLABORATOR\"\)|"
             r"author_association:\s*String::from\(\"OWNER\"\)|"
-            r"valid_repository_segment\(owner\)|"
-            r"Merge pull request.*owner/",
+            r"valid_repository_segment\(owner\)",
             re.IGNORECASE,
         ),
     ),
@@ -294,7 +286,30 @@ ALLOWLIST = (
         re.compile(r"(?:^|,|=\s*)\s*'owner'(?=\s*[,)]|$)"),
     ),
     Allowance(
-        "Rust and domain-record ownership phrasing",
+        "non-owner cross-fragment identifiers",
+        re.compile(
+            r"^clients/native/Tests/(?:SignalboxAppTests/ViewModelTests|"
+            r"SignalboxModelsTests/ProcessProtocolTests)[.]swift$"
+        ),
+        re.compile(
+            r"\b(?:sendOutcomeUnknownError|"
+            r"testExpandedKnownErrorDetailDegradesBeforeProtocolProjection|"
+            r"testUnknownRejectionDetailDegradesKnownError)\b"
+        ),
+    ),
+    Allowance(
+        "Rust borrow/ownership phrasing",
+        re.compile(r"^(?:crates|apps|clients|docs/spec)/"),
+        re.compile(
+            r"(?<![A-Za-z0-9_])"
+            r"(?![A-Za-z0-9_]*owner[A-Za-z0-9_]*owner)"
+            r"[A-Za-z0-9_]*ownership[A-Za-z0-9_]*"
+            r"(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        ),
+    ),
+    Allowance(
+        "domain-record ownership phrasing",
         re.compile(
             r"^(?:apps/signalbox-runner/src/state[.]rs|"
             r"apps/signalboxd/src/runner_protocol_runtime[.]rs|"
@@ -310,7 +325,6 @@ ALLOWLIST = (
             r"turn-lifecycle-and-scheduling)[.]md)$"
         ),
         re.compile(
-            r"[A-Za-z0-9_]*Ownership[A-Za-z0-9_]*|ownership|\bowned\b|\bowning\b|"
             r"acceptance positions, typed priority relations, and active-slot owner are|"
             r"active slot owner[.]$|sole active slot owner, when present|"
             r"exact active slot owner[.]$|records the active slot owner, stale|"
