@@ -231,12 +231,9 @@ async fn s36_missing_placement_head_fails_closed_for_reads_and_updates()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(0x204);
+    let creation = creation(command(0x105), session_id, SessionPlacement::pathless());
     CreateSessionRepository::new(pool.clone(), credential_pin())
-        .handle(creation(
-            command(0x105),
-            session_id,
-            SessionPlacement::pathless(),
-        ))
+        .handle(creation.clone())
         .await?;
     sqlx::raw_sql(
         "ALTER TABLE session_current_placement DISABLE TRIGGER USER;
@@ -270,6 +267,16 @@ async fn s36_missing_placement_head_fails_closed_for_reads_and_updates()
         panic!("missing placement history fails with typed corruption")
     };
     assert_eq!(reason, "session placement head missing");
+    let creation_error = CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation)
+        .await
+        .expect_err("creation replay requires its current placement head");
+    let CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Missing(field)) =
+        creation_error
+    else {
+        panic!("missing placement head fails creation replay with typed corruption")
+    };
+    assert_eq!(field, "current_placement_head_version");
 
     pool.close().await;
     drop(container);
@@ -528,7 +535,7 @@ async fn s36_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Er
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_current_session_load_authenticates_the_placement_update_receipt()
+async fn s36_current_read_and_update_authenticate_the_placement_update_receipt()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(0x20a);
@@ -570,6 +577,19 @@ async fn s36_current_session_load_authenticates_the_placement_update_receipt()
         panic!("cross-wired current placement fails with typed session corruption")
     };
     assert_eq!(reason, "current placement provenance receipt");
+    let update_error = SessionPlacementRepository::new(pool.clone())
+        .handle(UpdateSessionPlacement::new(
+            command(0x118),
+            session_id,
+            SessionPlacementVersion::try_from_u64(2).expect("fixture current version is positive"),
+            scoped("projects.foo.replacement"),
+        ))
+        .await
+        .expect_err("an update must authenticate the current event before advancing it");
+    let SessionPlacementRepositoryError::Corruption(update_reason) = update_error else {
+        panic!("cross-wired current placement fails update with typed corruption")
+    };
+    assert_eq!(update_reason, "current placement provenance receipt");
 
     pool.close().await;
     drop(container);

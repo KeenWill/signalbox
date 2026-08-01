@@ -280,7 +280,8 @@ fn decode_complete(
             )
             .into());
         }
-        let placement = decode_current_placement(&row, true)?;
+        let placement =
+            decode_current_placement(&row, PlacementCreationFamily::ImportedConversation)?;
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
@@ -319,7 +320,7 @@ fn decode_complete(
         required(&row, "dangerous_tool_auto_approval")?,
         row.try_get("system_prompt")?,
     )?;
-    let placement = decode_current_placement(&row, false)?;
+    let placement = decode_current_placement(&row, PlacementCreationFamily::Native)?;
 
     SessionReconstitutionInput::new_with_template_and_placement(
         requested_session,
@@ -337,9 +338,15 @@ fn decode_complete(
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())
 }
 
+#[derive(Clone, Copy)]
+enum PlacementCreationFamily {
+    Native,
+    ImportedConversation,
+}
+
 fn decode_current_placement(
     row: &PgRow,
-    imported_ancestry: bool,
+    creation_family: PlacementCreationFamily,
 ) -> Result<VersionedSessionPlacement, SessionRepositoryError> {
     let version =
         crate::session_placement::decode_version(required(row, "current_placement_version")?)
@@ -365,10 +372,14 @@ fn decode_current_placement(
             version == SessionPlacementVersion::INITIAL
                 && prior.is_none()
                 && update.is_none()
-                && ((imported_ancestry && imported_creation.is_some() && native_creation.is_none())
-                    || (!imported_ancestry
-                        && native_creation.is_some()
-                        && imported_creation.is_none()))
+                && match creation_family {
+                    PlacementCreationFamily::Native => {
+                        native_creation.is_some() && imported_creation.is_none()
+                    }
+                    PlacementCreationFamily::ImportedConversation => {
+                        imported_creation.is_some() && native_creation.is_none()
+                    }
+                }
         }
         SessionPlacementEventKind::Updated => {
             prior.is_some()

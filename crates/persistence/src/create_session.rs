@@ -575,6 +575,8 @@ async fn load_from_connection(
             ,pe.version AS stored_placement_version
             ,pe.placement_path AS stored_placement_path
             ,pe.root_global_read_intent AS stored_root_intent
+            ,placement_head.current_version AS current_placement_head_version
+            ,current_placement.version AS current_placement_event_version
          FROM durable_command AS d
          LEFT JOIN create_session_command AS c
            ON c.command_id = d.command_id
@@ -587,6 +589,11 @@ async fn load_from_connection(
            ON pe.session_id = c.created_session_id
           AND pe.version = 1
           AND pe.provenance_command_id = c.command_id
+         LEFT JOIN session_current_placement AS placement_head
+           ON placement_head.session_id = c.created_session_id
+         LEFT JOIN session_placement_event AS current_placement
+           ON current_placement.session_id = placement_head.session_id
+          AND current_placement.version = placement_head.current_version
          WHERE d.command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -711,6 +718,17 @@ fn decode_complete(
         required(&row, "stored_root_intent")?,
         PLACEMENT_FROM_STORAGE_VERSION,
     )?;
+    let placement_head = placement_version_from_numeric(
+        required(&row, "current_placement_head_version")?,
+        "current placement head version",
+    )?;
+    let current_placement_event = placement_version_from_numeric(
+        required(&row, "current_placement_event_version")?,
+        "current placement event version",
+    )?;
+    if placement_head != current_placement_event {
+        return Err(CreateSessionCorruption::Inconsistent("current placement head event").into());
+    }
 
     CreateSessionReconstitutionInput::new_with_template_and_placement(
         command,

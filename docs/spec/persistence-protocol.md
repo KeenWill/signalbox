@@ -91,8 +91,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirty-eight files, `202607180001` through
-`202607300101` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — thirty-nine files, `202607180001` through
+`202608020016` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -426,27 +426,26 @@ identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
-`review_workflow`, `compact_session`, `replace_lost_runner`,
-`abandon_lost_runner`, `promote_pending_runner`) and a kind-scoped
-`storage_version`. The gates above fix the current numbers: create-session
-records write version 5, defaults-bearing imported-create records write version
-4, and replace-defaults records write version 3. Create-session records
-reconstitute version 1 with the disabled dangerous-tool posture, and versions 1
-and 2 with no system prompt — a pre-version-three row carrying one fails closed
-in both the schema and every Rust reader. A pre-version-four create row carrying
-template provenance and a pre-version-five create row carrying a runner
-placement likewise fail closed; therefore a rollback reader that supports only
-versions 1 through 4 rejects every new create record instead of projecting a
-runner-backed creation as daemon-only, exactly as a reader supporting only
-versions 1 through 3 rejects every template-provenance record instead of
-projecting template creation as explicit creation. Metadata, submit, decision,
-review-workflow, compaction, and runner-recovery records use version 1. Each
-kind has one typed subordinate request record keyed by `command_id` that stores
-every caller-supplied semantic field in typed, `CHECK`-constrained columns.
-Every kind except runner replacement also stores the terminal
-`applied`/`rejected` result and typed result fields there.
-`replace_lost_runner_command` is the immutable request and
-provisioning-authorization root; at most one append-only
+`review_workflow`, `review_orchestration`, `compact_session`, `goal`,
+`update_session_placement`) and a kind-scoped `storage_version`. The gates above
+fix the current numbers: create-session records write version 6;
+defaults-bearing imported-create and replace-defaults records write version 3;
+every other closed kind writes version 1. Create-session records reconstitute
+version 1 with the disabled dangerous-tool posture, and versions 1 and 2 with no
+system prompt — a pre-version-three row carrying one fails closed in both the
+schema and every Rust reader. A pre-version-four create row carrying template
+provenance and a pre-version-five create row carrying a runner placement
+likewise fail closed; therefore a rollback reader that supports only versions 1
+through 4 rejects every new create record instead of projecting a runner-backed
+creation as daemon-only, exactly as a reader supporting only versions 1 through
+3 rejects every template-provenance record instead of projecting template
+creation as explicit creation. Metadata, submit, decision, review-workflow,
+compaction, and runner-recovery records use version 1. Each kind has one typed
+subordinate request record keyed by `command_id` that stores every
+caller-supplied semantic field in typed, `CHECK`-constrained columns. Every kind
+except runner replacement also stores the terminal `applied`/`rejected` result
+and typed result fields there. `replace_lost_runner_command` is the immutable
+request and provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
 its fields. Deferred reverse constraints require exactly one typed request per

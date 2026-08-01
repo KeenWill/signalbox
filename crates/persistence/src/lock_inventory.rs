@@ -70,11 +70,35 @@ pub(crate) const REPLACE_SESSION_METADATA: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
 pub(crate) const UPDATE_SESSION_PLACEMENT_HEAD: &str =
-    "SELECT event.version, event.placement_path, event.root_global_read_intent
+    "SELECT event.version, event.prior_version, event.event_kind,
+            event.placement_path, event.root_global_read_intent,
+            native_creation.command_id AS native_creation_command_id,
+            imported_creation.command_id AS imported_creation_command_id,
+            placement_update.command_id AS placement_update_command_id
        FROM session_current_placement AS head
        JOIN session_placement_event AS event
          ON event.session_id = head.session_id
         AND event.version = head.current_version
+       LEFT JOIN create_session_command AS native_creation
+         ON native_creation.command_id = event.provenance_command_id
+        AND native_creation.created_session_id = event.session_id
+        AND native_creation.result_kind = 'applied'
+        AND native_creation.placement_path IS NOT DISTINCT FROM event.placement_path
+        AND native_creation.root_global_read_intent = event.root_global_read_intent
+       LEFT JOIN create_session_from_imported_frontier_command AS imported_creation
+         ON imported_creation.command_id = event.provenance_command_id
+        AND imported_creation.created_session_id = event.session_id
+        AND imported_creation.result_kind = 'applied'
+        AND event.placement_path IS NULL
+        AND NOT event.root_global_read_intent
+       LEFT JOIN update_session_placement_command AS placement_update
+         ON placement_update.command_id = event.provenance_command_id
+        AND placement_update.session_id = event.session_id
+        AND placement_update.result_kind = 'applied'
+        AND placement_update.result_version = event.version
+        AND placement_update.expected_version = event.prior_version
+        AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
+        AND placement_update.root_global_read_intent = event.root_global_read_intent
       WHERE head.session_id = $1
       FOR UPDATE OF head";
 

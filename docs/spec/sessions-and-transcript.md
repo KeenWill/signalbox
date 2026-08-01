@@ -167,7 +167,7 @@ conversations are not sessions; neither surface is filtered by this rule.
 
 A one-segment placement sits in the root directory and therefore has global
 conversation read, including pathless sessions. It is legal only through the
-loud `RootGlobalRead` variant carrying
+loud `SessionPlacement::root_global_read` constructor, which requires
 `RootPlacementGlobalReadIntent::Acknowledged`. The creation command, typed
 record, and version-one event all preserve both its path and the explicit
 global-read-intent bit. Ordinary scoped construction rejects a root path.

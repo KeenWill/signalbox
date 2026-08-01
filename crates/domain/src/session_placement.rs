@@ -1,6 +1,11 @@
 //! Validated session placement and path-scoped conversation-read decisions.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::{
+    error::Error,
+    fmt,
+    hash::{Hash, Hasher},
+    num::NonZeroU64,
+};
 
 use crate::{DurableCommandId, SessionId};
 
@@ -309,12 +314,32 @@ impl VersionedSessionPlacement {
 }
 
 /// Durable command payload for appending one explicit placement update event.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct UpdateSessionPlacement {
     command_id: DurableCommandId,
     session: SessionId,
     expected_version: SessionPlacementVersion,
     replacement: SessionPlacement,
+}
+
+/// docs/spec/identity-and-commands.md comparison equality covers every
+/// caller field except the command identifier itself.
+impl PartialEq for UpdateSessionPlacement {
+    fn eq(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.expected_version == other.expected_version
+            && self.replacement == other.replacement
+    }
+}
+
+impl Eq for UpdateSessionPlacement {}
+
+impl Hash for UpdateSessionPlacement {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.session.hash(state);
+        self.expected_version.hash(state);
+        self.replacement.hash(state);
+    }
 }
 
 /// Kind of one immutable placement-history event.
@@ -435,10 +460,18 @@ impl UpdateSessionPlacement {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+
     use super::*;
 
     fn scoped(value: &str) -> SessionPlacement {
         SessionPlacement::scoped(SessionPlacementPath::try_new(value.to_owned()).unwrap()).unwrap()
+    }
+
+    fn hash(value: &UpdateSessionPlacement) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
     }
 
     #[test]
@@ -581,5 +614,26 @@ mod tests {
         );
         assert_eq!(event.placement().placement(), &replacement);
         assert_eq!(event.command_id(), command);
+    }
+
+    #[test]
+    fn placement_update_payload_equality_excludes_the_lookup_identity() {
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+        let replacement = scoped("projects.foo.session");
+        let left = UpdateSessionPlacement::new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(2)),
+            session,
+            SessionPlacementVersion::INITIAL,
+            replacement.clone(),
+        );
+        let right = UpdateSessionPlacement::new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(3)),
+            session,
+            SessionPlacementVersion::INITIAL,
+            replacement,
+        );
+
+        assert_eq!(left, right);
+        assert_eq!(hash(&left), hash(&right));
     }
 }

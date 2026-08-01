@@ -263,9 +263,52 @@ async fn load_current_for_update(
         .fetch_optional(&mut *connection)
         .await?;
     if let Some(row) = row {
-        return decode_versioned_placement(row).map(Some);
+        return decode_authenticated_locked_placement(row).map(Some);
     }
     missing_head_result(connection, session).await
+}
+
+fn decode_authenticated_locked_placement(
+    row: PgRow,
+) -> Result<VersionedSessionPlacement, SessionPlacementRepositoryError> {
+    let version = decode_version(row.try_get("version")?)?;
+    let prior = row
+        .try_get::<Option<Decimal>, _>("prior_version")?
+        .map(decode_version)
+        .transpose()?;
+    let event_kind =
+        session_placement_event_kind_from_str(row.try_get::<String, _>("event_kind")?.as_str())
+            .ok_or(SessionPlacementRepositoryError::Corruption(
+                "current placement event kind",
+            ))?;
+    let native_creation: Option<sqlx::types::Uuid> = row.try_get("native_creation_command_id")?;
+    let imported_creation: Option<sqlx::types::Uuid> =
+        row.try_get("imported_creation_command_id")?;
+    let update: Option<sqlx::types::Uuid> = row.try_get("placement_update_command_id")?;
+    let receipt_is_valid = match event_kind {
+        SessionPlacementEventKind::Created => {
+            version == SessionPlacementVersion::INITIAL
+                && prior.is_none()
+                && update.is_none()
+                && (native_creation.is_some() != imported_creation.is_some())
+        }
+        SessionPlacementEventKind::Updated => {
+            prior.is_some()
+                && update.is_some()
+                && native_creation.is_none()
+                && imported_creation.is_none()
+        }
+    };
+    if !receipt_is_valid {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "current placement provenance receipt",
+        ));
+    }
+    let placement = decode_placement(
+        row.try_get("placement_path")?,
+        row.try_get("root_global_read_intent")?,
+    )?;
+    Ok(VersionedSessionPlacement::reconstitute(version, placement))
 }
 
 async fn missing_head_result(
@@ -391,6 +434,10 @@ fn decode_record(
     command_id: DurableCommandId,
 ) -> Result<(UpdateSessionPlacement, UpdateSessionPlacementResult), SessionPlacementRepositoryError>
 {
+    validate_typed_header(
+        row.try_get::<String, _>("command_kind")?.as_str(),
+        row.try_get("storage_version")?,
+    )?;
     let session = session_id_from_uuid(row.try_get("session_id")?);
     let expected = decode_version(row.try_get("expected_version")?)?;
     let replacement = decode_placement(
@@ -518,6 +565,23 @@ fn decode_record(
         }
     };
     Ok((command, result))
+}
+
+fn validate_typed_header(
+    command_kind: &str,
+    storage_version: i16,
+) -> Result<(), SessionPlacementRepositoryError> {
+    if command_kind != UPDATE_SESSION_PLACEMENT_KIND {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "typed command kind",
+        ));
+    }
+    if storage_version != STORAGE_VERSION {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "typed command storage version",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_terminal_field_shape(
@@ -653,6 +717,16 @@ mod tests {
         assert_eq!(reason, "terminal result fields");
     }
 
+    fn assert_header_corruption(
+        result: Result<(), SessionPlacementRepositoryError>,
+        expected_reason: &'static str,
+    ) {
+        let Err(SessionPlacementRepositoryError::Corruption(reason)) = result else {
+            panic!("fixture header must fail with typed corruption")
+        };
+        assert_eq!(reason, expected_reason);
+    }
+
     #[test]
     fn replay_terminal_shapes_reject_every_stray_result_field() {
         assert_terminal_field_corruption(validate_terminal_field_shape(
@@ -679,5 +753,17 @@ mod tests {
             true,
             true,
         ));
+    }
+
+    #[test]
+    fn replay_rejects_each_inconsistent_typed_command_header() {
+        assert_header_corruption(
+            validate_typed_header("create_session", STORAGE_VERSION),
+            "typed command kind",
+        );
+        assert_header_corruption(
+            validate_typed_header(UPDATE_SESSION_PLACEMENT_KIND, STORAGE_VERSION + 1),
+            "typed command storage version",
+        );
     }
 }

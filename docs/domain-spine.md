@@ -608,6 +608,7 @@ pub enum SessionPlacementError {
     RootRequiresGlobalReadIntent,
     GlobalReadIntentRequiresRoot,
 }
+// impl Display + std::error::Error
 pub struct SessionPlacementDirectory { /* private */ }
 impl SessionPlacementDirectory {
     // accessors: as_str(), prefix(), is_root()
