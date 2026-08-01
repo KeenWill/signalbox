@@ -12,9 +12,9 @@ from pathlib import Path
 CHECKER = Path(__file__).resolve().parent / "check_user_vocabulary.py"
 
 
-def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
+def run_checker(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(CHECKER), "--root", str(root)],
+        [sys.executable, str(CHECKER), "--root", str(root), *arguments],
         check=False,
         capture_output=True,
         text=True,
@@ -504,6 +504,36 @@ def main() -> int:
         accepted = run_checker(root)
         assert accepted.returncode == 0, (
             f"allowed vocabulary failed:\n{accepted.stdout}{accepted.stderr}"
+        )
+
+        inventory = run_checker(root, "--show-allowlist-hash")
+        assert inventory.returncode == 0, (
+            f"allowlist inventory failed:\n{inventory.stdout}{inventory.stderr}"
+        )
+        reviewed_inventory = inventory.stdout.strip()
+        accepted_storage = mixed_storage_path.read_text(encoding="utf-8")
+        mixed_storage_path.write_text(
+            accepted_storage
+            + 'const HUMAN_PRINCIPAL: &str = "owner_command";\n',
+            encoding="utf-8",
+        )
+        drifted = run_checker(
+            root,
+            "--expected-allowlist-sha256",
+            reviewed_inventory,
+        )
+        assert drifted.returncode == 1, "allowlisted inventory drift passed"
+        assert "reviewed owner allowlist inventory changed" in drifted.stdout, (
+            f"inventory drift lacked exact diagnostic: {drifted.stdout}"
+        )
+        mixed_storage_path.write_text(accepted_storage, encoding="utf-8")
+        restored = run_checker(
+            root,
+            "--expected-allowlist-sha256",
+            reviewed_inventory,
+        )
+        assert restored.returncode == 0, (
+            f"restored inventory failed:\n{restored.stdout}{restored.stderr}"
         )
     print("user-vocabulary checker self-test passed")
     return 0
