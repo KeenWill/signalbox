@@ -402,7 +402,10 @@ CREATE INDEX session_plan_event_entry_history
 
 CREATE INDEX session_plan_event_unsupported_kind
     ON session_plan_event (session_id, event_kind)
-    WHERE event_kind NOT IN ('created', 'text_revised', 'status_changed');
+    WHERE (
+        event_kind IS NULL
+        OR event_kind NOT IN ('created', 'text_revised', 'status_changed')
+    );
 
 CREATE INDEX session_plan_event_created_page
     ON session_plan_event (session_id, event_ordinal)
