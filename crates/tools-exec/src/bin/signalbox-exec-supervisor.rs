@@ -156,7 +156,13 @@ mod linux {
         control.write_all(&[1]).map_err(|_| ())?;
         let cancelled = cancellation_signal();
         loop {
-            match outer_startup_state(child.try_wait(), tree.live_descendant_beyond_root()) {
+            match outer_startup_state(
+                child.try_wait(),
+                tree.live_descendant_beyond_root(bounded_observation_deadline(
+                    started,
+                    Duration::from_millis(timeout_milliseconds),
+                )),
+            ) {
                 OuterStartupState::Ready => break,
                 OuterStartupState::Waiting => {}
                 OuterStartupState::Failed => {
@@ -484,7 +490,9 @@ mod linux {
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    break match tree.live_descendant_beyond_root() {
+                    break match tree
+                        .live_descendant_beyond_root(bounded_observation_deadline(started, timeout))
+                    {
                         Ok(_) => SupervisionCompletion::LauncherExited {
                             success: status.success(),
                         },
@@ -864,8 +872,14 @@ mod linux {
             self.process_tree_supported.load(Ordering::Acquire)
         }
 
-        fn live_descendant_beyond_root(&self) -> Result<bool, ()> {
-            observe_descendants(self.root, self.supervisor, &self.descendants, None, None)?;
+        fn live_descendant_beyond_root(&self, deadline: Instant) -> Result<bool, ()> {
+            observe_descendants(
+                self.root,
+                self.supervisor,
+                &self.descendants,
+                None,
+                Some(deadline),
+            )?;
             let descendants = self
                 .descendants
                 .lock()
@@ -881,6 +895,15 @@ mod linux {
                 self.process_tree_supported.store(false, Ordering::Release);
             }
         }
+    }
+
+    fn bounded_observation_deadline(started: Instant, timeout: Duration) -> Instant {
+        let scan_deadline = Instant::now() + REAP_DEADLINE;
+        started
+            .checked_add(timeout)
+            .map_or(scan_deadline, |request_deadline| {
+                request_deadline.min(scan_deadline)
+            })
     }
 
     impl Drop for ProcessTreeGuard {

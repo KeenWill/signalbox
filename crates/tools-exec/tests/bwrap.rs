@@ -37,7 +37,7 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     let result = runner.try_run(arguments).await?;
 
-    assert_real_bwrap_result(result)?;
+    assert_real_bwrap_result(result, ci)?;
 
     let nested_arguments = ExecArguments {
         program: String::from("sh"),
@@ -51,7 +51,7 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     let nested_result = runner.try_run(nested_arguments).await?;
 
-    assert_real_bwrap_result(nested_result)?;
+    assert_real_bwrap_result(nested_result, ci)?;
 
     let missing_arguments = ExecArguments {
         program: String::from("signalbox-exec-definitely-missing-target"),
@@ -88,6 +88,7 @@ fn real_bwrap_gate(
 
 fn assert_real_bwrap_result(
     result: signalbox_tools_exec::ExecResult,
+    ci: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match result.confinement {
         ExecutionConfinement::FilesystemConfined => {
@@ -97,6 +98,7 @@ fn assert_real_bwrap_result(
         ExecutionConfinement::SandboxRefused {
             availability: BwrapAvailability::Unusable,
         } => {
+            real_bwrap_refusal_policy(ci).map_err(std::io::Error::other)?;
             assert_eq!(
                 result.outcome,
                 ProcessOutcome::SpawnFailed {
@@ -112,6 +114,14 @@ fn assert_real_bwrap_result(
             Ok(())
         }
         confinement => Err(format!("unexpected real bubblewrap result: {confinement:?}").into()),
+    }
+}
+
+fn real_bwrap_refusal_policy(ci: bool) -> Result<(), &'static str> {
+    if ci {
+        Err("CI requires the real bwrap profile to confine successfully")
+    } else {
+        Ok(())
     }
 }
 
@@ -184,4 +194,17 @@ fn real_bwrap_gate_requires_the_installed_binary_in_ci() {
         real_bwrap_gate(true, false, true, false),
         Err("CI requires /usr/bin/bwrap for the real profile")
     );
+}
+
+#[test]
+fn real_bwrap_refusal_is_rejected_in_ci() {
+    assert_eq!(
+        real_bwrap_refusal_policy(true),
+        Err("CI requires the real bwrap profile to confine successfully")
+    );
+}
+
+#[test]
+fn real_bwrap_refusal_remains_typed_evidence_outside_ci() {
+    assert_eq!(real_bwrap_refusal_policy(false), Ok(()));
 }
