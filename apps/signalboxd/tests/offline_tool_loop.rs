@@ -598,7 +598,7 @@ fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>) {
         .iter()
         .map(|definition| definition.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 35);
+    assert_eq!(names.len(), 37);
     assert!(names.contains(&REPOSITORY_READ_FILE_NAME));
     assert!(names.contains(&PULL_REQUEST_METADATA_NAME));
     assert!(names.contains(&PULL_REQUEST_PUBLISH_REVIEW_NAME));
