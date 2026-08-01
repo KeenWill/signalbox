@@ -16,13 +16,28 @@ pub(super) const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
 
 pub(super) const MAX_RESULT_SNIPPET_BYTES: usize = 16 * 1024;
 
+/// Result query parameters admitted into tool output.
+///
+/// No provider-neutral result parameter has a security contract at launch, so
+/// the allowlist is intentionally empty. A future entry must be reviewed as
+/// output data, not inherited from an upstream result URL.
+pub(super) const RESULT_QUERY_PARAMETER_ALLOWLIST: &[&str] = &[];
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct ResultTitle(String);
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct ParsedResultUrl(String);
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct EscapedSnippet(String);
+
 /// One checked provider result.
 #[derive(Clone, Eq, PartialEq)]
 pub struct WebSearchResult {
-    pub(super) title: String,
-    pub(super) source_url: String,
-    pub(super) url: String,
-    pub(super) snippet: String,
+    pub(super) title: ResultTitle,
+    pub(super) url: ParsedResultUrl,
+    pub(super) snippet: EscapedSnippet,
 }
 
 /// Named fields for one provider result.
@@ -48,41 +63,112 @@ impl fmt::Debug for WebSearchResult {
 }
 
 impl WebSearchResult {
-    /// Constructs one provider result within the fixed field bounds.
+    /// Parses one provider result into bounded output components.
+    ///
+    /// The result URL is reconstructed from its parsed components. User
+    /// information and fragments are discarded, and only explicitly
+    /// allowlisted query parameters can survive. Snippets are entity-escaped
+    /// before they can become tool output.
     pub fn try_new(fields: WebSearchResultFields) -> Option<Self> {
-        let parsed = Url::parse(&fields.url).ok()?;
-        let normalized_url = parsed.to_string();
-        (fields.title.len() <= MAX_RESULT_TITLE_BYTES
-            && !fields.title.trim().is_empty()
-            && fields.url.len() <= MAX_RESULT_URL_BYTES
-            && normalized_url.len() <= MAX_RESULT_URL_BYTES
-            && matches!(parsed.scheme(), "http" | "https")
-            && parsed.host_str().is_some()
-            && parsed.username().is_empty()
-            && parsed.password().is_none()
-            && fields.snippet.len() <= MAX_RESULT_SNIPPET_BYTES)
-            .then_some(Self {
-                title: fields.title,
-                source_url: fields.url,
-                url: normalized_url,
-                snippet: fields.snippet,
-            })
+        Some(Self {
+            title: ResultTitle::try_new(fields.title)?,
+            url: ParsedResultUrl::try_new(&fields.url)?,
+            snippet: EscapedSnippet::try_new(&fields.snippet)?,
+        })
     }
 
     /// Result title.
     pub fn title(&self) -> &str {
-        &self.title
+        self.title.as_str()
     }
 
-    /// Absolute HTTP(S) result URL.
+    /// Parsed HTTP(S) result URL with unsafe components discarded.
     pub fn url(&self) -> &str {
-        &self.url
+        self.url.as_str()
     }
 
-    /// Provider-supplied result snippet.
+    /// Entity-escaped provider result snippet.
     pub fn snippet(&self) -> &str {
-        &self.snippet
+        self.snippet.as_str()
     }
+}
+
+impl ResultTitle {
+    fn try_new(title: String) -> Option<Self> {
+        (title.len() <= MAX_RESULT_TITLE_BYTES && !title.trim().is_empty()).then_some(Self(title))
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ParsedResultUrl {
+    pub(super) fn try_new(source: &str) -> Option<Self> {
+        if source.len() > MAX_RESULT_URL_BYTES {
+            return None;
+        }
+        let mut parsed = Url::parse(source).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return None;
+        }
+
+        parsed.set_username("").ok()?;
+        parsed.set_password(None).ok()?;
+        parsed.set_fragment(None);
+        let retained_query = parsed
+            .query_pairs()
+            .filter(|(name, _)| result_query_parameter_is_allowed(name))
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        parsed.set_query(None);
+        if !retained_query.is_empty() {
+            parsed.query_pairs_mut().extend_pairs(retained_query);
+        }
+
+        let rendered = parsed.to_string();
+        (rendered.len() <= MAX_RESULT_URL_BYTES).then_some(Self(rendered))
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl EscapedSnippet {
+    fn try_new(snippet: &str) -> Option<Self> {
+        if snippet.len() > MAX_RESULT_SNIPPET_BYTES {
+            return None;
+        }
+        let escaped = entity_escape(snippet, MAX_RESULT_SNIPPET_BYTES)?;
+        Some(Self(escaped))
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub(super) fn result_query_parameter_is_allowed(name: &str) -> bool {
+    RESULT_QUERY_PARAMETER_ALLOWLIST.contains(&name)
+}
+
+pub(super) fn entity_escape(source: &str, maximum_bytes: usize) -> Option<String> {
+    let mut escaped = String::with_capacity(source.len().min(maximum_bytes));
+    for character in source.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+        if escaped.len() > maximum_bytes {
+            return None;
+        }
+    }
+    Some(escaped)
 }
 
 /// One complete bounded provider response.
@@ -153,10 +239,10 @@ impl WebSearchResponse {
     }
 }
 
-/// Opaque complete provider error body retained for request-key sanitization.
+/// Parsed provider rejection facts with no retained raw response bytes.
 pub struct WebSearchProviderError {
     pub(super) status: u16,
-    pub(super) body: Vec<u8>,
+    pub(super) message: Option<String>,
     pub(super) body_failure_class: Option<WebSearchTransportFailureClass>,
 }
 
@@ -175,12 +261,20 @@ impl fmt::Display for WebSearchProviderError {
 impl Error for WebSearchProviderError {}
 
 impl WebSearchProviderError {
-    /// Retains one complete provider error body within the exchange cap.
+    /// Parses one complete provider error body without retaining raw bytes.
+    ///
+    /// Only the known string-valued `message` component is retained, and it is
+    /// entity-escaped before it can become failure evidence. Unknown or
+    /// malformed bodies contribute no provider text.
     pub fn new(status: u16, body: Vec<u8>) -> Option<Self> {
         let status_code = StatusCode::from_u16(status).ok()?;
-        (!status_code.is_success() && body.len() <= MAX_PROVIDER_RESPONSE_BYTES).then_some(Self {
+        if status_code.is_success() || body.len() > MAX_PROVIDER_RESPONSE_BYTES {
+            return None;
+        }
+        let message = parsed_provider_error_message(&body);
+        Some(Self {
             status,
-            body,
+            message,
             body_failure_class: None,
         })
     }
@@ -192,4 +286,11 @@ impl WebSearchProviderError {
         self.body_failure_class = Some(failure_class);
         self
     }
+}
+
+fn parsed_provider_error_message(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let message = value.get("message")?.as_str()?;
+    let maximum_escaped_bytes = MAX_PROVIDER_RESPONSE_BYTES.checked_mul("&quot;".len())?;
+    entity_escape(message, maximum_escaped_bytes)
 }

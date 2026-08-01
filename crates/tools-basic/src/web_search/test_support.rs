@@ -41,6 +41,18 @@ pub(super) const FIXTURE_ORIGIN_ONLY_RESULT_URL: &str = "https://example.com";
 
 pub(super) const FIXTURE_CANONICAL_ORIGIN_RESULT_URL: &str = "https://example.com/";
 
+pub(super) const FIXTURE_USERINFO_RESULT_URL: &str =
+    "https://fixture-user:fixture-password@example.com/result";
+
+pub(super) const FIXTURE_QUERY_RESULT_URL: &str = "https://example.com/result?fixture=unapproved";
+
+pub(super) const FIXTURE_FRAGMENT_RESULT_URL: &str = "https://example.com/result#fixture-fragment";
+
+pub(super) const FIXTURE_MARKUP_SNIPPET: &str = "Synthetic <b>result & details</b>";
+
+pub(super) const FIXTURE_ESCAPED_MARKUP_SNIPPET: &str =
+    "Synthetic &lt;b&gt;result &amp; details&lt;/b&gt;";
+
 pub(super) const SUCCESS_PAYLOAD_COLLISION_KEY: &str = "results";
 
 pub(super) const URL_SCHEME_COLLISION_KEY: &str = "https";
@@ -164,6 +176,9 @@ pub(super) const UNICODE_COMBINING_MARK_COLLISION_KEY: &str = "\u{0301}x";
 pub(super) const UNICODE_COMBINING_MARK_COLLISION_VALUE: &str = "éx";
 
 pub(super) const PROVIDER_REJECTION_STATUS: u16 = 429;
+
+pub(super) const FIXTURE_UNPARSED_PROVIDER_ERROR: &str =
+    "synthetic provider-private response bytes";
 
 pub(super) fn configuration() -> WebSearchConfiguration {
     WebSearchConfiguration::new(WebSearchProvider::Brave)

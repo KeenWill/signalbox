@@ -78,6 +78,61 @@ fn web_search_result_preserves_canonicalizable_origin_url() {
     assert_eq!(result.url(), FIXTURE_CANONICAL_ORIGIN_RESULT_URL);
 }
 
+/// INV-035: result URL user information is discarded by the typed parser and
+/// cannot reach tool evidence.
+#[test]
+fn web_search_result_drops_parsed_user_information() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_USERINFO_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("userinfo fixture URL is parsed");
+
+    assert_eq!(result.url(), FIXTURE_RESULT_URL);
+}
+
+/// INV-035: result URL query parameters not named by the explicit allowlist
+/// are discarded before output construction.
+#[test]
+fn web_search_result_drops_unapproved_query_parameters() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_QUERY_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("query fixture URL is parsed");
+
+    assert_eq!(result.url(), FIXTURE_RESULT_URL);
+}
+
+/// INV-035: result URL fragments are discarded before output construction.
+#[test]
+fn web_search_result_drops_fragments() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_FRAGMENT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("fragment fixture URL is parsed");
+
+    assert_eq!(result.url(), FIXTURE_RESULT_URL);
+}
+
+/// INV-035: snippets are entity-escaped while the provider response is parsed,
+/// before any evidence renderer can observe them.
+#[test]
+fn web_search_result_entity_escapes_snippets() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_MARKUP_SNIPPET),
+    })
+    .expect("markup snippet fixture is bounded");
+
+    assert_eq!(result.snippet(), FIXTURE_ESCAPED_MARKUP_SNIPPET);
+}
+
 /// INV-035: provider response and error diagnostics never render
 /// provider-controlled fields that could reflect the API key.
 #[test]

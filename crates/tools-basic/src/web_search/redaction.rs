@@ -212,20 +212,6 @@ impl CredentialScrubber {
             || unicode_case_insensitive_contains(&unicode_host, &self.json_escaped)
             || self.contains_credential(&unicode_host)
     }
-
-    pub(super) fn redact_body(&self, body: &[u8]) -> String {
-        let text = String::from_utf8_lossy(body);
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-            let Ok(canonical) = serde_json::to_string(&value) else {
-                return String::from("[redacted]");
-            };
-            return self.redact_text(&canonical);
-        }
-        if text.contains('\\') {
-            return String::from("[redacted]");
-        }
-        self.redact_text(&text)
-    }
 }
 
 pub(super) fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {

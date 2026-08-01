@@ -2,10 +2,10 @@ use signalbox_model_runtime::CredentialValue;
 
 use super::{diagnostic::*, evidence::*, redaction::*, result::*, test_support::*};
 
-/// INV-035: a reversibly percent-encoded credential in a provider result
-/// URL is rejected before completed evidence can retain it.
+/// INV-035: an unapproved query parameter is structurally absent from output,
+/// even when its value is a reversibly percent-encoded credential.
 #[test]
-fn web_search_rejects_percent_encoded_credential_in_result_url() {
+fn web_search_drops_percent_encoded_credential_in_unapproved_query() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(FIXTURE_RESULT_TITLE),
         url: format!("{FIXTURE_RESULT_URL}?token={URL_ENCODED_COLLISION_VALUE}"),
@@ -19,16 +19,16 @@ fn web_search_rejects_percent_encoded_credential_in_result_url() {
     ))
     .expect("fixture credential is usable");
 
-    assert_eq!(
-        success_evidence(response, &scrubber),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber).expect("typed result encodes");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(URL_ENCODED_COLLISION_VALUE));
 }
 
-/// INV-035: a form-encoded space cannot retain a reversible credential in
-/// a provider result URL.
+/// INV-035: an unapproved query parameter is structurally absent from output,
+/// even when its value is a form-encoded credential.
 #[test]
-fn web_search_rejects_form_encoded_credential_in_result_url() {
+fn web_search_drops_form_encoded_credential_in_unapproved_query() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(FIXTURE_RESULT_TITLE),
         url: format!("{FIXTURE_RESULT_URL}?token={URL_FORM_COLLISION_VALUE}"),
@@ -42,10 +42,10 @@ fn web_search_rejects_form_encoded_credential_in_result_url() {
     ))
     .expect("fixture credential is usable");
 
-    assert_eq!(
-        success_evidence(response, &scrubber),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber).expect("typed result encodes");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(URL_FORM_COLLISION_VALUE));
 }
 
 /// INV-035: IDNA serialization cannot retain a reversible credential in a
@@ -672,10 +672,10 @@ fn web_search_rejects_canonicalized_complete_url_credential() {
     );
 }
 
-/// INV-035: reversible decoding beyond the inspection bound fails closed
-/// before deeply encoded result text can enter completed evidence.
+/// INV-035: deeply encoded text in an unapproved query parameter is removed
+/// structurally, without depending on the scrubber's decode bound.
 #[test]
-fn web_search_rejects_result_url_encoding_beyond_the_decode_bound() {
+fn web_search_drops_unapproved_query_beyond_the_decode_bound() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(FIXTURE_RESULT_TITLE),
         url: format!("{FIXTURE_RESULT_URL}?token={EXCESSIVE_FORM_ENCODING_VALUE}"),
@@ -685,8 +685,8 @@ fn web_search_rejects_result_url_encoding_beyond_the_decode_bound() {
     let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
         .expect("fixture response is admitted");
 
-    assert_eq!(
-        success_evidence(response, &scrubber()),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber()).expect("typed result encodes");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(EXCESSIVE_FORM_ENCODING_VALUE));
 }

@@ -43,6 +43,22 @@ fn web_search_error_body_redacts_json_escaped_credential() {
     assert!(!detail.as_str().contains(SYNTHETIC_KEY));
 }
 
+/// INV-035: an unparsed provider error body contributes no text to failure
+/// evidence, independently of whether it collides with the credential.
+#[test]
+fn web_search_unparsed_error_body_never_enters_evidence() {
+    let error = WebSearchProviderError::new(
+        PROVIDER_REJECTION_STATUS,
+        FIXTURE_UNPARSED_PROVIDER_ERROR.as_bytes().to_vec(),
+    )
+    .expect("fixture error body is bounded");
+    let detail = provider_error_detail(error, &scrubber())
+        .expect("fixed detail is admitted")
+        .expect("fixed detail does not collide");
+
+    assert!(!detail.as_str().contains(FIXTURE_UNPARSED_PROVIDER_ERROR));
+}
+
 /// INV-035: error redaction precedes evidence truncation, so a credential
 /// crossing the retained prefix is replaced before the suffix is added.
 #[test]
@@ -53,7 +69,9 @@ fn web_search_error_body_is_redacted_before_truncation() {
         SYNTHETIC_KEY,
         "z".repeat(MAX_ERROR_DETAIL_BYTES)
     );
-    let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, reflected.into_bytes())
+    let body = serde_json::to_vec(&serde_json::json!({"message": reflected}))
+        .expect("fixture provider error encodes");
+    let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
         .expect("fixture error body is bounded");
     let detail = provider_error_detail(error, &scrubber())
         .expect("detail is admitted")

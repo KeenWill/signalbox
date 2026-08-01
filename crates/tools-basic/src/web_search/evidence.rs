@@ -25,24 +25,26 @@ pub(super) fn success_evidence(
         .into_iter()
         .take(MAX_RETURNED_RESULTS)
         .map(|result| {
-            let normalization_conceals_credential = result.source_url != result.url
-                && scrubber.contains_credential(&result.source_url)
-                && !scrubber.contains_credential(&result.url);
-            if normalization_conceals_credential
-                || scrubber.url_contains_encoded_credential(&result.url)
-            {
+            if scrubber.url_contains_encoded_credential(result.url.as_str()) {
                 return Err(WebSearchExecutorError::EvidenceEncoding);
             }
-            let sanitized = WebSearchResult::try_new(WebSearchResultFields {
-                title: scrubber.redact_text(&result.title),
-                url: scrubber.redact_text(&result.url),
-                snippet: scrubber.redact_text(&result.snippet),
-            })
-            .ok_or(WebSearchExecutorError::EvidenceEncoding)?;
+
+            let title = scrubber.redact_text(result.title.as_str());
+            if title.len() > MAX_RESULT_TITLE_BYTES || title.trim().is_empty() {
+                return Err(WebSearchExecutorError::EvidenceEncoding);
+            }
+            let url = scrubber.redact_text(result.url.as_str());
+            let parsed_url = ParsedResultUrl::try_new(&url)
+                .filter(|parsed| parsed.as_str() == url)
+                .ok_or(WebSearchExecutorError::EvidenceEncoding)?;
+            let snippet = scrubber.redact_text(result.snippet.as_str());
+            if snippet.len() > MAX_RESULT_SNIPPET_BYTES {
+                return Err(WebSearchExecutorError::EvidenceEncoding);
+            }
             Ok(RenderedSearchResult {
-                title: sanitized.title,
-                url: sanitized.url,
-                snippet: sanitized.snippet,
+                title,
+                url: parsed_url.as_str().to_owned(),
+                snippet,
             })
         })
         .collect::<Result<Vec<_>, WebSearchExecutorError>>()?;
@@ -77,7 +79,11 @@ pub(super) fn provider_error_detail(
     error: WebSearchProviderError,
     scrubber: &CredentialScrubber,
 ) -> Result<Option<ToolExecutionErrorDetail>, WebSearchExecutorError> {
-    let redacted = scrubber.redact_body(&error.body);
+    let redacted = error
+        .message
+        .as_deref()
+        .map(|message| scrubber.redact_text(message))
+        .unwrap_or_default();
     let normalized = redacted
         .chars()
         .map(|character| {
