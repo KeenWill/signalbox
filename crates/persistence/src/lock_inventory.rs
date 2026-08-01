@@ -69,6 +69,15 @@ pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
 pub(crate) const REPLACE_SESSION_METADATA: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
+pub(crate) const UPDATE_SESSION_PLACEMENT_HEAD: &str =
+    "SELECT event.version, event.placement_path, event.root_global_read_intent
+       FROM session_current_placement AS head
+       JOIN session_placement_event AS event
+         ON event.session_id = head.session_id
+        AND event.version = head.current_version
+      WHERE head.session_id = $1
+      FOR UPDATE OF head";
+
 pub(crate) const PLAN_APPEND_ATTEMPT: &str = "SELECT attempt.attempt_id
   FROM tool_attempt AS attempt
   JOIN tool_request AS request

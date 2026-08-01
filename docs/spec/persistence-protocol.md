@@ -27,15 +27,16 @@ lock inventory were verified against PR #314
 was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified against this PR (`agent/plan-tool`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #383 (`agent/goal-mode`). This page covers the Postgres representation in
-`crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+PR #383 (`agent/goal-mode`); and the session-placement event, current head, and
+update lock were verified through this PR (`agent/scoped-visibility`). This page
+covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -607,6 +608,12 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
+
+- **UpdateSessionPlacement**: an unseen command locks the target's
+  `session_current_placement` head `FOR UPDATE` before checking the expected
+  version, appending the next immutable placement event, and advancing the head.
+  Exact replay and conflicting reuse resolve from the command registry without
+  taking that lock.
 
 - **SessionPlan append**: `next_session_plan_event_ordinal` first locks the
   session row `FOR NO KEY UPDATE` and reads the trigger-maintained head. The
