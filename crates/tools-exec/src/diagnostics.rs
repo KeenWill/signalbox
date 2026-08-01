@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, path::Path};
+use std::{error::Error, fmt, fs::File, io::Read, path::Path};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -36,6 +36,7 @@ const MAX_TEST_NAME_BYTES: usize = 1024;
 const MAX_CARGO_FAILURE_BYTES: usize = 8192;
 const MAX_TEST_EXECUTABLE_BYTES: usize = 4096;
 const CARGO_TEST_RUNNER: &str = "['/signalbox-exec-dispatch','--cargo-test-runner']";
+const MAX_CARGO_CONFIG_BYTES: u64 = 64 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded cargo-diagnostics arguments";
 
 fn default_timeout_seconds() -> u64 {
@@ -298,7 +299,13 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
         arguments: CargoDiagnosticsArguments,
     ) -> CargoDiagnosticsResult {
         let command = arguments.command;
-        let exec_arguments = cargo_arguments(command, arguments.timeout_seconds);
+        let preserve_native_test_runner = command == CargoDiagnosticsCommand::Test
+            && workspace_configures_native_runner(self.command_runner.pinned_workspace_root());
+        let exec_arguments = cargo_arguments(
+            command,
+            arguments.timeout_seconds,
+            preserve_native_test_runner,
+        );
         let result = self
             .command_runner
             .run_with_capture(exec_arguments, DIAGNOSTICS_CAPTURE_BYTES)
@@ -307,7 +314,11 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
     }
 }
 
-fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> ExecArguments {
+fn cargo_arguments(
+    command: CargoDiagnosticsCommand,
+    timeout_seconds: u64,
+    preserve_native_test_runner: bool,
+) -> ExecArguments {
     let arguments = match command {
         CargoDiagnosticsCommand::Check => [
             "check",
@@ -330,18 +341,7 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
         ]
         .map(String::from)
         .to_vec(),
-        CargoDiagnosticsCommand::Test => vec![
-            String::from("test"),
-            String::from("--config"),
-            String::from("term.quiet=false"),
-            String::from("--config"),
-            cargo_test_runner_config(),
-            String::from("--no-fail-fast"),
-            String::from("--workspace"),
-            String::from("--all-targets"),
-            String::from("--all-features"),
-            String::from("--message-format=json"),
-        ],
+        CargoDiagnosticsCommand::Test => cargo_test_arguments(preserve_native_test_runner),
     };
     ExecArguments {
         program: String::from("cargo"),
@@ -349,6 +349,94 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
         working_directory: String::from("."),
         timeout_seconds,
     }
+}
+
+fn cargo_test_arguments(preserve_native_runner: bool) -> Vec<String> {
+    let mut arguments = vec![
+        String::from("test"),
+        String::from("--config"),
+        String::from("term.quiet=false"),
+    ];
+    if !preserve_native_runner {
+        arguments.push(String::from("--config"));
+        arguments.push(cargo_test_runner_config());
+    }
+    arguments.extend(
+        [
+            "--no-fail-fast",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--message-format=json",
+        ]
+        .map(String::from),
+    );
+    arguments
+}
+
+fn workspace_configures_native_runner(workspace_root: &Path) -> bool {
+    ["config.toml", "config"]
+        .iter()
+        .any(|name| cargo_config_defines_native_runner(&workspace_root.join(".cargo").join(name)))
+}
+
+fn cargo_config_defines_native_runner(path: &Path) -> bool {
+    let Ok(metadata) = path.symlink_metadata() else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_CARGO_CONFIG_BYTES {
+        return true;
+    }
+    let Ok(file) = File::open(path) else {
+        return true;
+    };
+    let mut contents = String::new();
+    if file
+        .take(MAX_CARGO_CONFIG_BYTES + 1)
+        .read_to_string(&mut contents)
+        .is_err()
+        || contents.len() as u64 > MAX_CARGO_CONFIG_BYTES
+    {
+        return true;
+    }
+    config_text_defines_native_runner(&contents, env!("SIGNALBOX_EXECUTION_TARGET"))
+}
+
+fn config_text_defines_native_runner(contents: &str, native_target: &str) -> bool {
+    let mut target_section = None;
+    for line in contents.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            target_section = cargo_target_section(&line[1..line.len() - 1], native_target);
+            continue;
+        }
+        let Some((key, _)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "include" {
+            return true;
+        }
+        if key.trim() == "runner" && target_section == Some(true) {
+            return true;
+        }
+        if key.trim().ends_with(".runner")
+            && cargo_target_section(key.trim().trim_end_matches(".runner"), native_target)
+                == Some(true)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn cargo_target_section(section: &str, native_target: &str) -> Option<bool> {
+    let section = section.trim();
+    let target = section.strip_prefix("target.")?.trim();
+    let target = target
+        .strip_prefix(['\'', '"'])
+        .and_then(|target| target.strip_suffix(['\'', '"']))
+        .unwrap_or(target);
+    Some(target == native_target || target.starts_with("cfg("))
 }
 
 fn cargo_test_runner_config() -> String {
@@ -1363,7 +1451,7 @@ mod tests {
 
     #[test]
     fn cargo_test_arguments_keep_no_fail_fast_before_workspace_flags() {
-        let arguments = cargo_arguments(CargoDiagnosticsCommand::Test, 300);
+        let arguments = cargo_arguments(CargoDiagnosticsCommand::Test, 300, false);
         let runner_config = cargo_test_runner_config();
 
         assert_eq!(
@@ -1385,5 +1473,37 @@ mod tests {
         assert!(runner_config.contains(env!("SIGNALBOX_EXECUTION_TARGET")));
         assert!(!runner_config.contains("cfg(all())"));
         assert_eq!(arguments.working_directory, ".");
+    }
+
+    #[test]
+    fn cargo_test_arguments_preserve_a_configured_native_runner() {
+        let arguments = cargo_arguments(CargoDiagnosticsCommand::Test, 300, true);
+
+        assert_eq!(
+            arguments.arguments,
+            [
+                "test",
+                "--config",
+                "term.quiet=false",
+                "--no-fail-fast",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--message-format=json",
+            ]
+            .map(String::from)
+        );
+    }
+
+    #[test]
+    fn cargo_config_runner_detection_distinguishes_native_foreign_and_cfg_tables() {
+        let native_target = env!("SIGNALBOX_EXECUTION_TARGET");
+        let native = format!("[target.'{native_target}']\nrunner = 'native-wrapper'\n");
+        let foreign = "[target.'aarch64-unknown-linux-gnu']\nrunner = 'qemu-aarch64'\n";
+        let configured = "[target.'cfg(target_os = \"linux\")']\nrunner = 'linux-wrapper'\n";
+
+        assert!(config_text_defines_native_runner(&native, native_target));
+        assert!(!config_text_defines_native_runner(foreign, native_target));
+        assert!(config_text_defines_native_runner(configured, native_target));
     }
 }

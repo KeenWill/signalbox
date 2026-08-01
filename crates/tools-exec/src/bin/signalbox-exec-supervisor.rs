@@ -303,7 +303,9 @@ mod linux {
         }
         let program = arguments.remove(0);
         let executable = program.to_string_lossy().into_owned();
-        let expected_count = list_cargo_tests(&program, &arguments).ok().flatten();
+        let Some(expected_count) = list_cargo_tests(&program, &arguments).ok().flatten() else {
+            return run_custom_test_harness(program, arguments);
+        };
         let Ok((mut test_log, logfile_path)) = create_cargo_test_log() else {
             return ExitCode::FAILURE;
         };
@@ -329,13 +331,30 @@ mod linux {
             || emit_cargo_test_log_events(
                 &mut test_log,
                 &executable,
-                expected_count,
+                Some(expected_count),
                 &mut std::io::stdout().lock(),
             )
             .is_err()
         {
             return ExitCode::FAILURE;
         }
+        exit_code(status)
+    }
+
+    fn run_custom_test_harness(program: OsString, arguments: Vec<OsString>) -> ExitCode {
+        let status = Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status();
+        if emit_cargo_test_source_truncated(&mut std::io::stdout().lock()).is_err() {
+            return ExitCode::FAILURE;
+        }
+        status.map(exit_code).unwrap_or(ExitCode::FAILURE)
+    }
+
+    fn exit_code(status: ExitStatus) -> ExitCode {
         if status.success() {
             ExitCode::SUCCESS
         } else {
@@ -1472,7 +1491,7 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use std::os::unix::process::ExitStatusExt;
+        use std::os::unix::{fs::PermissionsExt, process::ExitStatusExt};
 
         use super::*;
 
@@ -1481,6 +1500,48 @@ mod linux {
         const CARGO_PASSING_TEST: &str = "example::passes";
         const CARGO_IGNORED_TEST: &str = "example::ignored";
         const CARGO_IGNORED_REASON: &str = "platform unavailable";
+
+        struct CustomHarnessFixture {
+            root: std::path::PathBuf,
+            program: OsString,
+        }
+
+        impl CustomHarnessFixture {
+            fn new() -> Result<Self, Box<dyn std::error::Error>> {
+                let identity = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos();
+                let root = std::env::temp_dir().join(format!(
+                    "signalbox-custom-harness-{}-{identity}",
+                    std::process::id()
+                ));
+                std::fs::create_dir(&root)?;
+                let program = root.join("custom-harness");
+                std::fs::write(&program, b"#!/bin/sh\ntest \"$#\" -eq 0\n")?;
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+                Ok(Self {
+                    root,
+                    program: program.into_os_string(),
+                })
+            }
+        }
+
+        impl Drop for CustomHarnessFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+
+        #[test]
+        fn cargo_test_runner_retries_a_custom_harness_without_libtest_arguments()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let fixture = CustomHarnessFixture::new()?;
+
+            let status = cargo_test_runner(vec![fixture.program.clone()]);
+
+            assert_eq!(status, ExitCode::SUCCESS);
+            Ok(())
+        }
 
         #[test]
         fn cargo_test_runner_frames_harness_log_outcomes() -> Result<(), Box<dyn std::error::Error>>
