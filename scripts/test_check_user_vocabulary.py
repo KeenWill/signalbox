@@ -101,6 +101,9 @@ def main() -> int:
         reviewed_github_path = root / "docs" / "spec" / "tool-loop.md"
         reviewed_identity_path = root / "docs" / "spec" / "identity-and-commands.md"
         reviewed_unix_path = root / "docs" / "spec" / "process-protocol.md"
+        local_socket_path = (
+            root / "apps" / "signalboxd" / "src" / "local_socket.rs"
+        )
         violation_lines = (
             "The owner approves this tool.",
             "The owners approve this tool.",
@@ -162,6 +165,9 @@ def main() -> int:
             "The wrong owner approves this tool.",
             "HumanRoleOwnerMismatch = true",
             "Owner-only access lets the owner approve this socket.",
+        )
+        local_socket_lines = (
+            "fn tool_is_approved(owner: u32) -> bool { owner == HUMAN_USER_ID }",
         )
         imported_lines = (
             "struct EntryFixture {",
@@ -243,6 +249,10 @@ def main() -> int:
         reviewed_unix_path.write_text(
             fixture_text(reviewed_unix_lines), encoding="utf-8"
         )
+        local_socket_path.parent.mkdir(parents=True, exist_ok=True)
+        local_socket_path.write_text(
+            fixture_text(local_socket_lines), encoding="utf-8"
+        )
         imported.write_text(fixture_text(imported_lines), encoding="utf-8")
         git(root, "init", "--quiet")
         git(
@@ -263,6 +273,7 @@ def main() -> int:
             "docs/spec/process-protocol.md",
             "docs/spec/review-workflows.md",
             "docs/spec/tool-loop.md",
+            "apps/signalboxd/src/local_socket.rs",
         )
         rejected = run_checker(root)
         assert rejected.returncode == 1, (
@@ -279,6 +290,9 @@ def main() -> int:
             "docs/spec/user-message.md:2: The runtime also sends a user",
             *expected_diagnostics(
                 "docs/spec/process-protocol.md", reviewed_unix_lines
+            ),
+            *expected_diagnostics(
+                "apps/signalboxd/src/local_socket.rs", local_socket_lines
             ),
             *expected_diagnostics(
                 "docs/spec/review-workflows.md", reviewed_domain_lines
@@ -346,6 +360,12 @@ def main() -> int:
         )
         reviewed_unix_path.write_text(
             "signalboxd binds a socket with owner-only `0600` permissions.\n",
+            encoding="utf-8",
+        )
+        local_socket_path.write_text(
+            "fn ancestor_owner_is_trusted(owner: u32, effective_user: u32) -> bool {\n"
+            "    owner == 0 || owner == effective_user\n"
+            "}\n",
             encoding="utf-8",
         )
         imported.write_text(fixture_text(imported_lines[:-1]), encoding="utf-8")
