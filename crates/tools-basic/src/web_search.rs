@@ -1731,41 +1731,44 @@ fn bind_request_outcome(
     let bound_diagnostic_check = bound_diagnostic_check(&evidence);
     let bound = invocation.bind(evidence);
     let rendered_result = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&bound));
-    if let BoundCredentialCheck::BoundedVariants(credential) = &credential {
-        if credential.collides(&rendered_result, bound_diagnostic_check) {
-            return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
-                WebSearchCredentialDiagnostic {
-                    rendered: String::new(),
-                    failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
-                    transport_failure_class: None,
-                },
-            ));
+    match credential {
+        BoundCredentialCheck::None => Ok(bound),
+        BoundCredentialCheck::BoundedVariants(credential) => {
+            if credential.collides(&rendered_result, bound_diagnostic_check) {
+                return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+                    WebSearchCredentialDiagnostic {
+                        rendered: String::new(),
+                        failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                        transport_failure_class: None,
+                    },
+                ));
+            }
+            Ok(bound)
         }
-        return Ok(bound);
-    }
-    let BoundCredentialCheck::Exact(credential) = credential else {
-        return Ok(bound);
-    };
-    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-    let check_rendered_collision = match bound_diagnostic_check {
-        BoundDiagnosticCheck::AllCredentialVariants => true,
-        BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-            !unicode_case_insensitive_contains("Failed", credential_text)
+        BoundCredentialCheck::Exact(credential) => {
+            let credential_text =
+                std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+            let check_rendered_collision = match bound_diagnostic_check {
+                BoundDiagnosticCheck::AllCredentialVariants => true,
+                BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
+                    !unicode_case_insensitive_contains("Failed", credential_text)
+                }
+            };
+            if credential_text.is_empty()
+                || (check_rendered_collision
+                    && bound_diagnostic_contains_credential(&rendered_result, credential_text))
+            {
+                return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+                    WebSearchCredentialDiagnostic {
+                        rendered: safe_collision_diagnostic(credential_text),
+                        failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                        transport_failure_class: None,
+                    },
+                ));
+            }
+            Ok(bound)
         }
-    };
-    if credential_text.is_empty()
-        || (check_rendered_collision
-            && bound_diagnostic_contains_credential(&rendered_result, credential_text))
-    {
-        return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
-            WebSearchCredentialDiagnostic {
-                rendered: safe_collision_diagnostic(credential_text),
-                failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
-                transport_failure_class: None,
-            },
-        ));
     }
-    Ok(bound)
 }
 
 fn bound_diagnostic_check(evidence: &ToolExecutorEvidence) -> BoundDiagnosticCheck {
@@ -2247,6 +2250,14 @@ impl CredentialScrubber {
         }) {
             return true;
         }
+        if self.reversible_variants().any(|variant| {
+            canonicalized_url_port_fragment(variant).is_some_and(|normalized| {
+                unicode_case_insensitive_contains(text, &normalized)
+                    || encoded_contains_credential(text, &normalized)
+            })
+        }) {
+            return true;
+        }
         let Ok(url) = Url::parse(text) else {
             return true;
         };
@@ -2325,6 +2336,16 @@ fn normalize_url_path_dot_segments(path: &str) -> Option<String> {
         normalized.push('/');
     }
     (changed && !normalized.is_empty() && normalized != slash_normalized).then_some(normalized)
+}
+
+fn canonicalized_url_port_fragment(value: &str) -> Option<String> {
+    let port = value.strip_prefix(':')?;
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let candidate = format!("http://example.com{value}/");
+    let url = Url::parse(&candidate).ok()?;
+    url.port().map(|port| format!(":{port}"))
 }
 
 fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {
@@ -2408,12 +2429,9 @@ fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
             continue;
         };
         let entity = &reference[1..relative_end];
-        if let Some(replacement) = decode_html_character_reference(entity) {
-            decoded.push_str(&replacement);
-            changed = true;
-        } else {
-            decoded.push_str(&reference[..=relative_end]);
-        }
+        let replacement = decode_html_character_reference(entity)?;
+        decoded.push_str(&replacement);
+        changed = true;
         remaining = &reference[relative_end + 1..];
     }
     decoded.push_str(remaining);
@@ -2854,8 +2872,12 @@ mod tests {
     const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
     const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
     const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
+    const URL_PORT_COLLISION_KEY: &str = ":08081";
+    const URL_PORT_COLLISION_VALUE: &str = "http://example.com:8081/";
     const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
+    const UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY: &str = "*";
+    const UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE: &str = "&ast;";
     const HTML_NUMERIC_C1_COLLISION_KEY: &str = "€";
     const HTML_NUMERIC_C1_COLLISION_VALUE: &str = "&#x80;";
     const OVER_WINDOW_NUMERIC_HTML_COLLISION_KEY: &str = "ZXQ";
@@ -4195,6 +4217,37 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
+    /// INV-035: an unimplemented standard named HTML reference fails closed
+    /// before query text reaches the injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_unsupported_named_html_reference_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("unsupported named-reference syntax is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
     /// INV-035: a numeric HTML reference whose terminator exceeds the scan
     /// window fails closed before the injected transport boundary.
     #[tokio::test]
@@ -5050,19 +5103,43 @@ mod tests {
         assert!(!content.contains(REVERSE_ENCODED_COLLISION_VALUE));
     }
 
-    /// Unsupported named HTML references stay ordinary text instead of
-    /// becoming false credential collisions in queries or provider fields.
+    /// INV-035: unsupported named HTML-reference syntax fails closed instead
+    /// of remaining potentially reversible text.
     #[test]
-    fn web_search_unsupported_named_html_reference_remains_ordinary_text() {
+    fn web_search_unsupported_named_html_reference_fails_closed() {
         let scrubber = scrubber();
 
         let sanitized = scrubber.redact_text(SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE);
 
-        assert!(!query_contains_credential(
+        assert!(query_contains_credential(
             SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE,
             SYNTHETIC_KEY,
         ));
-        assert_eq!(sanitized, SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE);
+        assert_eq!(sanitized, "[redacted]");
+    }
+
+    /// INV-035: an unimplemented standard named HTML reference fails closed
+    /// before provider-controlled text enters completed evidence.
+    #[test]
+    fn web_search_redacts_unsupported_named_html_reference_in_result_text() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("unsupported named-entity fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY));
+        assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE));
     }
 
     /// INV-035: credential scrubbing cannot turn a checked result title into
@@ -5449,6 +5526,29 @@ mod tests {
         );
     }
 
+    /// INV-035: numeric port canonicalization cannot conceal a credential in
+    /// a provider result URL.
+    #[test]
+    fn web_search_rejects_canonicalized_port_credential_in_result_url() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(URL_PORT_COLLISION_VALUE),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("canonical port fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_PORT_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// INV-035: a standard HTML character reference cannot conceal a
     /// credential reflected in provider-controlled text.
     #[test]
@@ -5609,17 +5709,13 @@ mod tests {
         ));
     }
 
-    /// Character-reference terminator search is bounded at every ampersand in
-    /// a maximum-size provider body.
+    /// INV-035: character-reference terminator search is bounded and fails
+    /// closed at every ampersand in a maximum-size provider body.
     #[test]
-    fn web_search_html_reference_scan_bounds_distant_terminator_work() {
+    fn web_search_html_reference_scan_bounds_and_rejects_distant_terminator() {
         let source = distant_html_reference_terminator();
 
-        let (decoded, changed) = decode_html_character_references(&source)
-            .expect("ordinary distant terminator remains literal text");
-
-        assert_eq!(decoded, source);
-        assert!(!changed);
+        assert_eq!(decode_html_character_references(&source), None);
     }
 
     #[test]
