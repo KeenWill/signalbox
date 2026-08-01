@@ -356,9 +356,15 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTurnContinuationOutcome::NotPursuing);
         };
-        if !matches!(goal.current().state(), GoalState::Pursuing) {
-            transaction.rollback().await?;
-            return Ok(GoalTurnContinuationOutcome::NotPursuing);
+        match goal.current().state() {
+            GoalState::Pursuing => {}
+            GoalState::Blocked { .. }
+            | GoalState::Achieved { .. }
+            | GoalState::UserStopped
+            | GoalState::Superseded { .. } => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::NotPursuing);
+            }
         }
         let generation = goal.current().generation();
         let predecessor = current_goal_turn(&mut transaction, session, generation)
@@ -551,14 +557,18 @@ impl GoalRepository {
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
-    goal.events().iter().find(|event| {
-        matches!(
-            event.kind(),
-            GoalEventKind::Blocked {
-                block: signalbox_domain::GoalBlockProvenance::ExecutionFailure { provenance },
-                ..
-            } if provenance.turn() == turn
-        )
+    goal.events().iter().find(|event| match event.kind() {
+        GoalEventKind::Blocked { block, .. } => match block {
+            signalbox_domain::GoalBlockProvenance::ExecutionFailure { provenance } => {
+                provenance.turn() == turn
+            }
+            signalbox_domain::GoalBlockProvenance::Model { .. } => false,
+        },
+        GoalEventKind::Commissioned { .. }
+        | GoalEventKind::Resumed { .. }
+        | GoalEventKind::Achieved { .. }
+        | GoalEventKind::UserStopped { .. }
+        | GoalEventKind::Superseded { .. } => false,
     })
 }
 

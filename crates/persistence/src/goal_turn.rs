@@ -154,6 +154,16 @@ pub(crate) async fn insert_goal_turn(
     let turn = turn_id_to_uuid(candidates.turn());
     let session_uuid = session_id_to_uuid(session);
 
+    let scheduler_exists =
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
+            .bind(session_uuid)
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some();
+    if !scheduler_exists {
+        return Err(GoalCorruption::Missing("session scheduler row").into());
+    }
+
     sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
