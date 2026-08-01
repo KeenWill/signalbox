@@ -1,0 +1,38 @@
+//! Bounded direct command execution rooted at an injected workspace.
+//!
+//! [`SandboxedExecTool`] confines writable and project-visible filesystem
+//! authority to the injected workspace with bubblewrap (`bwrap`). The sandbox
+//! also exposes a small read-only operating-system runtime needed to start
+//! ordinary programs, clears the ambient environment, and admits only a
+//! bounded locale plus executable search paths rooted in that runtime.
+//! Production uses the trusted absolute `/usr/bin/bwrap`; missing, unsupported,
+//! or unusable `bwrap` is typed refusal evidence and never falls back to
+//! unsandboxed execution.
+//!
+//! [`UnsandboxedExecTool`] is a separate catalog-composable tool whose fixed
+//! permission default requires user confirmation. This crate ships the two
+//! tools independently and does not decide which session catalogs contain
+//! either one.
+//!
+//! This day-one profile does not fence the network or impose resource limits.
+//! It is therefore not an admissible boundary for executing untrusted code.
+//! Shell sessions and PTYs are likewise outside this crate's contract.
+//!
+//! The real-bubblewrap containment check is mandatory in CI. Unsupported local
+//! hosts skip it unless `SIGNALBOX_RUN_BWRAP_INTEGRATION=1` requests the same
+//! fail-closed check explicitly:
+//! `SIGNALBOX_RUN_BWRAP_INTEGRATION=1 cargo test -p signalbox-tools-exec
+//! --test bwrap`.
+
+mod process;
+#[cfg(target_os = "linux")]
+mod supervisor_protocol;
+
+pub use process::{
+    BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
+    ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
+    OutputCapture, OutputEncoding, ProcessEnvironment, ProcessOutcome, ProcessOutput,
+    ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure, ProcessStatusProtocol,
+    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
+    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+};
