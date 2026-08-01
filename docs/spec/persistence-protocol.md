@@ -794,6 +794,8 @@ Each adapter has a purpose-specific corruption enum with a shared vocabulary:
 - `Unsupported { field, value }` — a closed discriminator or storage version has
   no admitted mapping (unknown values fail; they are never coerced);
 - `Inconsistent(relationship)` — correlated durable records disagree;
+- `Column(field)` — a declared SQL field failed decoding, classified by a static
+  field label rather than driver prose;
 - `InvalidOrdinal` / `InvalidContent` — checked scalar decoding failed;
 - nested `CurrentSession(...)`, `Domain(...)`, `Scheduling(...)` — a subordinate
   projection failed its own boundary or domain validation.

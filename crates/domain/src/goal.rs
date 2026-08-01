@@ -816,7 +816,7 @@ impl GoalReconstitutionInput {
         }
         let mut goal = Goal::commission(self.session, statement, provenance);
         for stored in events {
-            let transitioned = apply_stored_event(goal.clone(), &stored).map_err(|_| {
+            let transitioned = apply_stored_event(goal, &stored).map_err(|_| {
                 GoalReconstitutionError::new(GoalReconstitutionFailure::InvalidTransition)
             })?;
             if transitioned.events.last() != Some(&stored) {

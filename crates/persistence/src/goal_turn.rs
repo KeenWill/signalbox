@@ -65,6 +65,11 @@ pub enum GoalTurnContinuationOutcome {
     NotPursuing,
     /// The completed turn is not owned by the current goal generation.
     NotCurrentGoalTurn,
+    /// The selected defaults name an alias with no available definition.
+    UnknownModelAlias {
+        /// The unavailable alias selected by the current defaults epoch.
+        alias: ModelAlias,
+    },
     /// This predecessor already has its one durable goal successor.
     AlreadyScheduled,
 }
