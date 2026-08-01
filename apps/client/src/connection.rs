@@ -71,9 +71,13 @@ impl ProcessClient {
             .await
     }
 
+    pub(crate) fn pending_request_id(&self) -> Result<RequestId, ClientError> {
+        RequestId::try_new(self.next_request_id)
+            .map_err(|_| ClientError::Protocol("request identity exhausted"))
+    }
+
     fn next_request_id(&mut self) -> Result<RequestId, ClientError> {
-        let request_id = RequestId::try_new(self.next_request_id)
-            .map_err(|_| ClientError::Protocol("request identity exhausted"))?;
+        let request_id = self.pending_request_id()?;
         self.next_request_id = self
             .next_request_id
             .checked_add(1)

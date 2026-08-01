@@ -51,6 +51,7 @@ mod transcript;
 
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Smallest bounded metadata page the process protocol admits.
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
@@ -555,11 +556,21 @@ async fn open_import_source(path: &Path) -> Result<tokio::fs::File, ClientError>
         .map_err(ClientError::source_file)
 }
 
-async fn read_import_file(mut file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
+async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
+    let read_limit = u64::try_from(MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES)
+        .ok()
+        .and_then(|bound| bound.checked_add(1))
+        .ok_or(ClientError::Protocol(
+            "conversation import read bound overflow",
+        ))?;
     let mut source = Vec::new();
-    file.read_to_end(&mut source)
+    file.take(read_limit)
+        .read_to_end(&mut source)
         .await
         .map_err(ClientError::source_file)?;
+    if source.len() > MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES {
+        return Err(ClientError::SourceExceedsFrame);
+    }
     Ok(source)
 }
 
@@ -1190,14 +1201,14 @@ fn open_scanned_import_source(
 fn source_fits_single_shot_import(
     format: ConversationImportFormat,
     source: &[u8],
+    request_id: RequestId,
 ) -> Result<bool, ClientError> {
-    if source.len() > MAX_FRAME_BYTES / 4 * 3 {
+    if source.len() > MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES {
         return Ok(false);
     }
     let frame = ClientFrame::try_new_for_version(
         ProtocolVersion::One,
-        RequestId::try_new(u64::MAX)
-            .map_err(|_| ClientError::Protocol("maximum request identity is invalid"))?,
+        request_id,
         ClientRequest::ImportConversation {
             format,
             source: ConversationImportSource::new(source.to_vec()),
@@ -1221,7 +1232,9 @@ async fn import_conversation_file(
         .await
         .map_err(ClientError::source_file)?
         .len();
-    if declared_size_bytes <= u64::try_from(MAX_FRAME_BYTES / 4 * 3).unwrap_or(u64::MAX) {
+    if declared_size_bytes
+        <= u64::try_from(MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES).unwrap_or(u64::MAX)
+    {
         let source = read_import_file(file).await?;
         import_conversation_source(client, format, source).await
     } else {
@@ -1235,7 +1248,7 @@ async fn import_conversation_source(
     format: ConversationImportFormat,
     source: Vec<u8>,
 ) -> Result<ConversationImportOutcome, ClientError> {
-    if source_fits_single_shot_import(format, &source)? {
+    if source_fits_single_shot_import(format, &source, client.pending_request_id()?)? {
         import_conversation(client, format, source).await
     } else {
         let declared_size_bytes = u64::try_from(source.len())
@@ -1277,9 +1290,8 @@ where
     }
 
     let mut assembled_size_bytes = 0_u64;
-    let mut chunk = Vec::with_capacity(MAX_CONVERSATION_IMPORT_CHUNK_BYTES);
     loop {
-        chunk.clear();
+        let mut chunk = Vec::with_capacity(MAX_CONVERSATION_IMPORT_CHUNK_BYTES);
         (&mut source)
             .take(u64::try_from(MAX_CONVERSATION_IMPORT_CHUNK_BYTES).unwrap_or(u64::MAX))
             .read_to_end(&mut chunk)
@@ -1300,7 +1312,7 @@ where
             .continue_setup_request(
                 &mut connection,
                 ClientRequest::AppendConversationImport {
-                    chunk: ConversationImportSource::new(chunk.clone()),
+                    chunk: ConversationImportSource::new(chunk),
                 },
             )
             .await?;
@@ -3796,7 +3808,7 @@ mod tests {
         ConversationImportFormat, ConversationOriginFilter, ConversationSummary, FrameEncodeError,
         ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
         InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
-        ModelCallState, ModelSelection, ProtocolVersion, ReviewConcernTerminalOutcome,
+        ModelCallState, ModelSelection, ProtocolVersion, RequestId, ReviewConcernTerminalOutcome,
         ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
         ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
         ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
@@ -3813,11 +3825,12 @@ mod tests {
 
     use super::{
         ConversationImportOutcome, ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES,
-        MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES, ProcessClient, ReviewCommand,
-        ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest, SnapshotSelection,
-        SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
-        await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
-        decide, import_conversation_file, imported, model_call_recovery_transition,
+        MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES,
+        MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ProcessClient, ReviewCommand, ReviewConcernsFile,
+        ReviewFindingsFile, SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt,
+        ThroughPositionArgument, TurnTerminal, TurnWaitMode, await_turn_terminal,
+        collect_import_paths, continue_imported, conversations, create, decide,
+        import_conversation_file, imported, model_call_recovery_transition,
         open_scanned_import_source, read_import_file, read_input, read_review_json_file,
         read_system_prompt_file, reconcile_turn, review, review_concern_state_is_coherent,
         review_finding_event_status, review_judgment_effect_state_is_coherent,
@@ -4636,15 +4649,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_reader_retains_source_beyond_one_frame() -> Result<(), Box<dyn Error>> {
+    async fn import_reader_rejects_source_beyond_its_single_frame_bound()
+    -> Result<(), Box<dyn Error>> {
         let source_file = tempfile::tempfile()?;
-        let source_size = MAX_FRAME_BYTES + 1;
+        let source_size = MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES + 1;
         source_file.set_len(u64::try_from(source_size)?)?;
         let source_file = tokio::fs::File::from_std(source_file);
 
-        let source = read_import_file(source_file).await?;
+        let error = read_import_file(source_file).await.unwrap_err();
 
-        assert_eq!(source.len(), source_size);
+        assert!(matches!(error, ClientError::SourceExceedsFrame));
         Ok(())
     }
 
@@ -4653,14 +4667,17 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let small_source = b"{}\n";
         let oversized_source = vec![b'x'; MAX_FRAME_BYTES];
+        let request_id = RequestId::try_new(1)?;
 
         assert!(source_fits_single_shot_import(
             ConversationImportFormat::CodexRolloutJsonlV1,
             small_source,
+            request_id,
         )?);
         assert!(!source_fits_single_shot_import(
             ConversationImportFormat::CodexRolloutJsonlV1,
             &oversized_source,
+            request_id,
         )?);
         Ok(())
     }
