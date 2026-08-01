@@ -477,6 +477,7 @@ pub struct ProcessTranscriptModelCallUsage {
     call: ModelCallId,
     target: ResolvedProviderTarget,
     credential_profile: String,
+    input_includes_cache_tokens: bool,
     provenance: ProcessModelCallUsageProvenance,
     usage: ProcessModelCallTokenUsage,
 }
@@ -500,6 +501,11 @@ impl ProcessTranscriptModelCallUsage {
     /// Returns the event-sourced credential profile pinned into this call.
     pub fn credential_profile(&self) -> &str {
         &self.credential_profile
+    }
+
+    /// Reports whether this call's input count includes its cache axes.
+    pub const fn input_includes_cache_tokens(&self) -> bool {
+        self.input_includes_cache_tokens
     }
 
     /// Returns the closed provenance of this call's token fields.
@@ -1896,6 +1902,7 @@ async fn load_next_model_call_usage(
             call.resolved_provider_model_identity_id,
             call.credential_reference,
             call.usage_provenance_kind,
+            call.usage_input_includes_cache_tokens,
             call.usage_input_tokens,
             call.usage_output_tokens,
             call.usage_cache_creation_input_tokens,
@@ -1969,6 +1976,7 @@ fn decode_model_call_usage(
                 "resolved_provider_model_identity_id",
             )?)),
             credential_profile: required(row, "credential_reference")?,
+            input_includes_cache_tokens: required(row, "usage_input_includes_cache_tokens")?,
             provenance,
             usage: ProcessModelCallTokenUsage {
                 input_tokens,

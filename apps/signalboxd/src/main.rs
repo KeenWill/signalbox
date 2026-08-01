@@ -1141,7 +1141,8 @@ async fn run_hub(
         model_targets,
         credential_reference,
     )
-    .with_session_credentials(model_configuration.credential_family_catalog());
+    .with_session_credentials(model_configuration.credential_family_catalog())
+    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,

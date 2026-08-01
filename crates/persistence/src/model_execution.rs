@@ -6,7 +6,7 @@
 //! method holds a database transaction across provider work.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     fmt,
 };
@@ -269,6 +269,7 @@ pub struct PostgresModelCallRepository {
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
 }
 
 impl PostgresModelCallRepository {
@@ -284,6 +285,7 @@ impl PostgresModelCallRepository {
             targets,
             credential_reference,
             credential_families: None,
+            cache_inclusive_input_targets: HashSet::new(),
         }
     }
 
@@ -293,6 +295,15 @@ impl PostgresModelCallRepository {
         credential_families: crate::ModelCredentialFamilyCatalog,
     ) -> Self {
         self.credential_families = Some(credential_families);
+        self
+    }
+
+    /// Pins which configured targets report input totals inclusive of cache.
+    pub fn with_cache_inclusive_input_targets(
+        mut self,
+        targets: HashSet<ResolvedProviderTarget>,
+    ) -> Self {
+        self.cache_inclusive_input_targets = targets;
         self
     }
 
@@ -309,6 +320,7 @@ impl PostgresModelCallRepository {
             self.targets.clone(),
             self.credential_reference.clone(),
         )
+        .with_cache_inclusive_input_targets(self.cache_inclusive_input_targets.clone())
         .with_session_credentials(self.credential_families.clone())
     }
 
@@ -437,7 +449,14 @@ impl PostgresModelCallRepository {
             self.credential_families.as_ref(),
         )
         .await?;
-        insert_prepared_call(connection, &prepared, &credential_reference).await
+        insert_prepared_call(
+            connection,
+            &prepared,
+            &credential_reference,
+            self.cache_inclusive_input_targets
+                .contains(&prepared.call().target()),
+        )
+        .await
     }
 
     /// Commits Prepared while consuming the complete locked steering inventory.
@@ -602,7 +621,14 @@ impl PostgresModelCallRepository {
                 self.credential_families.as_ref(),
             )
             .await?;
-            insert_prepared_call(&mut transaction, &prepared, &credential_reference).await?;
+            insert_prepared_call(
+                &mut transaction,
+                &prepared,
+                &credential_reference,
+                self.cache_inclusive_input_targets
+                    .contains(&prepared.call().target()),
+            )
+            .await?;
             let reloaded = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 call,
@@ -1179,6 +1205,7 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     targets: &ModelTargetCatalog,
     credential_reference: &ModelCallCredentialReference,
     credential_families: Option<&crate::ModelCredentialFamilyCatalog>,
+    cache_inclusive_input_targets: &HashSet<ResolvedProviderTarget>,
     projection: &PreparedToolResultProjection,
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
@@ -1299,7 +1326,13 @@ where
         credential_families,
     )
     .await?;
-    insert_prepared_call(connection, &prepared, &credential_reference).await?;
+    insert_prepared_call(
+        connection,
+        &prepared,
+        &credential_reference,
+        cache_inclusive_input_targets.contains(&prepared.call().target()),
+    )
+    .await?;
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
 }
 
@@ -3135,6 +3168,7 @@ pub(crate) async fn insert_prepared_call(
     connection: &mut PgConnection,
     prepared: &signalbox_domain::PreparedInitialModelCall,
     credential_reference: &ModelCallCredentialReference,
+    input_includes_cache_tokens: bool,
 ) -> Result<(), ModelCallRepositoryError> {
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
@@ -3225,9 +3259,10 @@ pub(crate) async fn insert_prepared_call(
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id, frozen_model_alias_id,
              frozen_alias_selected_direct_id, resolved_provider_model_identity_id,
-             context_frontier_id, credential_reference, state_kind,
+             context_frontier_id, credential_reference,
+             usage_input_includes_cache_tokens, state_kind,
              terminal_disposition_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'prepared', NULL)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'prepared', NULL)",
     )
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -3240,6 +3275,7 @@ pub(crate) async fn insert_prepared_call(
     .bind(call.target().identity().into_uuid())
     .bind(call.frontier().snapshot().into_uuid())
     .bind(credential_reference.as_str())
+    .bind(input_includes_cache_tokens)
     .execute(&mut *connection)
     .await?;
     outbox::append(

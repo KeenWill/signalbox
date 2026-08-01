@@ -718,13 +718,16 @@ historical profile declaration, or call with no present usage axis produces no
 dollar figure rather than zero. Codex CLI's reported `input_tokens` includes its
 reported cache-creation and cache-read breakdowns, so derivation subtracts the
 present cache counts from total input before applying the ordinary input rate
-and applies each cache rate once. A cache breakdown larger than total input
-yields no figure. A credential update that advances the session head cannot
-relabel an earlier call because that call retains its original profile pin.
-Deployment keeps one profile name's billing meaning stable and uses a new name
-when an authentication update changes that meaning. The parser cannot detect a
-same-name semantic rewrite across configuration restarts; such a rewrite would
-relabel historical reads and is invalid deployment evolution.
+and applies each cache rate once. That inclusive-input meaning is pinned on the
+call when it is prepared, so a later configuration restart that reuses the
+target with another adapter cannot reinterpret historical usage. A cache
+breakdown larger than total input yields no figure. A credential update that
+advances the session head cannot relabel an earlier call because that call
+retains its original profile pin. Deployment keeps one profile name's billing
+meaning stable and uses a new name when an authentication update changes that
+meaning. The parser cannot detect a same-name semantic rewrite across
+configuration restarts; such a rewrite would relabel historical reads and is
+invalid deployment evolution.
 
 In the provider bridge, a durably resolved target with no `RuntimeModelCatalog`
 mapping is a typed adapter defect (`UnconfiguredTarget`), never provider

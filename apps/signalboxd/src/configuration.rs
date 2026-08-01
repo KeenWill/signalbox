@@ -96,6 +96,21 @@ impl ModelBillingRates {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ModelCallInputUsage {
+    tokens: Option<u64>,
+    includes_cache_tokens: bool,
+}
+
+impl ModelCallInputUsage {
+    pub(crate) const fn new(tokens: Option<u64>, includes_cache_tokens: bool) -> Self {
+        Self {
+            tokens,
+            includes_cache_tokens,
+        }
+    }
+}
+
 /// One dollar figure derived from configured rates and exactly present axes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DerivedModelCallCost {
@@ -607,6 +622,14 @@ impl HubModelConfiguration {
         self.provider_model_adapters.get(provider_model).copied()
     }
 
+    /// Returns targets whose provider-reported input count includes cache axes.
+    pub fn cache_inclusive_input_targets(&self) -> HashSet<ResolvedProviderTarget> {
+        self.target_adapters
+            .iter()
+            .filter_map(|(target, adapter)| (*adapter == ModelAdapter::CodexCli).then_some(*target))
+            .collect()
+    }
+
     /// Returns the complete credential snapshot pinned into a new session.
     pub fn session_credential_pin(&self) -> SessionCredentialPin {
         self.session_credential_pin.clone()
@@ -622,21 +645,19 @@ impl HubModelConfiguration {
     /// Absence means either this target has no declared rates, the historical
     /// credential profile has no declared billing kind, no token axis was
     /// reported, or exact decimal arithmetic could not represent the result.
-    pub fn derive_model_call_cost(
+    pub(crate) fn derive_model_call_cost(
         &self,
         target: ResolvedProviderTarget,
         credential_profile: &str,
-        input_tokens: Option<u64>,
+        input: ModelCallInputUsage,
         output_tokens: Option<u64>,
         cache_creation_input_tokens: Option<u64>,
         cache_read_input_tokens: Option<u64>,
     ) -> Option<DerivedModelCallCost> {
         let rates = self.billing_rates.get(&target)?;
         let billing_kind = *self.billing_kinds.get(credential_profile)?;
-        let adapter = *self.target_adapters.get(&target)?;
-        let input_tokens = match adapter {
-            ModelAdapter::Anthropic => input_tokens,
-            ModelAdapter::CodexCli => match input_tokens {
+        let input_tokens = if input.includes_cache_tokens {
+            match input.tokens {
                 Some(total) => Some(
                     total.checked_sub(
                         cache_creation_input_tokens
@@ -645,7 +666,9 @@ impl HubModelConfiguration {
                     )?,
                 ),
                 None => None,
-            },
+            }
+        } else {
+            input.tokens
         };
         let amount_usd = fold_reported_cost([
             (input_tokens, rates.input),
@@ -1225,8 +1248,8 @@ mod tests {
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
-        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, UnknownSessionModel, credential_bytes,
-        validate_alias_count,
+        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
+        credential_bytes, validate_alias_count,
     };
 
     const CONFIGURATION: &str = r#"
@@ -1429,7 +1452,7 @@ cache_read_input_usd_per_million_tokens = "4"
             .derive_model_call_cost(
                 configured_target(&configuration),
                 "anthropic-primary",
-                Some(1_000_000),
+                ModelCallInputUsage::new(Some(1_000_000), false),
                 Some(2),
                 None,
                 Some(10),
@@ -1453,7 +1476,7 @@ cache_read_input_usd_per_million_tokens = "4"
             configuration.derive_model_call_cost(
                 configured_target(&configuration),
                 "anthropic-primary",
-                Some(1),
+                ModelCallInputUsage::new(Some(1), false),
                 None,
                 None,
                 None,
@@ -1478,7 +1501,7 @@ cache_read_input_usd_per_million_tokens = "4"
             configuration.derive_model_call_cost(
                 configured_target(&configuration),
                 "anthropic-primary",
-                Some(1),
+                ModelCallInputUsage::new(Some(1), false),
                 Some(1),
                 Some(1),
                 Some(1),
@@ -1526,7 +1549,7 @@ context_window_tokens = 200000
             .derive_model_call_cost(
                 configured_target(&configuration),
                 "codex-subscription-primary",
-                Some(1),
+                ModelCallInputUsage::new(Some(1), false),
                 None,
                 None,
                 None,
@@ -1554,7 +1577,7 @@ context_window_tokens = 200000
             .derive_model_call_cost(
                 route.target(),
                 route.credential_profile(),
-                Some(1),
+                ModelCallInputUsage::new(Some(1), true),
                 None,
                 None,
                 None,
@@ -1584,7 +1607,7 @@ context_window_tokens = 200000
             .derive_model_call_cost(
                 route.target(),
                 route.credential_profile(),
-                Some(1_000_000),
+                ModelCallInputUsage::new(Some(1_000_000), true),
                 None,
                 Some(100_000),
                 Some(200_000),
@@ -1592,6 +1615,35 @@ context_window_tokens = 200000
             .expect("the consistent Codex breakdown derives a cost");
 
         assert_eq!(cost.amount_usd().to_string(), "1.8");
+    }
+
+    #[test]
+    fn historical_input_semantics_survive_an_adapter_route_change() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = HubModelConfiguration::parse(
+            &configuration_with_api_metered_codex_model(&executable, temporary.path()),
+        )
+        .expect("the API-metered Codex fixture is valid");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000002").expect("fixture UUID is valid"),
+        );
+        let route = configuration
+            .resolve_direct_model(selection)
+            .expect("the Codex fixture has a route");
+        let cost = configuration
+            .derive_model_call_cost(
+                route.target(),
+                route.credential_profile(),
+                ModelCallInputUsage::new(Some(1_000_000), false),
+                None,
+                Some(100_000),
+                Some(200_000),
+            )
+            .expect("historically exclusive input axes derive a cost");
+
+        assert_eq!(route.adapter(), ModelAdapter::CodexCli);
+        assert_eq!(cost.amount_usd().to_string(), "2.1");
     }
 
     #[test]

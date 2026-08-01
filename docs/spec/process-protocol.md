@@ -1154,12 +1154,14 @@ with required-nullable `input_tokens`, `output_tokens`,
 that axis was not supplied; a present zero is the canonical decimal string
 `"0"`. The required-nullable `cost` member is null when no derivation is
 available. Otherwise it carries canonical nonnegative decimal `amount_usd`, the
-exact bounded `rate_version`, and label `real` or `metered_equivalent`.
-`amount_usd` admits exactly the decimal representation used for derivation: at
-most 28 fractional digits and a coefficient no greater than
-79,228,162,514,264,337,593,543,950,335. The daemon derives that value at read
-time under the [configuration-and-credentials](configuration-and-credentials.md)
-contract; no bare dollar amount is durable model-call evidence.
+exact bounded `rate_version`, and label `real` or `metered_equivalent`. Because
+no read-time derivation exists without evidence, a nonnull `cost` is rejected
+when all four usage axes are null. `amount_usd` admits exactly the decimal
+representation used for derivation: at most 28 fractional digits and a
+coefficient no greater than 79,228,162,514,264,337,593,543,950,335. The daemon
+derives that value at read time under the
+[configuration-and-credentials](configuration-and-credentials.md) contract; no
+bare dollar amount is durable model-call evidence.
 `transcript_model_calls_end { model_call_count }` acknowledges the exact row
 count before any entry message. Every terminal call has one row, including
 historical, cancellation, and recovery calls whose four fields are all null.
@@ -1944,7 +1946,8 @@ version; each line states that labeled triple and its costed-call count. These
 client totals are presentation arithmetic over exact per-call read evidence and
 use an anonymous temporary-file index so distinct rate versions do not grow
 client heap. The client scans that index once for output; totals are never
-persisted.
+persisted, and an addition that cannot retain both operands exactly rejects the
+snapshot instead of reporting a rounded total.
 
 The unbounded aggregate session-summary sequence is bounded the same way. `list`
 validates ordering and the terminal count while spooling summary frames to an

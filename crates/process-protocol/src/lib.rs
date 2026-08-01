@@ -4357,6 +4357,15 @@ impl ServerMessage {
                     preview.validate()?;
                 }
             }
+            Self::TranscriptModelCallUsage { usage, cost, .. }
+                if cost.is_some()
+                    && usage.input_tokens.is_none()
+                    && usage.output_tokens.is_none()
+                    && usage.cache_creation_input_tokens.is_none()
+                    && usage.cache_read_input_tokens.is_none() =>
+            {
+                return Err(FrameValidationError::ModelCallUsageShape);
+            }
             _ => {}
         }
         Ok(())
@@ -4530,6 +4539,8 @@ pub enum FrameValidationError {
     TemplateShape,
     /// A review lifecycle or orchestration frame carried an invalid shape.
     ReviewShape,
+    /// A model-call usage row carried cost without any reported usage axis.
+    ModelCallUsageShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -4556,6 +4567,7 @@ impl fmt::Display for FrameValidationError {
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
             Self::TemplateShape => "session-template frame shape is inconsistent",
             Self::ReviewShape => "review workflow frame shape is inconsistent",
+            Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
         })
     }
 }
@@ -6245,6 +6257,15 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"reported","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null,"cache_read_input_tokens":null}}}"#,
         ))
         .expect_err("the derived cost member is required nullable");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[test]
+    fn usage_rejects_cost_without_a_present_axis() {
+        let error = decode_server_line(&line(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"reported","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null,"cache_read_input_tokens":null},"cost":{"amount_usd":"0","rate_version":"rates-v1","label":"real"}}}"#,
+        ))
+        .expect_err("a cost without derivation evidence must be rejected");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
     }
 

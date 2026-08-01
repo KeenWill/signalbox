@@ -151,10 +151,16 @@ impl DiskCostTotals {
                 return Ok(());
             };
             if candidate == encoded {
-                total.amount_usd = total
+                let next_amount = total
                     .amount_usd
                     .checked_add(amount)
                     .ok_or(ClientError::Protocol("dollar cost total overflowed"))?;
+                if next_amount.checked_sub(total.amount_usd) != Some(amount)
+                    || next_amount.checked_sub(amount) != Some(total.amount_usd)
+                {
+                    return Err(ClientError::Protocol("dollar cost total was inexact"));
+                }
+                total.amount_usd = next_amount;
                 total.calls = total
                     .calls
                     .checked_add(1)
@@ -2225,6 +2231,7 @@ mod tests {
     use std::{
         io::{self, Write},
         path::Path,
+        str::FromStr,
     };
 
     use expect_test::expect;
@@ -3240,7 +3247,7 @@ mod tests {
     fn transcript_costs_aggregate_only_with_matching_provenance_and_labels() {
         let turn = wire_uuid(1);
         let usage = ModelCallTokenUsage {
-            input_tokens: None,
+            input_tokens: Some(CanonicalU64::new(0)),
             output_tokens: None,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
@@ -3301,12 +3308,12 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported terminal_calls=2 input_tokens=unreported input_tokens_present_calls=0/2 output_tokens=unreported output_tokens_present_calls=0/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/2
-            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated terminal_calls=1 input_tokens=unreported input_tokens_present_calls=0/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported terminal_calls=2 input_tokens=0 input_tokens_present_calls=2/2 output_tokens=unreported output_tokens_present_calls=0/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/2
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated terminal_calls=1 input_tokens=0 input_tokens_present_calls=1/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
             cost turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported label=real rate_version=rates-v1 usd=0.3 costed_calls=2
             cost turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated label=metered_equivalent rate_version=rates-v1 usd=0.4 costed_calls=1
-            usage_total scope=session usage_provenance=reported terminal_calls=2 input_tokens=unreported input_tokens_present_calls=0/2 output_tokens=unreported output_tokens_present_calls=0/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/2
-            usage_total scope=session usage_provenance=estimated terminal_calls=1 input_tokens=unreported input_tokens_present_calls=0/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
+            usage_total scope=session usage_provenance=reported terminal_calls=2 input_tokens=0 input_tokens_present_calls=2/2 output_tokens=unreported output_tokens_present_calls=0/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/2
+            usage_total scope=session usage_provenance=estimated terminal_calls=1 input_tokens=0 input_tokens_present_calls=1/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
             cost_total scope=session usage_provenance=reported label=real rate_version=rates-v1 usd=0.3 costed_calls=2
             cost_total scope=session usage_provenance=estimated label=metered_equivalent rate_version=rates-v1 usd=0.4 costed_calls=1
         "#]]
@@ -3348,6 +3355,38 @@ mod tests {
         assert_eq!(later_total.calls, 1);
         assert_eq!(earlier_total.amount_usd, Decimal::new(1, 1));
         assert_eq!(earlier_total.calls, 1);
+    }
+
+    #[test]
+    fn transcript_cost_totals_reject_inexact_decimal_addition() {
+        let key = CostAggregateKey {
+            provenance: UsageProvenance::Reported,
+            label: ModelCallCostLabel::Real,
+            rate_version: String::from("rates-v1"),
+        };
+        let large = Decimal::from_str("10000000000000000000000000000")
+            .expect("fixture dollar amount is representable");
+        let tiny = Decimal::from_str("0.0000000000000000000000000001")
+            .expect("fixture dollar amount is representable");
+        let mut totals = DiskCostTotals::with_capacity(2).expect("the test cost spool must open");
+        totals
+            .add(&key, large)
+            .expect("the first exact amount must spool");
+
+        let error = totals
+            .add(&key, tiny)
+            .expect_err("an inexact aggregate must be rejected");
+        let retained = totals
+            .get(&key)
+            .expect("the cost spool must read")
+            .expect("the original total must remain");
+
+        assert!(matches!(
+            error,
+            ClientError::Protocol("dollar cost total was inexact")
+        ));
+        assert_eq!(retained.amount_usd, large);
+        assert_eq!(retained.calls, 1);
     }
 
     #[test]

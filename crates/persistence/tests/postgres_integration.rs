@@ -5667,6 +5667,42 @@ async fn model_call_usage_provenance_rejects_unknown_values() -> Result<(), Box<
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_input_semantics_are_immutable() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6d60, true).await?;
+
+    let stored: bool = sqlx::query_scalar(
+        "SELECT usage_input_includes_cache_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(!stored);
+    let error = sqlx::query(
+        "UPDATE model_call
+            SET usage_input_includes_cache_tokens = true
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a prepared call's input semantics must be immutable");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("model_call_usage_metadata_immutable")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006: cancellation evidence cannot carry provider usage because neither
 /// cancellation-confirmed nor pre-send cancellation reports token evidence.
 #[tokio::test(flavor = "multi_thread")]
@@ -7340,8 +7376,8 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
 }
 
 /// S01 / S20 / S21 / INV-014 / INV-015 / INV-032 / INV-035: the production
-/// persistence chain checkpoints Prepared with its non-secret credential
-/// reference, reloads that reference instead of a changed deployment value,
+/// persistence chain checkpoints Prepared with its credential and input-token
+/// semantics pins, reloads them instead of changed deployment values,
 /// separately authorizes send, and atomically commits exact assistant content,
 /// completion, terminal frontier, lifecycle, call, attempt, and typed outbox
 /// records.
@@ -7412,9 +7448,10 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     assert_eq!(activated.turn(), turn);
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe1));
+    let resolved_target = ResolvedProviderTarget::naming(provider_identity);
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         direct_selection,
-        ResolvedProviderTarget::naming(provider_identity),
+        resolved_target,
     )])
     .expect("one immutable direct target forms a catalog");
     let pinned_credential_reference = model_credential_reference();
@@ -7422,7 +7459,8 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         pool.clone(),
         targets.clone(),
         pinned_credential_reference.clone(),
-    );
+    )
+    .with_cache_inclusive_input_targets(HashSet::from([resolved_target]));
     let call = ModelCallId::from_uuid(Uuid::from_u128(0xce2));
     let PrepareInitialModelCallOutcome::Checkpointed(checkpointed_call) = repository
         .prepare_initial_call(
@@ -7482,6 +7520,16 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     assert_eq!(prepared.attempt(), attempt);
     assert_eq!(prepared.call().id(), call);
     assert_eq!(prepared.call().target().identity(), provider_identity);
+    let input_includes_cache_tokens: bool = sqlx::query_scalar(
+        "SELECT usage_input_includes_cache_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(input_includes_cache_tokens);
+
     assert_eq!(prepared.frontier_entries().len(), 1);
     assert_eq!(
         prepared

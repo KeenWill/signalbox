@@ -78,9 +78,12 @@ The same terminal transition stores four token-usage fields — input, output,
 cache-creation input, and cache-read input — on the `model_call` row. Each field
 is independently nullable: null means that axis was not supplied, while a
 present zero remains zero. Every call also carries the closed
-`usage_provenance_kind` discriminator, exactly `reported` or `estimated`.
-Current execution paths produce only `reported`; `estimated` is reserved for a
-later explicit estimator and no present writer selects it. Calls closed from
+`usage_provenance_kind` discriminator, exactly `reported` or `estimated`. The
+prepared checkpoint also pins `usage_input_includes_cache_tokens`, which
+preserves whether input is inclusive of separately reported cache axes even if a
+later daemon configuration routes the target through another adapter. Current
+execution paths produce only `reported`; `estimated` is reserved for a later
+explicit estimator and no present writer selects it. Calls closed from
 `ProvenUnsent`, `CancellationConfirmed`, capability failure, or restart recovery
 have all four fields unreported because no provider usage evidence exists.
 Historical rows likewise remain unreported. The terminal-row immutability rule
@@ -103,7 +106,8 @@ authorized. Migration `202608020014_model_call_usage_provenance.sql` adds the
 non-null closed provenance column with `reported` as the existing-row and
 current-writer value. It rejects an unknown spelling and prevents provenance
 rewrites except when a nonterminal call and its usage become terminal in the
-same update.
+same update. The same migration adds the existing-row-default-false input
+semantic and rejects every rewrite after insertion.
 
 The provider target is pinned as a turn-level fact before any call exists: the
 turn's frozen selection resolves through an immutable configured
