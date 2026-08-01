@@ -86,11 +86,9 @@ pub(crate) const PLAN_APPEND_ATTEMPT: &str = "SELECT attempt.attempt_id
    AND request.turn_id = $5
    AND request.tool_name = 'plan_write'
    AND request.arguments_kind = 'json'
-   AND CASE
-           WHEN request.arguments_kind = 'json'
-           THEN request.arguments_text::jsonb
-           ELSE NULL::jsonb
-       END =
+   AND session_plan_request_arguments_json(
+           request.arguments_kind, request.arguments_text
+       ) =
         CASE $7::text
             WHEN 'created' THEN jsonb_build_object(
                 'kind', 'create',

@@ -188,7 +188,9 @@ pub(crate) fn plan_status_from_str(value: &str) -> Option<PlanStatus> {
     }
 }
 
-fn positive_u64_from_numeric(value: Decimal) -> Result<u64, PositiveOrdinalMappingError> {
+pub(crate) fn positive_u64_from_numeric(
+    value: Decimal,
+) -> Result<u64, PositiveOrdinalMappingError> {
     if !value.fract().is_zero() {
         return Err(PositiveOrdinalMappingError::Fractional);
     }

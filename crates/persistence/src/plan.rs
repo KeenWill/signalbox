@@ -207,6 +207,8 @@ pub enum SessionPlanRepositoryError {
     Corruption(SessionPlanCorruption),
     /// The caller supplied provenance that is not an active plan-write attempt.
     InvalidAppendProvenance,
+    /// One physical plan-write attempt was submitted more than once.
+    DuplicateAppendAttempt,
 }
 
 impl fmt::Display for SessionPlanRepositoryError {
@@ -219,6 +221,9 @@ impl fmt::Display for SessionPlanRepositoryError {
             Self::InvalidAppendProvenance => {
                 formatter.write_str("session plan append provenance is not active")
             }
+            Self::DuplicateAppendAttempt => {
+                formatter.write_str("session plan append attempt was already used")
+            }
         }
     }
 }
@@ -228,7 +233,7 @@ impl Error for SessionPlanRepositoryError {
         match self {
             Self::Database { source, .. } => Some(source),
             Self::Corruption(error) => Some(error),
-            Self::InvalidAppendProvenance => None,
+            Self::InvalidAppendProvenance | Self::DuplicateAppendAttempt => None,
         }
     }
 }
@@ -238,14 +243,11 @@ impl From<sqlx::Error> for SessionPlanRepositoryError {
         let constraint = source
             .as_database_error()
             .and_then(|database| database.constraint());
-        if matches!(
-            constraint,
-            Some(
-                "session_plan_event_requires_active_plan_write_attempt"
-                    | "session_plan_event_provenance_attempt_id_key"
-            )
-        ) {
+        if constraint == Some("session_plan_event_requires_active_plan_write_attempt") {
             return Self::InvalidAppendProvenance;
+        }
+        if constraint == Some("session_plan_event_provenance_attempt_id_key") {
+            return Self::DuplicateAppendAttempt;
         }
         Self::Database {
             source,
@@ -269,7 +271,9 @@ impl ClassifyOperatorFailure for SessionPlanRepositoryError {
                 commit_ambiguous: *commit_ambiguous,
             },
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
-            Self::InvalidAppendProvenance => OperatorFailureClass::CallerOrHubBug,
+            Self::InvalidAppendProvenance | Self::DuplicateAppendAttempt => {
+                OperatorFailureClass::CallerOrHubBug
+            }
         }
     }
 }
@@ -550,14 +554,14 @@ fn event_kind_from_draft(draft: PlanEventDraft) -> PlanEventKind {
 
 fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     let entry = PlanEntryId::try_from_u64(positive_u64(
-        row.try_get("entry_ordinal")?,
+        required(row, "entry_ordinal")?,
         "entry ordinal",
     )?)
     .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
         "entry ordinal",
     ))?;
     let creation_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
-        row.try_get("creation_event_ordinal")?,
+        required(row, "creation_event_ordinal")?,
         "creation event ordinal",
     )?)
     .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
@@ -653,14 +657,14 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
 
 fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPlanRepositoryError> {
     let ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
-        row.try_get("event_ordinal")?,
+        required(row, "event_ordinal")?,
         "event ordinal",
     )?)
     .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
         "event ordinal",
     ))?;
     let entry = PlanEntryId::try_from_u64(positive_u64(
-        row.try_get("entry_ordinal")?,
+        required(row, "entry_ordinal")?,
         "entry ordinal",
     )?)
     .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
@@ -775,11 +779,11 @@ fn decode_provenance(
     session: SessionId,
     row: &PgRow,
 ) -> Result<PlanEventProvenance, SessionPlanRepositoryError> {
-    let turn: Uuid = row.try_get("provenance_turn_id")?;
-    let issuing_attempt: Uuid = row.try_get("provenance_issuing_turn_attempt_id")?;
-    let request: Uuid = row.try_get("provenance_request_id")?;
-    let attempt: Uuid = row.try_get("provenance_attempt_id")?;
-    let generation_value: Decimal = row.try_get("provenance_dispatch_generation")?;
+    let turn: Uuid = required(row, "provenance_turn_id")?;
+    let issuing_attempt: Uuid = required(row, "provenance_issuing_turn_attempt_id")?;
+    let request: Uuid = required(row, "provenance_request_id")?;
+    let attempt: Uuid = required(row, "provenance_attempt_id")?;
+    let generation_value: Decimal = required(row, "provenance_dispatch_generation")?;
     let generation = positive_u64(generation_value, "provenance dispatch generation")?;
     let generation = ToolDispatchGeneration::try_from_u64(generation).ok_or(
         SessionPlanCorruption::InvalidPositiveInteger("provenance dispatch generation"),
@@ -831,11 +835,8 @@ fn page_completeness(has_more: bool) -> PlanPageCompleteness {
 }
 
 fn positive_u64(value: Decimal, field: &'static str) -> Result<u64, SessionPlanCorruption> {
-    if value.fract().is_zero() && value > Decimal::ZERO {
-        return u64::try_from(value)
-            .map_err(|_| SessionPlanCorruption::InvalidPositiveInteger(field));
-    }
-    Err(SessionPlanCorruption::InvalidPositiveInteger(field))
+    mapping::positive_u64_from_numeric(value)
+        .map_err(|_| SessionPlanCorruption::InvalidPositiveInteger(field))
 }
 
 fn required<T>(row: &PgRow, field: &'static str) -> Result<T, SessionPlanRepositoryError>

@@ -99,6 +99,27 @@ CREATE TABLE session_plan_head (
         ON DELETE RESTRICT
 );
 
+CREATE FUNCTION session_plan_request_arguments_json(
+    arguments_kind text,
+    arguments_text text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+BEGIN
+    IF arguments_kind IS DISTINCT FROM 'json' OR arguments_text IS NULL THEN
+        RETURN NULL;
+    END IF;
+    BEGIN
+        RETURN arguments_text::jsonb;
+    EXCEPTION
+        WHEN invalid_text_representation THEN
+            RETURN NULL;
+    END;
+END;
+$$;
+
 CREATE FUNCTION session_plan_event_has_authority(candidate session_plan_event)
 RETURNS boolean
 LANGUAGE sql
@@ -123,11 +144,9 @@ AS $$
            AND request.turn_id = candidate.provenance_turn_id
            AND request.tool_name = 'plan_write'
            AND request.arguments_kind = 'json'
-           AND CASE
-                   WHEN request.arguments_kind = 'json'
-                   THEN request.arguments_text::jsonb
-                   ELSE NULL::jsonb
-               END =
+           AND session_plan_request_arguments_json(
+                   request.arguments_kind, request.arguments_text
+               ) =
                 CASE candidate.event_kind
                     WHEN 'created' THEN jsonb_build_object(
                         'kind', 'create',
@@ -200,11 +219,9 @@ BEGIN
        AND attempt.session_id = NEW.session_id
        AND request.tool_name = 'plan_write'
        AND request.arguments_kind = 'json'
-       AND CASE
-               WHEN request.arguments_kind = 'json'
-               THEN request.arguments_text::jsonb
-               ELSE NULL::jsonb
-           END =
+       AND session_plan_request_arguments_json(
+               request.arguments_kind, request.arguments_text
+           ) =
             CASE NEW.event_kind
                 WHEN 'created' THEN jsonb_build_object(
                     'kind', 'create',

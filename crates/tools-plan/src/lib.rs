@@ -615,7 +615,16 @@ impl PlanReadPage {
     }
 
     fn truncated_to(&self, units: usize) -> Self {
-        let entry_units = units.min(self.entries.len());
+        let reserved_history_units = usize::from(
+            units > 0
+                && self
+                    .history
+                    .as_ref()
+                    .is_some_and(|history| !history.events.is_empty()),
+        );
+        let entry_units = units
+            .saturating_sub(reserved_history_units)
+            .min(self.entries.len());
         let history_units = units.saturating_sub(entry_units);
         let history = self.history.as_ref().map(|history| {
             let retained = history_units.min(history.events.len());

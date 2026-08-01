@@ -647,6 +647,10 @@ fn read_truncates_oversized_encoded_evidence_and_reports_every_omission() {
     assert!(ToolResultText::try_new(encoded).is_ok());
     assert_eq!(output["plan_truncated"], json!(true));
     assert_eq!(output["history_truncated"], json!(true));
+    assert_eq!(
+        output["history"].as_array().map(Vec::len),
+        Some(MIN_PLAN_HISTORY_EVENTS)
+    );
 }
 
 #[test]
