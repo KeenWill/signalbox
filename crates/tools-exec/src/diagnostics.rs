@@ -1242,6 +1242,7 @@ mod tests {
     const BOUNDED_TEXT_LIMIT: usize = 4;
     const TEST_NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
     const FOREIGN_TARGET: &str = "aarch64-unknown-linux-gnu";
+    const TEST_SANDBOX_LAUNCHER_DESCRIPTOR: i32 = 93;
 
     struct CargoConfigFixture {
         root: PathBuf,
@@ -1335,6 +1336,10 @@ mod tests {
     impl ProcessRunner for FakeRunner {
         fn sandbox_launcher_program(&self) -> &Path {
             Path::new(BWRAP_PROGRAM)
+        }
+
+        fn sandbox_launcher_descriptor(&self) -> Option<i32> {
+            Some(TEST_SANDBOX_LAUNCHER_DESCRIPTOR)
         }
 
         async fn bwrap_availability(&mut self, _probe: ProcessRequest) -> BwrapAvailability {
