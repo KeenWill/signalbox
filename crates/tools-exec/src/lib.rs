@@ -14,6 +14,14 @@
 //! tools independently and does not decide which session catalogs contain
 //! either one.
 //!
+//! [`CargoDiagnosticsTool`] builds on the same sandboxed core to run bounded
+//! whole-workspace Cargo check, clippy, and test passes. It returns typed
+//! compiler locations and test outcomes rather than raw terminal output. Cargo
+//! and helper frames share output channels with workspace build and test code,
+//! so each collection is labeled as workspace-influenced evidence. Its
+//! `known_truncated` flag reports positive truncation evidence; false never
+//! claims that the workspace-influenced collection is complete or authentic.
+//!
 //! This day-one profile does not fence the network or impose resource limits.
 //! It is therefore not an admissible boundary for executing untrusted code.
 //! Shell sessions and PTYs are likewise outside this crate's contract.
@@ -24,10 +32,19 @@
 //! `SIGNALBOX_RUN_BWRAP_INTEGRATION=1 cargo test -p signalbox-tools-exec
 //! --test bwrap`.
 
+mod diagnostics;
 mod process;
 #[cfg(target_os = "linux")]
 mod supervisor_protocol;
 
+pub use diagnostics::{
+    CARGO_DIAGNOSTICS_NAME, CargoDiagnostic, CargoDiagnosticRecords, CargoDiagnosticSpan,
+    CargoDiagnosticsArguments, CargoDiagnosticsCommand, CargoDiagnosticsExecution,
+    CargoDiagnosticsExecutor, CargoDiagnosticsExecutorError, CargoDiagnosticsPreparationFailure,
+    CargoDiagnosticsResult, CargoDiagnosticsRunner, CargoDiagnosticsStream, CargoDiagnosticsTool,
+    CargoDiagnosticsToolConstructionError, CargoEvidenceProvenance, CargoFailureDetail,
+    CargoTestOutcome, CargoTestRecords, CargoTestResult, InvalidCargoDiagnosticsArguments,
+};
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
     ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
