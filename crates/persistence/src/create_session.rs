@@ -586,6 +586,7 @@ async fn load_from_connection(
          LEFT JOIN session_placement_event AS pe
            ON pe.session_id = c.created_session_id
           AND pe.version = 1
+          AND pe.provenance_command_id = c.command_id
          WHERE d.command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -740,7 +741,7 @@ fn decode_placement(
 ) -> Result<SessionPlacement, CreateSessionRepositoryError> {
     if storage_version < PLACEMENT_FROM_STORAGE_VERSION {
         return if path.is_none() && !root_intent {
-            Ok(SessionPlacement::Pathless)
+            Ok(SessionPlacement::pathless())
         } else {
             Err(CreateSessionCorruption::Inconsistent("pre-version-six placement").into())
         };
@@ -749,7 +750,7 @@ fn decode_placement(
         return if root_intent {
             Err(CreateSessionCorruption::Inconsistent("pathless root intent").into())
         } else {
-            Ok(SessionPlacement::Pathless)
+            Ok(SessionPlacement::pathless())
         };
     };
     let path = SessionPlacementPath::try_new(path)

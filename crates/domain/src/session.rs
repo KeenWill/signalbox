@@ -255,7 +255,7 @@ impl CreateSession {
             command_id,
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
-            placement: SessionPlacement::Pathless,
+            placement: SessionPlacement::pathless(),
         }
     }
 
@@ -289,7 +289,7 @@ impl CreateSession {
                 provenance: template_provenance,
                 resolved: resolved_configuration_defaults,
             },
-            placement: SessionPlacement::Pathless,
+            placement: SessionPlacement::pathless(),
         }
     }
 
@@ -568,7 +568,7 @@ impl InitialSession {
             provenance,
             template_provenance: None,
             configuration_defaults,
-            placement: VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            placement: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         }
     }
 
@@ -738,7 +738,7 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         )
     }
 
@@ -765,7 +765,7 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         )
     }
 
@@ -1110,7 +1110,7 @@ impl CreateSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         )
     }
 
@@ -1135,7 +1135,7 @@ impl CreateSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         )
     }
 

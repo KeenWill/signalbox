@@ -1623,7 +1623,7 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             prepared.command().initial_configuration_defaults().clone(),
-            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             conversation.clone(),
             seeds,
             snapshots,
@@ -1649,7 +1649,7 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             prepared.command().initial_configuration_defaults().clone(),
-            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             vec![ImportedSessionSeedReconstitutionInput::new(
                 seed.session(),
                 seed.seed_frontier(),

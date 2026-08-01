@@ -593,15 +593,9 @@ pub enum SessionPlacementPathError {
 // impl Display + std::error::Error
 
 pub enum RootPlacementGlobalReadIntent { Acknowledged }
-pub enum SessionPlacement {
-    Pathless,
-    Scoped(SessionPlacementPath),
-    RootGlobalRead {
-        path: SessionPlacementPath,
-        intent: RootPlacementGlobalReadIntent,
-    },
-}
+pub struct SessionPlacement { /* private */ }
 impl SessionPlacement {
+    pub const fn pathless() -> Self;
     pub fn scoped(path: SessionPlacementPath) -> Result<Self, SessionPlacementError>;
     pub fn root_global_read(
         path: SessionPlacementPath,

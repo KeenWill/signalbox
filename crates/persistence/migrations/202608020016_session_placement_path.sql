@@ -116,13 +116,18 @@ CREATE TABLE update_session_placement_command (
             replacement_path IS NOT NULL AND position('.' IN replacement_path) = 0
         )
     ),
-    CHECK (
+    CONSTRAINT update_session_placement_command_result_shape CHECK (
         (result_kind = 'applied' AND rejection_kind IS NULL
             AND result_version IS NOT NULL AND result_current_version IS NULL)
-        OR (result_kind = 'rejected' AND rejection_kind IS NOT NULL
+        OR (result_kind = 'rejected' AND rejection_kind = 'session_not_found'
+            AND result_version IS NULL AND result_current_version IS NULL)
+        OR (result_kind = 'rejected' AND rejection_kind = 'current_version_mismatch'
+            AND result_version IS NULL AND result_current_version IS NOT NULL
+            AND result_current_version <> expected_version)
+        OR (result_kind = 'rejected' AND rejection_kind = 'version_exhausted'
             AND result_version IS NULL
-            AND ((rejection_kind = 'session_not_found' AND result_current_version IS NULL)
-                OR (rejection_kind <> 'session_not_found' AND result_current_version IS NOT NULL)))
+            AND expected_version = 18446744073709551615
+            AND result_current_version = 18446744073709551615)
     ),
     FOREIGN KEY (command_id, command_kind, storage_version)
         REFERENCES durable_command(command_id, command_kind, storage_version)

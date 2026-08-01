@@ -222,17 +222,36 @@ pub(crate) async fn load_current(
     session: SessionId,
 ) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
     let row = sqlx::query(
-        "SELECT event.version, event.placement_path, event.root_global_read_intent
-           FROM session_current_placement AS head
-           JOIN session_placement_event AS event
+        "SELECT head.session_id AS head_session_id,
+                event.session_id AS event_session_id,
+                event.version, event.placement_path, event.root_global_read_intent
+           FROM session
+           LEFT JOIN session_current_placement AS head
+             ON head.session_id = session.session_id
+           LEFT JOIN session_placement_event AS event
              ON event.session_id = head.session_id
             AND event.version = head.current_version
-          WHERE head.session_id = $1",
+          WHERE session.session_id = $1",
     )
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut *connection)
     .await?;
-    row.map(decode_versioned_placement).transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let head: Option<sqlx::types::Uuid> = row.try_get("head_session_id")?;
+    if head.is_none() {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "session placement head missing",
+        ));
+    }
+    let event: Option<sqlx::types::Uuid> = row.try_get("event_session_id")?;
+    if event.is_none() {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "session placement event missing",
+        ));
+    }
+    decode_versioned_placement(row).map(Some)
 }
 
 async fn load_current_for_update(
@@ -246,6 +265,13 @@ async fn load_current_for_update(
     if let Some(row) = row {
         return decode_versioned_placement(row).map(Some);
     }
+    missing_head_result(connection, session).await
+}
+
+async fn missing_head_result(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
     let session_exists: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
             .bind(session_id_to_uuid(session))
@@ -442,22 +468,35 @@ fn decode_record(
         (
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch),
-        ) => UpdateSessionPlacementResult::Rejected(
-            UpdateSessionPlacementRejection::CurrentVersionMismatch {
-                session,
-                expected,
-                current: decode_version(required(&row, "result_current_version")?)?,
-            },
-        ),
+        ) => {
+            let current = decode_version(required(&row, "result_current_version")?)?;
+            if current == expected {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "mismatch rejection version",
+                ));
+            }
+            UpdateSessionPlacementResult::Rejected(
+                UpdateSessionPlacementRejection::CurrentVersionMismatch {
+                    session,
+                    expected,
+                    current,
+                },
+            )
+        }
         (
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::VersionExhausted),
-        ) => UpdateSessionPlacementResult::Rejected(
-            UpdateSessionPlacementRejection::VersionExhausted {
-                session,
-                current: decode_version(required(&row, "result_current_version")?)?,
-            },
-        ),
+        ) => {
+            let current = decode_version(required(&row, "result_current_version")?)?;
+            if expected.as_u64() != u64::MAX || current.as_u64() != u64::MAX {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "version exhaustion ordinal",
+                ));
+            }
+            UpdateSessionPlacementResult::Rejected(
+                UpdateSessionPlacementRejection::VersionExhausted { session, current },
+            )
+        }
         _ => {
             return Err(SessionPlacementRepositoryError::Corruption(
                 "terminal result shape",
@@ -484,7 +523,7 @@ pub(crate) fn decode_placement(
                 "pathless root intent",
             ))
         } else {
-            Ok(SessionPlacement::Pathless)
+            Ok(SessionPlacement::pathless())
         };
     };
     let path = SessionPlacementPath::try_new(path)

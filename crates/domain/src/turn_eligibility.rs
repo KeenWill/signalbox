@@ -6925,7 +6925,7 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             command_defaults,
-            VersionedSessionPlacement::initial(SessionPlacement::Pathless),
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             conversation,
             vec![crate::ImportedSessionSeedReconstitutionInput::new(
                 seed.session(),

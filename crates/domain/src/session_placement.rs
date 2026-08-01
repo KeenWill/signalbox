@@ -94,26 +94,44 @@ pub enum RootPlacementGlobalReadIntent {
 }
 
 /// One session's opt-in placement decision.
+///
+/// Private fields keep the root-global-read acknowledgement inseparable from a
+/// root path; callers construct each admitted shape through the methods below.
+///
+/// ```compile_fail
+/// use signalbox_domain::{SessionPlacement, SessionPlacementPath};
+///
+/// fn forge_implicit_root(path: SessionPlacementPath) -> SessionPlacement {
+///     SessionPlacement {
+///         path: Some(path),
+///         root_global_read_intent: false,
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum SessionPlacement {
-    /// Legacy behavior: no read scope is applied.
-    Pathless,
-    /// A non-root placement whose parent directory scopes reads.
-    Scoped(SessionPlacementPath),
-    /// A root placement, explicitly acknowledged as granting global read.
-    RootGlobalRead {
-        path: SessionPlacementPath,
-        intent: RootPlacementGlobalReadIntent,
-    },
+pub struct SessionPlacement {
+    path: Option<SessionPlacementPath>,
+    root_global_read_intent: bool,
 }
 
 impl SessionPlacement {
+    /// Constructs the legacy pathless decision with no read scope.
+    pub const fn pathless() -> Self {
+        Self {
+            path: None,
+            root_global_read_intent: false,
+        }
+    }
+
     /// Constructs a non-root placement and refuses an implicit global-read root.
     pub fn scoped(path: SessionPlacementPath) -> Result<Self, SessionPlacementError> {
         if path.depth() == 1 {
             Err(SessionPlacementError::RootRequiresGlobalReadIntent)
         } else {
-            Ok(Self::Scoped(path))
+            Ok(Self {
+                path: Some(path),
+                root_global_read_intent: false,
+            })
         }
     }
 
@@ -123,7 +141,11 @@ impl SessionPlacement {
         intent: RootPlacementGlobalReadIntent,
     ) -> Result<Self, SessionPlacementError> {
         if path.depth() == 1 {
-            Ok(Self::RootGlobalRead { path, intent })
+            let RootPlacementGlobalReadIntent::Acknowledged = intent;
+            Ok(Self {
+                path: Some(path),
+                root_global_read_intent: true,
+            })
         } else {
             Err(SessionPlacementError::GlobalReadIntentRequiresRoot)
         }
@@ -131,15 +153,12 @@ impl SessionPlacement {
 
     /// Borrows the dotted path, or `None` for legacy pathless behavior.
     pub fn path(&self) -> Option<&SessionPlacementPath> {
-        match self {
-            Self::Pathless => None,
-            Self::Scoped(path) | Self::RootGlobalRead { path, .. } => Some(path),
-        }
+        self.path.as_ref()
     }
 
     /// Returns whether creation recorded explicit root-global-read intent.
     pub const fn records_root_global_read_intent(&self) -> bool {
-        matches!(self, Self::RootGlobalRead { .. })
+        self.root_global_read_intent
     }
 
     /// Decides one cross-session read with exactly one path-prefix comparison.
@@ -519,7 +538,7 @@ mod tests {
     fn pathless_keeps_legacy_reads_and_root_reads_every_placement() {
         let scoped = scoped("projects.foo.session");
         assert_eq!(
-            SessionPlacement::Pathless.decide_cross_session_read(&scoped),
+            SessionPlacement::pathless().decide_cross_session_read(&scoped),
             SessionReadScopeDecision::Allowed
         );
         let root = SessionPlacement::root_global_read(
@@ -532,7 +551,7 @@ mod tests {
             SessionReadScopeDecision::Allowed
         );
         assert_eq!(
-            root.decide_cross_session_read(&SessionPlacement::Pathless),
+            root.decide_cross_session_read(&SessionPlacement::pathless()),
             SessionReadScopeDecision::Allowed
         );
     }
