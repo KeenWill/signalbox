@@ -38,7 +38,7 @@ pub enum ResolvedToolConversationEntry {
         /// Terminal physical result authority.
         attempt: EndedToolAttempt,
     },
-    /// The owner decision and request referenced by one denial entry.
+    /// The user decision and request referenced by one denial entry.
     Denied {
         /// Source-qualified semantic entry.
         source: SemanticTranscriptEntryRef,
@@ -77,7 +77,7 @@ pub enum ToolAttemptAuthorizationStatus {
     InFlight(AuthorizedToolAttempt),
 }
 
-/// Transaction consuming one owner decision and advancing the exact wait.
+/// Transaction consuming one user decision and advancing the exact wait.
 pub trait DecideToolRequestTransaction {
     /// Adapter-specific classified failure.
     type Error: ClassifyOperatorFailure;

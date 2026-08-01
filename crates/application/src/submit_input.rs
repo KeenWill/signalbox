@@ -1,7 +1,7 @@
 //! Durable input-submission orchestration.
 //!
 //! docs/spec/identity-and-commands.md owns hub-minted identity supply and
-//! owner-global command replay, and admits only the owner actor at the
+//! user-global command replay, and admits only the user actor at the
 //! baseline command boundary. Authoritative session loading, position
 //! allocation, preparation, and recording remain inside one atomic
 //! transaction port.
@@ -22,7 +22,7 @@ use crate::{
 /// Why caller input cannot enter canonical `SubmitInput` construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmitInputRequestError {
-    /// The owner-global command identity is a reserved sentinel.
+    /// The user-global command identity is a reserved sentinel.
     InvalidCommandId(InvalidDurableCommandId),
     /// The accepted-input text exceeds the provisional admission bound.
     OversizedContent {
@@ -51,7 +51,7 @@ impl Error for SubmitInputRequestError {}
 /// Content is already a checked domain value. Private fields ensure the nil
 /// and max command-identity sentinels reserved by
 /// docs/spec/identity-and-commands.md cannot enter canonical command
-/// construction through this boundary. The owner actor is fixed by the
+/// construction through this boundary. The user actor is fixed by the
 /// service rather than accepted as caller input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitInputRequest {
@@ -96,7 +96,7 @@ impl SubmitInputRequest {
         })
     }
 
-    /// Returns the owner-global durable command identity.
+    /// Returns the user-global durable command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -165,7 +165,7 @@ impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
 pub enum SubmitInputOutcome {
     /// First handling or equal replay returned the recorded domain result.
     Recorded(SubmitInputResult),
-    /// The owner-global command identity already names another typed payload.
+    /// The user-global command identity already names another typed payload.
     ConflictingReuse {
         /// The identity whose existing meaning remains intact.
         command_id: DurableCommandId,
@@ -174,7 +174,7 @@ pub enum SubmitInputOutcome {
 
 /// Atomic command-handling boundary for durable input submission.
 ///
-/// Implementations look up the owner-global command identity before mutable
+/// Implementations look up the user-global command identity before mutable
 /// session validation. For an unseen command they load authoritative state,
 /// allocate ordering, prepare, and atomically record the terminal result and
 /// any accepted queued-work facts. A failure proven to precede commit claims no
@@ -246,7 +246,7 @@ where
     Transaction: SubmitInputTransaction,
     Nudge: EligibilityNudge,
 {
-    /// Constructs and handles one owner-attributed input command.
+    /// Constructs and handles one user-attributed input command.
     ///
     /// Each invocation creates fresh candidates, including retransmission
     /// after a lost acknowledgement. The atomic port remains authoritative:
@@ -426,7 +426,7 @@ mod tests {
             session_id(2),
             session_id(2),
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             session_id(2),
@@ -745,10 +745,10 @@ mod tests {
     }
 
     /// S01 / INV-002 / INV-007 / INV-008 / INV-012 / INV-028: orchestration
-    /// fixes owner attribution and forwards one exact command and candidate
+    /// fixes user attribution and forwards one exact command and candidate
     /// pair to the atomic port.
     #[test]
-    fn s01_inv002_inv007_inv008_inv012_inv028_orchestrates_one_owner_command_and_candidate_pair() {
+    fn s01_inv002_inv007_inv008_inv012_inv028_orchestrates_one_user_command_and_candidate_pair() {
         let request = request(1);
         let accepted_input = accepted_input_id(4);
         let turn = turn_id(5);
@@ -772,7 +772,7 @@ mod tests {
         let (command, observed_input, observed_turn) = &transaction.observed[0];
         assert_eq!(command.command_id(), request.command_id());
         assert_eq!(command.session(), request.session());
-        assert_eq!(command.actor(), Actor::Owner);
+        assert_eq!(command.actor(), Actor::User);
         assert_eq!(command.content(), request.content());
         assert_eq!(command.delivery(), request.delivery());
         assert_eq!(*observed_input, accepted_input);
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(applied.turn(), winner_turn);
     }
 
-    /// S01 / INV-012: owner-global conflicting reuse is returned unchanged.
+    /// S01 / INV-012: user-global conflicting reuse is returned unchanged.
     #[test]
     fn s01_inv012_conflicting_reuse_is_returned_unchanged() {
         let request = request(1);

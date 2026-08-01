@@ -1,5 +1,8 @@
 # Sessions and the transcript
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
@@ -32,7 +35,7 @@ records two required, independent, immutable creation facts, paired as
 `SessionCreationProvenance` (INV-003):
 
 - **Creation cause** — why the session exists. The only constructible variant is
-  `OwnerInitiated`. Reserved causes (application, schedule, delegation) are not
+  `UserInitiated`. Reserved causes (application, schedule, delegation) are not
   represented as placeholder variants.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
@@ -94,13 +97,13 @@ discarded.
 Application orchestration (`crates/application/src/create_session.rs`):
 
 - rejects nil/max sentinel command identities before canonical construction;
-- fixes cause `OwnerInitiated` and ancestry `None` — the request type has no
+- fixes cause `UserInitiated` and ancestry `None` — the request type has no
   cause or ancestry inputs;
 - mints one fresh UUIDv7 `SessionId` candidate per invocation (the UUID
   timestamp confers no domain order or authority); and
 - calls one atomic transaction port exactly once, with no retry.
 
-Domain preparation admits only the owner-initiated, no-ancestry pair. A
+Domain preparation admits only the user-initiated, no-ancestry pair. A
 `SingleSource` command is a valid canonical value but fails preparation with
 `TranscriptAncestryUnavailable` — a nonterminal error that claims no command
 identifier. Forks are therefore typed but not yet creatable. Import-seeded
@@ -109,7 +112,7 @@ creation uses the separate command path below; it does not widen
 
 The committing transaction atomically inserts the session row, the scheduler
 registration (`session_scheduler`), defaults version one, the current-defaults
-pointer, the typed command record, the owner-global registry claim, and — when
+pointer, the typed command record, the user-global registry claim, and — when
 the request carried a placement — that session's initial `Unpinned`
 `SessionRunnerPlacement` record at revision one with its complete request. A
 visible session therefore never names a placement its creation command did not
@@ -183,12 +186,12 @@ semantic-entry generator closure to one atomic transaction port. Imported
 aggregates are immutable, so the repository takes no explicit imported-record
 row lock; after resolving the complete selected prefix, it invokes the closure
 exactly once per prefix member in order. The transaction first follows the
-owner-global claim protocol in
-[identity-and-commands](identity-and-commands.md). A claimed identifier resolves
-to its recorded equal replay or conflicting reuse before any imported-target
-lookup. Only for an unclaimed identifier does the transaction load the complete
-imported conversation named by `frontier.conversation()`, resolve exactly
-positions `1..=N` through that frontier's inclusive boundary, and either:
+user-global claim protocol in [identity-and-commands](identity-and-commands.md).
+A claimed identifier resolves to its recorded equal replay or conflicting reuse
+before any imported-target lookup. Only for an unclaimed identifier does the
+transaction load the complete imported conversation named by
+`frontier.conversation()`, resolve exactly positions `1..=N` through that
+frontier's inclusive boundary, and either:
 
 - returns `ImportedConversationNotFound` or `ImportedFrontierNotFound` without
   claiming the command identity; or
@@ -199,12 +202,12 @@ An equal replay returns the recorded created session and ignores unused fresh
 identity candidates. Changed frontier, relationship, or defaults under an
 already claimed command identity is conflicting reuse; selecting another
 conversation necessarily changes the frontier. Cross-kind reuse follows the
-owner-global durable-command contract in
+user-global durable-command contract in
 [identity-and-commands](identity-and-commands.md).
 
 The committing transaction atomically inserts:
 
-- the owner-initiated session whose immutable ancestry names the imported
+- the user-initiated session whose immutable ancestry names the imported
   conversation and boundary derived from the selected frontier, plus the
   relationship;
 - defaults version one, its current pointer, scheduler registration, typed
@@ -304,7 +307,7 @@ selection alone.
 
 ### Session-template provenance
 
-An owner-initiated session may carry one optional immutable
+A user-initiated session may carry one optional immutable
 `SessionTemplateProvenance`, distinct from its creation cause and transcript
 ancestry. Presence pairs a validated `SessionTemplateName` with an exact 32-byte
 `SessionTemplateContentDigest`; absence denotes explicit creation. Template
@@ -424,23 +427,23 @@ never a combination of separately committed snapshots.
 `ReplaceSessionMetadata` carries durable command identity, target session,
 actor, and one complete replacement snapshot. Its replay equality covers every
 field except command identity (INV-012). The process-facing application request
-fixes `Actor::Owner`. A separate purpose-specific application constructor
-accepts only `Actor::Tool { request }` for the exact executing tool request;
-model, recovery, and arbitrary caller-selected actors remain unconstructible.
-First handling locks the target session, then either records `SessionNotFound`
-without an effect or atomically replaces the complete root, tag, and attribute
-snapshot. After acquiring that lock, a separate statement samples PostgreSQL
-statement time at microsecond precision; the applied result records it together
-with the command actor as the one last-writer stamp. An equal replay returns
-that exact recorded result and timestamp. The database timestamp is result
-evidence, not caller intent or a global ordering token, so it does not
-participate in command equality.
+fixes `Actor::User`. A separate purpose-specific application constructor accepts
+only `Actor::Tool { request }` for the exact executing tool request; model,
+recovery, and arbitrary caller-selected actors remain unconstructible. First
+handling locks the target session, then either records `SessionNotFound` without
+an effect or atomically replaces the complete root, tag, and attribute snapshot.
+After acquiring that lock, a separate statement samples PostgreSQL statement
+time at microsecond precision; the applied result records it together with the
+command actor as the one last-writer stamp. An equal replay returns that exact
+recorded result and timestamp. The database timestamp is result evidence, not
+caller intent or a global ordering token, so it does not participate in command
+equality.
 
 There is deliberately no expected or installed metadata version and no versioned
 metadata-history API. Two distinct writes are last-writer-wins after
 serialization on the session row; a full replacement can overwrite an earlier
 writer's unrelated field. Callers that need to preserve fields read the current
-snapshot before forming the replacement. The owner-global durable-command
+snapshot before forming the replacement. The user-global durable-command
 contract retains each command's payload and typed result for replay, so those
 records preserve prior replacement values. Persistence also retains append-only
 internal evidence that each applied receipt became current exactly once; it
@@ -488,7 +491,7 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because `OwnerInitiated` is the only constructible creation cause and every
+Because `UserInitiated` is the only constructible creation cause and every
 current session-creation boundary lacks actor attribution, the implemented
 default view is exactly all non-archived sessions. No visibility taxonomy,
 creation-time override, or inference from missing attribution is stored. The
@@ -567,11 +570,11 @@ and closed:
   summary text retaining its dedicated physical call and the first and through
   source-qualified entries of the inclusive range it represents;
 - `RunnerPlacementChanged { placement_revision }` — a reference to the complete
-  checked successor placement record at an owner-explicit relocation boundary.
-  One entry kind covers every session-relocation fact: a move to a different
-  runner and a working-directory move on the same runner both require it, and
-  the referenced record is the authority for which of them occurred. Splitting
-  the kind so that a working-directory-only move carries its own payload variant
+  checked successor placement record at a user-explicit relocation boundary. One
+  entry kind covers every session-relocation fact: a move to a different runner
+  and a working-directory move on the same runner both require it, and the
+  referenced record is the authority for which of them occurred. Splitting the
+  kind so that a working-directory-only move carries its own payload variant
   changes no other contract on this page, since every consumer resolves the
   record rather than reading the payload;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
@@ -714,7 +717,7 @@ frozen direct selection changed, and finally appends its ordinary origin
 
 Session relocation has a session-level frontier boundary. Every transaction that
 installs a successor placement — loss replacement today, and the committed
-owner-directed move of a healthy session or of its working directory later
+user-directed move of a healthy session or of its working directory later
 ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one))
 — appends one `RunnerPlacementChanged` entry after the latest authoritative
 semantic frontier, or establishes a one-entry root when no frontier exists, and
@@ -831,34 +834,35 @@ Why (bytes, at admission): byte measurement matches wire and storage cost and
 keeps the domain value exactly as accepted; rejecting before construction can
 never truncate or rewrite content.
 
-This is a provisional owner-approved floor, not the resource-governance policy.
+This is a provisional maintainer-approved floor, not the resource-governance
+policy.
 
 ## Actor attribution
 
-The actor algebra (`Owner`, `Model { turn }`, `Recovery`, `Tool { request }`),
+The actor algebra (`User`, `Model { turn }`, `Recovery`, `Tool { request }`),
 its participation in structural replay equality, and its closed-discriminator
 storage convention are owned by
 [identity-and-commands](identity-and-commands.md). Attribution is provenance
 only — not authentication, authorization, or approval — and model agency can
-never compare equal to owner agency (INV-020).
+never compare equal to user agency (INV-020).
 
 The session-command consequences: `SubmitInput` and `ReplaceSessionMetadata` are
 the command payloads carrying an actor inside the conversational command
-surface. `SubmitInput` fixes `Actor::Owner`. Metadata replacement admits the
-owner-facing constructor plus the purpose-specific `Actor::Tool { request }`
+surface. `SubmitInput` fixes `Actor::User`. Metadata replacement admits the
+user-facing constructor plus the purpose-specific `Actor::Tool { request }`
 constructor described above; neither accepts arbitrary agency. Domain
 reconstitution compares the stored actor against the canonical command and fails
 closed on mismatch (`StoredActorMismatch` for input and `CommandActorMismatch`
 for metadata). The metadata actor also becomes its organizational last-writer
 stamp.
 
-Why (seeded before expansion): carrying owner attribution from the first
-metadata write preserved a truthful backfill, and the existing closed actor
-columns now admit tool attribution without a semantic migration.
+Why (seeded before expansion): carrying user attribution from the first metadata
+write preserved a truthful backfill, and the existing closed actor columns now
+admit tool attribution without a semantic migration.
 
-`CreateSession` carries no actor; amending it remains an explicit owner choice
-that has not been taken. `Recovery` and `Model` remain representable without an
-implemented command-producing boundary.
+`CreateSession` carries no actor; amending it remains an explicit maintainer
+choice that has not been taken. `Recovery` and `Model` remain representable
+without an implemented command-producing boundary.
 
 ## Implemented transcript projections
 
@@ -897,15 +901,15 @@ edges of [model-call-execution](model-call-execution.md).
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so
-  later adoption needs another kind-scoped storage version; the truthful `Owner`
+  later adoption needs another kind-scoped storage version; the truthful `User`
   backfill that design relies on still exists.
-- `CreateSession` actor attribution remains implicit pending an explicit owner
-  amendment choice.
+- `CreateSession` actor attribution remains implicit pending an explicit
+  maintainer amendment choice.
 - `Recovery` and `Model` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
-- The 1 MiB content bound is a provisional owner floor; the resource-governance
-  limit question stays open, and non-text content kinds remain unconstructible
-  pending their owning decisions.
+- The 1 MiB content bound is a provisional maintainer floor; the
+  resource-governance limit question stays open, and non-text content kinds
+  remain unconstructible pending their owning decisions.
 - The session system prompt remains one optional bounded string per defaults
   epoch. Composition from base, per-use-case, and instruction-file sources and
   richer named profiles remain the open

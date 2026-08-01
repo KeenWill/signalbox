@@ -114,7 +114,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = makeService()
     let sessions = try await service.listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
-    let content = "fixture owner input"
+    let content = "fixture user input"
 
     let prepared = try await service.prepareInputSubmission(
       session: session,
@@ -3586,7 +3586,7 @@ private enum ProcessProjectionFixture {
       "model_call_count":"0"
     }
     """
-  static let userText = "fixture materialized owner input"
+  static let userText = "fixture materialized user input"
   static let proposedAssistantText = "I will inspect the fixture before using the tool."
   static let proposedToolName = "inspect_fixture"
   static let proposedAssistantEntry = "99999999-9999-4999-8999-999999999999"

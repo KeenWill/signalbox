@@ -28,7 +28,7 @@ pub struct ConversationMessage {
 }
 
 impl ConversationMessage {
-    /// A user message containing one text part.
+    /// A user-role message containing one text part.
     pub fn user_text(text: impl Into<String>) -> Self {
         Self {
             role: ConversationRole::User,
