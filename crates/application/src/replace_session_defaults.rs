@@ -1,7 +1,7 @@
 //! Session-defaults replacement orchestration.
 //!
 //! docs/spec/sessions-and-transcript.md admits the canonical compare-and-set
-//! command, docs/spec/identity-and-commands.md owns owner-global replay, and
+//! command, docs/spec/identity-and-commands.md owns user-global replay, and
 //! the domain replacement boundary owns typed applied-or-rejected results.
 //! This application slice constructs the canonical command and delegates
 //! exactly once to an atomic transaction port. Authoritative session loading
@@ -58,7 +58,7 @@ impl ReplaceSessionDefaultsRequest {
         })
     }
 
-    /// Returns the owner-global durable command identity.
+    /// Returns the user-global durable command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -108,7 +108,7 @@ pub enum ReplaceSessionDefaultsOutcome {
     /// The nested value remains exactly the domain's applied-or-rejected
     /// receipt; application orchestration does not recompute or reshape it.
     Recorded(ReplaceSessionDefaultsResult),
-    /// The owner-global command identity already names another typed payload.
+    /// The user-global command identity already names another typed payload.
     ConflictingReuse {
         /// The identity whose existing meaning remains intact.
         command_id: DurableCommandId,
@@ -120,7 +120,7 @@ pub enum ReplaceSessionDefaultsOutcome {
 
 /// Atomic command-handling boundary for session-defaults replacement.
 ///
-/// Implementations look up owner-global command identity before current-state
+/// Implementations look up user-global command identity before current-state
 /// validation. For unseen commands they load and prepare against authoritative
 /// session state, compare-and-set the expected version, and atomically record
 /// either the applied effects or typed rejection before returning `Recorded`.
@@ -231,7 +231,7 @@ mod tests {
             id,
             id,
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             id,
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(service.into_transaction().observed, [command]);
     }
 
-    /// S01 / INV-012: conflicting owner-global reuse is returned unchanged and
+    /// S01 / INV-012: conflicting user-global reuse is returned unchanged and
     /// does not acquire a replacement meaning in application code.
     #[test]
     fn s01_inv012_conflicting_reuse_is_returned_unchanged() {

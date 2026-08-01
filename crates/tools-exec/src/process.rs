@@ -537,11 +537,19 @@ impl TokioProcessRunner {
         supervisor_program: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
         let supplied = supervisor_program.as_ref();
+        if !supplied.is_absolute() {
+            return Err(ExecToolConstructionError::SupervisorProgram {
+                path: supplied.to_owned(),
+                source: None,
+            });
+        }
         #[cfg(target_os = "linux")]
         let (supervisor_program, _supervisor) = {
             let supervisor = rustix::fs::open(
                 supplied,
-                rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::NONBLOCK,
                 rustix::fs::Mode::empty(),
             )
             .map_err(|source| ExecToolConstructionError::SupervisorProgram {
@@ -1276,7 +1284,14 @@ fn sandbox_program_is_executable(candidate: &Path) -> bool {
     {
         candidate
             .metadata()
-            .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+            .is_ok_and(|metadata| metadata.is_file())
+            && rustix::fs::accessat(
+                rustix::fs::CWD,
+                candidate,
+                rustix::fs::Access::EXEC_OK,
+                rustix::fs::AtFlags::EACCESS,
+            )
+            .is_ok()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1596,10 +1611,15 @@ async fn read_supervised_stdout(
             },
         },
         status,
-        if matches!(status, SupervisorStatus::Exited { code: Some(0), .. }) {
-            launcher_trailer.map(|(_, status)| status)
-        } else {
-            None
+        match status {
+            SupervisorStatus::Exited { code: Some(0), .. } => {
+                launcher_trailer.map(|(_, status)| status)
+            }
+            SupervisorStatus::Exited { .. }
+            | SupervisorStatus::TimedOut
+            | SupervisorStatus::Cancelled
+            | SupervisorStatus::SpawnFailed { .. }
+            | SupervisorStatus::SupervisionFailed { .. } => None,
         },
     ))
 }
@@ -1820,9 +1840,13 @@ impl Drop for OuterProcessTreeGuard {
 }
 
 #[cfg(target_os = "linux")]
-fn preflight_outer_process_tree() -> Result<OuterTrackedProcess, ()> {
-    outer_process_children(std::process::id()).map_err(|_| ())?;
-    outer_pin_process(std::process::id())?.ok_or(())
+fn preflight_outer_process_tree(deadline: Instant) -> Result<OuterTrackedProcess, ()> {
+    outer_process_children_until(std::process::id(), None, Some(deadline)).map_err(|_| ())?;
+    if Instant::now() >= deadline {
+        return Err(());
+    }
+    let process = outer_pin_process(std::process::id())?.ok_or(())?;
+    (Instant::now() < deadline).then_some(process).ok_or(())
 }
 
 #[cfg(target_os = "linux")]
@@ -2060,11 +2084,6 @@ enum OuterProcessChildrenError {
 }
 
 #[cfg(target_os = "linux")]
-fn outer_process_children(pid: u32) -> Result<Vec<u32>, OuterProcessChildrenError> {
-    outer_process_children_until(pid, None, None)
-}
-
-#[cfg(target_os = "linux")]
 fn outer_process_children_until(
     pid: u32,
     stop: Option<&AtomicBool>,
@@ -2145,10 +2164,14 @@ async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> Proc
 
 #[cfg(target_os = "linux")]
 async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
-    let request_deadline = tokio::time::Instant::now() + request.timeout;
+    let request_deadline = Instant::now() + request.timeout;
+    let asynchronous_request_deadline = tokio::time::Instant::from_std(request_deadline);
     let status_protocol = request.status_protocol;
-    let outer_reservation = match preflight_outer_process_tree() {
+    let outer_reservation = match preflight_outer_process_tree(request_deadline) {
         Ok(reservation) => reservation,
+        Err(()) if Instant::now() >= request_deadline => {
+            return empty_process_result(ProcessOutcome::TimedOut);
+        }
         Err(()) => {
             return empty_process_result(ProcessOutcome::SpawnFailed {
                 reason: ProcessSpawnFailure::ProcessTreeUnsupported,
@@ -2241,7 +2264,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         status_protocol,
     ));
     let mut stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
-    let startup = tokio::time::timeout_at(request_deadline, async {
+    let startup = tokio::time::timeout_at(asynchronous_request_deadline, async {
         let control = control.as_mut().ok_or(())?;
         control.write_all(&[1]).await.map_err(|_| ())
     })
@@ -2264,7 +2287,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             }
         });
     }
-    let root_exit = tokio::time::timeout_at(request_deadline, async {
+    let root_exit = tokio::time::timeout_at(asynchronous_request_deadline, async {
         loop {
             outer_tree.watcher_is_supported()?;
             match outer_tree.root_exited() {
@@ -2689,6 +2712,12 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn outer_process_tree_preflight_honors_the_request_deadline() {
+        assert!(preflight_outer_process_tree(Instant::now()).is_err());
+    }
+
     struct ReplacementWorkspace {
         path: PathBuf,
         retired: PathBuf,
@@ -2725,7 +2754,7 @@ mod tests {
             let expected_shell = executable_directory.join("sh");
             std::fs::write(&blocked_shell, b"blocked")?;
             std::fs::write(&expected_shell, b"executable")?;
-            std::fs::set_permissions(&blocked_shell, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(&blocked_shell, std::fs::Permissions::from_mode(0o001))?;
             std::fs::set_permissions(&expected_shell, std::fs::Permissions::from_mode(0o700))?;
             let search_path = std::env::join_paths([blocked_directory, executable_directory])?;
             Ok(Self {
@@ -2901,6 +2930,37 @@ mod tests {
         assert!(matches!(
             result,
             Err(ExecToolConstructionError::SupervisorProgram { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_runner_rejects_a_relative_supervisor_before_opening_it() {
+        let result = TokioProcessRunner::try_new(Path::new("relative-supervisor"));
+
+        assert!(matches!(
+            result,
+            Err(ExecToolConstructionError::SupervisorProgram { source: None, .. })
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_runner_rejects_a_supervisor_fifo_without_blocking() -> Result<(), Box<dyn Error>> {
+        let directory = ReplacementWorkspace::new()?;
+        let fifo = directory.path().join("supervisor");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )?;
+
+        let result = TokioProcessRunner::try_new(&fifo);
+
+        assert!(matches!(
+            result,
+            Err(ExecToolConstructionError::SupervisorProgram { source: None, .. })
         ));
         Ok(())
     }

@@ -724,7 +724,7 @@ mod linux {
 
     fn terminate_child(child: &mut std::process::Child) {
         let _ = child.kill();
-        let _ = child.wait();
+        let _ = wait_for_root_until(child, None, Instant::now() + REAP_DEADLINE);
     }
 
     fn supervise(

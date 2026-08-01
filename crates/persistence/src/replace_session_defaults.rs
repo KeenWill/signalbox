@@ -44,9 +44,9 @@ pub enum ReplaceSessionDefaultsHandlingOutcome {
     Applied(ReplaceSessionDefaultsAppliedResult),
     /// First handling or equal replay returns the recorded rejection.
     Rejected(ReplaceSessionDefaultsRejectedResult),
-    /// The identifier already has a structurally different owner-global use.
+    /// The identifier already has a structurally different user-global use.
     ConflictingReuse {
-        /// The owner-global identifier whose existing meaning is retained.
+        /// The user-global identifier whose existing meaning is retained.
         command_id: DurableCommandId,
     },
     /// An unstated prompt member met a prompted current epoch under the CAS
@@ -134,7 +134,7 @@ pub enum ReplaceSessionDefaultsRepositoryError {
     },
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
-        /// The owner-global identifier that names another kind.
+        /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
     /// Durable records cannot reconstruct the requested domain value.
@@ -209,7 +209,7 @@ impl ReplaceSessionDefaultsRepository {
 
     /// Claims and handles an unseen command, or resolves its recorded meaning.
     ///
-    /// Owner-global command lookup is the first durable read. Mutable session
+    /// User-global command lookup is the first durable read. Mutable session
     /// state is consulted only for an unseen identifier.
     pub async fn handle(
         &self,
