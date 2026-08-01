@@ -1469,11 +1469,14 @@ mod tests {
     }
 
     #[test]
-    fn append_cycle_checks_do_not_copy_postgres_arrays() {
+    fn append_cycle_checks_use_one_linear_session_local_worklist() {
         assert!(SESSION_PLAN_MIGRATION.contains("session_plan_event_advances_projection"));
         assert!(!SESSION_PLAN_MIGRATION.contains("session_plan_dependency_cycle_exists"));
         assert!(!SESSION_PLAN_MIGRATION.contains("array_append"));
         assert!(!SESSION_PLAN_MIGRATION.contains("trim_array"));
+        assert!(SESSION_PLAN_MIGRATION.contains("pg_temp.session_plan_dependency_visit"));
+        assert!(SESSION_PLAN_MIGRATION.contains("pg_temp.session_plan_dependency_stack"));
+        assert!(!SESSION_PLAN_MIGRATION.contains("dependency_path(origin, node)"));
     }
 
     #[test]

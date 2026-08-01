@@ -806,6 +806,36 @@ fn read_rejects_a_self_dependency_from_the_port() {
 }
 
 #[test]
+fn read_rejects_an_absent_dependency_from_a_complete_uncursored_page() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let absent_dependency = entry(999);
+    let current = PlanEntry::with_dependencies(
+        dependent,
+        text(INITIAL_TEXT),
+        PlanStatus::Pending,
+        vec![absent_dependency],
+        PlanReadiness::Waiting,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![current],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("a complete uncursored page must contain every dependency entry");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
 fn read_rejects_a_page_local_dependency_cycle_from_the_port() {
     let dispatch = correlation(10);
     let first = entry(1);
@@ -923,7 +953,7 @@ fn read_output_exposes_dependencies_and_waiting_readiness() {
     let page = PlanReadPage::new(
         dispatch.session(),
         vec![current],
-        PlanPageCompleteness::Complete,
+        PlanPageCompleteness::Truncated,
         None,
     );
     let port = FakePort::reading(page);

@@ -299,6 +299,130 @@ BEGIN
 END;
 $$;
 
+-- Validate the complete dependency component reachable from the proposed
+-- edge's roots. Session-local work tables give the depth-first traversal one
+-- durable cursor per active node without copying a path for every branch.
+CREATE FUNCTION inspect_session_plan_dependency_graph(
+    target_session_id uuid,
+    target_entry_ordinal numeric(20, 0),
+    target_dependency_ordinal numeric(20, 0)
+)
+RETURNS TABLE (graph_cyclic boolean, closes_cycle boolean)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    root_node numeric(20, 0);
+    detects_proposed_cycle boolean;
+    stack_depth bigint;
+    current_node numeric(20, 0);
+    after_dependency numeric(20, 0);
+    next_dependency numeric(20, 0);
+    edge_found boolean;
+    child_finished boolean;
+    child_seen boolean;
+BEGIN
+    CREATE TEMP TABLE IF NOT EXISTS pg_temp.session_plan_dependency_visit (
+        node numeric(20, 0) PRIMARY KEY,
+        finished boolean NOT NULL
+    ) ON COMMIT DELETE ROWS;
+    CREATE TEMP TABLE IF NOT EXISTS pg_temp.session_plan_dependency_stack (
+        depth bigint PRIMARY KEY,
+        node numeric(20, 0) NOT NULL,
+        next_dependency_ordinal numeric(20, 0)
+    ) ON COMMIT DELETE ROWS;
+    DELETE FROM pg_temp.session_plan_dependency_stack;
+    DELETE FROM pg_temp.session_plan_dependency_visit;
+
+    graph_cyclic := FALSE;
+    closes_cycle := FALSE;
+    <<root_scan>>
+    FOR root_node, detects_proposed_cycle IN
+        SELECT root.node, root.detects_cycle
+          FROM (
+              VALUES
+                  (target_dependency_ordinal, TRUE),
+                  (target_entry_ordinal, FALSE)
+          ) AS root(node, detects_cycle)
+    LOOP
+        IF EXISTS (
+            SELECT 1
+              FROM pg_temp.session_plan_dependency_visit AS visit
+             WHERE visit.node = root_node
+        ) THEN
+            CONTINUE;
+        END IF;
+
+        INSERT INTO pg_temp.session_plan_dependency_visit (node, finished)
+        VALUES (root_node, FALSE);
+        stack_depth := 1;
+        INSERT INTO pg_temp.session_plan_dependency_stack (
+            depth, node, next_dependency_ordinal
+        )
+        VALUES (stack_depth, root_node, NULL);
+
+        WHILE stack_depth > 0 LOOP
+            SELECT stack.node, stack.next_dependency_ordinal
+              INTO current_node, after_dependency
+              FROM pg_temp.session_plan_dependency_stack AS stack
+             WHERE stack.depth = stack_depth;
+            SELECT edge.dependency_ordinal
+              INTO next_dependency
+              FROM session_plan_current_dependency AS edge
+             WHERE edge.session_id = target_session_id
+               AND edge.entry_ordinal = current_node
+               AND (
+                   after_dependency IS NULL
+                   OR edge.dependency_ordinal > after_dependency
+               )
+             ORDER BY edge.dependency_ordinal
+             LIMIT 1;
+            edge_found := FOUND;
+
+            IF NOT edge_found THEN
+                UPDATE pg_temp.session_plan_dependency_visit AS visit
+                   SET finished = TRUE
+                 WHERE visit.node = current_node;
+                DELETE FROM pg_temp.session_plan_dependency_stack AS stack
+                 WHERE stack.depth = stack_depth;
+                stack_depth := stack_depth - 1;
+                CONTINUE;
+            END IF;
+
+            UPDATE pg_temp.session_plan_dependency_stack AS stack
+               SET next_dependency_ordinal = next_dependency
+             WHERE stack.depth = stack_depth;
+            IF detects_proposed_cycle
+                AND next_dependency = target_entry_ordinal
+            THEN
+                closes_cycle := TRUE;
+            END IF;
+
+            SELECT visit.finished
+              INTO child_finished
+              FROM pg_temp.session_plan_dependency_visit AS visit
+             WHERE visit.node = next_dependency;
+            child_seen := FOUND;
+            IF child_seen THEN
+                IF NOT child_finished THEN
+                    graph_cyclic := TRUE;
+                    EXIT root_scan;
+                END IF;
+                CONTINUE;
+            END IF;
+
+            INSERT INTO pg_temp.session_plan_dependency_visit (node, finished)
+            VALUES (next_dependency, FALSE);
+            stack_depth := stack_depth + 1;
+            INSERT INTO pg_temp.session_plan_dependency_stack (
+                depth, node, next_dependency_ordinal
+            )
+            VALUES (stack_depth, next_dependency, NULL);
+        END LOOP;
+    END LOOP root_scan;
+    RETURN NEXT;
+END;
+$$;
+
 CREATE FUNCTION guard_session_plan_event_append()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -497,43 +621,13 @@ BEGIN
             END IF;
         END IF;
 
-        WITH RECURSIVE relevant_node(node) AS (
-            SELECT root.node
-              FROM (
-                  VALUES (NEW.entry_ordinal), (NEW.dependency_ordinal)
-              ) AS root(node)
-            UNION
-            SELECT edge.dependency_ordinal
-              FROM relevant_node
-              JOIN session_plan_current_dependency AS edge
-                ON edge.session_id = NEW.session_id
-               AND edge.entry_ordinal = relevant_node.node
-        ),
-        dependency_path(origin, node) AS (
-            SELECT edge.entry_ordinal, edge.dependency_ordinal
-              FROM relevant_node
-              JOIN session_plan_current_dependency AS edge
-                ON edge.session_id = NEW.session_id
-               AND edge.entry_ordinal = relevant_node.node
-            UNION
-            SELECT dependency_path.origin, edge.dependency_ordinal
-              FROM dependency_path
-              JOIN session_plan_current_dependency AS edge
-                ON edge.session_id = NEW.session_id
-               AND edge.entry_ordinal = dependency_path.node
-        )
-        SELECT EXISTS (
-                   SELECT 1
-                     FROM dependency_path
-                    WHERE origin = node
-               ),
-               EXISTS (
-                   SELECT 1
-                     FROM dependency_path
-                    WHERE origin = NEW.dependency_ordinal
-                      AND node = NEW.entry_ordinal
-               )
-          INTO graph_cyclic, closes_cycle;
+        SELECT inspection.graph_cyclic, inspection.closes_cycle
+          INTO graph_cyclic, closes_cycle
+          FROM inspect_session_plan_dependency_graph(
+              NEW.session_id,
+              NEW.entry_ordinal,
+              NEW.dependency_ordinal
+          ) AS inspection;
         IF graph_cyclic THEN
             RAISE EXCEPTION 'session plan dependency graph is already cyclic'
                 USING ERRCODE = '23514',
@@ -636,43 +730,13 @@ BEGIN
                         CONSTRAINT = 'session_plan_dependency_limit';
             END IF;
 
-            WITH RECURSIVE relevant_node(node) AS (
-                SELECT root.node
-                  FROM (
-                      VALUES (NEW.entry_ordinal), (NEW.dependency_ordinal)
-                  ) AS root(node)
-                UNION
-                SELECT edge.dependency_ordinal
-                  FROM relevant_node
-                  JOIN session_plan_current_dependency AS edge
-                    ON edge.session_id = NEW.session_id
-                   AND edge.entry_ordinal = relevant_node.node
-            ),
-            dependency_path(origin, node) AS (
-                SELECT edge.entry_ordinal, edge.dependency_ordinal
-                  FROM relevant_node
-                  JOIN session_plan_current_dependency AS edge
-                    ON edge.session_id = NEW.session_id
-                   AND edge.entry_ordinal = relevant_node.node
-                UNION
-                SELECT dependency_path.origin, edge.dependency_ordinal
-                  FROM dependency_path
-                  JOIN session_plan_current_dependency AS edge
-                    ON edge.session_id = NEW.session_id
-                   AND edge.entry_ordinal = dependency_path.node
-            )
-            SELECT EXISTS (
-                       SELECT 1
-                         FROM dependency_path
-                        WHERE origin = node
-                   ),
-                   EXISTS (
-                       SELECT 1
-                         FROM dependency_path
-                        WHERE origin = NEW.dependency_ordinal
-                          AND node = NEW.entry_ordinal
-                   )
-              INTO graph_cyclic, closes_cycle;
+            SELECT inspection.graph_cyclic, inspection.closes_cycle
+              INTO graph_cyclic, closes_cycle
+              FROM inspect_session_plan_dependency_graph(
+                  NEW.session_id,
+                  NEW.entry_ordinal,
+                  NEW.dependency_ordinal
+              ) AS inspection;
             IF graph_cyclic THEN
                 RAISE EXCEPTION 'session plan dependency graph is already cyclic'
                     USING ERRCODE = '23514',

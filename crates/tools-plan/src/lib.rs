@@ -1417,6 +1417,8 @@ fn validate_read_page<PortError>(
         .iter()
         .map(|entry| (entry.id(), entry.status()))
         .collect::<std::collections::HashMap<_, _>>();
+    let complete_uncursored_plan =
+        request.after_entry().is_none() && !page.completeness().is_truncated();
     let mut previous = request.after_entry();
     for entry in page.entries() {
         if previous.is_some_and(|prior| entry.id() <= prior) {
@@ -1430,6 +1432,14 @@ fn validate_read_page<PortError>(
             .dependencies()
             .iter()
             .all(|dependency| dependencies.insert(*dependency))
+        {
+            return Err(PlanExecutorError::PortContract);
+        }
+        if complete_uncursored_plan
+            && entry
+                .dependencies()
+                .iter()
+                .any(|dependency| !page_statuses.contains_key(dependency))
         {
             return Err(PlanExecutorError::PortContract);
         }
