@@ -84,7 +84,7 @@ impl ClassifyOperatorFailure for FakeError {
 
 #[derive(Debug)]
 struct FakePort {
-    append_result: Option<PlanEvent>,
+    append_result: Option<PlanAppendOutcome>,
     read_result: Option<PlanReadPage>,
     append_requests: Vec<PlanAppendRequest>,
     read_requests: Vec<PlanReadRequest>,
@@ -93,7 +93,16 @@ struct FakePort {
 impl FakePort {
     fn appending(result: PlanEvent) -> Self {
         Self {
-            append_result: Some(result),
+            append_result: Some(PlanAppendOutcome::Appended(result)),
+            read_result: None,
+            append_requests: Vec::new(),
+            read_requests: Vec::new(),
+        }
+    }
+
+    fn rejecting(result: PlanAppendRejection) -> Self {
+        Self {
+            append_result: Some(PlanAppendOutcome::Rejected(result)),
             read_result: None,
             append_requests: Vec::new(),
             read_requests: Vec::new(),
@@ -116,7 +125,7 @@ impl SessionPlanPort for FakePort {
     fn append_plan_event(
         &mut self,
         request: PlanAppendRequest,
-    ) -> impl Future<Output = Result<PlanEvent, Self::Error>> + Send {
+    ) -> impl Future<Output = Result<PlanAppendOutcome, Self::Error>> + Send {
         self.append_requests.push(request);
         ready(Ok(self
             .append_result
@@ -156,6 +165,64 @@ fn completed_text(evidence: ToolExecutorEvidence) -> String {
         panic!("fixture execution completes with text")
     };
     result
+}
+
+fn only_entry(plan: &FoldedPlan) -> &PlanEntry {
+    let [current] = plan.entries() else {
+        panic!("one created entry remains visible")
+    };
+    current
+}
+
+fn ordered_pair(plan: &FoldedPlan) -> (&PlanEntry, &PlanEntry) {
+    let [first, later] = plan.entries() else {
+        panic!("two entries remain in creation order")
+    };
+    (first, later)
+}
+
+fn only_append_request(port: &FakePort) -> &PlanAppendRequest {
+    let [observed] = port.append_requests.as_slice() else {
+        panic!("one append request is observed")
+    };
+    observed
+}
+
+fn only_read_request(port: &FakePort) -> &PlanReadRequest {
+    let [observed] = port.read_requests.as_slice() else {
+        panic!("one read request is observed")
+    };
+    observed
+}
+
+fn is_port_contract<PortError>(error: &PlanExecutorError<PortError>) -> bool {
+    matches!(error, PlanExecutorError::PortContract)
+}
+
+fn known_failure_has_detail(evidence: &ToolExecutorEvidence) -> bool {
+    matches!(
+        evidence,
+        ToolExecutorEvidence::KnownFailed { detail: Some(_) }
+    )
+}
+
+fn oversized_read_page(provenance: PlanEventProvenance) -> PlanReadPage {
+    let large_text = text(&"🦀".repeat(MAX_PLAN_TEXT_CHARS));
+    let entries = (1..=MAX_PLAN_READ_ENTRIES)
+        .map(|value| PlanEntry::new(entry(value as u64), large_text.clone(), PlanStatus::Pending))
+        .collect();
+    let events = (1..=MAX_PLAN_HISTORY_EVENTS)
+        .map(|value| {
+            event(
+                value as u64,
+                provenance,
+                PlanEventKind::Created {
+                    text: large_text.clone(),
+                },
+            )
+        })
+        .collect();
+    PlanReadPage::new(entries, false, Some(PlanHistoryPage::new(events, false)))
 }
 
 #[test]
@@ -233,9 +300,7 @@ fn fold_applies_revisions_and_status_moves_without_removing_abandoned_entries() 
     ];
 
     let folded = fold_plan_events(&events).expect("contiguous fixture history folds");
-    let [current] = folded.entries() else {
-        panic!("one created entry remains visible")
-    };
+    let current = only_entry(&folded);
 
     assert_eq!(current.id(), entry(1));
     assert_eq!(current.text(), &revised);
@@ -281,9 +346,7 @@ fn fold_preserves_creation_order_under_interleaved_entry_appends() {
     ];
 
     let folded = fold_plan_events(&events).expect("interleaved fixture history folds");
-    let [first, later] = folded.entries() else {
-        panic!("two entries remain in creation order")
-    };
+    let (first, later) = ordered_pair(&folded);
 
     assert_eq!(first.id(), entry(1));
     assert_eq!(first.text(), &revised_first);
@@ -304,29 +367,29 @@ fn write_uses_trusted_provenance_and_returns_the_assigned_entry_identity() {
             text: text(INITIAL_TEXT),
         },
     );
+    let expected_ordinal = appended.ordinal();
     let port = FakePort::appending(appended);
     let (_catalog, mut executor) = PlanTools::try_new(port)
         .expect("fixture tools compile")
         .into_parts();
-    let operation = decode_operation(
-        PlanToolKind::Write,
-        &arguments(json!({"kind": "create", "text": INITIAL_TEXT})),
-    )
-    .expect("fixture append arguments are valid");
+    let operation =
+        decode_write_operation(&arguments(json!({"kind": "create", "text": INITIAL_TEXT})))
+            .expect("fixture append arguments are valid");
 
     let evidence =
         run_ready(executor.execute_operation(dispatch, operation)).expect("fake append succeeds");
     let output: Value =
         serde_json::from_str(&completed_text(evidence)).expect("tool result is compact JSON");
     let port = executor.into_port();
-    let [observed] = port.append_requests.as_slice() else {
-        panic!("one append request is observed")
-    };
+    let observed = only_append_request(&port);
 
     assert_eq!(observed.session(), dispatch.session());
     assert_eq!(observed.provenance(), provenance);
-    assert_eq!(output["event"]["ordinal"], json!(7));
-    assert_eq!(output["event"]["entry_id"], json!(7));
+    assert_eq!(output["event"]["ordinal"], json!(expected_ordinal.as_u64()));
+    assert_eq!(
+        output["event"]["entry_id"],
+        json!(PlanEntryId::from_creation_ordinal(expected_ordinal).as_u64())
+    );
 }
 
 #[test]
@@ -348,23 +411,128 @@ fn read_reports_long_history_truncation_without_implying_completeness() {
     let (_catalog, mut executor) = PlanTools::try_new(port)
         .expect("fixture tools compile")
         .into_parts();
-    let operation = decode_operation(
-        PlanToolKind::Read,
-        &arguments(json!({"include_history": true})),
-    )
-    .expect("fixture history arguments are valid");
+    let operation = decode_read_operation(&arguments(json!({"include_history": true})))
+        .expect("fixture history arguments are valid");
 
     let evidence = run_ready(executor.execute_operation(dispatch, operation))
         .expect("fake history read succeeds");
     let output: Value =
         serde_json::from_str(&completed_text(evidence)).expect("tool result is compact JSON");
     let port = executor.into_port();
-    let [observed] = port.read_requests.as_slice() else {
-        panic!("one read request is observed")
-    };
+    let observed = only_read_request(&port);
 
     assert_eq!(observed.session(), dispatch.session());
     assert_eq!(observed.history_limit(), Some(MAX_PLAN_HISTORY_EVENTS));
     assert_eq!(output["history_truncated"], json!(true));
     assert_eq!(output["history"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn text_rejects_postgres_null_at_the_checked_boundary() {
+    let rejected = PlanText::try_new("cannot\0persist".to_owned());
+
+    assert_eq!(rejected, Err(PlanTextError::ContainsNull));
+}
+
+#[test]
+fn write_reports_unknown_entry_as_an_authenticated_failure() {
+    let dispatch = correlation(10);
+    let missing = entry(8);
+    let port = FakePort::rejecting(PlanAppendRejection::UnknownEntry { entry: missing });
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "entry_id": missing.as_u64(),
+        "kind": "set_status",
+        "status": "completed"
+    })))
+    .expect("fixture mutation arguments are valid");
+
+    let evidence = run_ready(executor.execute_operation(dispatch, operation))
+        .expect("unknown entry is a known failure");
+    let port = executor.into_port();
+    let observed = only_append_request(&port);
+
+    assert!(known_failure_has_detail(&evidence));
+    assert_eq!(observed.session(), dispatch.session());
+}
+
+#[test]
+fn write_rejects_a_port_event_that_precedes_its_mutation_target() {
+    let dispatch = correlation(10);
+    let provenance = PlanEventProvenance::from_invocation(dispatch);
+    let target = entry(2);
+    let appended = event(
+        1,
+        provenance,
+        PlanEventKind::TextRevised {
+            entry: target,
+            text: text(REVISED_TEXT),
+        },
+    );
+    let port = FakePort::appending(appended);
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "entry_id": target.as_u64(),
+        "kind": "revise",
+        "text": REVISED_TEXT
+    })))
+    .expect("fixture revision arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("self-targeting durable mutation violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_truncates_oversized_encoded_evidence_and_reports_every_omission() {
+    let dispatch = correlation(10);
+    let provenance = PlanEventProvenance::from_invocation(dispatch);
+    let port = FakePort::reading(oversized_read_page(provenance));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_read_operation(&arguments(json!({"include_history": true})))
+        .expect("fixture history arguments are valid");
+
+    let evidence = run_ready(executor.execute_operation(dispatch, operation))
+        .expect("oversized evidence is honestly truncated");
+    let encoded = completed_text(evidence);
+    let output: Value = serde_json::from_str(&encoded).expect("tool result is compact JSON");
+
+    assert!(ToolResultText::try_new(encoded).is_ok());
+    assert_eq!(output["plan_truncated"], json!(true));
+    assert_eq!(output["history_truncated"], json!(true));
+}
+
+#[test]
+fn read_rejects_current_entries_that_contradict_complete_history() {
+    let dispatch = correlation(10);
+    let provenance = PlanEventProvenance::from_invocation(dispatch);
+    let history = PlanHistoryPage::new(
+        vec![event(
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        )],
+        false,
+    );
+    let contradictory = PlanEntry::new(entry(1), text(REVISED_TEXT), PlanStatus::Pending);
+    let port = FakePort::reading(PlanReadPage::new(vec![contradictory], false, Some(history)));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_read_operation(&arguments(json!({"include_history": true})))
+        .expect("fixture history arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("contradictory current state violates the port contract");
+
+    assert!(is_port_contract(&error));
 }

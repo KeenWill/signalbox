@@ -9,7 +9,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     NormalizedToolArguments, SessionId, ToolAttemptDispatchCorrelation, ToolEffectClass,
-    ToolExecutionErrorDetail, ToolPermissionDefault, ToolResultText,
+    ToolExecutionErrorDetail, ToolPermissionDefault, ToolResultText, ToolResultTextFailure,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -29,6 +29,7 @@ pub const MAX_PLAN_READ_ENTRIES: usize = 100;
 pub const MAX_PLAN_HISTORY_EVENTS: usize = 100;
 
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded plan-tool arguments";
+const ENTRY_NOT_FOUND_DETAIL: &str = "plan entry not found";
 
 /// One positive ordinal in a session's append-only plan history.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -125,6 +126,9 @@ impl PlanText {
         if value.is_empty() {
             return Err(PlanTextError::Empty);
         }
+        if value.contains('\0') {
+            return Err(PlanTextError::ContainsNull);
+        }
         let characters = value.chars().count();
         if characters > MAX_PLAN_TEXT_CHARS {
             return Err(PlanTextError::TooLong { characters });
@@ -148,6 +152,8 @@ impl PlanText {
 pub enum PlanTextError {
     /// Empty entries are not meaningful steps.
     Empty,
+    /// PostgreSQL text cannot retain U+0000.
+    ContainsNull,
     /// Text exceeded the declared scalar bound.
     TooLong {
         /// Observed Unicode scalar count.
@@ -159,6 +165,7 @@ impl fmt::Display for PlanTextError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("plan text is empty"),
+            Self::ContainsNull => formatter.write_str("plan text contains U+0000"),
             Self::TooLong { characters } => write!(
                 formatter,
                 "plan text has {characters} characters, above {MAX_PLAN_TEXT_CHARS}"
@@ -438,6 +445,25 @@ impl PlanAppendRequest {
     }
 }
 
+/// Typed evidence that one append was safely refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanAppendRejection {
+    /// A mutation named no created entry in the invoking session.
+    UnknownEntry {
+        /// Missing creation-event identity.
+        entry: PlanEntryId,
+    },
+}
+
+/// Result of attempting one atomic append.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlanAppendOutcome {
+    /// The event was durably appended.
+    Appended(PlanEvent),
+    /// No event was appended for the typed reason.
+    Rejected(PlanAppendRejection),
+}
+
 /// Port request for one bounded current page and optional history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlanReadRequest {
@@ -542,6 +568,32 @@ impl PlanReadPage {
         self.history.as_ref()
     }
 }
+impl PlanReadPage {
+    fn evidence_units(&self) -> usize {
+        self.entries.len()
+            + self
+                .history
+                .as_ref()
+                .map_or(0, |history| history.events.len())
+    }
+
+    fn truncated_to(&self, units: usize) -> Self {
+        let entry_units = units.min(self.entries.len());
+        let history_units = units.saturating_sub(entry_units);
+        let history = self.history.as_ref().map(|history| {
+            let retained = history_units.min(history.events.len());
+            PlanHistoryPage::new(
+                history.events[..retained].to_vec(),
+                history.has_more || retained < history.events.len(),
+            )
+        });
+        Self::new(
+            self.entries[..entry_units].to_vec(),
+            self.has_more_entries || entry_units < self.entries.len(),
+            history,
+        )
+    }
+}
 
 /// Durable boundary for the invoking session's plan.
 pub trait SessionPlanPort: Send {
@@ -552,7 +604,7 @@ pub trait SessionPlanPort: Send {
     fn append_plan_event(
         &mut self,
         request: PlanAppendRequest,
-    ) -> impl Future<Output = Result<PlanEvent, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<PlanAppendOutcome, Self::Error>> + Send;
 
     /// Reads a bounded folded page and optional bounded history.
     fn read_plan(
@@ -619,29 +671,6 @@ impl ToolContract for PlanReadContract {
         "Reads the invoking session's folded current plan and optional bounded event history.";
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PlanToolKind {
-    Write,
-    Read,
-}
-
-impl PlanToolKind {
-    const ALL: [Self; 2] = [Self::Write, Self::Read];
-
-    fn definition(self) -> Result<signalbox_application::ToolDefinition, ToolContractCompileError> {
-        match self {
-            Self::Write => compile_contract_definition::<PlanWriteContract>(
-                ToolPermissionDefault::Auto,
-                ToolEffectClass::ExternalEffect,
-            ),
-            Self::Read => compile_contract_definition::<PlanReadContract>(
-                ToolPermissionDefault::Auto,
-                ToolEffectClass::EffectFree,
-            ),
-        }
-    }
-}
-
 /// A static plan declaration could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlanToolConstructionError {
@@ -680,27 +709,41 @@ impl<Port> PlanTools<Port> {
     pub fn try_new(port: Port) -> Result<Self, PlanToolConstructionError> {
         let invalid_detail = ToolExecutionErrorDetail::try_new(INVALID_ARGUMENTS_DETAIL.to_owned())
             .map_err(|_| PlanToolConstructionError::ErrorDetail)?;
-        let compiled = PlanToolKind::ALL
-            .into_iter()
-            .map(|kind| {
-                let definition = kind.definition().map_err(|error| match error {
-                    ToolContractCompileError::Name => PlanToolConstructionError::Name,
-                    ToolContractCompileError::Schema => PlanToolConstructionError::Schema,
-                })?;
-                Ok(CompiledTool::new(
-                    definition,
-                    PlanArgumentValidator {
-                        kind,
-                        detail: invalid_detail.clone(),
-                    },
-                ))
-            })
-            .collect::<Result<Vec<_>, PlanToolConstructionError>>()?;
+        let entry_not_found_detail =
+            ToolExecutionErrorDetail::try_new(ENTRY_NOT_FOUND_DETAIL.to_owned())
+                .map_err(|_| PlanToolConstructionError::ErrorDetail)?;
+        let write_definition = compile_contract_definition::<PlanWriteContract>(
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::ExternalEffect,
+        )
+        .map_err(map_contract_error)?;
+        let read_definition = compile_contract_definition::<PlanReadContract>(
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        )
+        .map_err(map_contract_error)?;
+        let compiled = vec![
+            CompiledTool::new(
+                write_definition,
+                PlanWriteArgumentValidator {
+                    detail: invalid_detail.clone(),
+                },
+            ),
+            CompiledTool::new(
+                read_definition,
+                PlanReadArgumentValidator {
+                    detail: invalid_detail,
+                },
+            ),
+        ];
         let catalog = CompiledToolCatalog::try_new(compiled)
             .map_err(|_| PlanToolConstructionError::Duplicate)?;
         Ok(Self {
             catalog,
-            executor: PlanExecutor { port },
+            executor: PlanExecutor {
+                port,
+                entry_not_found_detail,
+            },
         })
     }
 
@@ -710,18 +753,40 @@ impl<Port> PlanTools<Port> {
     }
 }
 
+fn map_contract_error(error: ToolContractCompileError) -> PlanToolConstructionError {
+    match error {
+        ToolContractCompileError::Name => PlanToolConstructionError::Name,
+        ToolContractCompileError::Schema => PlanToolConstructionError::Schema,
+    }
+}
+
 #[derive(Clone, Debug)]
-struct PlanArgumentValidator {
-    kind: PlanToolKind,
+struct PlanWriteArgumentValidator {
     detail: ToolExecutionErrorDetail,
 }
 
-impl ToolArgumentValidator for PlanArgumentValidator {
+impl ToolArgumentValidator for PlanWriteArgumentValidator {
     fn validate(
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail> {
-        decode_operation(self.kind, arguments)
+        decode_write_operation(arguments)
+            .map(|_| ())
+            .map_err(|_| self.detail.clone())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PlanReadArgumentValidator {
+    detail: ToolExecutionErrorDetail,
+}
+
+impl ToolArgumentValidator for PlanReadArgumentValidator {
+    fn validate(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolExecutionErrorDetail> {
+        decode_read_operation(arguments)
             .map(|_| ())
             .map_err(|_| self.detail.clone())
     }
@@ -739,56 +804,47 @@ enum PlanOperation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InvalidPlanArguments;
 
-fn decode_operation(
-    kind: PlanToolKind,
+fn decode_write_operation(
     arguments: &NormalizedToolArguments,
 ) -> Result<PlanOperation, InvalidPlanArguments> {
-    match kind {
-        PlanToolKind::Write => {
-            let decoded: PlanWriteArguments =
-                serde_json::from_str(arguments.as_str()).map_err(|_| InvalidPlanArguments)?;
-            let draft = match decoded {
-                PlanWriteArguments::Create { text } => PlanEventDraft::Create {
-                    text: PlanText::try_new(text).map_err(|_| InvalidPlanArguments)?,
-                },
-                PlanWriteArguments::Revise { entry_id, text } => PlanEventDraft::Revise {
-                    entry: PlanEntryId::try_from_u64(entry_id).ok_or(InvalidPlanArguments)?,
-                    text: PlanText::try_new(text).map_err(|_| InvalidPlanArguments)?,
-                },
-                PlanWriteArguments::SetStatus { entry_id, status } => PlanEventDraft::SetStatus {
-                    entry: PlanEntryId::try_from_u64(entry_id).ok_or(InvalidPlanArguments)?,
-                    status,
-                },
-            };
-            Ok(PlanOperation::Write(draft))
-        }
-        PlanToolKind::Read => {
-            let decoded: PlanReadArguments =
-                serde_json::from_str(arguments.as_str()).map_err(|_| InvalidPlanArguments)?;
-            let after_entry = decoded
-                .after_entry_id
-                .map(|value| PlanEntryId::try_from_u64(value).ok_or(InvalidPlanArguments))
-                .transpose()?;
-            Ok(PlanOperation::Read {
-                after_entry,
-                include_history: decoded.include_history,
-            })
-        }
-    }
+    let decoded: PlanWriteArguments =
+        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidPlanArguments)?;
+    let draft = match decoded {
+        PlanWriteArguments::Create { text } => PlanEventDraft::Create {
+            text: PlanText::try_new(text).map_err(|_| InvalidPlanArguments)?,
+        },
+        PlanWriteArguments::Revise { entry_id, text } => PlanEventDraft::Revise {
+            entry: PlanEntryId::try_from_u64(entry_id).ok_or(InvalidPlanArguments)?,
+            text: PlanText::try_new(text).map_err(|_| InvalidPlanArguments)?,
+        },
+        PlanWriteArguments::SetStatus { entry_id, status } => PlanEventDraft::SetStatus {
+            entry: PlanEntryId::try_from_u64(entry_id).ok_or(InvalidPlanArguments)?,
+            status,
+        },
+    };
+    Ok(PlanOperation::Write(draft))
 }
 
-fn kind_for_name(name: &str) -> Option<PlanToolKind> {
-    match name {
-        PLAN_WRITE_NAME => Some(PlanToolKind::Write),
-        PLAN_READ_NAME => Some(PlanToolKind::Read),
-        _ => None,
-    }
+fn decode_read_operation(
+    arguments: &NormalizedToolArguments,
+) -> Result<PlanOperation, InvalidPlanArguments> {
+    let decoded: PlanReadArguments =
+        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidPlanArguments)?;
+    let after_entry = decoded
+        .after_entry_id
+        .map(|value| PlanEntryId::try_from_u64(value).ok_or(InvalidPlanArguments))
+        .transpose()?;
+    Ok(PlanOperation::Read {
+        after_entry,
+        include_history: decoded.include_history,
+    })
 }
 
 /// Executor for both session-scoped plan operations.
 #[derive(Clone, Debug)]
 pub struct PlanExecutor<Port> {
     port: Port,
+    entry_not_found_detail: ToolExecutionErrorDetail,
 }
 
 impl<Port> PlanExecutor<Port> {
@@ -852,10 +908,12 @@ impl<Port: SessionPlanPort> ToolExecutor for PlanExecutor<Port> {
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let correlation = invocation.correlation();
-        let kind = kind_for_name(invocation.request().name().as_str())
-            .ok_or(PlanExecutorError::ArgumentValidationDrift)?;
-        let operation = decode_operation(kind, invocation.request().arguments())
-            .map_err(|_| PlanExecutorError::ArgumentValidationDrift)?;
+        let operation = match invocation.request().name().as_str() {
+            PLAN_WRITE_NAME => decode_write_operation(invocation.request().arguments()),
+            PLAN_READ_NAME => decode_read_operation(invocation.request().arguments()),
+            _ => Err(InvalidPlanArguments),
+        }
+        .map_err(|_| PlanExecutorError::ArgumentValidationDrift)?;
         let evidence = self.execute_operation(correlation, operation).await?;
         Ok(invocation.bind(evidence))
     }
@@ -873,13 +931,25 @@ impl<Port: SessionPlanPort> PlanExecutor<Port> {
                     PlanEventProvenance::from_invocation(correlation),
                     draft,
                 );
-                let event = self
+                let outcome = self
                     .port
                     .append_plan_event(request.clone())
                     .await
                     .map_err(PlanExecutorError::Port)?;
-                validate_append(&request, &event)?;
-                Ok(ToolExecutorEvidence::CompletedText(encode_append(event)?))
+                match outcome {
+                    PlanAppendOutcome::Appended(event) => {
+                        validate_append(&request, &event)?;
+                        Ok(ToolExecutorEvidence::CompletedText(encode_append(event)?))
+                    }
+                    PlanAppendOutcome::Rejected(rejection)
+                        if rejection_matches_request(request.draft(), rejection) =>
+                    {
+                        Ok(ToolExecutorEvidence::KnownFailed {
+                            detail: Some(self.entry_not_found_detail.clone()),
+                        })
+                    }
+                    PlanAppendOutcome::Rejected(_) => Err(PlanExecutorError::PortContract),
+                }
             }
             PlanOperation::Read {
                 after_entry,
@@ -924,7 +994,11 @@ fn event_matches_draft(event: &PlanEvent, draft: &PlanEventDraft) -> bool {
                 entry: requested_entry,
                 text: requested_text,
             },
-        ) => stored_entry == requested_entry && stored_text == requested_text,
+        ) => {
+            stored_entry == requested_entry
+                && stored_text == requested_text
+                && event.ordinal() > stored_entry.creation_ordinal()
+        }
         (
             PlanEventKind::StatusChanged {
                 entry: stored_entry,
@@ -934,7 +1008,11 @@ fn event_matches_draft(event: &PlanEvent, draft: &PlanEventDraft) -> bool {
                 entry: requested_entry,
                 status: requested_status,
             },
-        ) => stored_entry == requested_entry && stored_status == requested_status,
+        ) => {
+            stored_entry == requested_entry
+                && stored_status == requested_status
+                && event.ordinal() > stored_entry.creation_ordinal()
+        }
         (
             PlanEventKind::Created { .. },
             PlanEventDraft::Revise { .. } | PlanEventDraft::SetStatus { .. },
@@ -948,6 +1026,32 @@ fn event_matches_draft(event: &PlanEvent, draft: &PlanEventDraft) -> bool {
             PlanEventDraft::Create { .. } | PlanEventDraft::Revise { .. },
         ) => false,
     }
+}
+
+fn rejection_matches_request(draft: &PlanEventDraft, rejection: PlanAppendRejection) -> bool {
+    match (draft, rejection) {
+        (
+            PlanEventDraft::Revise { entry, .. } | PlanEventDraft::SetStatus { entry, .. },
+            PlanAppendRejection::UnknownEntry {
+                entry: rejected_entry,
+            },
+        ) => *entry == rejected_entry,
+        (PlanEventDraft::Create { .. }, PlanAppendRejection::UnknownEntry { .. }) => false,
+    }
+}
+
+fn complete_history_matches_current(
+    request: PlanReadRequest,
+    page: &PlanReadPage,
+    folded: FoldedPlan,
+) -> bool {
+    let mut expected = folded.into_entries();
+    if let Some(after) = request.after_entry() {
+        expected.retain(|entry| entry.id() > after);
+    }
+    let has_more = expected.len() > request.max_entries();
+    expected.truncate(request.max_entries());
+    page.entries() == expected && page.has_more_entries() == has_more
 }
 
 fn validate_read_page<PortError>(
@@ -975,7 +1079,11 @@ fn validate_read_page<PortError>(
             return Err(PlanExecutorError::PortContract);
         }
         let mut prior_ordinal = None;
-        fold_plan_events(history.events()).map_err(|_| PlanExecutorError::PortContract)?;
+        let folded =
+            fold_plan_events(history.events()).map_err(|_| PlanExecutorError::PortContract)?;
+        if !history.has_more() && !complete_history_matches_current(request, page, folded) {
+            return Err(PlanExecutorError::PortContract);
+        }
 
         for event in history.events() {
             if event.provenance().session() != request.session()
@@ -1091,6 +1199,36 @@ struct ReadOutput {
 }
 
 fn encode_read<PortError>(page: PlanReadPage) -> Result<String, PlanExecutorError<PortError>> {
+    if let Some(encoded) = encode_admitted_read(page.clone())? {
+        return Ok(encoded);
+    }
+    let mut lower = 0_usize;
+    let mut upper = page.evidence_units().saturating_sub(1);
+    while lower < upper {
+        let candidate_units = lower + (upper - lower).div_ceil(2);
+        let candidate = page.truncated_to(candidate_units);
+        if encode_admitted_read(candidate)?.is_some() {
+            lower = candidate_units;
+        } else {
+            upper = candidate_units - 1;
+        }
+    }
+    encode_admitted_read(page.truncated_to(lower))?.ok_or(PlanExecutorError::ResultEncoding)
+}
+
+fn encode_admitted_read<PortError>(
+    page: PlanReadPage,
+) -> Result<Option<String>, PlanExecutorError<PortError>> {
+    let encoded =
+        serde_json::to_string(&read_output(page)).map_err(|_| PlanExecutorError::ResultEncoding)?;
+    match ToolResultText::try_new(encoded) {
+        Ok(admitted) => Ok(Some(admitted.into_string())),
+        Err(error) if matches!(error.failure(), ToolResultTextFailure::TooLarge { .. }) => Ok(None),
+        Err(_) => Err(PlanExecutorError::ResultEncoding),
+    }
+}
+
+fn read_output(page: PlanReadPage) -> ReadOutput {
     let next_after_entry_id = if page.has_more_entries {
         page.entries.last().map(|entry| entry.id().as_u64())
     } else {
@@ -1103,13 +1241,13 @@ fn encode_read<PortError>(page: PlanReadPage) -> Result<String, PlanExecutorErro
         ),
         None => (None, false),
     };
-    encode_result(&ReadOutput {
+    ReadOutput {
         entries: page.entries.into_iter().map(EntryOutput::from).collect(),
         next_after_entry_id,
         plan_truncated: page.has_more_entries,
         history,
         history_truncated,
-    })
+    }
 }
 
 fn encode_result<PortError>(

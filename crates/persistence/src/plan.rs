@@ -9,9 +9,9 @@ use signalbox_domain::{
     ToolAttemptId, ToolDispatchGeneration, ToolRequestId, TurnAttemptId, TurnId,
 };
 use signalbox_tools_plan::{
-    PlanAppendRequest, PlanEntry, PlanEntryId, PlanEvent, PlanEventDraft, PlanEventKind,
-    PlanEventOrdinal, PlanEventProvenance, PlanHistoryPage, PlanReadPage, PlanReadRequest,
-    PlanText, SessionPlanPort,
+    PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntry, PlanEntryId, PlanEvent,
+    PlanEventDraft, PlanEventKind, PlanEventOrdinal, PlanEventProvenance, PlanHistoryPage,
+    PlanReadPage, PlanReadRequest, PlanText, SessionPlanPort,
 };
 use sqlx::{PgPool, Row, postgres::PgRow};
 
@@ -167,7 +167,7 @@ impl SessionPlanRepository {
     pub async fn append(
         &self,
         request: PlanAppendRequest,
-    ) -> Result<PlanEvent, SessionPlanRepositoryError> {
+    ) -> Result<PlanAppendOutcome, SessionPlanRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let next: Decimal = sqlx::query_scalar("SELECT next_session_plan_event_ordinal($1)")
             .bind(request.session().into_uuid())
@@ -177,6 +177,28 @@ impl SessionPlanRepository {
             .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
                 "next event ordinal",
             ))?;
+        if let Some(entry) = draft_target(request.draft()) {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1
+                      FROM session_plan_event
+                     WHERE session_id = $1
+                       AND event_ordinal = $2
+                       AND event_kind = 'created'
+                )",
+            )
+            .bind(request.session().into_uuid())
+            .bind(Decimal::from(entry.as_u64()))
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !exists {
+                transaction.rollback().await?;
+                return Ok(PlanAppendOutcome::Rejected(
+                    PlanAppendRejection::UnknownEntry { entry },
+                ));
+            }
+        }
+
         let encoded = EncodedDraft::new(next, request.draft());
 
         sqlx::query(
@@ -216,11 +238,11 @@ impl SessionPlanRepository {
                 commit_ambiguous,
             }
         })?;
-        Ok(PlanEvent::new(
+        Ok(PlanAppendOutcome::Appended(PlanEvent::new(
             next,
             request.provenance(),
             event_kind_from_draft(request.draft().clone()),
-        ))
+        )))
     }
 
     /// Reads one bounded current page and optional history prefix.
@@ -235,8 +257,13 @@ impl SessionPlanRepository {
         let after = request
             .after_entry()
             .map(|entry| Decimal::from(entry.as_u64()));
-        let current_limit = i64::try_from(request.max_entries() + 1)
-            .map_err(|_| SessionPlanCorruption::InvalidPositiveInteger("current limit"))?;
+        let current_limit = request
+            .max_entries()
+            .checked_add(1)
+            .and_then(|limit| i64::try_from(limit).ok())
+            .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+                "current limit",
+            ))?;
         let mut entries = sqlx::query(CURRENT_PLAN_SQL)
             .bind(request.session().into_uuid())
             .bind(after)
@@ -251,8 +278,12 @@ impl SessionPlanRepository {
 
         let history = match request.history_limit() {
             Some(limit) => {
-                let query_limit = i64::try_from(limit + 1)
-                    .map_err(|_| SessionPlanCorruption::InvalidPositiveInteger("history limit"))?;
+                let query_limit = limit
+                    .checked_add(1)
+                    .and_then(|limit| i64::try_from(limit).ok())
+                    .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+                        "history limit",
+                    ))?;
                 let mut events = sqlx::query(HISTORY_SQL)
                     .bind(request.session().into_uuid())
                     .bind(query_limit)
@@ -279,7 +310,7 @@ impl SessionPlanPort for SessionPlanRepository {
     async fn append_plan_event(
         &mut self,
         request: PlanAppendRequest,
-    ) -> Result<PlanEvent, Self::Error> {
+    ) -> Result<PlanAppendOutcome, Self::Error> {
         self.append(request).await
     }
 
@@ -316,6 +347,15 @@ impl<'a> EncodedDraft<'a> {
                 text: None,
                 status: Some(mapping::plan_status_to_str(*status)),
             },
+        }
+    }
+}
+
+fn draft_target(draft: &PlanEventDraft) -> Option<PlanEntryId> {
+    match draft {
+        PlanEventDraft::Create { .. } => None,
+        PlanEventDraft::Revise { entry, .. } | PlanEventDraft::SetStatus { entry, .. } => {
+            Some(*entry)
         }
     }
 }
