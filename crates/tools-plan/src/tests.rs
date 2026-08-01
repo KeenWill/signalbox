@@ -218,14 +218,21 @@ fn only_read_request(port: &FakePort) -> &PlanReadRequest {
 }
 
 fn is_port_contract<PortError>(error: &PlanExecutorError<PortError>) -> bool {
-    matches!(error, PlanExecutorError::PortContract)
+    match error {
+        PlanExecutorError::PortContract => true,
+        PlanExecutorError::ArgumentValidationDrift
+        | PlanExecutorError::Port(_)
+        | PlanExecutorError::ResultEncoding => false,
+    }
 }
 
 fn known_failure_has_detail(evidence: &ToolExecutorEvidence) -> bool {
-    matches!(
-        evidence,
-        ToolExecutorEvidence::KnownFailed { detail: Some(_) }
-    )
+    match evidence {
+        ToolExecutorEvidence::KnownFailed { detail: Some(_) } => true,
+        ToolExecutorEvidence::CompletedText(_)
+        | ToolExecutorEvidence::KnownFailed { detail: None }
+        | ToolExecutorEvidence::Ambiguous => false,
+    }
 }
 
 fn oversized_read_page(provenance: PlanEventProvenance) -> PlanReadPage {

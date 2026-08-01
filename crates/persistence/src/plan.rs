@@ -22,13 +22,16 @@ const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE R
 const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_ordinal,
        created.entry_ordinal AS entry_ordinal,
        created.entry_text AS created_text,
+       created.entry_status AS created_status,
        revision.event_ordinal AS revision_event_ordinal,
        revision.entry_text AS revised_text,
+       revision.entry_status AS revised_status,
        movement.event_ordinal AS status_event_ordinal,
+       movement.entry_text AS moved_text,
        movement.entry_status AS moved_status
   FROM session_plan_event AS created
   LEFT JOIN LATERAL (
-      SELECT event_ordinal, entry_text
+      SELECT event_ordinal, entry_text, entry_status
         FROM session_plan_event
        WHERE session_id = created.session_id
          AND entry_ordinal = created.event_ordinal
@@ -37,7 +40,7 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
        LIMIT 1
   ) AS revision ON TRUE
   LEFT JOIN LATERAL (
-      SELECT event_ordinal, entry_status
+      SELECT event_ordinal, entry_text, entry_status
         FROM session_plan_event
        WHERE session_id = created.session_id
          AND entry_ordinal = created.event_ordinal
@@ -410,11 +413,16 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
         return Err(SessionPlanCorruption::MismatchedIdentity("current entry identity").into());
     }
     let created_text: String = required(row, "created_text")?;
+    let created_status: Option<String> = row.try_get("created_status")?;
+    if created_status.is_some() {
+        return Err(SessionPlanCorruption::InvalidEventPayload("current creation").into());
+    }
     let revision_ordinal: Option<Decimal> = row.try_get("revision_event_ordinal")?;
     let revised_text: Option<String> = row.try_get("revised_text")?;
-    let text = match (revision_ordinal, revised_text) {
-        (None, None) => created_text,
-        (Some(revision_ordinal), Some(revised_text)) => {
+    let revised_status: Option<String> = row.try_get("revised_status")?;
+    let text = match (revision_ordinal, revised_text, revised_status) {
+        (None, None, None) => created_text,
+        (Some(revision_ordinal), Some(revised_text), None) => {
             let revision_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
                 revision_ordinal,
                 "revision event ordinal",
@@ -429,17 +437,18 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
             }
             revised_text
         }
-        (None, Some(_)) | (Some(_), None) => {
+        _ => {
             return Err(SessionPlanCorruption::InvalidEventPayload("current text revision").into());
         }
     };
     let text = PlanText::try_new(text).map_err(|_| SessionPlanCorruption::InvalidText)?;
 
     let status_ordinal: Option<Decimal> = row.try_get("status_event_ordinal")?;
+    let moved_text: Option<String> = row.try_get("moved_text")?;
     let moved_status: Option<String> = row.try_get("moved_status")?;
-    let status = match (status_ordinal, moved_status) {
-        (None, None) => PlanStatus::Pending,
-        (Some(status_ordinal), Some(moved_status)) => {
+    let status = match (status_ordinal, moved_text, moved_status) {
+        (None, None, None) => PlanStatus::Pending,
+        (Some(status_ordinal), None, Some(moved_status)) => {
             let status_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
                 status_ordinal,
                 "status event ordinal",
@@ -459,7 +468,7 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
                 }
             })?
         }
-        (None, Some(_)) | (Some(_), None) => {
+        _ => {
             return Err(SessionPlanCorruption::InvalidEventPayload("current status change").into());
         }
     };
