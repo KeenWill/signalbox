@@ -7,7 +7,7 @@ use signalbox_application::{
     OperatorFailureClass, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
     ToolExecutionInvocation, ToolExecutor,
 };
-use signalbox_domain::{NormalizedToolArguments, ToolName};
+use signalbox_domain::{NormalizedToolArguments, ToolApprovalPosture, ToolName};
 use signalbox_model_runtime::CredentialAccess;
 use signalbox_persistence::plan::SessionPlanRepository;
 use signalbox_tools_basic::{
@@ -525,10 +525,36 @@ impl DaemonToolCatalog {
         }
         Ok(Self { entries })
     }
+    /// Applies explicit deployment postures and rejects unknown tool names.
+    pub fn with_approval_postures(
+        mut self,
+        postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
+    ) -> Result<Self, UnknownConfiguredApprovalTool> {
+        for (name, posture) in postures {
+            let Some(entry) = self.entries.get_mut(&name) else {
+                return Err(UnknownConfiguredApprovalTool { name });
+            };
+            entry.definition = entry.definition.clone().with_approval_posture(posture);
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DuplicateDaemonTool;
+
+/// A configured posture named no tool in the composed catalog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnknownConfiguredApprovalTool {
+    name: ToolName,
+}
+
+impl UnknownConfiguredApprovalTool {
+    /// Borrows the unknown configured tool name.
+    pub const fn name(&self) -> &ToolName {
+        &self.name
+    }
+}
 
 impl ToolCatalog for DaemonToolCatalog {
     fn definitions(&self) -> Box<[ToolDefinition]> {
@@ -927,6 +953,34 @@ mod tests {
             .iter()
             .map(|definition| definition.name().as_str())
             .collect()
+    }
+
+    #[test]
+    fn composed_catalog_applies_postures_and_rejects_unknown_names() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+        let configured = catalog
+            .clone()
+            .with_approval_postures([(echo.clone(), ToolApprovalPosture::Delegated)])
+            .expect("known tool posture is applied");
+        let unknown = ToolName::try_new(String::from("unknown_tool"))
+            .expect("unknown fixture name is structurally valid");
+        let rejected = catalog
+            .with_approval_postures([(unknown.clone(), ToolApprovalPosture::Human)])
+            .expect_err("unknown tool posture fails closed");
+
+        assert_eq!(
+            configured
+                .definition(&echo)
+                .expect("configured tool remains present")
+                .approval_posture(),
+            Some(ToolApprovalPosture::Delegated)
+        );
+        assert_eq!(rejected.name(), &unknown);
     }
 
     #[test]

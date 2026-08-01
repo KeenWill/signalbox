@@ -450,18 +450,35 @@ one credential-free download from its validated, pinned, bounded public HTTPS
 redirect destination; the pull-request suite has no such exception. Model
 arguments cannot widen either admission rule.
 
-Composition preserves each compiled declaration's permission default and feeds
-it unchanged into the existing durable approval flow. Exact-revision code-host
-and pull-request reads and all workspace reads default to `Auto`; code-host
-mutations, GitHub review publication, and every workspace mutation default to
-`Confirm`. Reading the invoking session's transcript defaults to `Auto`, while
-listing conversations and reading another native or imported conversation
-default to `Confirm`. With the session posture disabled, a confirmed request
-creates the ordinary durable approval wait exposed by the process protocol;
-execution does not enter its transport or filesystem boundary until a
-per-request approval is recorded. A session frozen with `ApproveAll` instead
-receives the existing explicit `SessionBlanket` approval and does not park. No
-composition layer changes a declaration from `Confirm` to `Auto`.
+The optional `[tool_approval_postures]` table maps an exact composed tool name
+to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
+unknown posture values, and startup rejects a structurally valid name that is
+absent from the actually composed catalog. An absent table or omitted tool name
+preserves that declaration's legacy permission-default and session-blanket
+behavior exactly. An explicit posture supersedes that legacy result for the
+request: `auto` records policy automation, `delegated` parks for the approval
+judge, and `human` parks for a user even when the session blanket is enabled.
+
+The optional `[approval_judge]` table has exactly one `selection_id`, which must
+name a configured direct selection and therefore uses the same adapter mapping,
+credential profile, and target-resolution machinery as an ordinary model call.
+When the table is absent, judge preparation selects the judged session call's
+direct selection unchanged; there is no hardcoded lower-tier fallback.
+
+When no explicit posture is configured, composition preserves each compiled
+declaration's permission default and feeds it unchanged into the existing
+durable approval flow. Exact-revision code-host and pull-request reads and all
+workspace reads default to `Auto`; code-host mutations, GitHub review
+publication, and every workspace mutation default to `Confirm`. Reading the
+invoking session's transcript defaults to `Auto`, while listing conversations
+and reading another native or imported conversation default to `Confirm`. With
+the session posture disabled, a confirmed request creates the ordinary durable
+approval wait exposed by the process protocol; execution does not enter its
+transport or filesystem boundary until a per-request approval is recorded. A
+session frozen with `ApproveAll` instead receives the existing explicit
+`SessionBlanket` approval and does not park. Only the explicit
+`[tool_approval_postures]` table changes a declaration's resolved posture;
+family composition itself does not.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and

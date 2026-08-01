@@ -1004,6 +1004,19 @@ async fn run_hub(
         }
     };
 
+    let tool_catalog =
+        match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
+            Ok(catalog) => catalog,
+            Err(_error) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("unknown_tool_approval_posture"),
+                );
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
+
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(

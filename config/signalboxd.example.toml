@@ -73,6 +73,19 @@ workspace_root = "/srv/signalbox/workspace"
 family = "conversations"
 adapter = "application"
 
+# Exact-name overrides are optional. Any composed tool omitted here retains its
+# existing permission default and session-blanket behavior.
+[tool_approval_postures]
+web_fetch = "human"
+github_pull_request_publish_review = "delegated"
+write_file = "delegated"
+
+# An optional fixed judge selection must name one [[models]] selection_id.
+# With no [approval_judge] table, each judge uses the judged session model's
+# direct selection, including its existing adapter and credential mapping.
+# [approval_judge]
+# selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
+
 # Anthropic's most capable widely released model. Hard cap: 128000.
 [[models]]
 selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
