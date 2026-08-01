@@ -448,7 +448,7 @@ admission errors are different: after registry inspection, a missing
 conversation named by the selected imported frontier or a boundary absent from
 that conversation returns without inserting a claim or typed record. Replay
 resolution — reconstruct the recorded command, compare structurally, return the
-recorded result or `ConflictingReuse` — follows the owning page.s contract.
+recorded result or `ConflictingReuse` — follows the owning page's contract.
 
 `load` operations return `None` only for an unseen identifier; a claimed row
 that cannot be reconstructed is corruption, never an unclaimed identifier.

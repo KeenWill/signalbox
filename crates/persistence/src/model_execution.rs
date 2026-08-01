@@ -4118,6 +4118,7 @@ fn encode_tool_decision_source(
     source: ToolDecisionSource,
 ) -> Result<&'static str, ModelCallRepositoryError> {
     match source {
+        // Applied migrations freeze this legacy storage discriminator.
         ToolDecisionSource::UserCommand => Ok("owner_command"),
         ToolDecisionSource::PolicyAuto => Ok("policy_auto"),
         ToolDecisionSource::SessionBlanket => Ok("session_blanket"),

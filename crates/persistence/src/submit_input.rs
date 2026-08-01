@@ -3913,6 +3913,7 @@ struct EncodedActor {
 
 fn encode_actor(actor: Actor) -> EncodedActor {
     match actor {
+        // Applied migrations freeze this legacy storage discriminator.
         Actor::User => EncodedActor {
             kind: "owner",
             turn: None,

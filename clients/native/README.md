@@ -1,6 +1,6 @@
 # Signalbox Native
 
-> Snapshot import (2026-07-23) from the maintainer.s private monorepo, without
+> Snapshot import (2026-07-23) from the maintainer's private monorepo, without
 > history.
 
 Native SwiftUI client for the Signalbox process protocol.

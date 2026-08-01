@@ -9,7 +9,7 @@ use crate::{ToolRequestId, TurnId};
 /// The initiating agency of a durable command or attributed transition.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Actor {
-    /// The single user.s authority, however connected.
+    /// The single user's authority, however connected.
     User,
     /// Agency exercised by model output from one exact turn.
     Model {

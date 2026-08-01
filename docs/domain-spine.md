@@ -1,6 +1,6 @@
 # Domain spine
 
-This file is the maintainer.s primary API-review surface. The crates are
+This file is the maintainer's primary API-review surface. The crates are
 authoritative: this is a hand-maintained mirror of their public API, updated
 from source and never edited in source's place. The source files in
 `crates/domain/src/` and `crates/application/src/` are intentionally dense with

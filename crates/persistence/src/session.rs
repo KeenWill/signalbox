@@ -21,6 +21,7 @@ use crate::mapping::{
     defaults_version_from_numeric, session_id_from_uuid, session_id_to_uuid,
 };
 
+// Applied migrations freeze this legacy storage spelling.
 const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 
