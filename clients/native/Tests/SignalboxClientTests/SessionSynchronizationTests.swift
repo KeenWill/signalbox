@@ -835,33 +835,6 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testTurnActivatedRequestsSideSnapshotRefresh() throws {
-    var transport = try SynchronizationFixture.synchronizedTransport(
-      cursor: SynchronizationFixture.initialCursor
-    )
-
-    let effects = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.turnActivatedEvent(
-          cursor: SynchronizationFixture.unknownCursor
-        )
-      )
-    )
-
-    XCTAssertEqual(
-      SynchronizationFixture.effectNames(effects),
-      ["publish_event", "request_side_snapshot", "arm_deadline"]
-    )
-    XCTAssertEqual(
-      transport.machine.phase,
-      SynchronizationFixture.steady(
-        cursor: SynchronizationFixture.unknownCursor,
-        refreshID: SynchronizationFixture.firstRefreshID
-      )
-    )
-  }
-
   func testContextCompactedRequestsSideSnapshotRefresh() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
@@ -1059,36 +1032,6 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertFalse(
       SynchronizationFixture.effectNames(effects).contains("publish_event")
     )
-    XCTAssertEqual(
-      transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .steady)
-    )
-  }
-
-  func testUnknownTerminalDispositionCountsTowardBufferedUTF8Capacity() throws {
-    var transport = try SynchronizationFixture.synchronizedTransport(
-      cursor: SynchronizationFixture.initialCursor,
-      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(maximumUTF8Bytes: 1)
-    )
-
-    _ = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.completedEvent(
-          cursor: SynchronizationFixture.sideRefreshTriggerCursor
-        )
-      )
-    )
-    let effects = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.unknownTerminalDispositionEvent(
-          cursor: SynchronizationFixture.sideBufferedCursor
-        )
-      )
-    )
-
-    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
     XCTAssertEqual(
       transport.machine.phase,
       SynchronizationFixture.firstRecovery(failedStage: .steady)
@@ -1662,52 +1605,6 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
   }
 
-  func testUnknownFailedCallScalarsCountTowardSnapshotUTF8Capacity() throws {
-    var transport = try SynchronizationFixture.transportInHistory(
-      cursor: SynchronizationFixture.initialCursor,
-      snapshotCapacity: .init(maximumRecords: 10, maximumUTF8Bytes: 1)
-    )
-
-    let effects = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.failedTurnWithUnknownCallScalars()
-      )
-    )
-
-    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
-    XCTAssertEqual(
-      transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .history)
-    )
-  }
-
-  func testUnknownImportedScalarsCountTowardSnapshotUTF8Capacity() throws {
-    var transport = try SynchronizationFixture.transportInHistory(
-      cursor: SynchronizationFixture.initialCursor,
-      snapshotCapacity: .init(maximumRecords: 10, maximumUTF8Bytes: 1)
-    )
-
-    _ = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.modelCallsEnd(count: 0)
-      )
-    )
-    let effects = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.importedEntryWithUnknownScalars()
-      )
-    )
-
-    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
-    XCTAssertEqual(
-      transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .history)
-    )
-  }
-
   func testModelCallUsageRejectsUUIDOrderRegressionWithinATurn() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -1865,6 +1762,109 @@ final class SessionSynchronizationTests: XCTestCase {
       .frame(
         generation: SynchronizationFixture.initialGeneration,
         message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testTurnActivatedRequestsSideSnapshotRefresh() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.turnActivatedEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      ["publish_event", "request_side_snapshot", "arm_deadline"]
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(
+        cursor: SynchronizationFixture.unknownCursor,
+        refreshID: SynchronizationFixture.firstRefreshID
+      )
+    )
+  }
+
+  func testUnknownTerminalDispositionCountsTowardBufferedUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor,
+      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(maximumUTF8Bytes: 1)
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedEvent(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor
+        )
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownTerminalDispositionEvent(
+          cursor: SynchronizationFixture.sideBufferedCursor
+        )
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
+    )
+  }
+
+  func testUnknownFailedCallScalarsCountTowardSnapshotUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(maximumRecords: 10, maximumUTF8Bytes: 1)
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.failedTurnWithUnknownCallScalars()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testUnknownImportedScalarsCountTowardSnapshotUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(maximumRecords: 10, maximumUTF8Bytes: 1)
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.importedEntryWithUnknownScalars()
       )
     )
 

@@ -1315,10 +1315,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
+    case .turnActivated, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
-      return true
-    case .turnActivated:
       return true
     case .sessionCreated, .inputAccepted, .modelCallTransition:
       return false
@@ -1694,10 +1692,8 @@ extension SignalboxTranscriptTurnState {
     switch self {
     case .queued(_, let content):
       return UInt(content.utf8.count)
-    case .activeRunning(_, let currentModelCall):
-      return currentModelCall?.state.retainedUTF8Bytes ?? 0
-    case .failed(_, _, let terminalModelCall):
-      return terminalModelCall?.retainedUTF8Bytes ?? 0
+    case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
+    case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
     case .unknown(_, let payload, let diagnostic):
       return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
