@@ -465,7 +465,10 @@ impl WebSearchResponse {
 
     /// Whether the provider reported another page beyond this response.
     pub const fn more_results_available(&self) -> bool {
-        matches!(self.completeness, WebSearchPageCompleteness::MoreAvailable)
+        match self.completeness {
+            WebSearchPageCompleteness::Complete => false,
+            WebSearchPageCompleteness::MoreAvailable => true,
+        }
     }
 }
 
@@ -926,6 +929,7 @@ fn build_provider_request(
     }
     if request.query().contains(credential_text)
         || form_decoded_contains(request.query(), credential.expose_bytes())
+        || html_decoded_contains(request.query(), credential_text)
     {
         return Err(WebSearchTransportFailure::RequestFailed);
     }
@@ -1182,14 +1186,18 @@ where
             }
         };
         let Some(scrubber) = CredentialScrubber::try_new(&credential) else {
-            report_credential_value_failure(correlation);
+            let reporting = report_credential_value_failure(correlation, &credential);
             let credential_text =
                 std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
             let detail = (!fixed_outer_error_debug_may_contain(credential_text))
                 .then(|| self.credential_unavailable_detail.clone());
-            return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Uncredentialed(
-                ToolExecutorEvidence::KnownFailed { detail },
-            ));
+            if let Err(error) = reporting {
+                return WebSearchRequestOutcome::Error { error, credential };
+            }
+            return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Credentialed {
+                evidence: ToolExecutorEvidence::KnownFailed { detail },
+                credential,
+            });
         };
         let transport_result = self
             .transport
@@ -1428,7 +1436,29 @@ enum CredentialValueFailure {
     Unusable,
 }
 
-fn report_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation) {
+fn report_credential_value_failure(
+    correlation: &ToolAttemptDispatchCorrelation,
+    credential: &CredentialValue,
+) -> Result<(), WebSearchExecutorError> {
+    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    let controlled_event = format!(
+        "WARN signalbox_tools_basic_web_search: web search credential value was unusable failure={:?} session_id={} turn_id={}",
+        CredentialValueFailure::Unusable,
+        correlation.session().as_uuid(),
+        correlation.turn().as_uuid()
+    );
+    if credential_text.is_empty()
+        || compact_formatter_metadata_may_contain(credential_text)
+        || controlled_event.contains(credential_text)
+    {
+        return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+            WebSearchCredentialDiagnostic {
+                rendered: safe_collision_diagnostic(credential_text),
+                failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                transport_failure_class: None,
+            },
+        ));
+    }
     tracing::warn!(
         target: "signalbox_tools_basic_web_search",
         failure = ?CredentialValueFailure::Unusable,
@@ -1436,6 +1466,7 @@ fn report_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation)
         turn_id = %correlation.turn().as_uuid(),
         "web search credential value was unusable"
     );
+    Ok(())
 }
 
 fn report_transport_failure(
@@ -1520,8 +1551,8 @@ fn success_evidence(
     response: WebSearchResponse,
     scrubber: &CredentialScrubber,
 ) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
-    let truncated = response.results.len() > MAX_RETURNED_RESULTS
-        || response.completeness == WebSearchPageCompleteness::MoreAvailable;
+    let truncated =
+        response.results.len() > MAX_RETURNED_RESULTS || response.more_results_available();
     let results = response
         .results
         .into_iter()
@@ -1907,6 +1938,7 @@ mod tests {
     const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
     const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
+    const SHORT_DIAGNOSTIC_COLLISION_KEY: &str = "r";
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
     const TIMESTAMP_COLLISION_KEY: &str = "2026";
@@ -2272,17 +2304,20 @@ mod tests {
         output.text()
     }
 
-    fn capture_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation) -> String {
+    fn capture_credential_value_failure(
+        correlation: &ToolAttemptDispatchCorrelation,
+        credential: &CredentialValue,
+    ) -> (String, Result<(), WebSearchExecutorError>) {
         let output = CapturedTelemetry::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
             .with_writer(output.clone())
             .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            report_credential_value_failure(correlation);
+        let result = tracing::subscriber::with_default(subscriber, || {
+            report_credential_value_failure(correlation, credential)
         });
-        output.text()
+        (output.text(), result)
     }
 
     fn capture_transport_failure(
@@ -3182,6 +3217,19 @@ mod tests {
         ));
     }
 
+    /// INV-035: an HTML-reference spelling of the API key fails before URL
+    /// construction can dispatch it as provider-controlled query text.
+    #[test]
+    fn brave_request_rejects_html_encoded_query_credential_collision() {
+        let failure = build_brave_request(HTML_ENTITY_COLLISION_VALUE, HTML_ENTITY_COLLISION_KEY)
+            .expect_err("HTML-encoded credential query is rejected");
+
+        assert_eq!(
+            failure.class(),
+            WebSearchTransportFailureClass::RequestFailed
+        );
+    }
+
     /// INV-035: a key matching fixed provider URL text fails before the URL
     /// can be dispatched or recorded.
     #[test]
@@ -3483,13 +3531,61 @@ mod tests {
     #[test]
     fn unusable_credential_value_diagnostic_preserves_safe_classification() {
         let correlation = dispatch_correlation();
+        let credential = CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec());
 
-        let diagnostic = capture_credential_value_failure(&correlation);
+        let (diagnostic, result) = capture_credential_value_failure(&correlation, &credential);
 
+        result.expect("safe credential value diagnostic is emitted");
         assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(CREDENTIAL_VALUE_FAILURE_CLASSIFICATION));
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
+    /// INV-035: an unusable one-byte credential is retained while its
+    /// colliding diagnostic is suppressed and safely classified.
+    #[tokio::test]
+    async fn unusable_short_credential_value_diagnostic_is_suppressed() {
+        let correlation = dispatch_correlation();
+        let credential = CredentialValue::new(SHORT_DIAGNOSTIC_COLLISION_KEY.as_bytes().to_vec());
+        let credentials = StaticCredentials {
+            value: SHORT_DIAGNOSTIC_COLLISION_KEY,
+        };
+        let searches = Arc::new(AtomicUsize::new(0));
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("fixture web_search tool compiles")
+                .into_parts();
+
+        let (diagnostic, result) = capture_credential_value_failure(&correlation, &credential);
+        let report_error = result.expect_err("credential collision suppresses the diagnostic");
+        let executor_error = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect_err("short credential returns guarded failure");
+
+        assert!(!diagnostic.contains(SHORT_DIAGNOSTIC_COLLISION_KEY));
+        assert!(!format!("{report_error:?}").contains(SHORT_DIAGNOSTIC_COLLISION_KEY));
+        assert!(
+            !report_error
+                .to_string()
+                .contains(SHORT_DIAGNOSTIC_COLLISION_KEY)
+        );
+        assert!(!format!("{executor_error:?}").contains(SHORT_DIAGNOSTIC_COLLISION_KEY));
+        assert!(
+            !executor_error
+                .to_string()
+                .contains(SHORT_DIAGNOSTIC_COLLISION_KEY)
+        );
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            executor_error.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
     }
 
     #[test]
