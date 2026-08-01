@@ -5,7 +5,7 @@
 //! injected root. The local family has no remote operation.
 
 use std::{
-    cell::Cell,
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     ffi::{OsStr, OsString},
@@ -1350,8 +1350,9 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 let result = LocalGitResult::BranchCreate(branch_create(
                     &repository,
                     &self.repository_authority,
+                    &object_database,
                     arguments,
-                    || self.validate_current_repository_identity(),
+                    || self.validate_current_repository(),
                 )?);
                 return encode_result(&result);
             }
@@ -1729,7 +1730,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository: &Repository,
         arguments: GitBranchSwitchArguments,
     ) -> Result<BranchResult, LocalGitFailure> {
-        self.branch_switch_with_hooks(repository, arguments, || {}, || {}, || {})
+        self.branch_switch_with_hooks(repository, arguments, || {}, || {}, || {}, || {})
     }
 
     #[cfg(test)]
@@ -1739,7 +1740,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         post_checkout: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
-        self.branch_switch_with_hooks(repository, arguments, || {}, post_checkout, || {})
+        self.branch_switch_with_hooks(repository, arguments, || {}, post_checkout, || {}, || {})
     }
 
     #[cfg(test)]
@@ -1749,7 +1750,14 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         before_reference_locks: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
-        self.branch_switch_with_hooks(repository, arguments, before_reference_locks, || {}, || {})
+        self.branch_switch_with_hooks(
+            repository,
+            arguments,
+            before_reference_locks,
+            || {},
+            || {},
+            || {},
+        )
     }
 
     #[cfg(test)]
@@ -1759,13 +1767,38 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         post_index_publish: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
-        self.branch_switch_with_hooks(repository, arguments, || {}, || {}, post_index_publish)
+        self.branch_switch_with_hooks(
+            repository,
+            arguments,
+            || {},
+            || {},
+            post_index_publish,
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    fn branch_switch_with_head_publish_hook<Hook: FnOnce()>(
+        &self,
+        repository: &Repository,
+        arguments: GitBranchSwitchArguments,
+        before_head_publish: Hook,
+    ) -> Result<BranchResult, LocalGitFailure> {
+        self.branch_switch_with_hooks(
+            repository,
+            arguments,
+            || {},
+            || {},
+            || {},
+            before_head_publish,
+        )
     }
 
     fn branch_switch_with_hooks<
         BeforeLocks: FnOnce(),
         PostCheckout: FnOnce(),
         PostIndexPublish: FnOnce(),
+        BeforeHeadPublish: FnOnce(),
     >(
         &self,
         repository: &Repository,
@@ -1773,6 +1806,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         before_reference_locks: BeforeLocks,
         post_checkout: PostCheckout,
         post_index_publish: PostIndexPublish,
+        before_head_publish: BeforeHeadPublish,
     ) -> Result<BranchResult, LocalGitFailure> {
         let mut index_lock = self.bind_locked_index(repository)?;
         if repository.state() != RepositoryState::Clean {
@@ -1914,7 +1948,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         }
         let original_index_bytes = index_lock.original_bytes()?;
         index_lock.write(&mut next_index)?;
-        let checkout_started = Cell::new(false);
+        let updated_paths = RefCell::new(BTreeSet::new());
         let mut checkout = CheckoutBuilder::new();
         checkout
             .safe()
@@ -1923,15 +1957,25 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .disable_filters(true);
         checkout
             .notify_on(CheckoutNotificationType::UPDATED)
-            .notify(|_, _, _, _, _| {
-                checkout_started.set(true);
+            .notify(|_, path, _, _, _| {
+                let mut updated_paths = updated_paths.borrow_mut();
+                if let Some(path) = path {
+                    updated_paths.insert(path.to_owned());
+                } else {
+                    updated_paths.extend(checkout_paths.iter().cloned());
+                }
                 true
             });
         checkout_tree_with_rollback(
             repository,
             current_tree.as_ref(),
-            &checkout_paths,
-            &checkout_started,
+            &target_tree,
+            &updated_paths,
+            CheckoutRollbackContext {
+                filesystem: &self.filesystem,
+                root: &self.root,
+                authority: &self.repository_authority,
+            },
             || {
                 repository
                     .checkout_tree(target_commit.as_object(), Some(&mut checkout))
@@ -1988,9 +2032,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 current_target.unwrap_or(git2::Oid::ZERO_SHA1),
                 target,
                 &signature,
+                || {
+                    before_head_publish();
+                    self.validate_current_repository_identity()
+                },
             )
         })();
-        if publish_result.is_err() {
+        if let Err(failure) = publish_result {
             let worktree_rollback = rollback_checkout_atomically(
                 repository,
                 current_tree.as_ref(),
@@ -2007,7 +2055,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             );
             worktree_rollback?;
             index_rollback?;
-            return Err(LocalGitFailure::Operation);
+            return Err(failure);
         }
         Ok(BranchResult {
             branch: arguments.name,
@@ -2244,12 +2292,12 @@ fn atomic_restore_checkout_path<FileSystem: WorkspaceFileSystem>(
                     RenameFlags::EXCHANGE,
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
-                return Err(LocalGitFailure::Operation);
+                return Ok(());
             }
         }
         (true, false) => {
             if expected.get(path) != Some(&WorktreeRollbackEntry::Missing) {
-                return Err(LocalGitFailure::Operation);
+                return Ok(());
             }
             renameat_with(
                 &original_parent,
@@ -2295,7 +2343,7 @@ fn atomic_restore_checkout_path<FileSystem: WorkspaceFileSystem>(
                     RenameFlags::EXCHANGE,
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
-                return Err(LocalGitFailure::Operation);
+                return Ok(());
             }
             let current_identity = statat(
                 &workspace_parent,
@@ -2315,7 +2363,7 @@ fn atomic_restore_checkout_path<FileSystem: WorkspaceFileSystem>(
         }
         (false, false) => {
             if expected.get(path) != Some(&WorktreeRollbackEntry::Missing) {
-                return Err(LocalGitFailure::Operation);
+                return Ok(());
             }
         }
     }
@@ -2382,53 +2430,39 @@ fn rollback_states_equal(
         })
 }
 
-fn checkout_tree_with_rollback<Checkout: FnOnce() -> Result<(), LocalGitFailure>>(
+struct CheckoutRollbackContext<'context, FileSystem> {
+    filesystem: &'context FileSystem,
+    root: &'context WorkspaceRoot,
+    authority: &'context PinnedRepository,
+}
+
+fn checkout_tree_with_rollback<
+    FileSystem: WorkspaceFileSystem,
+    Checkout: FnOnce() -> Result<(), LocalGitFailure>,
+>(
     repository: &Repository,
     current_tree: Option<&git2::Tree<'_>>,
-    checkout_paths: &BTreeSet<PathBuf>,
-    checkout_started: &Cell<bool>,
+    target_tree: &git2::Tree<'_>,
+    updated_paths: &RefCell<BTreeSet<PathBuf>>,
+    rollback: CheckoutRollbackContext<'_, FileSystem>,
     checkout: Checkout,
 ) -> Result<(), LocalGitFailure> {
     if checkout().is_err() {
-        if checkout_started.get() {
-            rollback_checkout(repository, current_tree, checkout_paths)?;
+        let rollback_paths = updated_paths.borrow().clone();
+        if !rollback_paths.is_empty() {
+            rollback_checkout_atomically(
+                repository,
+                current_tree,
+                target_tree,
+                &rollback_paths,
+                rollback.filesystem,
+                rollback.root,
+                rollback.authority,
+            )?;
         }
         return Err(LocalGitFailure::Operation);
     }
     Ok(())
-}
-
-fn rollback_checkout(
-    repository: &Repository,
-    current_tree: Option<&git2::Tree<'_>>,
-    checkout_paths: &BTreeSet<PathBuf>,
-) -> Result<(), LocalGitFailure> {
-    let generated_tree;
-    let tree = if let Some(current_tree) = current_tree {
-        current_tree
-    } else {
-        let mut empty = Index::new().map_err(|_| LocalGitFailure::Operation)?;
-        let oid = empty
-            .write_tree_to(repository)
-            .map_err(|_| LocalGitFailure::Operation)?;
-        generated_tree = repository
-            .find_tree(oid)
-            .map_err(|_| LocalGitFailure::Operation)?;
-        &generated_tree
-    };
-    let mut checkout = CheckoutBuilder::new();
-    checkout
-        .force()
-        .remove_untracked(true)
-        .update_index(false)
-        .refresh(false)
-        .disable_filters(true);
-    for path in checkout_paths {
-        checkout.path(path);
-    }
-    repository
-        .checkout_tree(tree.as_object(), Some(&mut checkout))
-        .map_err(|_| LocalGitFailure::Operation)
 }
 
 fn restore_index(
@@ -3689,7 +3723,9 @@ fn status<FileSystem: WorkspaceFileSystem>(
                 } else {
                     0o100755
                 };
-                if read.truncated || blob_oid(&read.bytes)? != *oid {
+                if *mode == 0o120000 {
+                    set_worktree_status(&mut raw, path, "type_changed");
+                } else if read.truncated || blob_oid(&read.bytes)? != *oid {
                     set_worktree_status(&mut raw, path, "modified");
                 } else if filemode && observed_mode != *mode {
                     set_worktree_status(&mut raw, path, "type_changed");
@@ -5132,14 +5168,18 @@ fn publish_commit_reference_with_hook<Hook: FnOnce()>(
     Ok(())
 }
 
-fn publish_symbolic_head(
+fn publish_symbolic_head<ValidateRoot>(
     authority: &PinnedRepository,
     mut head_lock: ReferenceLock,
     target_reference: &str,
     old: git2::Oid,
     new: git2::Oid,
     signature: &Signature<'_>,
-) -> Result<(), LocalGitFailure> {
+    validate_root_before_publish: ValidateRoot,
+) -> Result<(), LocalGitFailure>
+where
+    ValidateRoot: FnOnce() -> Result<(), LocalGitFailure>,
+{
     head_lock.prepare_symbolic(authority, target_reference)?;
     let mut log = ReferenceLogLock::acquire(authority, "HEAD")?;
     log.append(
@@ -5149,6 +5189,10 @@ fn publish_symbolic_head(
         "checkout: moving to configured local branch",
     )?;
     log.publish()?;
+    if let Err(failure) = validate_root_before_publish() {
+        let _ = log.rollback();
+        return Err(failure);
+    }
     if head_lock.publish(authority).is_err() {
         let _ = log.rollback();
         return Err(LocalGitFailure::Operation);
@@ -5481,6 +5525,7 @@ fn files_have_equal_content(
 fn branch_create<ValidateRoot>(
     repository: &Repository,
     authority: &PinnedRepository,
+    captured_objects: &Odb<'_>,
     arguments: GitBranchCreateArguments,
     validate_root_before_publish: ValidateRoot,
 ) -> Result<BranchResult, LocalGitFailure>
@@ -5489,20 +5534,12 @@ where
 {
     let commit = resolve_bounded_commit(repository, authority, &arguments.start)?;
     let head = commit.id().to_string();
-    let live_repository = open_pinned_repository(
-        &authority.root,
-        &authority.git_directory,
-        &authority._config,
-    )
-    .map_err(|_| LocalGitFailure::Operation)?;
-    let live_objects = live_repository
-        .odb()
-        .map_err(|_| LocalGitFailure::Operation)?;
+    let absent_objects = Odb::new().map_err(|_| LocalGitFailure::Operation)?;
     persist_objects(
         authority,
         repository,
-        &live_objects,
-        &live_objects,
+        &absent_objects,
+        captured_objects,
         &[PackRoot::Commit(commit.id())],
     )?;
     let reference_name = format!("refs/heads/{}", arguments.name);
@@ -9763,6 +9800,7 @@ mod tests {
         branch_create(
             &pinned_repository,
             &executor.repository_authority,
+            &object_database,
             GitBranchCreateArguments {
                 name: FIX_BRANCH.to_owned(),
                 start: target_text,
@@ -9791,6 +9829,44 @@ mod tests {
     }
 
     #[test]
+    fn branch_create_rejects_an_alternates_fifo_planted_after_object_pinning() {
+        let fixture = Fixture::new();
+        let executor = fixture.executor();
+        let repository = executor
+            .repository_authority
+            .repository()
+            .expect("pinned fixture repository opens");
+        let pinned_objects = PinnedObjectDatabase::capture(&executor.repository_authority)
+            .expect("fixture objects pin");
+        let object_database = Odb::new().expect("fixture object database constructs");
+        pinned_objects
+            .add_to(&object_database)
+            .expect("pinned objects attach");
+        repository
+            .set_odb(&object_database)
+            .expect("pinned object database installs");
+        let alternates = fixture.root().join(".git/objects/info/alternates");
+        mkfifoat(CWD, &alternates, Mode::RUSR | Mode::WUSR)
+            .expect("replacement alternates FIFO constructs");
+
+        let failure = branch_create(
+            &repository,
+            &executor.repository_authority,
+            &object_database,
+            GitBranchCreateArguments {
+                name: FIX_BRANCH.to_owned(),
+                start: fixture.initial.to_string(),
+            },
+            || executor.validate_current_repository(),
+        )
+        .expect_err("mutable alternates rejects before branch publication");
+        fs::remove_file(&alternates).expect("replacement alternates FIFO removes");
+
+        assert_eq!(failure, LocalGitFailure::Repository);
+        assert!(repository.find_reference("refs/heads/agent/fix").is_err());
+    }
+
+    #[test]
     fn branch_create_rejects_a_replaced_refs_hierarchy() {
         let fixture = Fixture::new();
         let executor = fixture.executor();
@@ -9805,10 +9881,14 @@ mod tests {
             .repository_authority
             .repository()
             .expect("pinned fixture repository opens");
+        let object_database = repository
+            .odb()
+            .expect("fixture object database opens before replacement");
 
         let failure = branch_create(
             &repository,
             &executor.repository_authority,
+            &object_database,
             GitBranchCreateArguments {
                 name: FIX_BRANCH.to_owned(),
                 start: fixture.initial.to_string(),
@@ -9838,10 +9918,14 @@ mod tests {
             .repository_authority
             .repository()
             .expect("pinned original repository opens");
+        let object_database = repository
+            .odb()
+            .expect("original object database opens before replacement");
 
         let failure = branch_create(
             &repository,
             &executor.repository_authority,
+            &object_database,
             GitBranchCreateArguments {
                 name: FIX_BRANCH.to_owned(),
                 start: initial.to_string(),
@@ -10869,6 +10953,76 @@ mod tests {
     }
 
     #[test]
+    fn branch_switch_revalidates_the_root_at_head_publication() {
+        let parent = tempfile::tempdir().expect("workspace parent constructs");
+        let root = parent.path().join("workspace");
+        let retired = parent.path().join("retired");
+        fs::create_dir(&root).expect("workspace root constructs");
+        let original = Repository::init(&root).expect("original repository initializes");
+        fs::write(root.join(TRACKED_PATH), INITIAL_CONTENT).expect("original fixture file writes");
+        let initial = commit_all(&original, INITIAL_MESSAGE);
+        let initial_commit = original
+            .find_commit(initial)
+            .expect("original initial commit opens");
+        original
+            .branch(FIX_BRANCH, &initial_commit, false)
+            .expect("fixture branch creates");
+        drop(initial_commit);
+        fs::write(root.join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("original fixture change writes");
+        let original_head = commit_all(&original, MODEL_MESSAGE);
+        let executor = LocalGitTools::try_new(LocalWorkspaceFileSystem, &root, identity())
+            .expect("local Git suite constructs")
+            .into_parts()
+            .1;
+        let mut replacement_head = None;
+
+        let failure = executor
+            .branch_switch_with_head_publish_hook(
+                &executor
+                    .repository_authority
+                    .repository()
+                    .expect("pinned original repository opens"),
+                GitBranchSwitchArguments {
+                    name: FIX_BRANCH.to_owned(),
+                },
+                || {
+                    fs::rename(&root, &retired).expect("original workspace retires");
+                    fs::create_dir(&root).expect("replacement workspace constructs");
+                    let replacement =
+                        Repository::init(&root).expect("replacement repository initializes");
+                    fs::write(root.join(TRACKED_PATH), INITIAL_CONTENT)
+                        .expect("replacement fixture file writes");
+                    replacement_head.replace(commit_all(&replacement, INITIAL_MESSAGE));
+                },
+            )
+            .expect_err("root replacement rejects at HEAD publication");
+        let replacement = Repository::open(&root).expect("replacement repository opens");
+        let retired_repository =
+            Repository::open(&retired).expect("retired original repository opens");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            replacement
+                .head()
+                .expect("replacement HEAD exists")
+                .target(),
+            replacement_head
+        );
+        assert_eq!(
+            retired_repository
+                .head()
+                .expect("retired original HEAD exists")
+                .target(),
+            Some(original_head)
+        );
+        assert_eq!(
+            fs::read(retired.join(TRACKED_PATH)).expect("retired worktree file reads"),
+            INITIAL_CONTENT.as_bytes()
+        );
+    }
+
+    #[test]
     fn branch_switch_rollback_preserves_a_concurrent_worktree_edit() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -11565,6 +11719,26 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_a_tracked_symlink_replaced_by_a_file_as_type_changed() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let link_path = "tracked-link";
+        let initial_target = "first-target";
+        symlink(initial_target, fixture.root().join(link_path))
+            .expect("tracked fixture symlink creates");
+        commit_all(&repository, MODEL_MESSAGE);
+        fs::remove_file(fixture.root().join(link_path)).expect("fixture symlink removes");
+        fs::write(fixture.root().join(link_path), CHANGED_CONTENT)
+            .expect("replacement fixture file writes");
+        let executor = fixture.executor();
+
+        let status = execute(&executor, LocalOperation::Status);
+
+        assert_eq!(status["entries"][0]["path"], link_path);
+        assert_eq!(status["entries"][0]["worktree"], "type_changed");
+    }
+
+    #[test]
     fn worktree_diff_includes_an_untracked_symlink_without_following_it() {
         let fixture = Fixture::new();
         let link_target = "untracked-target";
@@ -12070,21 +12244,35 @@ mod tests {
     fn checkout_error_rolls_back_a_partially_written_worktree() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("target checkout fixture writes");
+        let target = commit_all(&repository, MODEL_MESSAGE);
+        fs::write(fixture.root().join(TRACKED_PATH), INITIAL_CONTENT)
+            .expect("current checkout fixture restores");
         let current_tree = repository
             .find_commit(fixture.initial)
             .expect("fixture initial commit opens")
             .tree()
             .expect("fixture initial tree opens");
-        let checkout_paths = BTreeSet::from([PathBuf::from(TRACKED_PATH)]);
-        let checkout_started = Cell::new(false);
+        let target_tree = repository
+            .find_commit(target)
+            .expect("fixture target commit opens")
+            .tree()
+            .expect("fixture target tree opens");
+        let updated_paths = RefCell::new(BTreeSet::from([PathBuf::from(TRACKED_PATH)]));
+        let executor = fixture.executor();
 
         let failure = checkout_tree_with_rollback(
             &repository,
             Some(&current_tree),
-            &checkout_paths,
-            &checkout_started,
+            &target_tree,
+            &updated_paths,
+            CheckoutRollbackContext {
+                filesystem: &executor.filesystem,
+                root: &executor.root,
+                authority: &executor.repository_authority,
+            },
             || {
-                checkout_started.set(true);
                 fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
                     .expect("partial checkout fixture writes");
                 Err(LocalGitFailure::Operation)
@@ -12096,6 +12284,51 @@ mod tests {
         assert_eq!(
             fs::read(fixture.root().join(TRACKED_PATH)).expect("rolled-back fixture content reads"),
             INITIAL_CONTENT.as_bytes()
+        );
+    }
+
+    #[test]
+    fn checkout_error_preserves_an_edit_after_a_partial_write() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("target checkout fixture writes");
+        let target = commit_all(&repository, MODEL_MESSAGE);
+        let current_tree = repository
+            .find_commit(fixture.initial)
+            .expect("fixture initial commit opens")
+            .tree()
+            .expect("fixture initial tree opens");
+        let target_tree = repository
+            .find_commit(target)
+            .expect("fixture target commit opens")
+            .tree()
+            .expect("fixture target tree opens");
+        let updated_paths = RefCell::new(BTreeSet::from([PathBuf::from(TRACKED_PATH)]));
+        let executor = fixture.executor();
+
+        let failure = checkout_tree_with_rollback(
+            &repository,
+            Some(&current_tree),
+            &target_tree,
+            &updated_paths,
+            CheckoutRollbackContext {
+                filesystem: &executor.filesystem,
+                root: &executor.root,
+                authority: &executor.repository_authority,
+            },
+            || {
+                fs::write(fixture.root().join(TRACKED_PATH), TARGET_CONTENT)
+                    .expect("concurrent checkout fixture edit writes");
+                Err(LocalGitFailure::Operation)
+            },
+        )
+        .expect_err("partial checkout error is reported");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            fs::read(fixture.root().join(TRACKED_PATH)).expect("concurrent fixture edit reads"),
+            TARGET_CONTENT.as_bytes()
         );
     }
 
