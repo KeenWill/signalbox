@@ -103,6 +103,31 @@ DECLARE
     target_kind text;
 BEGIN
     PERFORM 1
+      FROM tool_attempt AS attempt
+      JOIN tool_request AS request
+        ON request.request_id = attempt.request_id
+     WHERE attempt.attempt_id = NEW.provenance_attempt_id
+       AND attempt.request_id = NEW.provenance_request_id
+       AND attempt.issuing_turn_attempt_id =
+            NEW.provenance_issuing_turn_attempt_id
+       AND attempt.dispatch_generation =
+            NEW.provenance_dispatch_generation
+       AND attempt.turn_id = NEW.provenance_turn_id
+       AND attempt.session_id = NEW.session_id
+       AND request.tool_name = 'plan_write'
+       AND attempt.effect_class = 'external_effect'
+       AND attempt.state_kind = 'in_flight'
+       FOR SHARE OF attempt;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'session plan event requires an active plan_write attempt'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'session_plan_event_requires_active_plan_write_attempt';
+    END IF;
+
+    PERFORM 1
       FROM session
      WHERE session_id = NEW.session_id
        FOR NO KEY UPDATE;
