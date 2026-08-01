@@ -602,8 +602,9 @@ mod tests {
         );
     }
 
+    /// INV-020: process-facing metadata replacement fixes user agency.
     #[test]
-    fn replacement_orchestration_fixes_user_actor() {
+    fn inv020_replacement_orchestration_fixes_user_actor() {
         let request =
             ReplaceSessionMetadataRequest::try_new(command_id(1), session_id(2), metadata(true))
                 .expect("ordinary command identity is admitted");

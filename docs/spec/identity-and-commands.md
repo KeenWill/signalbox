@@ -440,8 +440,8 @@ edges.
   despite the accepted adoption path expecting one from the kind's first
   accepted version; the truthful `User` backfill via another kind-scoped storage
   version remains available but unexercised.
-- `CreateSession` actor adoption remains an explicit user choice; v1/v2 leave
-  its attribution implicit.
+- `CreateSession` actor adoption remains an explicit maintainer choice; v1/v2
+  leave its attribution implicit.
 - No recorded-transition record family has adopted actor attribution;
   startup-scan terminalizations do not yet record a `Recovery` actor.
 - Public URL identity encodings remain undecided

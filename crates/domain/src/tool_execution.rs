@@ -1764,12 +1764,23 @@ mod tests {
     /// earliest wait and retain explicit user provenance.
     #[test]
     fn s10_inv010_inv012_inv020_user_decision_advances_to_next_wait() {
+        let batch = awaiting_batch();
+        let current_request = batch
+            .requests()
+            .first()
+            .expect("the fixture has a current approval request")
+            .id();
+        let expected_next_request = batch
+            .requests()
+            .get(1)
+            .expect("the fixture has one following approval request")
+            .id();
         let command = DecideToolRequest::new(
             DurableCommandId::from_uuid(uuid::Uuid::from_u128(20)),
-            tool_request_id(10),
+            current_request,
             ToolApprovalDecision::Approve,
         );
-        let prepared = awaiting_batch()
+        let prepared = batch
             .prepare_user_decision(command, None)
             .expect("the earliest decision needs no continuation yet");
         let DecideToolRequestResult::Applied(applied) = prepared.prepared_command().result() else {
@@ -1786,7 +1797,7 @@ mod tests {
         else {
             panic!("one decision advances to the next approval wait");
         };
-        assert_eq!(*next_request, tool_request_id(11));
+        assert_eq!(*next_request, expected_next_request);
     }
 
     /// S10 / INV-010: durable approval history is exactly a proposal-order

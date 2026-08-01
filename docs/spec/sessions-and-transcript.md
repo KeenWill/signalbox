@@ -860,9 +860,9 @@ Why (seeded before expansion): carrying user attribution from the first metadata
 write preserved a truthful backfill, and the existing closed actor columns now
 admit tool attribution without a semantic migration.
 
-`CreateSession` carries no actor; amending it remains an explicit user choice
-that has not been taken. `Recovery` and `Model` remain representable without an
-implemented command-producing boundary.
+`CreateSession` carries no actor; amending it remains an explicit maintainer
+choice that has not been taken. `Recovery` and `Model` remain representable
+without an implemented command-producing boundary.
 
 ## Implemented transcript projections
 
@@ -901,15 +901,15 @@ edges of [model-call-execution](model-call-execution.md).
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so
-  later adoption needs another kind-scoped storage version; the truthful `Owner`
+  later adoption needs another kind-scoped storage version; the truthful `User`
   backfill that design relies on still exists.
-- `CreateSession` actor attribution remains implicit pending an explicit user
-  amendment choice.
+- `CreateSession` actor attribution remains implicit pending an explicit
+  maintainer amendment choice.
 - `Recovery` and `Model` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
-- The 1 MiB content bound is a provisional user floor; the resource-governance
-  limit question stays open, and non-text content kinds remain unconstructible
-  pending their owning decisions.
+- The 1 MiB content bound is a provisional maintainer floor; the
+  resource-governance limit question stays open, and non-text content kinds
+  remain unconstructible pending their owning decisions.
 - The session system prompt remains one optional bounded string per defaults
   epoch. Composition from base, per-use-case, and instruction-file sources and
   richer named profiles remain the open

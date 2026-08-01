@@ -1376,17 +1376,23 @@ mod tests {
     /// tool-decision command space.
     #[test]
     fn inv012_tool_decision_rejects_reserved_command_identities() {
-        for value in [uuid::Uuid::nil(), uuid::Uuid::max()] {
-            let command_id = DurableCommandId::from_uuid(value);
-            let error = DecideToolRequest::try_new(
-                command_id,
-                tool_request_id(1),
-                ToolApprovalDecision::Approve,
-            )
-            .expect_err("reserved command identities are rejected");
+        let nil_command_id = DurableCommandId::from_uuid(uuid::Uuid::nil());
+        let nil_error = DecideToolRequest::try_new(
+            nil_command_id,
+            tool_request_id(1),
+            ToolApprovalDecision::Approve,
+        )
+        .expect_err("the nil command identity is rejected");
+        assert_eq!(nil_error.command_id(), nil_command_id);
 
-            assert_eq!(error.command_id(), command_id);
-        }
+        let max_command_id = DurableCommandId::from_uuid(uuid::Uuid::max());
+        let max_error = DecideToolRequest::try_new(
+            max_command_id,
+            tool_request_id(1),
+            ToolApprovalDecision::Approve,
+        )
+        .expect_err("the max command identity is rejected");
+        assert_eq!(max_error.command_id(), max_command_id);
     }
 
     /// S10 / INV-020: only an applied user command can restore

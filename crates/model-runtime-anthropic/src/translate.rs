@@ -134,7 +134,7 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
             if message.role != ConversationRole::User || results != expected {
                 return Err(PreparationFailure::UnsupportedOperation {
                     detail: "Anthropic requires one matching tool result for every tool use in \
-                             the immediately following user message"
+                             the immediately following user-role message"
                         .to_string(),
                 });
             }
@@ -249,7 +249,7 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
             );
         if !valid_role {
             return Err(PreparationFailure::UnsupportedOperation {
-                detail: "Anthropic requires tool results in user messages and tool calls or \
+                detail: "Anthropic requires tool results in user-role messages and tool calls or \
                          thinking blocks in assistant messages"
                     .to_string(),
             });
@@ -259,7 +259,7 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                 MessagePart::Text(_) => user_text_seen = true,
                 MessagePart::ToolResult(_) if user_text_seen => {
                     return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "Anthropic requires every tool result in a user message to \
+                        detail: "Anthropic requires every tool result in a user-role message to \
                                  precede text content"
                             .to_string(),
                     });
@@ -349,7 +349,7 @@ mod tests {
     use super::build_request;
 
     /// An operation whose correlation seed is the one knob; targets, one
-    /// user message, and a 64-token ceiling are canonical.
+    /// user-role message, and a 64-token ceiling are canonical.
     fn operation(correlation: &str) -> ModelOperation<String> {
         ModelOperation::new(
             correlation.to_string(),
@@ -968,7 +968,7 @@ mod tests {
         }];
 
         let failure = build_request(&operation)
-            .expect_err("Anthropic accepts tool_result only in a user message");
+            .expect_err("Anthropic accepts tool_result only in a user-role message");
 
         assert!(matches!(
             failure,

@@ -12,7 +12,8 @@ from pathlib import Path
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
-    r"(?i:\bowners?\b|owners?[_-]|(?<=[_-])owners?\b)|"
+    r"(?i:\bowners?\d*(?:\b|[_-])|owners?[_-]|(?<=[_-])owners?\d*(?:\b|[_-]))|"
+    r"\b[Oo]wners?\d+[A-Z][A-Za-z0-9_]*|"
     r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
     r"\b[A-Za-z0-9_]+Owners?(?:[A-Z][A-Za-z0-9_]*)?"
 )
@@ -69,7 +70,11 @@ ALLOWLIST = (
     Allowance(
         "Unix local-socket owner identifiers",
         re.compile(r"^apps/signalboxd/src/local_socket[.]rs$"),
-        re.compile(r"[A-Za-z0-9_]*Owner[A-Za-z0-9_]*|[A-Za-z0-9_]*owner_[A-Za-z0-9_]*", re.IGNORECASE),
+        re.compile(
+            r"OWNER_(?:ONLY_MODE|PRIVATE_DIRECTORY_MODE)|"
+            r"(?:Parent|Ancestor|ExistingSocket)OwnerMismatch|"
+            r"child_owner|ancestor_owner_is_trusted"
+        ),
     ),
     Allowance(
         "immutable applied migration vocabulary",
@@ -79,17 +84,34 @@ ALLOWLIST = (
     Allowance(
         "imported-conversation record owner identifiers",
         re.compile(r"^crates/(?:application/src/conversation_import|domain/src/imported_conversation)[.]rs$"),
-        re.compile(r"\bowner\b|returned_owner", re.IGNORECASE),
+        re.compile(
+            r"returned_owner|"
+            r"^\s*owner:\s*ImportedConversationId,\s*$|"
+            r"^\s*owner,\s*$|"
+            r"^\s*self[.]owner,\s*$|"
+            r"^\s*let owner = conversation\(\d+\);\s*$|"
+            r"self[.]observed[.]push\(\(owner, source[.]to_vec\(\)\)\);|"
+            r"self[.]returned_owner[.]unwrap_or\(owner\)|"
+            r"self[.]convert\(owner, source, next_entry_id\)\?",
+        ),
     ),
     Allowance(
         "context-frontier fixture owner identifiers",
         re.compile(r"^crates/domain/src/context_frontier[.]rs$"),
-        re.compile(r"\bowner\b", re.IGNORECASE),
+        re.compile(
+            r"same owner|"
+            r"^\s*let owner = session_id\(\d+\);\s*$|"
+            r"snapshot\(owner,|"
+            r"owning_session\(\), owner|"
+            r"^\s*owner,\s*$"
+        ),
     ),
     Allowance(
         "native model-call usage ownership",
         re.compile(r"^clients/native/(?:Sources/SignalboxClient/SessionSynchronization|Tests/SignalboxClientTests/SessionSynchronizationTests)[.]swift$"),
-        re.compile(r"[A-Za-z0-9_]*Owner[A-Za-z0-9_]*|\bowner\b", re.IGNORECASE),
+        re.compile(
+            r"[A-Za-z0-9_]*Owner[A-Za-z0-9_]*|terminal owner|case owner|[.]owner"
+        ),
     ),
     Allowance(
         "external imported wire fields",
@@ -102,7 +124,7 @@ ALLOWLIST = (
         re.compile(
             r"[\"']owner_initiated[\"']|[\"']owner_command(?:_id)?[\"']|"
             r"[\"']owner[\"']|`owner`|legacy owner|owner/tool|"
-            r"truthful `Owner`|\bowner_command_id\b"
+            r"\bowner_command_id\b"
         ),
     ),
     Allowance(
@@ -111,7 +133,7 @@ ALLOWLIST = (
         re.compile(
             r"[A-Za-z0-9_]*Ownership[A-Za-z0-9_]*|ownership|\bowned\b|\bowning\b|"
             r"(?:slot|lease|row|record|entry|event|attachment|observation|snapshot|"
-            r"frontier|session|turn|attempt|call|defaults|pointer|workspace|operation|"
+            r"frontier|turn|attempt|call|defaults|pointer|workspace|operation|"
             r"database|component|conversation|source|target|object|aggregate|terminal|"
             r"usage|member|runner|pass|finding) owner|"
             r"owner (?:slot|lease|row|record|entry|event|attachment|observation|snapshot|"

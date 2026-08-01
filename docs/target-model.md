@@ -262,8 +262,8 @@ transports remain future work.
 
 ## Destination features
 
-The user's feature arc beyond the landed model-call substrate. Everything here
-is directional under [Purpose and authority](#purpose-and-authority): each
+The maintainer's feature arc beyond the landed model-call substrate. Everything
+here is directional under [Purpose and authority](#purpose-and-authority): each
 feature reaches code only through its own future owning decisions, none is
 authorized by appearing here, and the [priority order](#priority-order) still
 governs sequencing. The inspirations are the same contemporary agent products
@@ -422,4 +422,5 @@ shape; their implemented behavior is owned by the [living spec](spec/README.md).
    [destination-feature arc](#destination-features) through its owning
    decisions: context management and compaction; inter-session messaging;
    orchestrator sessions, linking, and visibility authority; and persistent goal
-   mode. Their order within this step remains user-directed milestone selection.
+   mode. Their order within this step remains maintainer-directed milestone
+   selection.

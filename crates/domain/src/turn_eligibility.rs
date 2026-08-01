@@ -13464,7 +13464,7 @@ mod tests {
             vec![approval],
             vec![tool_attempt],
             ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
-                attempt: tool_attempt_id(80),
+                attempt: expected_tool_attempt,
             },
         )
         .reconstitute()
@@ -13608,8 +13608,9 @@ mod tests {
             panic!("the opaque tool wait remains an active recovery decision");
         };
         assert!(
-            ambiguous_operations
-                .contains(crate::IssuedOperationRef::ToolAttempt(tool_attempt_id(80)))
+            ambiguous_operations.contains(crate::IssuedOperationRef::ToolAttempt(
+                expected_tool_attempt
+            ))
         );
 
         let retained_request = batch
@@ -13637,7 +13638,7 @@ mod tests {
                 crate::AmbiguousModelCallTurnIdentities::new(frontier(41).id()),
             )
             .expect("the interrupt retains exact tool ambiguity");
-        assert_eq!(reconciled.tool_attempt().attempt(), tool_attempt_id(80));
+        assert_eq!(reconciled.tool_attempt().attempt(), expected_tool_attempt);
         assert_eq!(
             reconciled.attempt().end(),
             &AttemptEnd::AfterCancellation {
@@ -13658,7 +13659,7 @@ mod tests {
         assert_eq!(
             reconciled.tool_result_entries()[0].payload(),
             &crate::SemanticTranscriptEntryPayload::ToolClosed {
-                request: tool_request_id(70),
+                request: expected_request,
             }
         );
         let crate::TurnDisposition::ReconciliationRequired { marker } = reconciled.disposition()
@@ -13668,7 +13669,9 @@ mod tests {
         assert!(
             marker
                 .ambiguous_operations()
-                .contains(crate::IssuedOperationRef::ToolAttempt(tool_attempt_id(80)))
+                .contains(crate::IssuedOperationRef::ToolAttempt(
+                    expected_tool_attempt
+                ))
         );
     }
 
