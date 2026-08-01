@@ -161,10 +161,20 @@ impl ReferenceLock {
     }
 
     pub(super) fn publish_with_hook<Hook: FnOnce()>(
-        mut self,
+        self,
         authority: &PinnedRepository,
         expected: &PinnedReferenceValue,
         before_absent_publish: Hook,
+    ) -> Result<(), LocalGitFailure> {
+        self.publish_with_hooks(authority, expected, before_absent_publish, || {})
+    }
+
+    fn publish_with_hooks<BeforeAbsent: FnOnce(), AfterPublish: FnOnce()>(
+        mut self,
+        authority: &PinnedRepository,
+        expected: &PinnedReferenceValue,
+        before_absent_publish: BeforeAbsent,
+        after_publish: AfterPublish,
     ) -> Result<(), LocalGitFailure> {
         if !self.path_still_owned() || !self.hierarchy_is_current(authority) {
             return Err(LocalGitFailure::Operation);
@@ -183,9 +193,10 @@ impl ReferenceLock {
                 RenameFlags::NOREPLACE,
             )
             .map_err(|_| LocalGitFailure::Operation)?;
+            after_publish();
             let packed_is_current = packed_reference_target(authority, &self.name)
                 .is_ok_and(|current| current == expected_packed);
-            if !packed_is_current {
+            if !packed_is_current || !self.hierarchy_is_current(authority) {
                 if self.published_path_still_owned() {
                     let _ = unlinkat(&self.parent, &self.leaf, AtFlags::empty());
                 }
@@ -202,8 +213,9 @@ impl ReferenceLock {
             RenameFlags::EXCHANGE,
         )
         .map_err(|_| LocalGitFailure::Operation)?;
+        after_publish();
         let displaced = read_reference_leaf(&self.parent, &self.lock_name, authority, &self.name);
-        if displaced.as_ref() != Ok(expected) {
+        if displaced.as_ref() != Ok(expected) || !self.hierarchy_is_current(authority) {
             renameat_with(
                 &self.parent,
                 &self.lock_name,
@@ -227,6 +239,17 @@ impl ReferenceLock {
         }
         self.committed = true;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn publish_with_test_hooks<BeforeAbsent: FnOnce(), AfterPublish: FnOnce()>(
+        self,
+        authority: &PinnedRepository,
+        expected: &PinnedReferenceValue,
+        before_absent_publish: BeforeAbsent,
+        after_publish: AfterPublish,
+    ) -> Result<(), LocalGitFailure> {
+        self.publish_with_hooks(authority, expected, before_absent_publish, after_publish)
     }
 
     #[cfg(test)]

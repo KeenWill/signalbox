@@ -1,11 +1,18 @@
 //! Reference-hierarchy creation and rollback properties.
 
-use std::ffi::OsStr;
+use std::{ffi::OsStr, fs};
 
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
 use crate::failure::LocalGitFailure;
-use crate::reference_lock::open_or_create_ref_directory_with_mode_tracked_and_hook;
+use crate::layout::validate_repository_layout;
+use crate::limits::MAX_REVISION_BYTES;
+use crate::pinning::PinnedRepository;
+use crate::reference_lock::{
+    ReferenceLock, open_or_create_ref_directory_with_mode_tracked_and_hook, open_reference_parent,
+};
+use crate::reference_read::read_reference_leaf_with_test_hook;
+use crate::tests::support::Fixture;
 
 #[test]
 fn created_reference_directory_preserves_post_create_failure_and_removes_owned_path() {
@@ -29,4 +36,65 @@ fn created_reference_directory_preserves_post_create_failure_and_removes_owned_p
 
     assert_eq!(failure, LocalGitFailure::Repository);
     assert!(!parent.path().join(created_name).exists());
+}
+
+#[test]
+fn reference_publication_rolls_back_when_its_hierarchy_is_replaced() {
+    let fixture = Fixture::new();
+    let heads = fixture.root().join(".git/refs/heads");
+    let retired_heads = fixture.root().join(".git/refs/heads.retired");
+    let reference_path = heads.join("topic");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock =
+        ReferenceLock::acquire(&authority, "refs/heads/topic").expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("expected reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_test_hooks(
+            &authority,
+            &expected,
+            || {},
+            || {
+                fs::rename(&heads, &retired_heads).expect("reference hierarchy retires");
+                fs::create_dir(&heads).expect("replacement reference hierarchy constructs");
+            },
+        )
+        .expect_err("replaced hierarchy rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(retired_heads.join("topic"))
+            .expect("rolled-back original reference reads"),
+        format!("{}\n", fixture.initial)
+    );
+    assert!(!heads.join("topic").exists());
+}
+
+#[test]
+fn loose_reference_rejects_growth_after_metadata_capture() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/growing";
+    let reference_path = fixture.root().join(".git").join(name);
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let bound =
+        open_reference_parent(&authority, name, false).expect("fixture reference parent opens");
+    let mut oversized = b"ref: refs/heads/".to_vec();
+    oversized.extend(vec![b'a'; MAX_REVISION_BYTES]);
+
+    let failure =
+        read_reference_leaf_with_test_hook(&bound.directory, &bound.leaf, &authority, name, || {
+            fs::write(&reference_path, &oversized).expect("fixture reference grows in place")
+        })
+        .expect_err("grown reference rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
 }

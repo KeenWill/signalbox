@@ -5,7 +5,7 @@ use std::{fs, os::unix::fs::symlink};
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
 use crate::layout::{reject_administrative_symlinks, validate_repository_layout};
-use crate::pinning::PinnedRepository;
+use crate::pinning::{PinnedRepository, repository_filemode};
 use crate::tests::support::Fixture;
 
 #[test]
@@ -57,4 +57,44 @@ fn repository_open_reads_config_from_the_pinned_administrative_directory() {
     drop(authority);
     fs::remove_dir_all(&replacement_git).expect("replacement administrative directory removes");
     fs::rename(retired_git, git_path).expect("fixture administrative directory restores");
+}
+
+#[test]
+fn repository_config_rejects_a_utf8_bom_before_an_include_section() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        b"\xef\xbb\xbf[include]\npath = /outside/config\n",
+    )
+    .expect("BOM-prefixed fixture config writes");
+
+    let failure =
+        validate_repository_layout(fixture.root()).expect_err("BOM-prefixed include rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_open_parses_the_validated_config_snapshot() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(&config_path, "[core]\nfilemode = true\nbare = false\n")
+        .expect("validated fixture config writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+
+    let authority = PinnedRepository::open_with_hooks(
+        fixture.root(),
+        expected,
+        || {},
+        || {
+            fs::write(&config_path, "[core]\nfilemode = false\nbare = false\n")
+                .expect("live fixture config mutates in place");
+        },
+    )
+    .expect("repository opens from the validated config snapshot");
+    let repository = authority.repository().expect("fixture repository locks");
+    let filemode = repository_filemode(&repository).expect("snapshot filemode reads");
+
+    assert!(filemode);
 }

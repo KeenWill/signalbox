@@ -1,4 +1,4 @@
-use std::{fs, io::Read};
+use std::{collections::HashSet, fs, io::Read};
 
 use rustix::fs::{Mode, OFlags, openat};
 
@@ -76,10 +76,11 @@ pub(super) fn read_packed_references(
         .take((MAX_PACKED_REFS_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| LocalGitFailure::Operation)?;
-    if bytes.len() > MAX_PACKED_REFS_BYTES {
+    if bytes.len() > MAX_PACKED_REFS_BYTES || bytes.len() as u64 != metadata.len() {
         return Err(LocalGitFailure::Operation);
     }
     let mut references = Vec::new();
+    let mut names = HashSet::new();
     for line in bytes.split(|byte| *byte == b'\n') {
         if line.is_empty() || matches!(line.first(), Some(b'#' | b'^')) {
             continue;
@@ -99,6 +100,7 @@ pub(super) fn read_packed_references(
             || std::str::from_utf8(existing)
                 .ok()
                 .is_none_or(|name| !git2::Reference::is_valid_name(name))
+            || !names.insert(existing.to_vec())
         {
             return Err(LocalGitFailure::Operation);
         }

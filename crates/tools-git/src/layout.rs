@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     fs,
-    io::Read,
+    io::{Read, Seek, Write},
     os::{fd::OwnedFd, unix::ffi::OsStrExt},
     path::{Path, PathBuf},
 };
@@ -17,6 +17,11 @@ use crate::limits::{
     MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REVISION_BYTES, MAX_SHALLOW_BYTES,
     MAX_SHALLOW_ENTRIES,
 };
+
+pub(super) struct RepositoryConfig {
+    pub(super) source: fs::File,
+    pub(super) snapshot: fs::File,
+}
 
 pub(super) fn validate_repository_layout(
     root: &Path,
@@ -158,7 +163,7 @@ pub(super) fn reject_escaping_config(
 
 pub(super) fn open_repository_config(
     config_path: &Path,
-) -> Result<fs::File, LocalGitToolsConstructionError> {
+) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
     let descriptor = openat(
         CWD,
         config_path,
@@ -171,7 +176,7 @@ pub(super) fn open_repository_config(
 
 pub(super) fn open_repository_config_at(
     git_directory: &fs::File,
-) -> Result<fs::File, LocalGitToolsConstructionError> {
+) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
     let descriptor = openat(
         git_directory,
         "config",
@@ -184,7 +189,7 @@ pub(super) fn open_repository_config_at(
 
 fn validate_repository_config_descriptor(
     descriptor: OwnedFd,
-) -> Result<fs::File, LocalGitToolsConstructionError> {
+) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
     let mut file = fs::File::from(descriptor);
     let metadata = file
         .metadata()
@@ -197,11 +202,14 @@ fn validate_repository_config_descriptor(
         .take((MAX_REPOSITORY_CONFIG_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    if bytes.len() > MAX_REPOSITORY_CONFIG_BYTES {
+    if bytes.len() > MAX_REPOSITORY_CONFIG_BYTES || bytes.len() as u64 != metadata.len() {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
+    if bytes.starts_with(b"\xef\xbb\xbf") {
         return Err(LocalGitToolsConstructionError::Repository);
     }
     let config =
-        String::from_utf8(bytes).map_err(|_| LocalGitToolsConstructionError::Repository)?;
+        String::from_utf8(bytes.clone()).map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let mut section = "";
     for line in config.lines() {
         let mut normalized = line.trim().to_ascii_lowercase();
@@ -244,5 +252,15 @@ fn validate_repository_config_descriptor(
             return Err(LocalGitToolsConstructionError::Repository);
         }
     }
-    Ok(file)
+    let mut snapshot =
+        tempfile::tempfile().map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    snapshot
+        .write_all(&bytes)
+        .and_then(|()| snapshot.sync_all())
+        .and_then(|()| snapshot.rewind())
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    Ok(RepositoryConfig {
+        source: file,
+        snapshot,
+    })
 }

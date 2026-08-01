@@ -22,6 +22,7 @@ pub(super) struct PinnedRepository {
     pub(super) root: fs::File,
     pub(super) git_directory: fs::File,
     pub(super) _config: fs::File,
+    pub(super) _config_snapshot: fs::File,
     repository: Mutex<Repository>,
 }
 
@@ -53,12 +54,26 @@ impl PinnedRepository {
     where
         Hook: FnOnce(),
     {
+        Self::open_with_hooks(root_path, expected, after_git_directory_open, || {})
+    }
+
+    pub(super) fn open_with_hooks<GitDirectoryHook, ConfigHook>(
+        root_path: &Path,
+        expected: RepositoryIdentity,
+        after_git_directory_open: GitDirectoryHook,
+        after_config_snapshot: ConfigHook,
+    ) -> Result<Self, LocalGitToolsConstructionError>
+    where
+        GitDirectoryHook: FnOnce(),
+        ConfigHook: FnOnce(),
+    {
         let root =
             fs::File::open(root_path).map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let git_directory = fs::File::open(root_path.join(".git"))
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         after_git_directory_open();
         let config = open_repository_config_at(&git_directory)?;
+        after_config_snapshot();
         let observed = RepositoryIdentity {
             root: file_identity(
                 &root
@@ -72,6 +87,7 @@ impl PinnedRepository {
             ),
             config: file_identity(
                 &config
+                    .source
                     .metadata()
                     .map_err(|_| LocalGitToolsConstructionError::Repository)?,
             ),
@@ -79,12 +95,13 @@ impl PinnedRepository {
         if observed != expected {
             return Err(LocalGitToolsConstructionError::Repository);
         }
-        let repository = open_pinned_repository(&root, &git_directory, &config)
+        let repository = open_pinned_repository(&root, &git_directory, &config.snapshot)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         Ok(Self {
             root,
             git_directory,
-            _config: config,
+            _config: config.source,
+            _config_snapshot: config.snapshot,
             repository: Mutex::new(repository),
         })
     }

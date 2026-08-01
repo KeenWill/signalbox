@@ -89,6 +89,16 @@ pub(super) fn read_reference_leaf(
     authority: &PinnedRepository,
     name: &str,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    read_reference_leaf_with_hook(parent, leaf, authority, name, || {})
+}
+
+fn read_reference_leaf_with_hook<Hook: FnOnce()>(
+    parent: &OwnedFd,
+    leaf: &OsStr,
+    authority: &PinnedRepository,
+    name: &str,
+    after_metadata: Hook,
+) -> Result<PinnedReferenceValue, LocalGitFailure> {
     let descriptor = match openat(
         parent,
         leaf,
@@ -111,11 +121,15 @@ pub(super) fn read_reference_leaf(
     if !metadata.is_file() || metadata.len() > MAX_REVISION_BYTES as u64 {
         return Err(LocalGitFailure::Operation);
     }
+    after_metadata();
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     Read::by_ref(&mut file)
         .take((MAX_REVISION_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| LocalGitFailure::Operation)?;
+    if bytes.len() > MAX_REVISION_BYTES || bytes.len() as u64 != metadata.len() {
+        return Err(LocalGitFailure::Operation);
+    }
     let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
     if let Some(symbolic) = bytes.strip_prefix(b"ref: ") {
         let symbolic = std::str::from_utf8(symbolic).map_err(|_| LocalGitFailure::Operation)?;
@@ -129,6 +143,17 @@ pub(super) fn read_reference_leaf(
         .and_then(|value| git2::Oid::from_str(value).ok())
         .ok_or(LocalGitFailure::Operation)?;
     Ok(PinnedReferenceValue::Direct(direct))
+}
+
+#[cfg(test)]
+pub(super) fn read_reference_leaf_with_test_hook<Hook: FnOnce()>(
+    parent: &OwnedFd,
+    leaf: &OsStr,
+    authority: &PinnedRepository,
+    name: &str,
+    after_metadata: Hook,
+) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    read_reference_leaf_with_hook(parent, leaf, authority, name, after_metadata)
 }
 
 pub(super) fn resolve_pinned_reference_chain(

@@ -69,3 +69,53 @@ fn index_lock_rejects_a_replaced_lock_path_without_touching_it() {
     assert_eq!(failure, LocalGitFailure::Operation);
     assert!(replacement.file_type().is_fifo());
 }
+
+#[test]
+fn index_lock_rolls_back_a_replacement_racing_publication() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let original_index = fs::read(&index_path).expect("fixture index reads");
+    let (index_lock, _index) =
+        IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
+
+    let failure = index_lock
+        .commit_with_test_hook(|| {
+            fs::remove_file(&lock_path).expect("owned fixture lock unlinks during publication");
+            mkfifoat(CWD, &lock_path, Mode::RUSR | Mode::WUSR)
+                .expect("racing replacement lock FIFO constructs");
+        })
+        .expect_err("racing replacement rejects publication");
+    let replacement = fs::symlink_metadata(&lock_path).expect("replacement FIFO remains");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(&index_path).expect("rolled-back index reads"),
+        original_index
+    );
+    assert!(replacement.file_type().is_fifo());
+}
+
+#[test]
+fn index_lock_rejects_an_index_replaced_during_publication() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let replacement_index = b"replacement index".to_vec();
+    let (index_lock, _index) =
+        IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
+
+    let failure = index_lock
+        .commit_with_test_hook(|| {
+            fs::write(&index_path, &replacement_index)
+                .expect("racing replacement index writes in place");
+        })
+        .expect_err("racing index replacement rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(&index_path).expect("replacement index reads"),
+        replacement_index
+    );
+    assert!(!lock_path.exists());
+}
