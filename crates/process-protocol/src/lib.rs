@@ -5341,9 +5341,9 @@ mod tests {
             ClientRequest::ResumeGoal {
                 command_id: command(5)?,
                 session_id: uuid(3),
-                guidance: Some(String::from("use the owner decision")),
+                guidance: Some(String::from("use the user decision")),
             },
-            r#"{"type":"resume_goal","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000003","guidance":"use the owner decision"}"#,
+            r#"{"type":"resume_goal","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000003","guidance":"use the user decision"}"#,
         )?;
         assert_client_request_round_trip(
             request(6)?,
