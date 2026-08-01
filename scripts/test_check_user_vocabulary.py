@@ -49,7 +49,10 @@ def main() -> int:
             "owner2_id = nil\n"
             "Owner2Id = nil\n"
             "session_owner2_id = nil\n"
-            "The session owner approves this tool.\n",
+            "The session owner approves this tool.\n"
+            "The owner field identifies the human who approves this tool.\n"
+            "sessionOwner2 = nil\n"
+            "sessionOwner2Id = nil\n",
             encoding="utf-8",
         )
         imported.write_text(
@@ -89,6 +92,12 @@ def main() -> int:
         semantic_session_owner = (
             "docs/spec/example.md:10: The session owner approves this tool."
         )
+        generic_owner_phrase = (
+            "docs/spec/example.md:11: "
+            "The owner field identifies the human who approves this tool."
+        )
+        embedded_numeric = "docs/spec/example.md:12: sessionOwner2 = nil"
+        embedded_continued_numeric = "docs/spec/example.md:13: sessionOwner2Id = nil"
         imported_role_owner = (
             "crates/domain/src/imported_conversation.rs:10: "
             "// The owner approves this tool."
@@ -122,6 +131,15 @@ def main() -> int:
         )
         assert semantic_session_owner in rejected.stdout, (
             f"semantic session-owner violation missing:\n{rejected.stdout}"
+        )
+        assert generic_owner_phrase in rejected.stdout, (
+            f"generic owner-phrase violation missing:\n{rejected.stdout}"
+        )
+        assert embedded_numeric in rejected.stdout, (
+            f"embedded numeric violation missing:\n{rejected.stdout}"
+        )
+        assert embedded_continued_numeric in rejected.stdout, (
+            f"embedded continued numeric violation missing:\n{rejected.stdout}"
         )
         assert imported_role_owner in rejected.stdout, (
             f"imported-file role violation missing:\n{rejected.stdout}"
