@@ -161,6 +161,7 @@ def main() -> int:
         reviewed_unix_lines = (
             "The wrong owner approves this tool.",
             "HumanRoleOwnerMismatch = true",
+            "Owner-only access lets the owner approve this socket.",
         )
         imported_lines = (
             "struct EntryFixture {",
@@ -195,6 +196,7 @@ def main() -> int:
             "}",
             "impl Session {",
             "        fn owner(&self) -> &str {",
+            "let owner = human_owner + repository.owner_end;",
         )
         reviewed_author_lines = ('author: Some(String::from("owner")),',)
         author_violation_lines = (
@@ -293,6 +295,7 @@ def main() -> int:
                     github_accessor_lines[2],
                     github_accessor_lines[4],
                     github_accessor_lines[12],
+                    github_accessor_lines[13],
                 ),
             ),
             *expected_diagnostics(

@@ -94,7 +94,7 @@ ALLOWLIST = (
             r"[\"']owner[\"']:\s*(?:arguments[.]repository\(\)[.]owner\(\)|"
             r"repository[.]owner\(\)|owner)(?:,|\s*$)|"
             r"(?:arguments[.]repository[(][)]|repository)[.]owner[(][)]|"
-            r"let owner = .*owner_end|\bowner_end\b|"
+            r"let owner = &value\[\.\.owner_end\]|\bowner_end\b|"
             r"let \(owner, name\) = repository|"
             r"Exact owner/repository|canonical `owner/repository`|"
             r"`@codex review` request by an owner, member, or collaborator|"
@@ -141,8 +141,9 @@ ALLOWLIST = (
         ),
         re.compile(
             r"(?:socket|listener|directory|file|root|state|parent|sidecar|spool|mode|"
-            r"permissions|fixture|enrollment|durable).*owner-(?:only|private)|"
-            r"owner-(?:only|private).*(?:socket|listener|directory|file|root|state|"
+            r"permissions|fixture|enrollment|durable)(?:(?!owner).)*"
+            r"owner-(?:only|private)|"
+            r"owner-(?:only|private)(?:(?!owner).)*(?:socket|listener|directory|file|root|state|"
             r"parent|sidecar|spool|mode|permissions|fixture|enrollment|durable)|"
             r"unreadable, oversized, wrong-owner, wrong-mode|"
             r"unprivileged different owner cannot make a currently protected directory|"
