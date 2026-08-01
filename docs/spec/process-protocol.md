@@ -24,7 +24,7 @@ number after an out-of-order merge, left stale test or prose references after
 three renumberings, and made this specification name the wrong version twice.
 The protocol therefore follows the same pre-deployment discipline as schema
 baselines: make the correct current shape in place and squash vocabulary history
-at user checkpoints.
+at maintainer checkpoints.
 
 **Freeze condition.** In-place protocol editing ends at the first durable
 deployment: the first client that cannot be rebuilt at will. In practice, that

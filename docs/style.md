@@ -244,7 +244,7 @@ runner-domain follow-up; audit-fixes also owns outstanding items in
 `apps/signalboxd/`, `apps/client/src/`, the model-runtime crates, and the tool
 crates. The persistence remainder is crate-level and integration-test
 documentation outside the hardened `runner_protocol.rs` surface. A follow-up
-enables `missing_docs` at `deny` only after those owners clear the complete
+enables `missing_docs` at `deny` only after those efforts clear the complete
 inventory.
 
 `clippy::wildcard_enum_match_arm` is also not configured. A whole-workspace

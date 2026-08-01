@@ -34,11 +34,19 @@ class Allowance:
             for allowed in self.lines.finditer(line)
         )
 
-ANY_PATH = re.compile(r".")
 ALLOWLIST = (
     Allowance(
         "GitHub owner/repository coordinates and API fields",
-        ANY_PATH,
+        re.compile(
+            r"^(?:apps/client/src/(?:arguments|presentation)[.]rs|"
+            r"apps/client/tests/end_to_end[.]rs|"
+            r"apps/signalboxd/tests/offline_tool_loop[.]rs|"
+            r"crates/application/src/review_orchestration[.]rs|"
+            r"crates/process-protocol/src/lib[.]rs|crates/runner-wire/src/tests[.]rs|"
+            r"crates/tools-code-host/src/code_host/.+[.]rs|"
+            r"crates/tools-github/src/lib[.]rs|"
+            r"docs/spec/(?:configuration-and-credentials|runner-protocol|tool-loop)[.]md)$"
+        ),
         re.compile(
             r"owner/repository|owner/name|repos/owner/|repository\(owner:|\$owner\b|"
             r"[\"']owner[\"']:\s*owner|[\"']owner[\"']\s*:|"
@@ -54,7 +62,14 @@ ALLOWLIST = (
     ),
     Allowance(
         "Unix file-owner and permission semantics",
-        ANY_PATH,
+        re.compile(
+            r"^(?:apps/signalbox-runner/src/(?:configuration|protocol|state)[.]rs|"
+            r"apps/signalboxd/src/(?:local_socket|runner_protocol_runtime)[.]rs|"
+            r"apps/signalboxd/tests/process_substrate[.]rs|"
+            r"crates/model-runtime-codex-cli/tests/live_smoke[.]rs|"
+            r"docs/spec/(?:configuration-and-credentials|process-protocol|"
+            r"runner-protocol)[.]md)$"
+        ),
         re.compile(
             r"owner-(?:only|private)|wrong-owner|"
             r"wrong owner|unprivileged different owner|untrusted owner|effective-user ownership|"
@@ -115,12 +130,26 @@ ALLOWLIST = (
     ),
     Allowance(
         "external imported wire fields",
-        ANY_PATH,
+        re.compile(
+            r"^(?:clients/native/SignalboxNativeTests/SignalboxNativeTests[.]swift|"
+            r"clients/native/Sources/SignalboxApp/MockSignalboxFixtures[.]swift|"
+            r"clients/native/Sources/SignalboxModels/SignalboxEvents[.]swift|"
+            r"clients/native/Tests/SignalboxModelsTests/SignalboxModelsTests[.]swift|"
+            r"crates/model-runtime-codex-cli/tests/live_smoke[.]rs)$"
+        ),
         re.compile(r"isCollapsedByOwner|is_collapsed_by_owner|workspace_owner_usage_nudge"),
     ),
     Allowance(
         "legacy PostgreSQL user encodings",
-        re.compile(r"^(?:crates/persistence/|apps/signalboxd/tests/offline_tool_loop[.]rs$|docs/spec/)"),
+        re.compile(
+            r"^(?:apps/signalboxd/tests/offline_tool_loop[.]rs|"
+            r"crates/persistence/src/(?:create_session|"
+            r"create_session_from_imported_frontier|model_execution|session|"
+            r"session_metadata|submit_input|tool_loop)[.]rs|"
+            r"crates/persistence/tests/(?:conversation_import_postgres|postgres_integration|"
+            r"runner_protocol_postgres|session_metadata_postgres)[.]rs|"
+            r"docs/spec/identity-and-commands[.]md)$"
+        ),
         re.compile(
             r"[\"']owner_initiated[\"']|[\"']owner_command(?:_id)?[\"']|"
             r"[\"']owner[\"']|`owner`|legacy owner|owner/tool|"
@@ -129,16 +158,28 @@ ALLOWLIST = (
     ),
     Allowance(
         "Rust and domain-record ownership phrasing",
-        ANY_PATH,
+        re.compile(
+            r"^(?:apps/signalbox-runner/src/state[.]rs|"
+            r"apps/signalboxd/src/runner_protocol_runtime[.]rs|"
+            r"apps/signalboxd/tests/process_protocol_runtime[.]rs|"
+            r"clients/native/Sources/SignalboxClient/SessionSynchronization[.]swift|"
+            r"crates/application/src/(?:conversation_import|scheduler)[.]rs|"
+            r"crates/domain/src/(?:context_frontier|imported_session|model_execution|"
+            r"replace_session_defaults|review_workflow|runner|session|submit_input|"
+            r"tool_execution|turn_eligibility)[.]rs|"
+            r"crates/persistence/tests/(?:postgres_integration|review_workflow_postgres)[.]rs|"
+            r"docs/spec/(?:conversation-import|model-call-execution|persistence-protocol|"
+            r"process-protocol|review-workflows|sessions-and-transcript|"
+            r"turn-lifecycle-and-scheduling)[.]md)$"
+        ),
         re.compile(
             r"[A-Za-z0-9_]*Ownership[A-Za-z0-9_]*|ownership|\bowned\b|\bowning\b|"
-            r"(?:slot|lease|row|record|entry|event|attachment|observation|snapshot|"
-            r"frontier|turn|attempt|call|defaults|pointer|workspace|operation|"
-            r"database|component|conversation|source|target|object|aggregate|terminal|"
-            r"usage|member|runner|pass|finding) owner|"
-            r"owner (?:slot|lease|row|record|entry|event|attachment|observation|snapshot|"
-            r"frontier|session|turn|attempt|call|projection|facts|field|replacement|"
-            r"usage|path|identity)|owner cross-wired|OwnerMismatch|OwnerIDs?|"
+            r"active slot owner|active-slot owner|slot owner|lease owner|"
+            r"current-defaults pointer owner|selected defaults-row owner|stored defaults-row owner|"
+            r"cross-wired defaults owner|event owner must match|observation owner must match|"
+            r"attachment owner must match|terminal-record owner|owner projection|"
+            r"owner replacement|owner facts|operation-owner facts|"
+            r"owner cross-wired|OwnerMismatch|OwnerIDs?|"
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
             r"cross_wired_[A-Za-z0-9_]+_owner|"
             r"foreign(?:_[A-Za-z0-9_]+)?_owner|different_owner|returned_owner|"
@@ -146,8 +187,7 @@ ALLOWLIST = (
             r"cross-wired owner|foreign-owner|foreign owner|member.s owner|"
             r"let owner = stored[.]owning_session|owner != session|owner, non-successor|"
             r"already-claimed owner|process-lifetime root owner|extension owners|"
-            r"named as owner|validated owner|checked owner placement|file-owner|"
-            r"one owner for bounds|current owner prevents|one owner:|owner must equal",
+            r"named as owner|validated owner|checked owner placement|file-owner",
             re.IGNORECASE,
         ),
     ),

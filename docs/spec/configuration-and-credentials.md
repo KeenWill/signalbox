@@ -931,8 +931,8 @@ are outside this cluster-delivery policy:
   material the channels themselves depend on, not every cluster-delivered
   secret: user-client authentication, runner enrollment, and the database
   credential are separate open decisions outside it (see Open edges).
-- **Acyclic bootstrap chain.** The user-held age identity (custodied outside git
-  and outside operator sync) decrypts the sops channel; the sops channel
+- **Acyclic bootstrap chain.** The operator-held age identity (custodied outside
+  git and outside automated sync) decrypts the sops channel; the sops channel
   delivers the operator's credential; the operator syncs the 1Password channel;
   the daemon consumes mounted artifacts. No cluster workload may reach the age
   identity through the 1Password channel.
