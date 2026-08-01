@@ -4,7 +4,7 @@ use std::{
     fmt,
     fs::File,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -348,8 +348,28 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
                 Some(CargoDiagnosticsPreparationFailure::CargoHostUnavailable);
             return result;
         };
-        let runner_plan =
-            workspace_test_runner_plan(self.command_runner.pinned_workspace_root(), &cargo_host);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let mut timed_out = host_result;
+            timed_out.outcome = ProcessOutcome::TimedOut;
+            return structured_result_with_test_runner_mode(
+                CargoDiagnosticsCommand::Test,
+                timed_out,
+                CargoTestRunnerMode::ConfiguredRunnerPreserved,
+            );
+        }
+        let workspace_root = self.command_runner.pinned_workspace_root().to_owned();
+        let Some(runner_plan) =
+            workspace_test_runner_plan_before_deadline(workspace_root, cargo_host, remaining).await
+        else {
+            let mut timed_out = host_result;
+            timed_out.outcome = ProcessOutcome::TimedOut;
+            return structured_result_with_test_runner_mode(
+                CargoDiagnosticsCommand::Test,
+                timed_out,
+                CargoTestRunnerMode::ConfiguredRunnerPreserved,
+            );
+        };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             let mut timed_out = host_result;
@@ -376,6 +396,31 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
             runner_plan.mode,
         )
     }
+}
+
+async fn workspace_test_runner_plan_before_deadline(
+    workspace_root: PathBuf,
+    cargo_host: String,
+    remaining: Duration,
+) -> Option<CargoTestRunnerPlan> {
+    cargo_config_inspection_before_deadline(
+        move || workspace_test_runner_plan(&workspace_root, &cargo_host),
+        remaining,
+    )
+    .await
+}
+
+async fn cargo_config_inspection_before_deadline<Inspect>(
+    inspect: Inspect,
+    remaining: Duration,
+) -> Option<CargoTestRunnerPlan>
+where
+    Inspect: FnOnce() -> CargoTestRunnerPlan + Send + 'static,
+{
+    tokio::time::timeout(remaining, tokio::task::spawn_blocking(inspect))
+        .await
+        .ok()?
+        .ok()
 }
 
 fn cargo_host_arguments(timeout_seconds: u64) -> ExecArguments {
@@ -2281,6 +2326,23 @@ mod tests {
         assert!(!test_request.timeout.is_zero());
         assert!(test_request.timeout < Duration::from_secs(1));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn cargo_config_inspection_obeys_the_remaining_request_deadline() {
+        let plan = cargo_config_inspection_before_deadline(
+            || {
+                std::thread::sleep(Duration::from_millis(100));
+                CargoTestRunnerPlan {
+                    selected_target: String::from(TEST_NATIVE_TARGET),
+                    mode: CargoTestRunnerMode::HelperInstalled,
+                }
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(plan, None);
     }
 
     #[tokio::test]
