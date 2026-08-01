@@ -102,6 +102,31 @@ const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
    AND event_kind NOT IN ('created', 'text_revised', 'status_changed')
  LIMIT 1";
 
+const INVALID_EVENT_SEQUENCE_SQL: &str = "WITH ordered AS (
+    SELECT event_ordinal,
+           lag(event_ordinal, 1, 0::numeric) OVER (ORDER BY event_ordinal) AS prior_ordinal
+      FROM session_plan_event
+     WHERE session_id = $1
+), invalid_ordinal AS (
+    SELECT 1
+      FROM ordered
+     WHERE event_ordinal <> prior_ordinal + 1
+     LIMIT 1
+), missing_creation AS (
+    SELECT 1
+      FROM session_plan_event AS mutation
+      LEFT JOIN session_plan_event AS creation
+        ON creation.session_id = mutation.session_id
+       AND creation.event_ordinal = mutation.entry_ordinal
+       AND creation.event_kind = 'created'
+     WHERE mutation.session_id = $1
+       AND mutation.event_kind IN ('text_revised', 'status_changed')
+       AND creation.event_ordinal IS NULL
+     LIMIT 1
+)
+SELECT EXISTS (SELECT 1 FROM invalid_ordinal)
+    OR EXISTS (SELECT 1 FROM missing_creation)";
+
 const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
        event.entry_ordinal, event.entry_text, event.entry_status,
        event.provenance_turn_id, event.provenance_issuing_turn_attempt_id,
@@ -149,6 +174,8 @@ pub enum SessionPlanCorruption {
     InvalidEventPayload(&'static str),
     /// Stored text violated the tool boundary.
     InvalidText,
+    /// The durable event sequence has a gap or a mutation without a creation.
+    InvalidEventSequence,
     /// The chronological durable prefix cannot be folded.
     InvalidHistory(PlanFoldError),
     /// Two durable events claim the same physical tool attempt.
@@ -174,6 +201,9 @@ impl fmt::Display for SessionPlanCorruption {
                 write!(formatter, "session plan has invalid {kind} payload")
             }
             Self::InvalidText => formatter.write_str("session plan has invalid entry text"),
+            Self::InvalidEventSequence => {
+                formatter.write_str("session plan event sequence is invalid")
+            }
             Self::InvalidHistory(error) => {
                 write!(formatter, "session plan history is invalid: {error}")
             }
@@ -191,7 +221,8 @@ impl Error for SessionPlanCorruption {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidHistory(error) => Some(error),
-            Self::Missing(_)
+            Self::InvalidEventSequence
+            | Self::Missing(_)
             | Self::InvalidPositiveInteger(_)
             | Self::Unsupported { .. }
             | Self::MismatchedIdentity(_)
@@ -245,11 +276,16 @@ impl Error for SessionPlanRepositoryError {
 
 impl From<sqlx::Error> for SessionPlanRepositoryError {
     fn from(source: sqlx::Error) -> Self {
-        if source
+        let constraint = source
             .as_database_error()
-            .and_then(|database| database.constraint())
-            == Some("session_plan_event_requires_active_plan_write_attempt")
-        {
+            .and_then(|database| database.constraint());
+        if matches!(
+            constraint,
+            Some(
+                "session_plan_event_requires_active_plan_write_attempt"
+                    | "session_plan_event_provenance_attempt_id_key"
+            )
+        ) {
             return Self::InvalidAppendProvenance;
         }
         Self::Database {
@@ -420,6 +456,13 @@ impl SessionPlanRepository {
                 value,
             }
             .into());
+        }
+        let invalid_sequence: bool = sqlx::query_scalar(INVALID_EVENT_SEQUENCE_SQL)
+            .bind(request.session().into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        if invalid_sequence {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
         }
         let mut entries = sqlx::query(CURRENT_PLAN_SQL)
             .bind(request.session().into_uuid())

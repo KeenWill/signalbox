@@ -21,7 +21,8 @@ storage version four were verified through PR #311
 (`agent/session-templates-spec`); and the context-compaction transaction and
 lock inventory were verified against PR #314
 (`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
-was verified against this PR (`agent/domain-cleanup`). This page covers the
+was verified against this PR (`agent/domain-cleanup`); the session-plan event
+sequence was verified against this PR (`agent/plan-tool`). This page covers the
 Postgres representation in `crates/persistence` (source and migrations),
 migration discipline, durable command storage and replay equality, the
 fail-closed reconstitution boundary, the lock protocol, pending-steering durable
