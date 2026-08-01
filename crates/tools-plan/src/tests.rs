@@ -235,6 +235,17 @@ fn known_failure_has_detail(evidence: &ToolExecutorEvidence) -> bool {
     }
 }
 
+fn dependency_cycle_from(error: PlanFoldError) -> PlanDependencyCycle {
+    match error {
+        PlanFoldError::DependencyCycle(cycle) => cycle,
+        PlanFoldError::NoncontiguousOrdinal { .. }
+        | PlanFoldError::MixedSessions
+        | PlanFoldError::UnknownEntry { .. } => {
+            panic!("fixture fold failure is a dependency cycle")
+        }
+    }
+}
+
 fn has_invalid_arguments_detail(outcome: Result<(), ToolCatalogValidationFailure>) -> bool {
     match outcome {
         Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) }) => true,
@@ -445,6 +456,214 @@ fn fold_preserves_creation_order_under_interleaved_entry_appends() {
     assert_eq!(later.id(), later_entry);
     assert_eq!(later.text(), &second);
     assert_eq!(later.status(), later_status);
+}
+
+#[test]
+fn fold_exposes_waiting_until_every_dependency_is_completed() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let prerequisite = entry(1);
+    let dependent = entry(2);
+    let expected_dependencies = vec![prerequisite];
+    let waiting_status = PlanStatus::Pending;
+    let waiting_history = vec![
+        event(
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ),
+        event(
+            2,
+            provenance,
+            PlanEventKind::Created {
+                text: text(SECOND_TEXT),
+            },
+        ),
+        event(
+            3,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: dependent,
+                dependency: prerequisite,
+            },
+        ),
+    ];
+
+    let waiting = fold_plan_events(&waiting_history).expect("acyclic dependency history folds");
+    let waiting_entry = &waiting.entries()[1];
+
+    assert_eq!(waiting_entry.status(), waiting_status);
+    assert_eq!(
+        waiting_entry.dependencies(),
+        expected_dependencies.as_slice()
+    );
+    assert_eq!(waiting_entry.readiness(), PlanReadiness::Waiting);
+
+    let mut ready_history = waiting_history;
+    ready_history.push(event(
+        4,
+        provenance,
+        PlanEventKind::StatusChanged {
+            entry: prerequisite,
+            status: PlanStatus::Completed,
+        },
+    ));
+
+    let ready = fold_plan_events(&ready_history).expect("completed dependency history folds");
+    let ready_entry = &ready.entries()[1];
+
+    assert_eq!(ready_entry.status(), waiting_status);
+    assert_eq!(ready_entry.dependencies(), expected_dependencies.as_slice());
+    assert_eq!(ready_entry.readiness(), PlanReadiness::Ready);
+}
+
+#[test]
+fn fold_rejects_a_dependency_cycle_with_typed_closed_path() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let first = entry(1);
+    let second = entry(2);
+    let expected_path = vec![second, first, second];
+    let events = vec![
+        event(
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ),
+        event(
+            2,
+            provenance,
+            PlanEventKind::Created {
+                text: text(SECOND_TEXT),
+            },
+        ),
+        event(
+            3,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: first,
+                dependency: second,
+            },
+        ),
+        event(
+            4,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: second,
+                dependency: first,
+            },
+        ),
+    ];
+
+    let error = fold_plan_events(&events).expect_err("cyclic dependency history is rejected");
+    let cycle = dependency_cycle_from(error);
+
+    assert_eq!(cycle.entry(), second);
+    assert_eq!(cycle.dependency(), first);
+    assert_eq!(cycle.path(), expected_path.as_slice());
+}
+
+#[test]
+fn fold_rejects_a_self_dependency_with_typed_closed_path() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let dependent = entry(1);
+    let expected_path = vec![dependent, dependent];
+    let events = vec![
+        event(
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ),
+        event(
+            2,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: dependent,
+                dependency: dependent,
+            },
+        ),
+    ];
+
+    let error = fold_plan_events(&events).expect_err("self dependency history is rejected");
+    let cycle = dependency_cycle_from(error);
+
+    assert_eq!(cycle.entry(), dependent);
+    assert_eq!(cycle.dependency(), dependent);
+    assert_eq!(cycle.path(), expected_path.as_slice());
+}
+
+#[test]
+fn write_returns_a_known_failure_for_typed_cycle_evidence() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let dependency = entry(2);
+    let cycle_path = vec![dependent, dependency, dependent];
+    let cycle = PlanDependencyCycle::try_new(dependent, dependency, cycle_path)
+        .expect("fixture cycle path is closed");
+    let port = FakePort::rejecting(PlanAppendRejection::DependencyCycle(cycle));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "kind": "depends_on",
+        "entry_id": dependent.as_u64(),
+        "dependency_id": dependency.as_u64()
+    })))
+    .expect("fixture dependency arguments are valid");
+
+    let evidence = run_ready(executor.execute_operation(dispatch, operation))
+        .expect("typed rejection succeeds");
+
+    assert!(known_failure_has_detail(&evidence));
+}
+
+#[test]
+fn read_output_exposes_dependencies_and_waiting_readiness() {
+    let dispatch = correlation(10);
+    let prerequisite = entry(1);
+    let dependent = entry(2);
+    let dependencies = vec![prerequisite];
+    let expected_readiness = PlanReadiness::Waiting;
+    let current = PlanEntry::with_dependencies(
+        dependent,
+        text(SECOND_TEXT),
+        PlanStatus::Pending,
+        dependencies.clone(),
+        expected_readiness,
+    );
+    let page = PlanReadPage::new(
+        dispatch.session(),
+        vec![current],
+        PlanPageCompleteness::Complete,
+        None,
+    );
+    let port = FakePort::reading(page);
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let evidence =
+        run_ready(executor.execute_operation(dispatch, operation)).expect("fake read succeeds");
+    let output: Value =
+        serde_json::from_str(&completed_text(evidence)).expect("tool result is compact JSON");
+
+    assert_eq!(output["entries"][0]["entry_id"], json!(dependent.as_u64()));
+    assert_eq!(
+        output["entries"][0]["dependencies"],
+        json!(
+            dependencies
+                .iter()
+                .map(|dependency| dependency.as_u64())
+                .collect::<Vec<_>>()
+        )
+    );
+    assert_eq!(output["entries"][0]["readiness"], json!(expected_readiness));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 -- Session plans are append-only event histories. Entry identity is the ordinal of
--- its creation event; revisions and status changes retain their exact trusted
--- tool-dispatch provenance.
+-- its creation event; revisions, status changes, and dependency edges retain
+-- their exact trusted tool-dispatch provenance.
 
 CREATE TABLE session_plan_event (
     session_id uuid NOT NULL REFERENCES session(session_id) ON DELETE RESTRICT,
@@ -13,9 +13,14 @@ CREATE TABLE session_plan_event (
         ),
     event_kind text NOT NULL
         CONSTRAINT session_plan_event_kind_closed
-        CHECK (event_kind IN ('created', 'text_revised', 'status_changed')),
+        CHECK (event_kind IN ('created', 'text_revised', 'status_changed', 'depends_on')),
     entry_ordinal numeric(20, 0) NOT NULL
         CHECK (entry_ordinal BETWEEN 1 AND 18446744073709551615),
+    dependency_ordinal numeric(20, 0)
+        CHECK (
+            dependency_ordinal IS NULL
+            OR dependency_ordinal BETWEEN 1 AND 18446744073709551615
+        ),
     entry_text text,
     entry_status text
         CONSTRAINT session_plan_event_status_closed
@@ -53,6 +58,9 @@ CREATE TABLE session_plan_event (
     FOREIGN KEY (session_id, prior_event_ordinal)
         REFERENCES session_plan_event (session_id, event_ordinal)
         ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, dependency_ordinal)
+        REFERENCES session_plan_event (session_id, event_ordinal)
+        ON DELETE RESTRICT,
     CONSTRAINT session_plan_event_predecessor_shape CHECK (
         (event_ordinal = 1 AND prior_event_ordinal IS NULL)
         OR (
@@ -64,6 +72,7 @@ CREATE TABLE session_plan_event (
         (
             event_kind = 'created'
             AND entry_ordinal = event_ordinal
+            AND dependency_ordinal IS NULL
             AND entry_text IS NOT NULL
             AND char_length(entry_text) BETWEEN 1 AND 4096
             AND entry_status IS NULL
@@ -72,6 +81,7 @@ CREATE TABLE session_plan_event (
         (
             event_kind = 'text_revised'
             AND entry_ordinal < event_ordinal
+            AND dependency_ordinal IS NULL
             AND entry_text IS NOT NULL
             AND char_length(entry_text) BETWEEN 1 AND 4096
             AND entry_status IS NULL
@@ -80,8 +90,18 @@ CREATE TABLE session_plan_event (
         (
             event_kind = 'status_changed'
             AND entry_ordinal < event_ordinal
+            AND dependency_ordinal IS NULL
             AND entry_text IS NULL
             AND entry_status IS NOT NULL
+        )
+        OR
+        (
+            event_kind = 'depends_on'
+            AND entry_ordinal < event_ordinal
+            AND dependency_ordinal < event_ordinal
+            AND dependency_ordinal <> entry_ordinal
+            AND entry_text IS NULL
+            AND entry_status IS NULL
         )
     )
 );
@@ -181,6 +201,11 @@ AS $$
                         'entry_id', candidate.entry_ordinal,
                         'status', candidate.entry_status
                     )
+                    WHEN 'depends_on' THEN jsonb_build_object(
+                        'kind', 'depends_on',
+                        'entry_id', candidate.entry_ordinal,
+                        'dependency_id', candidate.dependency_ordinal
+                    )
                 END
     );
 $$;
@@ -215,6 +240,7 @@ AS $$
 DECLARE
     latest_ordinal numeric(20, 0);
     target_kind text;
+    closes_cycle boolean;
 BEGIN
     PERFORM 1
       FROM session
@@ -256,6 +282,11 @@ BEGIN
                     'entry_id', NEW.entry_ordinal,
                     'status', NEW.entry_status
                 )
+                WHEN 'depends_on' THEN jsonb_build_object(
+                    'kind', 'depends_on',
+                    'entry_id', NEW.entry_ordinal,
+                    'dependency_id', NEW.dependency_ordinal
+                )
             END
        AND attempt.effect_class = 'external_effect'
        AND attempt.state_kind = 'in_flight'
@@ -291,6 +322,7 @@ BEGIN
             NEW.event_kind = 'created'
             AND (
                 NEW.entry_ordinal IS DISTINCT FROM NEW.event_ordinal
+                OR NEW.dependency_ordinal IS NOT NULL
                 OR NEW.entry_text IS NULL
                 OR char_length(NEW.entry_text) NOT BETWEEN 1 AND 4096
                 OR NEW.entry_status IS NOT NULL
@@ -300,6 +332,7 @@ BEGIN
             NEW.event_kind = 'text_revised'
             AND (
                 NEW.entry_ordinal >= NEW.event_ordinal
+                OR NEW.dependency_ordinal IS NOT NULL
                 OR NEW.entry_text IS NULL
                 OR char_length(NEW.entry_text) NOT BETWEEN 1 AND 4096
                 OR NEW.entry_status IS NOT NULL
@@ -309,6 +342,7 @@ BEGIN
             NEW.event_kind = 'status_changed'
             AND (
                 NEW.entry_ordinal >= NEW.event_ordinal
+                OR NEW.dependency_ordinal IS NOT NULL
                 OR NEW.entry_text IS NOT NULL
                 OR NEW.entry_status IS NULL
                 OR NEW.entry_status NOT IN (
@@ -316,7 +350,18 @@ BEGIN
                 )
             )
         )
-        OR NEW.event_kind NOT IN ('created', 'text_revised', 'status_changed')
+        OR (
+            NEW.event_kind = 'depends_on'
+            AND (
+                NEW.entry_ordinal >= NEW.event_ordinal
+                OR NEW.dependency_ordinal IS NULL
+                OR NEW.dependency_ordinal >= NEW.event_ordinal
+                OR NEW.dependency_ordinal = NEW.entry_ordinal
+                OR NEW.entry_text IS NOT NULL
+                OR NEW.entry_status IS NOT NULL
+            )
+        )
+        OR NEW.event_kind NOT IN ('created', 'text_revised', 'status_changed', 'depends_on')
     THEN
         RAISE EXCEPTION 'session plan event has invalid certified shape';
     END IF;
@@ -329,6 +374,45 @@ BEGIN
            AND event_ordinal = NEW.entry_ordinal;
         IF target_kind IS DISTINCT FROM 'created' THEN
             RAISE EXCEPTION 'session plan mutation must name a creation event';
+        END IF;
+    END IF;
+
+    IF NEW.event_kind = 'depends_on' THEN
+        SELECT event_kind
+          INTO target_kind
+          FROM session_plan_event
+         WHERE session_id = NEW.session_id
+           AND event_ordinal = NEW.dependency_ordinal;
+        IF target_kind IS DISTINCT FROM 'created' THEN
+            RAISE EXCEPTION
+                'session plan dependency must name a creation event';
+        END IF;
+
+        WITH RECURSIVE dependency_path(node, path) AS (
+            SELECT
+                NEW.dependency_ordinal,
+                ARRAY[NEW.dependency_ordinal]::numeric[]
+            UNION ALL
+            SELECT
+                edge.dependency_ordinal,
+                dependency_path.path || edge.dependency_ordinal
+              FROM dependency_path
+              JOIN session_plan_event AS edge
+                ON edge.session_id = NEW.session_id
+               AND edge.event_kind = 'depends_on'
+               AND edge.entry_ordinal = dependency_path.node
+             WHERE NOT edge.dependency_ordinal = ANY(dependency_path.path)
+        )
+        SELECT EXISTS (
+            SELECT 1
+              FROM dependency_path
+             WHERE node = NEW.entry_ordinal
+        )
+          INTO closes_cycle;
+        IF closes_cycle THEN
+            RAISE EXCEPTION 'session plan dependency would create a cycle'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_cycle';
         END IF;
     END IF;
     RETURN NEW;
@@ -417,11 +501,16 @@ FOR EACH STATEMENT EXECUTE FUNCTION reject_session_plan_head_rewrite();
 CREATE INDEX session_plan_event_entry_history
     ON session_plan_event (session_id, entry_ordinal, event_ordinal);
 
+CREATE INDEX session_plan_event_dependencies
+    ON session_plan_event (session_id, entry_ordinal, event_ordinal)
+    INCLUDE (dependency_ordinal)
+    WHERE event_kind = 'depends_on';
+
 CREATE INDEX session_plan_event_unsupported_kind
     ON session_plan_event (session_id, event_kind)
     WHERE (
         event_kind IS NULL
-        OR event_kind NOT IN ('created', 'text_revised', 'status_changed')
+        OR event_kind NOT IN ('created', 'text_revised', 'status_changed', 'depends_on')
     );
 
 CREATE INDEX session_plan_event_created_page

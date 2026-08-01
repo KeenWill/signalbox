@@ -1,6 +1,10 @@
 //! PostgreSQL storage for append-only session plan events.
 
-use std::{collections::HashSet, error::Error, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -9,10 +13,11 @@ use signalbox_domain::{
     ToolAttemptId, ToolDispatchGeneration, ToolRequestId, TurnAttemptId, TurnId,
 };
 use signalbox_tools_plan::{
-    PLAN_WRITE_NAME, PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntry,
-    PlanEntryId, PlanEvent, PlanEventDraft, PlanEventKind, PlanEventOrdinal, PlanEventProvenance,
-    PlanFoldError, PlanHistoryPage, PlanPageCompleteness, PlanReadPage, PlanReadRequest,
-    PlanStatus, PlanText, SessionPlanPort, fold_plan_events,
+    PLAN_WRITE_NAME, PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest,
+    PlanDependencyCycle, PlanEntry, PlanEntryId, PlanEvent, PlanEventDraft, PlanEventKind,
+    PlanEventOrdinal, PlanEventProvenance, PlanFoldError, PlanHistoryPage, PlanPageCompleteness,
+    PlanReadPage, PlanReadRequest, PlanReadiness, PlanStatus, PlanText, SessionPlanPort,
+    fold_plan_events,
 };
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -60,12 +65,63 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
  ORDER BY created.event_ordinal
  LIMIT $3";
 
+const CURRENT_DEPENDENCIES_SQL: &str = "SELECT edge.entry_ordinal,
+       edge.dependency_ordinal, edge.first_event_ordinal,
+       edge.authorized,
+       session_plan_event_has_authority(dependency) AS dependency_authorized,
+       movement.event_ordinal AS dependency_status_event_ordinal,
+       movement.entry_status AS dependency_status,
+       movement.authorized AS dependency_status_authorized
+  FROM (
+      SELECT candidate.entry_ordinal, candidate.dependency_ordinal,
+             min(candidate.event_ordinal) AS first_event_ordinal,
+             bool_and(session_plan_event_has_authority(candidate)) AS authorized
+        FROM session_plan_event AS candidate
+       WHERE candidate.session_id = $1
+         AND candidate.event_kind = 'depends_on'
+         AND candidate.entry_ordinal = ANY($2::numeric[])
+       GROUP BY candidate.entry_ordinal, candidate.dependency_ordinal
+  ) AS edge
+  LEFT JOIN session_plan_event AS dependency
+    ON dependency.session_id = $1
+   AND dependency.event_ordinal = edge.dependency_ordinal
+   AND dependency.event_kind = 'created'
+  LEFT JOIN LATERAL (
+      SELECT candidate.event_ordinal, candidate.entry_status,
+             session_plan_event_has_authority(candidate) AS authorized
+        FROM session_plan_event AS candidate
+       WHERE candidate.session_id = $1
+         AND candidate.entry_ordinal = edge.dependency_ordinal
+         AND candidate.event_kind = 'status_changed'
+       ORDER BY candidate.event_ordinal DESC
+       LIMIT 1
+  ) AS movement ON TRUE
+ ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
+
+const DEPENDENCY_CYCLE_SQL: &str = "WITH RECURSIVE dependency_path(node, path) AS (
+    SELECT $3::numeric, ARRAY[$3::numeric]
+    UNION ALL
+    SELECT edge.dependency_ordinal,
+           dependency_path.path || edge.dependency_ordinal
+      FROM dependency_path
+      JOIN session_plan_event AS edge
+        ON edge.session_id = $1
+       AND edge.event_kind = 'depends_on'
+       AND edge.entry_ordinal = dependency_path.node
+     WHERE NOT edge.dependency_ordinal = ANY(dependency_path.path)
+)
+SELECT ARRAY[$2::numeric] || path
+  FROM dependency_path
+ WHERE node = $2
+ ORDER BY cardinality(path), path
+ LIMIT 1";
+
 const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
   FROM session_plan_event
  WHERE session_id = $1
    AND (
         event_kind IS NULL
-        OR event_kind NOT IN ('created', 'text_revised', 'status_changed')
+        OR event_kind NOT IN ('created', 'text_revised', 'status_changed', 'depends_on')
    )
  LIMIT 1";
 
@@ -94,7 +150,8 @@ const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
    AND certified.event_ordinal = head.event_ordinal";
 
 const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
-       event.entry_ordinal, event.entry_text, event.entry_status,
+       event.entry_ordinal, event.dependency_ordinal,
+       event.entry_text, event.entry_status,
        event.provenance_turn_id, event.provenance_issuing_turn_attempt_id,
        event.provenance_request_id, event.provenance_attempt_id,
        event.provenance_dispatch_generation,
@@ -330,6 +387,11 @@ impl SessionPlanRepository {
             .bind(Decimal::from(encoded.entry.as_u64()))
             .bind(encoded.text)
             .bind(encoded.status)
+            .bind(
+                encoded
+                    .dependency
+                    .map(|entry| Decimal::from(entry.as_u64())),
+            )
             .fetch_optional(&mut *transaction)
             .await?;
         if authorized.is_none() {
@@ -337,7 +399,7 @@ impl SessionPlanRepository {
             return Err(SessionPlanRepositoryError::InvalidAppendProvenance);
         }
 
-        if let Some(entry) = draft_target(request.draft()) {
+        for entry in draft_targets(request.draft()) {
             let exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
                     SELECT 1
@@ -359,6 +421,27 @@ impl SessionPlanRepository {
             }
         }
 
+        if let PlanEventDraft::DependsOn { entry, dependency } = request.draft() {
+            let path: Option<Vec<Decimal>> = sqlx::query_scalar(DEPENDENCY_CYCLE_SQL)
+                .bind(request.session().into_uuid())
+                .bind(Decimal::from(entry.as_u64()))
+                .bind(Decimal::from(dependency.as_u64()))
+                .fetch_optional(&mut *transaction)
+                .await?;
+            if let Some(path) = path {
+                let path = path
+                    .into_iter()
+                    .map(|ordinal| dependency_path_entry(ordinal))
+                    .collect::<Result<Vec<_>, _>>()?;
+                transaction.rollback().await?;
+                let cycle = PlanDependencyCycle::try_new(*entry, *dependency, path)
+                    .ok_or(SessionPlanCorruption::InvalidEventSequence)?;
+                return Ok(PlanAppendOutcome::Rejected(
+                    PlanAppendRejection::DependencyCycle(cycle),
+                ));
+            }
+        }
+
         let prior = next
             .as_u64()
             .checked_sub(1)
@@ -367,17 +450,22 @@ impl SessionPlanRepository {
         sqlx::query(
             "INSERT INTO session_plan_event
                 (session_id, event_ordinal, prior_event_ordinal,
-                 event_kind, entry_ordinal,
+                 event_kind, entry_ordinal, dependency_ordinal,
                  entry_text, entry_status, provenance_turn_id,
                  provenance_issuing_turn_attempt_id, provenance_request_id,
                  provenance_attempt_id, provenance_dispatch_generation)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(request.session().into_uuid())
         .bind(Decimal::from(next.as_u64()))
         .bind(prior)
         .bind(mapping::plan_event_kind_to_str(encoded.kind))
         .bind(Decimal::from(encoded.entry.as_u64()))
+        .bind(
+            encoded
+                .dependency
+                .map(|entry| Decimal::from(entry.as_u64())),
+        )
         .bind(encoded.text)
         .bind(encoded.status)
         .bind(request.provenance().correlation().turn().into_uuid())
@@ -460,6 +548,20 @@ impl SessionPlanRepository {
             .collect::<Result<Vec<_>, _>>()?;
         let has_more_entries = entries.len() > request.max_entries();
         entries.truncate(request.max_entries());
+        let entry_ordinals = entries
+            .iter()
+            .map(|entry| Decimal::from(entry.id().as_u64()))
+            .collect::<Vec<_>>();
+        let dependency_rows = if entry_ordinals.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query(CURRENT_DEPENDENCIES_SQL)
+                .bind(request.session().into_uuid())
+                .bind(&entry_ordinals)
+                .fetch_all(&mut *transaction)
+                .await?
+        };
+        entries = apply_dependency_rows(entries, &dependency_rows)?;
 
         let history = match request.history_limit() {
             Some(limit) => {
@@ -519,6 +621,7 @@ impl SessionPlanPort for SessionPlanRepository {
 struct EncodedDraft<'a> {
     kind: mapping::PlanEventStorageKind,
     entry: PlanEntryId,
+    dependency: Option<PlanEntryId>,
     text: Option<&'a str>,
     status: Option<&'static str>,
 }
@@ -529,31 +632,42 @@ impl<'a> EncodedDraft<'a> {
             PlanEventDraft::Create { text } => Self {
                 kind: mapping::PlanEventStorageKind::Created,
                 entry: PlanEntryId::from_creation_ordinal(ordinal),
+                dependency: None,
                 text: Some(text.as_str()),
                 status: None,
             },
             PlanEventDraft::Revise { entry, text } => Self {
                 kind: mapping::PlanEventStorageKind::TextRevised,
                 entry: *entry,
+                dependency: None,
                 text: Some(text.as_str()),
                 status: None,
             },
             PlanEventDraft::SetStatus { entry, status } => Self {
                 kind: mapping::PlanEventStorageKind::StatusChanged,
                 entry: *entry,
+                dependency: None,
                 text: None,
                 status: Some(mapping::plan_status_to_str(*status)),
+            },
+            PlanEventDraft::DependsOn { entry, dependency } => Self {
+                kind: mapping::PlanEventStorageKind::DependsOn,
+                entry: *entry,
+                dependency: Some(*dependency),
+                text: None,
+                status: None,
             },
         }
     }
 }
 
-fn draft_target(draft: &PlanEventDraft) -> Option<PlanEntryId> {
+fn draft_targets(draft: &PlanEventDraft) -> Vec<PlanEntryId> {
     match draft {
-        PlanEventDraft::Create { .. } => None,
+        PlanEventDraft::Create { .. } => Vec::new(),
         PlanEventDraft::Revise { entry, .. } | PlanEventDraft::SetStatus { entry, .. } => {
-            Some(*entry)
+            vec![*entry]
         }
+        PlanEventDraft::DependsOn { entry, dependency } => vec![*entry, *dependency],
     }
 }
 
@@ -564,7 +678,15 @@ fn event_kind_from_draft(draft: PlanEventDraft) -> PlanEventKind {
         PlanEventDraft::SetStatus { entry, status } => {
             PlanEventKind::StatusChanged { entry, status }
         }
+        PlanEventDraft::DependsOn { entry, dependency } => {
+            PlanEventKind::DependsOn { entry, dependency }
+        }
     }
+}
+
+fn dependency_path_entry(value: Decimal) -> Result<PlanEntryId, SessionPlanRepositoryError> {
+    PlanEntryId::try_from_u64(positive_u64(value, "dependency cycle path")?)
+        .ok_or(SessionPlanCorruption::InvalidPositiveInteger("dependency cycle path").into())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -671,6 +793,97 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     Ok(PlanEntry::new(entry, text, status))
 }
 
+fn apply_dependency_rows(
+    entries: Vec<PlanEntry>,
+    rows: &[PgRow],
+) -> Result<Vec<PlanEntry>, SessionPlanRepositoryError> {
+    let mut projected = HashMap::<PlanEntryId, (Vec<PlanEntryId>, bool)>::new();
+    for row in rows {
+        let entry = dependency_path_entry(required(row, "entry_ordinal")?)?;
+        let dependency = dependency_path_entry(required(row, "dependency_ordinal")?)?;
+        let first_event = PlanEventOrdinal::try_from_u64(positive_u64(
+            required(row, "first_event_ordinal")?,
+            "dependency event ordinal",
+        )?)
+        .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+            "dependency event ordinal",
+        ))?;
+        if entry == dependency
+            || entry.creation_ordinal() >= first_event
+            || dependency.creation_ordinal() >= first_event
+        {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
+        if required_projected_authority(row, "authorized")? != ProjectedAuthority::Trusted
+            || required_projected_authority(row, "dependency_authorized")?
+                != ProjectedAuthority::Trusted
+        {
+            return Err(SessionPlanCorruption::UntrustedProvenance.into());
+        }
+
+        let status_event: Option<Decimal> = row.try_get("dependency_status_event_ordinal")?;
+        let status: Option<String> = row.try_get("dependency_status")?;
+        let status_authority = optional_projected_authority(row, "dependency_status_authorized")?;
+        let status = match (status_event, status, status_authority) {
+            (None, None, None) => PlanStatus::Pending,
+            (Some(status_event), Some(status), Some(ProjectedAuthority::Trusted)) => {
+                let status_event = PlanEventOrdinal::try_from_u64(positive_u64(
+                    status_event,
+                    "dependency status event ordinal",
+                )?)
+                .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+                    "dependency status event ordinal",
+                ))?;
+                if status_event <= dependency.creation_ordinal() {
+                    return Err(SessionPlanCorruption::InvalidEventSequence.into());
+                }
+                mapping::plan_status_from_str(&status).ok_or({
+                    SessionPlanCorruption::Unsupported {
+                        field: "dependency status",
+                        value: status,
+                    }
+                })?
+            }
+            (Some(_), Some(_), Some(ProjectedAuthority::Untrusted)) => {
+                return Err(SessionPlanCorruption::UntrustedProvenance.into());
+            }
+            _ => {
+                return Err(SessionPlanCorruption::InvalidEventPayload("dependency status").into());
+            }
+        };
+        if !entries.iter().any(|candidate| candidate.id() == entry) {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
+        let (dependencies, waiting) = projected.entry(entry).or_default();
+        if dependencies.contains(&dependency) {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
+        dependencies.push(dependency);
+        *waiting |= status != PlanStatus::Completed;
+    }
+
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let (dependencies, waiting) = projected.remove(&entry.id()).unwrap_or_default();
+        let readiness = if waiting {
+            PlanReadiness::Waiting
+        } else {
+            PlanReadiness::Ready
+        };
+        result.push(PlanEntry::with_dependencies(
+            entry.id(),
+            entry.text().clone(),
+            entry.status(),
+            dependencies,
+            readiness,
+        ));
+    }
+    if !projected.is_empty() {
+        return Err(SessionPlanCorruption::InvalidEventSequence.into());
+    }
+    Ok(result)
+}
+
 fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPlanRepositoryError> {
     let ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
         required(row, "event_ordinal")?,
@@ -697,11 +910,12 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
             value: event_kind,
         },
     )?;
+    let dependency_ordinal: Option<Decimal> = row.try_get("dependency_ordinal")?;
     let entry_text: Option<String> = row.try_get("entry_text")?;
     let entry_status: Option<String> = row.try_get("entry_status")?;
     let kind = match storage_kind {
         mapping::PlanEventStorageKind::Created => {
-            let (Some(value), None) = (entry_text, entry_status) else {
+            let (None, Some(value), None) = (dependency_ordinal, entry_text, entry_status) else {
                 return Err(SessionPlanCorruption::InvalidEventPayload("created event").into());
             };
             if entry.creation_ordinal() != ordinal {
@@ -714,7 +928,7 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
             }
         }
         mapping::PlanEventStorageKind::TextRevised => {
-            let (Some(value), None) = (entry_text, entry_status) else {
+            let (None, Some(value), None) = (dependency_ordinal, entry_text, entry_status) else {
                 return Err(
                     SessionPlanCorruption::InvalidEventPayload("text-revised event").into(),
                 );
@@ -731,7 +945,7 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
             }
         }
         mapping::PlanEventStorageKind::StatusChanged => {
-            let (None, Some(value)) = (entry_text, entry_status) else {
+            let (None, None, Some(value)) = (dependency_ordinal, entry_text, entry_status) else {
                 return Err(
                     SessionPlanCorruption::InvalidEventPayload("status-changed event").into(),
                 );
@@ -749,6 +963,19 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
                 }
             })?;
             PlanEventKind::StatusChanged { entry, status }
+        }
+        mapping::PlanEventStorageKind::DependsOn => {
+            let (Some(value), None, None) = (dependency_ordinal, entry_text, entry_status) else {
+                return Err(SessionPlanCorruption::InvalidEventPayload("depends-on event").into());
+            };
+            let dependency = dependency_path_entry(value)?;
+            if entry.creation_ordinal() >= ordinal || dependency.creation_ordinal() >= ordinal {
+                return Err(SessionPlanCorruption::MismatchedIdentity(
+                    "depends-on target ordering",
+                )
+                .into());
+            }
+            PlanEventKind::DependsOn { entry, dependency }
         }
     };
     if !authority_payload_matches(row, &kind)? {
@@ -783,6 +1010,11 @@ fn authority_payload_matches(row: &PgRow, event: &PlanEventKind) -> Result<bool,
             "kind": "set_status",
             "entry_id": entry.as_u64(),
             "status": mapping::plan_status_to_str(*status),
+        }),
+        PlanEventKind::DependsOn { entry, dependency } => serde_json::json!({
+            "kind": "depends_on",
+            "entry_id": entry.as_u64(),
+            "dependency_id": dependency.as_u64(),
         }),
     };
     Ok(actual == expected)

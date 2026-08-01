@@ -158,9 +158,10 @@ Implemented table families (across the forward-only migrations):
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
 - `session_plan_event`, whose session-local positive ordinal sequence retains
-  entry creation, text revision, and status change with exact trusted
-  tool-dispatch provenance, plus trigger-maintained `session_plan_head`, which
-  certifies the complete validated prefix for bounded current reads; and
+  entry creation, text revision, status change, and dependency edges with exact
+  trusted tool-dispatch provenance, plus trigger-maintained `session_plan_head`,
+  which certifies the complete validated prefix for bounded current and
+  dependency-readiness reads; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -552,10 +553,13 @@ Locks per transaction, in acquisition order:
   adapter then uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the
   exact active tool attempt `FOR SHARE` while authenticating its request. The
   insert trigger reacquires those same locks in session-then-attempt order,
-  validates the complete new event and its predecessor, and only then advances
-  `session_plan_head`; the head update's row lock is therefore last. A
-  repeatable-read plan read takes no explicit lock and compares that certified
-  head with the indexed latest event before opening its bounded projections.
+  validates the complete new event and its predecessor, rejects dependency
+  edges whose existing path would close a cycle, and only then advances
+  `session_plan_head`; cycle traversal runs under the already-held session lock,
+  and the head update's row lock is therefore last. A repeatable-read plan read
+  takes no explicit lock, compares that certified head with the indexed latest
+  event, and derives dependency sets and ready/waiting state in the same
+  snapshot as its bounded current projection.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or

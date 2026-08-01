@@ -1,6 +1,12 @@
 //! Durable, session-scoped plan tools over an injected append/read port.
 
-use std::{collections::HashSet, error::Error, fmt, future::Future, num::NonZeroU64};
+use std::{
+    collections::{HashSet, VecDeque},
+    error::Error,
+    fmt,
+    future::Future,
+    num::NonZeroU64,
+};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -32,6 +38,7 @@ pub const MAX_PLAN_HISTORY_EVENTS: usize = 100;
 
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded plan-tool arguments";
 const ENTRY_NOT_FOUND_DETAIL: &str = "plan entry not found";
+const DEPENDENCY_CYCLE_DETAIL: &str = "plan dependency would create a cycle";
 
 /// One positive ordinal in a session's append-only plan history.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -200,6 +207,13 @@ pub enum PlanEventDraft {
         /// New status.
         status: PlanStatus,
     },
+    /// Makes one entry depend on another entry.
+    DependsOn {
+        /// Entry that becomes dependent.
+        entry: PlanEntryId,
+        /// Entry that must complete first.
+        dependency: PlanEntryId,
+    },
 }
 
 /// Exact trusted invocation provenance retained on every event.
@@ -245,6 +259,58 @@ pub enum PlanEventKind {
         /// New status.
         status: PlanStatus,
     },
+    /// An entry dependency was added.
+    DependsOn {
+        /// Entry that becomes dependent.
+        entry: PlanEntryId,
+        /// Entry that must complete first.
+        dependency: PlanEntryId,
+    },
+}
+
+/// Typed evidence for a dependency edge that would close a directed cycle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanDependencyCycle {
+    entry: PlanEntryId,
+    dependency: PlanEntryId,
+    path: Vec<PlanEntryId>,
+}
+
+impl PlanDependencyCycle {
+    /// Supplies the rejected edge and its closed cycle path, when structurally valid.
+    pub fn try_new(
+        entry: PlanEntryId,
+        dependency: PlanEntryId,
+        path: Vec<PlanEntryId>,
+    ) -> Option<Self> {
+        if path.len() < 2
+            || path.first() != Some(&entry)
+            || path.get(1) != Some(&dependency)
+            || path.last() != Some(&entry)
+        {
+            return None;
+        }
+        Some(Self {
+            entry,
+            dependency,
+            path,
+        })
+    }
+
+    /// Returns the entry that would gain the dependency.
+    pub const fn entry(&self) -> PlanEntryId {
+        self.entry
+    }
+
+    /// Returns the proposed dependency.
+    pub const fn dependency(&self) -> PlanEntryId {
+        self.dependency
+    }
+
+    /// Borrows the closed cycle, beginning and ending at the dependent entry.
+    pub fn path(&self) -> &[PlanEntryId] {
+        &self.path
+    }
 }
 
 /// One durable plan event.
@@ -291,12 +357,47 @@ pub struct PlanEntry {
     id: PlanEntryId,
     text: PlanText,
     status: PlanStatus,
+    dependencies: Vec<PlanEntryId>,
+    readiness: PlanReadiness,
+}
+
+/// Whether an entry's dependencies currently permit it to proceed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReadiness {
+    /// Every dependency is completed.
+    Ready,
+    /// At least one dependency is not completed.
+    Waiting,
 }
 
 impl PlanEntry {
     /// Supplies one folded entry.
     pub const fn new(id: PlanEntryId, text: PlanText, status: PlanStatus) -> Self {
-        Self { id, text, status }
+        Self {
+            id,
+            text,
+            status,
+            dependencies: Vec::new(),
+            readiness: PlanReadiness::Ready,
+        }
+    }
+
+    /// Supplies one folded entry with its dependency projection.
+    pub fn with_dependencies(
+        id: PlanEntryId,
+        text: PlanText,
+        status: PlanStatus,
+        dependencies: Vec<PlanEntryId>,
+        readiness: PlanReadiness,
+    ) -> Self {
+        Self {
+            id,
+            text,
+            status,
+            dependencies,
+            readiness,
+        }
     }
 
     /// Returns the creation-event identity.
@@ -312,6 +413,16 @@ impl PlanEntry {
     /// Returns the latest status.
     pub const fn status(&self) -> PlanStatus {
         self.status
+    }
+
+    /// Borrows dependencies in first-append order.
+    pub fn dependencies(&self) -> &[PlanEntryId] {
+        &self.dependencies
+    }
+
+    /// Returns current dependency readiness.
+    pub const fn readiness(&self) -> PlanReadiness {
+        self.readiness
     }
 }
 
@@ -334,7 +445,7 @@ impl FoldedPlan {
 }
 
 /// Why an event sequence cannot represent one session plan.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanFoldError {
     /// Ordinals were not contiguous from one.
     NoncontiguousOrdinal {
@@ -348,6 +459,8 @@ pub enum PlanFoldError {
         /// Missing target.
         entry: PlanEntryId,
     },
+    /// A dependency event closes a directed cycle.
+    DependencyCycle(PlanDependencyCycle),
 }
 
 impl fmt::Display for PlanFoldError {
@@ -368,6 +481,12 @@ impl fmt::Display for PlanFoldError {
                     entry.as_u64()
                 )
             }
+            Self::DependencyCycle(cycle) => write!(
+                formatter,
+                "plan dependency {} -> {} closes a cycle",
+                cycle.entry().as_u64(),
+                cycle.dependency().as_u64()
+            ),
         }
     }
 }
@@ -408,6 +527,24 @@ pub fn fold_plan_events(events: &[PlanEvent]) -> Result<FoldedPlan, PlanFoldErro
                     .ok_or(PlanFoldError::UnknownEntry { entry: *entry })?;
                 current.status = *status;
             }
+            PlanEventKind::DependsOn { entry, dependency } => {
+                if !entries.iter().any(|current| current.id() == *entry) {
+                    return Err(PlanFoldError::UnknownEntry { entry: *entry });
+                }
+                if !entries.iter().any(|current| current.id() == *dependency) {
+                    return Err(PlanFoldError::UnknownEntry { entry: *dependency });
+                }
+                if let Some(cycle) = dependency_cycle(&entries, *entry, *dependency) {
+                    return Err(PlanFoldError::DependencyCycle(cycle));
+                }
+                let current = entries
+                    .iter_mut()
+                    .find(|current| current.id() == *entry)
+                    .ok_or(PlanFoldError::UnknownEntry { entry: *entry })?;
+                if !current.dependencies.contains(dependency) {
+                    current.dependencies.push(*dependency);
+                }
+            }
         }
         if index + 1 < events.len() {
             expected = expected
@@ -415,7 +552,56 @@ pub fn fold_plan_events(events: &[PlanEvent]) -> Result<FoldedPlan, PlanFoldErro
                 .ok_or(PlanFoldError::NoncontiguousOrdinal { expected })?;
         }
     }
+    recompute_readiness(&mut entries);
     Ok(FoldedPlan { entries })
+}
+
+fn dependency_cycle(
+    entries: &[PlanEntry],
+    entry: PlanEntryId,
+    dependency: PlanEntryId,
+) -> Option<PlanDependencyCycle> {
+    let mut queued = VecDeque::from([vec![dependency]]);
+    let mut visited = HashSet::from([dependency]);
+    while let Some(path) = queued.pop_front() {
+        let current = *path.last()?;
+        if current == entry {
+            let mut closed = Vec::with_capacity(path.len() + 1);
+            closed.push(entry);
+            closed.extend(path);
+            return PlanDependencyCycle::try_new(entry, dependency, closed);
+        }
+        let Some(current_entry) = entries.iter().find(|candidate| candidate.id() == current) else {
+            continue;
+        };
+        for next in current_entry.dependencies() {
+            if visited.insert(*next) {
+                let mut next_path = path.clone();
+                next_path.push(*next);
+                queued.push_back(next_path);
+            }
+        }
+    }
+    None
+}
+
+fn recompute_readiness(entries: &mut [PlanEntry]) {
+    let completed = entries
+        .iter()
+        .filter(|entry| entry.status() == PlanStatus::Completed)
+        .map(PlanEntry::id)
+        .collect::<HashSet<_>>();
+    for entry in entries {
+        entry.readiness = if entry
+            .dependencies()
+            .iter()
+            .all(|dependency| completed.contains(dependency))
+        {
+            PlanReadiness::Ready
+        } else {
+            PlanReadiness::Waiting
+        };
+    }
 }
 
 /// Port request for one atomic session-local append.
@@ -448,13 +634,15 @@ impl PlanAppendRequest {
 }
 
 /// Typed evidence that one append was safely refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanAppendRejection {
     /// A mutation named no created entry in the invoking session.
     UnknownEntry {
         /// Missing creation-event identity.
         entry: PlanEntryId,
     },
+    /// The requested dependency would close a directed cycle.
+    DependencyCycle(PlanDependencyCycle),
 }
 
 /// Result of attempting one atomic append.
@@ -699,6 +887,15 @@ pub enum PlanWriteArguments {
         /// New closed status.
         status: PlanStatus,
     },
+    /// Makes one entry wait for another entry to complete.
+    DependsOn {
+        /// Positive identity of the dependent entry.
+        #[schemars(range(min = 1))]
+        entry_id: u64,
+        /// Positive identity of the prerequisite entry.
+        #[schemars(range(min = 1))]
+        dependency_id: u64,
+    },
 }
 
 /// Typed read arguments.
@@ -718,7 +915,7 @@ struct PlanWriteContract;
 impl ToolContract for PlanWriteContract {
     type Arguments = PlanWriteArguments;
     const NAME: &'static str = PLAN_WRITE_NAME;
-    const DESCRIPTION: &'static str = "Appends one durable create, text-revision, or status-change event to the invoking session's plan.";
+    const DESCRIPTION: &'static str = "Appends one durable create, text-revision, status-change, or dependency event to the invoking session's plan.";
 }
 
 struct PlanReadContract;
@@ -771,6 +968,9 @@ impl<Port> PlanTools<Port> {
         let entry_not_found_detail =
             ToolExecutionErrorDetail::try_new(ENTRY_NOT_FOUND_DETAIL.to_owned())
                 .map_err(|_| PlanToolConstructionError::ErrorDetail)?;
+        let dependency_cycle_detail =
+            ToolExecutionErrorDetail::try_new(DEPENDENCY_CYCLE_DETAIL.to_owned())
+                .map_err(|_| PlanToolConstructionError::ErrorDetail)?;
         let write_definition = compile_contract_definition::<PlanWriteContract>(
             ToolPermissionDefault::Auto,
             ToolEffectClass::ExternalEffect,
@@ -802,6 +1002,7 @@ impl<Port> PlanTools<Port> {
             executor: PlanExecutor {
                 port,
                 entry_not_found_detail,
+                dependency_cycle_detail,
             },
         })
     }
@@ -880,6 +1081,13 @@ fn decode_write_operation(
             entry: PlanEntryId::try_from_u64(entry_id).ok_or(InvalidPlanArguments)?,
             status,
         },
+        PlanWriteArguments::DependsOn {
+            entry_id,
+            dependency_id,
+        } => PlanEventDraft::DependsOn {
+            entry: PlanEntryId::try_from_u64(entry_id).ok_or(InvalidPlanArguments)?,
+            dependency: PlanEntryId::try_from_u64(dependency_id).ok_or(InvalidPlanArguments)?,
+        },
     };
     Ok(PlanOperation::Write(draft))
 }
@@ -904,6 +1112,7 @@ fn decode_read_operation(
 pub struct PlanExecutor<Port> {
     port: Port,
     entry_not_found_detail: ToolExecutionErrorDetail,
+    dependency_cycle_detail: ToolExecutionErrorDetail,
 }
 
 impl<Port> PlanExecutor<Port> {
@@ -1010,6 +1219,15 @@ impl<Port: SessionPlanPort> PlanExecutor<Port> {
                                 Err(PlanExecutorError::PortContract)
                             }
                         }
+                        PlanAppendRejection::DependencyCycle(cycle) => {
+                            if dependency_cycle_matches_request(request.draft(), &cycle) {
+                                Ok(ToolExecutorEvidence::KnownFailed {
+                                    detail: Some(self.dependency_cycle_detail.clone()),
+                                })
+                            } else {
+                                Err(PlanExecutorError::PortContract)
+                            }
+                        }
                     },
                 }
             }
@@ -1076,17 +1294,21 @@ fn event_matches_draft(event: &PlanEvent, draft: &PlanEventDraft) -> bool {
                 && event.ordinal() > stored_entry.creation_ordinal()
         }
         (
-            PlanEventKind::Created { .. },
-            PlanEventDraft::Revise { .. } | PlanEventDraft::SetStatus { .. },
-        )
-        | (
-            PlanEventKind::TextRevised { .. },
-            PlanEventDraft::Create { .. } | PlanEventDraft::SetStatus { .. },
-        )
-        | (
-            PlanEventKind::StatusChanged { .. },
-            PlanEventDraft::Create { .. } | PlanEventDraft::Revise { .. },
-        ) => false,
+            PlanEventKind::DependsOn {
+                entry: stored_entry,
+                dependency: stored_dependency,
+            },
+            PlanEventDraft::DependsOn {
+                entry: requested_entry,
+                dependency: requested_dependency,
+            },
+        ) => {
+            stored_entry == requested_entry
+                && stored_dependency == requested_dependency
+                && event.ordinal() > stored_entry.creation_ordinal()
+                && event.ordinal() > stored_dependency.creation_ordinal()
+        }
+        _ => false,
     }
 }
 
@@ -1095,8 +1317,24 @@ fn missing_entry_matches_request(draft: &PlanEventDraft, rejected_entry: PlanEnt
         PlanEventDraft::Revise { entry, .. } | PlanEventDraft::SetStatus { entry, .. } => {
             *entry == rejected_entry
         }
+        PlanEventDraft::DependsOn { entry, dependency } => {
+            *entry == rejected_entry || *dependency == rejected_entry
+        }
         PlanEventDraft::Create { .. } => false,
     }
+}
+
+fn dependency_cycle_matches_request(draft: &PlanEventDraft, cycle: &PlanDependencyCycle) -> bool {
+    let PlanEventDraft::DependsOn { entry, dependency } = draft else {
+        return false;
+    };
+    let path = cycle.path();
+    cycle.entry() == *entry
+        && cycle.dependency() == *dependency
+        && path.len() >= 2
+        && path.first() == Some(entry)
+        && path.get(1) == Some(dependency)
+        && path.last() == Some(entry)
 }
 
 fn complete_history_matches_current(
@@ -1195,6 +1433,7 @@ enum EventKindOutput {
     Created { entry_id: u64, text: String },
     TextRevised { entry_id: u64, text: String },
     StatusChanged { entry_id: u64, status: PlanStatus },
+    DependsOn { entry_id: u64, dependency_id: u64 },
 }
 
 #[derive(serde::Serialize)]
@@ -1222,6 +1461,10 @@ impl From<PlanEvent> for EventOutput {
                 entry_id: entry.as_u64(),
                 status,
             },
+            PlanEventKind::DependsOn { entry, dependency } => EventKindOutput::DependsOn {
+                entry_id: entry.as_u64(),
+                dependency_id: dependency.as_u64(),
+            },
         };
         Self {
             ordinal,
@@ -1247,14 +1490,23 @@ struct EntryOutput {
     entry_id: u64,
     text: String,
     status: PlanStatus,
+    dependencies: Vec<u64>,
+    readiness: PlanReadiness,
 }
 
 impl From<PlanEntry> for EntryOutput {
     fn from(value: PlanEntry) -> Self {
+        let dependencies = value
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.as_u64())
+            .collect();
         Self {
             entry_id: value.id.as_u64(),
             text: value.text.into_string(),
             status: value.status,
+            dependencies,
+            readiness: value.readiness,
         }
     }
 }

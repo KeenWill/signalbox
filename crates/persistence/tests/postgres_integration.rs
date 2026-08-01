@@ -38,14 +38,14 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
     ActivatedAcceptedInputTurn, ActiveTurnPhase, AmbiguousModelCallTurnIdentities,
-    AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
-    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
-    CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, PerInputConfigurationChoices,
+    AssistantResponsePart, AssistantText, AuthorizedModelCall, AuthorizedToolAttempt,
+    CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
+    CorrelatedModelCallTerminalObservation, CreateSession, CurrentToolAttemptState,
+    CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval,
+    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
     PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
@@ -111,9 +111,9 @@ use signalbox_persistence::{
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_tools_plan::{
-    PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntryId, PlanEvent,
-    PlanEventDraft, PlanEventProvenance, PlanPageCompleteness, PlanReadRequest, PlanStatus,
-    PlanText,
+    PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanDependencyCycle, PlanEntryId,
+    PlanEvent, PlanEventDraft, PlanEventProvenance, PlanPageCompleteness, PlanReadRequest,
+    PlanReadiness, PlanStatus, PlanText,
 };
 use sqlx::{PgConnection, PgPool, Row, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -20738,6 +20738,24 @@ fn revise_plan_arguments(entry: PlanEntryId, text: &str) -> String {
     .expect("the plan revision arguments fixture serializes")
 }
 
+fn status_plan_arguments(entry: PlanEntryId, status: PlanStatus) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "entry_id": entry.as_u64(),
+        "kind": "set_status",
+        "status": status,
+    }))
+    .expect("the plan status arguments fixture serializes")
+}
+
+fn depends_plan_arguments(entry: PlanEntryId, dependency: PlanEntryId) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "dependency_id": dependency.as_u64(),
+        "entry_id": entry.as_u64(),
+        "kind": "depends_on",
+    }))
+    .expect("the plan dependency arguments fixture serializes")
+}
+
 async fn authorize_plan_write(
     pool: &PgPool,
     arguments: &str,
@@ -20776,11 +20794,118 @@ async fn authorize_plan_write(
     ))
 }
 
+struct AuthorizedPlanWriteBatch {
+    session: SessionId,
+    turn: TurnId,
+    next_attempt_seed: u128,
+    repository: PostgresToolLoopRepository,
+}
+
+impl AuthorizedPlanWriteBatch {
+    async fn authorize_next(&mut self) -> Result<AuthorizedToolAttempt, Box<dyn Error>> {
+        let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(self.next_attempt_seed));
+        self.next_attempt_seed += 1;
+        self.repository
+            .prepare_next_attempt(
+                self.session,
+                self.turn,
+                attempt,
+                ToolEffectClass::ExternalEffect,
+            )
+            .await?
+            .expect("the next approved plan write prepares its physical attempt");
+        Ok(self
+            .repository
+            .authorize_attempt(self.session, self.turn, attempt)
+            .await?)
+    }
+
+    async fn finish(&self, authorized: AuthorizedToolAttempt) -> Result<(), Box<dyn Error>> {
+        self.repository
+            .commit_observation(
+                authorized
+                    .executor_fence()
+                    .bind(ToolAttemptObservation::Completed {
+                        result: ToolResultContent::Text(
+                            ToolResultText::try_new(String::from("plan event appended"))
+                                .expect("the plan result fixture is bounded"),
+                        ),
+                    }),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+async fn authorize_plan_writes(
+    pool: &PgPool,
+    arguments: &[String],
+) -> Result<(SessionId, AuthorizedPlanWriteBatch), Box<dyn Error>> {
+    let seed =
+        u128::from(NEXT_PLAN_FIXTURE_SEED.fetch_add(PLAN_FIXTURE_SEED_STRIDE, Ordering::Relaxed));
+    let proposals = arguments
+        .iter()
+        .map(|arguments| ("plan_write", arguments.as_str()))
+        .collect::<Vec<_>>();
+    let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(pool, seed, &proposals).await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    for (index, request) in requests.iter().enumerate() {
+        let offset = u128::try_from(index)?;
+        tool_repository
+            .decide(
+                decide_tool_request(
+                    DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0 + offset)),
+                    *request,
+                    ToolApprovalDecision::Approve,
+                ),
+                || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0 + offset)),
+            )
+            .await?;
+    }
+    Ok((
+        fixture.session,
+        AuthorizedPlanWriteBatch {
+            session: fixture.session,
+            turn: fixture.turn,
+            next_attempt_seed: seed + 0xf0,
+            repository: tool_repository,
+        },
+    ))
+}
+
+async fn append_plan_write(
+    batch: &mut AuthorizedPlanWriteBatch,
+    repository: &SessionPlanRepository,
+    draft: PlanEventDraft,
+) -> Result<PlanEvent, Box<dyn Error>> {
+    let authorized = batch.authorize_next().await?;
+    let outcome = repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(authorized.correlation()),
+            draft,
+        ))
+        .await?;
+    batch.finish(authorized).await?;
+    Ok(expect_appended(outcome))
+}
+
 fn expect_appended(outcome: PlanAppendOutcome) -> PlanEvent {
     match outcome {
         PlanAppendOutcome::Appended(event) => event,
         PlanAppendOutcome::Rejected(rejection) => {
             panic!("the plan append fixture was unexpectedly rejected: {rejection:?}")
+        }
+    }
+}
+
+fn expect_dependency_cycle(outcome: PlanAppendOutcome) -> PlanDependencyCycle {
+    match outcome {
+        PlanAppendOutcome::Rejected(PlanAppendRejection::DependencyCycle(cycle)) => cycle,
+        PlanAppendOutcome::Appended(event) => {
+            panic!("the cyclic dependency unexpectedly appended: {event:?}")
+        }
+        PlanAppendOutcome::Rejected(rejection) => {
+            panic!("the cycle fixture received a different rejection: {rejection:?}")
         }
     }
 }
@@ -20857,6 +20982,152 @@ async fn session_plan_append_and_read_round_trip_through_postgres() -> Result<()
     assert_eq!(entry.text().as_str(), CREATED_TEXT);
     assert_eq!(entry.status(), PlanStatus::Pending);
     assert_eq!(history.events(), std::slice::from_ref(&event));
+    assert_eq!(history.completeness(), PlanPageCompleteness::Complete);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Dependency appends expose waiting/ready projection changes, retain history,
+/// and reject a back-edge with a typed deterministic cycle path.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_dependencies_round_trip_and_reject_cycles() -> Result<(), Box<dyn Error>> {
+    const PREREQUISITE_TEXT: &str = "finish the durable base";
+    const DEPENDENT_TEXT: &str = "ship dependent work";
+    const EXPECTED_ENTRY_COUNT: usize = 2;
+    const EXPECTED_HISTORY_EVENT_COUNT: usize = 4;
+    const HISTORY_LIMIT: usize = 10;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let completed_status = PlanStatus::Completed;
+    let arguments = vec![
+        create_plan_arguments(PREREQUISITE_TEXT),
+        create_plan_arguments(DEPENDENT_TEXT),
+        depends_plan_arguments(dependent, prerequisite),
+        status_plan_arguments(prerequisite, completed_status),
+        depends_plan_arguments(prerequisite, dependent),
+    ];
+    let (session, mut batch) = authorize_plan_writes(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    append_plan_write(
+        &mut batch,
+        &repository,
+        PlanEventDraft::Create {
+            text: plan_text(PREREQUISITE_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut batch,
+        &repository,
+        PlanEventDraft::Create {
+            text: plan_text(DEPENDENT_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut batch,
+        &repository,
+        PlanEventDraft::DependsOn {
+            entry: dependent,
+            dependency: prerequisite,
+        },
+    )
+    .await?;
+
+    let waiting = repository
+        .read(PlanReadRequest::new(session, None, None))
+        .await?;
+    let waiting_entry = &waiting.entries()[1];
+    let expected_dependencies = vec![prerequisite];
+
+    assert_eq!(waiting.entries().len(), EXPECTED_ENTRY_COUNT);
+    assert_eq!(
+        waiting_entry.dependencies(),
+        expected_dependencies.as_slice()
+    );
+    assert_eq!(waiting_entry.readiness(), PlanReadiness::Waiting);
+
+    append_plan_write(
+        &mut batch,
+        &repository,
+        PlanEventDraft::SetStatus {
+            entry: prerequisite,
+            status: completed_status,
+        },
+    )
+    .await?;
+    let cycle_attempt = batch.authorize_next().await?;
+    let cycle_correlation = cycle_attempt.correlation();
+    let prior_event_ordinal = u64::try_from(EXPECTED_HISTORY_EVENT_COUNT)?;
+    let cycle_event_ordinal = prior_event_ordinal
+        .checked_add(1)
+        .expect("the fixture event ordinal has a successor");
+    let direct_cycle_error = sqlx::query(
+        "INSERT INTO session_plan_event
+            (session_id, event_ordinal, prior_event_ordinal,
+             event_kind, entry_ordinal, dependency_ordinal,
+             entry_text, entry_status, provenance_turn_id,
+             provenance_issuing_turn_attempt_id, provenance_request_id,
+             provenance_attempt_id, provenance_dispatch_generation)
+         VALUES ($1, $2, $3, 'depends_on', $4, $5, NULL, NULL,
+                 $6, $7, $8, $9, $10)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(cycle_event_ordinal))
+    .bind(Decimal::from(prior_event_ordinal))
+    .bind(Decimal::from(prerequisite.as_u64()))
+    .bind(Decimal::from(dependent.as_u64()))
+    .bind(cycle_correlation.turn().into_uuid())
+    .bind(cycle_correlation.issuing_attempt().into_uuid())
+    .bind(cycle_correlation.request().into_uuid())
+    .bind(cycle_correlation.attempt().into_uuid())
+    .bind(Decimal::from(cycle_correlation.generation().as_u64()))
+    .execute(&pool)
+    .await
+    .expect_err("the schema trigger rejects a dependency cycle");
+
+    assert_eq!(
+        direct_cycle_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("session_plan_dependency_cycle")
+    );
+
+    let cycle_outcome = repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(cycle_attempt.correlation()),
+            PlanEventDraft::DependsOn {
+                entry: prerequisite,
+                dependency: dependent,
+            },
+        ))
+        .await?;
+    let cycle = expect_dependency_cycle(cycle_outcome);
+    let expected_cycle_path = vec![prerequisite, dependent, prerequisite];
+
+    assert_eq!(cycle.entry(), prerequisite);
+    assert_eq!(cycle.dependency(), dependent);
+    assert_eq!(cycle.path(), expected_cycle_path.as_slice());
+
+    let ready = repository
+        .read(PlanReadRequest::new(session, None, Some(HISTORY_LIMIT)))
+        .await?;
+    let ready_entry = &ready.entries()[1];
+    let history = ready
+        .history()
+        .expect("the requested dependency history is returned");
+
+    assert_eq!(ready.entries().len(), EXPECTED_ENTRY_COUNT);
+    assert_eq!(ready_entry.dependencies(), expected_dependencies.as_slice());
+    assert_eq!(ready_entry.readiness(), PlanReadiness::Ready);
+    assert_eq!(history.events().len(), EXPECTED_HISTORY_EVENT_COUNT);
     assert_eq!(history.completeness(), PlanPageCompleteness::Complete);
 
     pool.close().await;
