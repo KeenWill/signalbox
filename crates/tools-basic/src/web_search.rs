@@ -3,6 +3,7 @@
 use std::{error::Error, fmt, future::Future, time::Duration};
 
 use futures_util::StreamExt;
+use icu_casemap::CaseMapper;
 use reqwest::{
     Client, StatusCode, Url,
     header::{ACCEPT, HeaderValue},
@@ -51,7 +52,7 @@ const MAX_RESULT_TITLE_BYTES: usize = 2 * 1024;
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
 const MAX_RESULT_SNIPPET_BYTES: usize = 16 * 1024;
 const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
-const MAX_FORM_DECODE_PASSES: usize = 4;
+const MAX_REVERSIBLE_DECODE_PASSES: usize = 4;
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
 /// Configured web-search provider.
@@ -751,7 +752,7 @@ fn credential_safe_transport_outcome(
             let credential_text =
                 std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
             if credential_text.is_empty()
-                || ascii_case_insensitive_contains(&format!("{response:?}"), credential_text)
+                || unicode_case_insensitive_contains(&format!("{response:?}"), credential_text)
             {
                 Err(WebSearchTransportFailure::CredentialDiagnosticCollision(
                     WebSearchCredentialDiagnostic {
@@ -768,7 +769,7 @@ fn credential_safe_transport_outcome(
     };
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let result = if credential_text.is_empty()
-        || ascii_case_insensitive_contains(&format!("{sanitized:?}"), credential_text)
+        || unicode_case_insensitive_contains(&format!("{sanitized:?}"), credential_text)
     {
         let failure_class = match &sanitized {
             Ok(_) => WebSearchCredentialDiagnosticClass::CallerOrHubBug,
@@ -829,8 +830,8 @@ fn credential_safe_transport_failure(
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let (source_contains_credential, executor_contains_credential) = match &failure {
         WebSearchTransportFailure::ProviderRejected(error) => (
-            ascii_case_insensitive_contains(&format!("{error:?}"), credential_text)
-                || ascii_case_insensitive_contains(&error.to_string(), credential_text),
+            unicode_case_insensitive_contains(&format!("{error:?}"), credential_text)
+                || unicode_case_insensitive_contains(&error.to_string(), credential_text),
             false,
         ),
         WebSearchTransportFailure::InvalidCredential
@@ -842,8 +843,8 @@ fn credential_safe_transport_failure(
             let executor_error = WebSearchExecutorError::DispatchUnknown;
             (
                 false,
-                ascii_case_insensitive_contains(&format!("{executor_error:?}"), credential_text)
-                    || ascii_case_insensitive_contains(
+                unicode_case_insensitive_contains(&format!("{executor_error:?}"), credential_text)
+                    || unicode_case_insensitive_contains(
                         &executor_error.to_string(),
                         credential_text,
                     ),
@@ -851,8 +852,8 @@ fn credential_safe_transport_failure(
         }
     };
     if credential_text.is_empty()
-        || ascii_case_insensitive_contains(&format!("{failure:?}"), credential_text)
-        || ascii_case_insensitive_contains(&failure.to_string(), credential_text)
+        || unicode_case_insensitive_contains(&format!("{failure:?}"), credential_text)
+        || unicode_case_insensitive_contains(&failure.to_string(), credential_text)
         || source_contains_credential
         || executor_contains_credential
     {
@@ -871,7 +872,7 @@ fn safe_collision_diagnostic(credential: &str) -> String {
     const DIAGNOSTIC: &str = "web search credential diagnostic suppressed";
     const REDACTION: &str = "[redacted]";
     let redacted = DIAGNOSTIC.replace(credential, REDACTION);
-    if !credential.is_empty() && !ascii_case_insensitive_contains(&redacted, credential) {
+    if !credential.is_empty() && !unicode_case_insensitive_contains(&redacted, credential) {
         return redacted;
     }
     if credential == "!" {
@@ -889,8 +890,8 @@ fn credential_safe_executor_error(
     let failure_class = executor_error_diagnostic_class(&error);
     let transport_failure_class = executor_error_transport_failure_class(&error);
     if credential_text.is_empty()
-        || ascii_case_insensitive_contains(&format!("{error:?}"), credential_text)
-        || ascii_case_insensitive_contains(&error.to_string(), credential_text)
+        || unicode_case_insensitive_contains(&format!("{error:?}"), credential_text)
+        || unicode_case_insensitive_contains(&error.to_string(), credential_text)
     {
         WebSearchExecutorError::CredentialDiagnosticCollision(WebSearchCredentialDiagnostic {
             rendered: safe_collision_diagnostic(credential_text),
@@ -957,7 +958,7 @@ fn build_provider_request(
         .append_pair("count", BRAVE_RESULT_COUNT_QUERY)
         .append_pair("result_filter", "web")
         .append_pair("text_decorations", "false");
-    if ascii_case_insensitive_contains(url.as_str(), credential_text)
+    if unicode_case_insensitive_contains(url.as_str(), credential_text)
         || encoded_contains_credential(url.as_str(), credential_text)
     {
         return Err(WebSearchTransportFailure::RequestFailed);
@@ -971,7 +972,7 @@ fn build_provider_request(
         .header(endpoint.credential_header, credential_header)
         .build()
         .map_err(|_| WebSearchTransportFailure::RequestFailed)?;
-    if ascii_case_insensitive_contains(&format!("{http_request:?}"), credential_text) {
+    if unicode_case_insensitive_contains(&format!("{http_request:?}"), credential_text) {
         return Err(WebSearchTransportFailure::RequestFailed);
     }
     Ok(http_request)
@@ -994,7 +995,7 @@ fn fixed_request_metadata_contains_credential(
         "application/json",
     ]
     .into_iter()
-    .any(|value| ascii_case_insensitive_contains(value, credential))
+    .any(|value| unicode_case_insensitive_contains(value, credential))
 }
 
 async fn collect_complete_body(
@@ -1241,6 +1242,18 @@ where
             ));
         };
         let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+        if fixed_bound_evidence_token_collides(credential_text) {
+            return WebSearchRequestOutcome::Error {
+                error: WebSearchExecutorError::CredentialDiagnosticCollision(
+                    WebSearchCredentialDiagnostic {
+                        rendered: safe_collision_diagnostic(credential_text),
+                        failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                        transport_failure_class: None,
+                    },
+                ),
+                credential,
+            };
+        }
         if query_contains_credential(request.query(), credential_text) {
             let outcome = known_failure_evidence(self.request_failed_detail.clone(), &scrubber);
             return match outcome {
@@ -1412,7 +1425,7 @@ fn bind_request_outcome(
                 Result::<&CorrelatedToolExecutorEvidence, _>::Err(&error)
             );
             if !credential_text.is_empty()
-                && !ascii_case_insensitive_contains(&rendered_result, credential_text)
+                && !unicode_case_insensitive_contains(&rendered_result, credential_text)
             {
                 return Err(error);
             }
@@ -1464,7 +1477,7 @@ fn bind_request_outcome(
     if credential_text.is_empty()
         || rendered_result.contains(credential_text)
         || (check_case_normalized_diagnostic
-            && ascii_case_insensitive_contains(&rendered_result, credential_text))
+            && unicode_case_insensitive_contains(&rendered_result, credential_text))
     {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
@@ -1842,6 +1855,8 @@ impl CredentialScrubber {
             || text.contains(&self.json_escaped)
             || unicode_normalized_contains(text, &self.exact)
             || unicode_normalized_contains(text, &self.json_escaped)
+            || unicode_case_insensitive_contains(text, &self.exact)
+            || unicode_case_insensitive_contains(text, &self.json_escaped)
             || self.contains_encoded_credential(text)
     }
 
@@ -1852,8 +1867,6 @@ impl CredentialScrubber {
 
     fn contains_case_normalized_credential(&self, text: &str) -> bool {
         self.contains_credential(text)
-            || unicode_case_insensitive_contains(text, &self.exact)
-            || unicode_case_insensitive_contains(text, &self.json_escaped)
     }
 
     fn url_contains_encoded_credential(&self, text: &str) -> bool {
@@ -1876,9 +1889,9 @@ impl CredentialScrubber {
         let Some(host) = url.host_str() else {
             return false;
         };
-        if canonicalized_url_host(&self.exact)
-            .is_some_and(|credential_host| ascii_case_insensitive_contains(host, &credential_host))
-        {
+        if canonicalized_url_host(&self.exact).is_some_and(|credential_host| {
+            unicode_case_insensitive_contains(host, &credential_host)
+        }) {
             return true;
         }
         if let Some(result_host) = parse_ip_literal(host) {
@@ -1920,46 +1933,32 @@ fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {
             .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
 }
 
-fn ascii_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
-    !needle.is_empty()
-        && haystack
-            .as_bytes()
-            .windows(needle.len())
-            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
 fn encoded_contains_credential(text: &str, credential: &str) -> bool {
     let mut decoded = String::from(text);
-    for _ in 0..MAX_FORM_DECODE_PASSES {
-        let form_decoded = form_decode_once(decoded.as_bytes());
-        let Ok(form_decoded) = String::from_utf8(form_decoded) else {
+    for _ in 0..MAX_REVERSIBLE_DECODE_PASSES {
+        let Some((next, changed)) = decode_reversible_text_once(&decoded) else {
             return true;
         };
-        let form_changed = form_decoded != decoded;
-        if form_changed && unicode_case_insensitive_contains(&form_decoded, credential) {
+        if changed && unicode_case_insensitive_contains(&next, credential) {
             return true;
         }
-        let Some((html_decoded, html_changed)) = decode_html_character_references(&form_decoded)
-        else {
-            return true;
-        };
-        if html_changed && unicode_case_insensitive_contains(&html_decoded, credential) {
-            return true;
-        }
-        if !form_changed && !html_changed {
+        if !changed {
             return false;
         }
-        decoded = html_decoded;
+        decoded = next;
     }
-    let form_decoded = form_decode_once(decoded.as_bytes());
-    let Ok(form_decoded) = String::from_utf8(form_decoded) else {
-        return true;
-    };
-    form_decoded != decoded
-        || decode_html_character_references(&form_decoded).is_none_or(|(_, changed)| changed)
+    decode_reversible_text_once(&decoded).is_none_or(|(_, changed)| changed)
 }
 
-fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
+fn decode_reversible_text_once(text: &str) -> Option<(String, bool)> {
+    let form_decoded = String::from_utf8(form_decode_once(text.as_bytes())).ok()?;
+    let form_changed = form_decoded != text;
+    let (html_decoded, html_changed) = decode_html_character_references(&form_decoded);
+    let (json_decoded, json_changed) = decode_json_unicode_escapes(&html_decoded);
+    Some((json_decoded, form_changed || html_changed || json_changed))
+}
+
+fn decode_html_character_references(text: &str) -> (String, bool) {
     const MAX_CHARACTER_REFERENCE_BYTES: usize = 64;
     let mut decoded = String::with_capacity(text.len());
     let mut remaining = text;
@@ -1976,23 +1975,31 @@ fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
             continue;
         };
         let entity = &reference[1..relative_end];
-        let replacement = decode_html_character_reference(entity)?;
-        decoded.push_str(&replacement);
-        changed = true;
+        if let Some(replacement) = decode_html_character_reference(entity) {
+            decoded.push_str(&replacement);
+            changed = true;
+        } else {
+            decoded.push_str(&reference[..=relative_end]);
+        }
         remaining = &reference[relative_end + 1..];
     }
     decoded.push_str(remaining);
-    Some((decoded, changed))
+    (decoded, changed)
 }
 
 fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
-    let normalized_needle = needle.to_lowercase().nfc().collect::<String>();
-    !normalized_needle.is_empty()
-        && haystack
-            .to_lowercase()
-            .nfc()
-            .collect::<String>()
-            .contains(&normalized_needle)
+    let normalized_needle = unicode_case_folded_nfc(needle);
+    !normalized_needle.is_empty() && unicode_case_folded_nfc(haystack).contains(&normalized_needle)
+}
+
+fn unicode_case_insensitive_eq(left: &str, right: &str) -> bool {
+    !left.is_empty() && unicode_case_folded_nfc(left) == unicode_case_folded_nfc(right)
+}
+
+fn unicode_case_folded_nfc(text: &str) -> String {
+    let decomposed = text.nfd().collect::<String>();
+    let folded = CaseMapper::new().fold_string(&decomposed);
+    folded.as_ref().nfc().collect()
 }
 
 fn unicode_normalized_contains(haystack: &str, needle: &str) -> bool {
@@ -2002,6 +2009,49 @@ fn unicode_normalized_contains(haystack: &str, needle: &str) -> bool {
             .nfc()
             .collect::<String>()
             .contains(&normalized_needle)
+}
+
+fn decode_json_unicode_escapes(text: &str) -> (String, bool) {
+    let mut decoded = String::with_capacity(text.len());
+    let mut remaining = text;
+    let mut changed = false;
+    while let Some(relative_start) = remaining.find("\\u") {
+        decoded.push_str(&remaining[..relative_start]);
+        let escape = &remaining[relative_start..];
+        let Some((character, consumed)) = decode_json_unicode_escape(escape) else {
+            decoded.push_str("\\u");
+            remaining = &escape[2..];
+            continue;
+        };
+        decoded.push(character);
+        remaining = &escape[consumed..];
+        changed = true;
+    }
+    decoded.push_str(remaining);
+    (decoded, changed)
+}
+
+fn decode_json_unicode_escape(escape: &str) -> Option<(char, usize)> {
+    const CODE_UNIT_ESCAPE_BYTES: usize = 6;
+    const SURROGATE_PAIR_ESCAPE_BYTES: usize = CODE_UNIT_ESCAPE_BYTES * 2;
+    let first = decode_json_code_unit(escape)?;
+    if (0xd800..=0xdbff).contains(&first) {
+        let second = decode_json_code_unit(escape.get(CODE_UNIT_ESCAPE_BYTES..)?)?;
+        if !(0xdc00..=0xdfff).contains(&second) {
+            return None;
+        }
+        let scalar = 0x1_0000 + ((u32::from(first) - 0xd800) << 10) + (u32::from(second) - 0xdc00);
+        return char::from_u32(scalar).map(|character| (character, SURROGATE_PAIR_ESCAPE_BYTES));
+    }
+    if (0xdc00..=0xdfff).contains(&first) {
+        return None;
+    }
+    char::from_u32(u32::from(first)).map(|character| (character, CODE_UNIT_ESCAPE_BYTES))
+}
+
+fn decode_json_code_unit(escape: &str) -> Option<u16> {
+    let digits = escape.strip_prefix("\\u")?.get(..4)?;
+    u16::from_str_radix(digits, 16).ok()
 }
 
 fn decode_html_character_reference(entity: &str) -> Option<String> {
@@ -2030,6 +2080,25 @@ fn decode_html_character_reference(entity: &str) -> Option<String> {
 
 fn fixed_outer_error_debug_may_contain(credential: &str) -> bool {
     "Err()".contains(credential)
+}
+
+fn fixed_bound_evidence_token_collides(credential: &str) -> bool {
+    let evidence = [
+        ToolExecutorEvidence::CompletedText(String::new()),
+        ToolExecutorEvidence::KnownFailed { detail: None },
+        ToolExecutorEvidence::Ambiguous,
+    ];
+    evidence.iter().any(|evidence| {
+        unicode_case_insensitive_eq(fixed_bound_evidence_debug_token(evidence), credential)
+    })
+}
+
+fn fixed_bound_evidence_debug_token(evidence: &ToolExecutorEvidence) -> &'static str {
+    match evidence {
+        ToolExecutorEvidence::CompletedText(_) => "CompletedText",
+        ToolExecutorEvidence::KnownFailed { .. } => "KnownFailed",
+        ToolExecutorEvidence::Ambiguous => "Ambiguous",
+    }
 }
 
 fn canonicalized_url_host(value: &str) -> Option<String> {
@@ -2153,6 +2222,9 @@ mod tests {
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
     const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
     const FORM_HTML_COLLISION_VALUE: &str = "abc%26amp%3Bdef";
+    const JSON_UNICODE_COLLISION_KEY: &str = "abc";
+    const JSON_UNICODE_COLLISION_VALUE: &str = r"\u0061\u0062\u0063";
+    const SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE: &str = "safe&nbsp;value";
     const REQUEST_DETAIL_COLLISION_KEY: &str = "failed";
     const QUERY_CASE_NORMALIZED_COLLISION_KEY: &str = "ABCDEF";
     const QUERY_CASE_NORMALIZED_COLLISION_VALUE: &str = "%61%62%63%64%65%66";
@@ -2166,10 +2238,13 @@ mod tests {
     const TIMESTAMP_COLLISION_KEY: &str = "2026";
     const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
     const EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY: &str = "completedtext";
+    const EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY: &str = "knownfailed";
     const EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY: &str = "completedtext(";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY: &str = "requestfailed";
     const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
+    const UNICODE_FULL_FOLD_COLLISION_KEY: &str = "STRASSE";
+    const UNICODE_FULL_FOLD_COLLISION_VALUE: &str = "Straße";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
     const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
@@ -3014,6 +3089,68 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
+    /// INV-035: JSON Unicode escapes cannot conceal a credential before the
+    /// injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_json_unicode_escaped_query_credential_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: JSON_UNICODE_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(JSON_UNICODE_COLLISION_VALUE),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("JSON-escaped credential collision is definitive evidence");
+        let _detail = known_failure_detail(evidence);
+
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: a multi-character full Unicode case fold cannot conceal a
+    /// credential before the injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_full_case_folded_query_credential_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: UNICODE_FULL_FOLD_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(UNICODE_FULL_FOLD_COLLISION_VALUE),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("full-fold credential collision is definitive evidence");
+        let _detail = known_failure_detail(evidence);
+
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
     /// INV-035: the actual `ToolExecutor::execute` result fails closed before
     /// its bound evidence diagnostic can reproduce the request credential.
     #[tokio::test]
@@ -3093,6 +3230,51 @@ mod tests {
             &rendered,
             EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY
         ));
+    }
+
+    /// INV-035: a credential matching the fixed `KnownFailed` Debug token is
+    /// rejected before dispatch and omitted from the public executor result.
+    #[tokio::test]
+    async fn web_search_bound_known_failure_token_omits_case_folded_credential_collision() {
+        let diagnostic = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&diagnostic);
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY,
+        };
+        let transport = RequestFailedTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("static web_search tool compiles")
+            .into_parts();
+        let executor = FormattingExecutor {
+            inner: executor,
+            diagnostic: captured,
+        };
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let rendered = diagnostic
+            .lock()
+            .expect("captured executor diagnostic lock is available")
+            .clone();
+
+        assert!(result.is_err());
+        assert!(!unicode_case_insensitive_contains(
+            &rendered,
+            EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY,
+        ));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
     /// INV-035: punctuation does not conceal a case-normalized fixed Debug
@@ -3333,6 +3515,74 @@ mod tests {
         let content = completed_text(evidence);
 
         assert!(!content.contains(SYNTHETIC_KEY));
+    }
+
+    /// INV-035: JSON Unicode escapes in provider text are decoded within the
+    /// bounded scrubber before completed evidence is formed.
+    #[test]
+    fn web_search_success_evidence_redacts_json_unicode_escaped_credential() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: format!("Synthetic {JSON_UNICODE_COLLISION_VALUE} result"),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("JSON-escaped fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            JSON_UNICODE_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(JSON_UNICODE_COLLISION_VALUE));
+        assert!(!unicode_case_insensitive_contains(
+            &content,
+            JSON_UNICODE_COLLISION_KEY,
+        ));
+    }
+
+    /// INV-035: multi-character full Unicode folding applies to provider text
+    /// before completed evidence is formed.
+    #[test]
+    fn web_search_success_evidence_redacts_full_case_folded_credential() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: format!("Synthetic {UNICODE_FULL_FOLD_COLLISION_VALUE} result"),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("full-fold fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            UNICODE_FULL_FOLD_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+        let content = completed_text(evidence);
+
+        assert!(!unicode_case_insensitive_contains(
+            &content,
+            UNICODE_FULL_FOLD_COLLISION_KEY,
+        ));
+    }
+
+    /// Unsupported named HTML references stay ordinary text instead of
+    /// becoming false credential collisions in queries or provider fields.
+    #[test]
+    fn web_search_unsupported_named_html_reference_remains_ordinary_text() {
+        let scrubber = scrubber();
+
+        let sanitized = scrubber.redact_text(SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE);
+
+        assert!(!query_contains_credential(
+            SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE,
+            SYNTHETIC_KEY,
+        ));
+        assert_eq!(sanitized, SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE);
     }
 
     /// INV-035: credential scrubbing cannot turn a checked result title into
