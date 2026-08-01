@@ -1,5 +1,8 @@
 # Runner protocol and placement
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page specifies the implemented runner-protocol domain foundation as
 verified against the implementing stack through PR #260
 (`agent/runner-protocol-domain`); its durable Postgres representation and

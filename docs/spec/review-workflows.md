@@ -1,5 +1,8 @@
 # Review workflows
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page specifies the implemented review-workflow bounded context. Its domain
 and store foundation was verified through PR #221
 (`agent/review-workflow-spec`); two-axis finding confidence is verified through

@@ -1,5 +1,8 @@
 # Configuration and credentials
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
 (`agent/credential-reference-total`). This includes signalboxd configuration
