@@ -9704,6 +9704,9 @@ const fn wire_goal_command_rejection(
         DomainGoalCommandRejection::UnknownModelAlias => {
             WireGoalCommandRejection::UnknownModelAlias
         }
+        DomainGoalCommandRejection::AcceptancePositionExhausted => {
+            WireGoalCommandRejection::AcceptancePositionExhausted
+        }
         DomainGoalCommandRejection::RequiresBlocked => WireGoalCommandRejection::RequiresBlocked,
         DomainGoalCommandRejection::RequiresPursuingOrBlocked => {
             WireGoalCommandRejection::RequiresPursuingOrBlocked

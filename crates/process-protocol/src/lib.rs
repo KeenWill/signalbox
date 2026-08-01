@@ -1851,6 +1851,8 @@ pub enum GoalCommandRejection {
     GoalNotAttached,
     /// The session's selected model alias is absent from daemon configuration.
     UnknownModelAlias,
+    /// The session accepted-input position cannot advance beyond `u64::MAX`.
+    AcceptancePositionExhausted,
     /// Resume requires a blocked current generation.
     RequiresBlocked,
     /// Stop or supersede requires a pursuing or blocked generation.
@@ -5417,10 +5419,10 @@ mod tests {
                 message: String::from("goal command rejected"),
                 detail: ErrorDetail::rejected(RejectionDetail::GoalCommandRejected {
                     session_id: uuid(3),
-                    reason: GoalCommandRejection::UnknownModelAlias,
+                    reason: GoalCommandRejection::AcceptancePositionExhausted,
                 }),
             },
-            r#"{"type":"error","code":"rejected","message":"goal command rejected","detail":{"type":"goal_command_rejected","session_id":"00000000-0000-0000-0000-000000000003","reason":"unknown_model_alias"}}"#,
+            r#"{"type":"error","code":"rejected","message":"goal command rejected","detail":{"type":"goal_command_rejected","session_id":"00000000-0000-0000-0000-000000000003","reason":"acceptance_position_exhausted"}}"#,
         )
     }
 
