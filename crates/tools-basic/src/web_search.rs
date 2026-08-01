@@ -989,7 +989,15 @@ fn fixed_request_metadata_contains_credential(
         endpoint.url,
         endpoint.credential_header,
         "GET",
+        ACCEPT.as_str(),
         "application/json",
+        "q",
+        "count",
+        BRAVE_RESULT_COUNT_QUERY,
+        "result_filter",
+        "web",
+        "text_decorations",
+        "false",
     ]
     .into_iter()
     .any(|value| text_contains_credential_variant(value, credential))
@@ -1239,8 +1247,7 @@ where
             let evidence = ToolExecutorEvidence::KnownFailed { detail };
             let retain_for_bound_diagnostic = credential.expose_bytes().len()
                 <= MAX_CREDENTIAL_BYTES
-                && !credential_text.is_empty()
-                && has_http_header_boundary_whitespace(credential.expose_bytes());
+                && !credential_text.is_empty();
             return if retain_for_bound_diagnostic {
                 WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Credentialed {
                     evidence,
@@ -1554,6 +1561,7 @@ fn report_credential_access_failure(
 ) {
     tracing::warn!(
         target: "signalbox_tools_basic_web_search",
+        parent: None,
         failure = ?error.failure,
         session_id = %correlation.session().as_uuid(),
         turn_id = %correlation.turn().as_uuid(),
@@ -2392,6 +2400,7 @@ mod tests {
     const FIXTURE_ORIGIN_ONLY_RESULT_URL: &str = "https://example.com";
     const FIXTURE_CANONICAL_ORIGIN_RESULT_URL: &str = "https://example.com/";
     const ACCEPT_HEADER_COLLISION_KEY: &str = "application/json";
+    const FIXED_QUERY_PARAMETER_COLLISION_KEY: &str = "text_decorations";
     const ACCEPT_HEADER_CASE_COLLISION_KEY: &str = "APPLICATION/JSON";
     const PROVIDER_HOST_CASE_COLLISION_KEY: &str = "API.SEARCH.BRAVE.COM";
     const URL_SCHEME_COLLISION_KEY: &str = "https";
@@ -3028,6 +3037,25 @@ mod tests {
         output.text()
     }
 
+    fn capture_credential_failure_in_credential_span(
+        error: &CredentialAccessError,
+        correlation: &ToolAttemptDispatchCorrelation,
+        credential: &str,
+    ) -> String {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let caller = tracing::warn_span!("caller", credential);
+            let _entered = caller.enter();
+            report_credential_access_failure(error, correlation);
+        });
+        output.text()
+    }
+
     fn capture_credential_value_failure(
         correlation: &ToolAttemptDispatchCorrelation,
         credential: &CredentialValue,
@@ -3367,6 +3395,37 @@ mod tests {
             .await
             .into_result()
             .expect("fixed metadata collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: every fixed provider query component is checked before the
+    /// injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_fixed_query_metadata_before_injected_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: FIXED_QUERY_PARAMETER_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(FIXTURE_QUERY),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("fixed query metadata collision is definitive evidence");
 
         assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
         assert_eq!(searches.load(Ordering::Relaxed), 0);
@@ -5349,6 +5408,25 @@ mod tests {
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
     }
 
+    /// INV-035: credential-resolution telemetry cannot inherit credential
+    /// bytes from an entered caller span.
+    #[test]
+    fn credential_failure_diagnostic_ignores_credential_bearing_caller_span() {
+        let error = CredentialAccessError::new(
+            CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
+            CredentialAccessFailure::Unmapped,
+        );
+        let correlation = dispatch_correlation();
+
+        let diagnostic =
+            capture_credential_failure_in_credential_span(&error, &correlation, SYNTHETIC_KEY);
+
+        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(CREDENTIAL_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
     /// INV-035: unusable-credential telemetry cannot retain the resolved
     /// credential bytes.
     #[test]
@@ -5383,7 +5461,7 @@ mod tests {
     }
 
     /// INV-035: an unusable one-byte credential suppresses colliding telemetry
-    /// and commits definitive pre-dispatch failure evidence.
+    /// and cannot form a colliding public bound result.
     #[tokio::test]
     async fn unusable_short_credential_value_diagnostic_is_suppressed() {
         let correlation = dispatch_correlation();
@@ -5391,8 +5469,10 @@ mod tests {
 
         let (diagnostic, result) = capture_credential_value_failure(&correlation, &credential);
         let report_error = result.expect_err("credential collision suppresses the diagnostic");
-        let (outcome, searches) =
-            execute_raw_credential_through_service(SHORT_DIAGNOSTIC_COLLISION_KEY.as_bytes()).await;
+        let (failed, searches, _rendered) = execute_formatted_raw_credential_through_service(
+            SHORT_DIAGNOSTIC_COLLISION_KEY.as_bytes(),
+        )
+        .await;
 
         assert!(!diagnostic.contains(SHORT_DIAGNOSTIC_COLLISION_KEY));
         assert!(!format!("{report_error:?}").contains(SHORT_DIAGNOSTIC_COLLISION_KEY));
@@ -5401,7 +5481,7 @@ mod tests {
                 .to_string()
                 .contains(SHORT_DIAGNOSTIC_COLLISION_KEY)
         );
-        assert!(is_committed_known_failure(&outcome));
+        assert!(failed);
         assert_eq!(searches, 0);
     }
 
