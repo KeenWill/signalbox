@@ -25,7 +25,10 @@ pub use web_fetch::{
     has_more_response_bytes, public_destination_client,
 };
 pub use web_search::{
-    BRAVE_SEARCH_CREDENTIAL_REFERENCE, WebSearchConfiguration, WebSearchCredentialDiagnostic,
+    BRAVE_SEARCH_CREDENTIAL_REFERENCE, ReqwestWebSearchConstructionError,
+    ReqwestWebSearchTransport, WebSearchConfiguration, WebSearchCredentialDiagnostic,
     WebSearchEgressPolicy, WebSearchExecutorError, WebSearchPageCompleteness, WebSearchProvider,
-    WebSearchProviderError, WebSearchResponse, WebSearchResult, WebSearchResultFields,
+    WebSearchProviderError, WebSearchRequest, WebSearchResponse, WebSearchResult,
+    WebSearchResultFields, WebSearchTransport, WebSearchTransportFailure,
+    WebSearchTransportOutcome,
 };
