@@ -137,11 +137,10 @@ jobs:
 
   # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
   # pinned PostgreSQL container through testcontainers, so tests execute
-  # concurrently without sharing database state. The persistence and signalboxd
-  # suites spend most of their wall clock waiting on container startup and
-  # database IO rather than on CPU, so they oversubscribe the four runner vCPUs
-  # with eight test threads. The terminal-client suite asserts on signal and PTY
-  # timing, so it stays at one thread per vCPU.
+  # concurrently without sharing database state. The terminal-client suite
+  # additionally asserts on signal delivery and PTY timing, so its thread count
+  # stays at one per runner vCPU; the other two suites carry no timing
+  # assertion and may oversubscribe.
   postgres-integration-suite:
     name: postgres-integration (${{ matrix.suite }})
     runs-on: ubuntu-latest
