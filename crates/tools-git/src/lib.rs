@@ -103,6 +103,7 @@ const MAX_LOG_IDENTITY_BYTES: usize = 256;
 const MAX_LOG_MESSAGE_BYTES: usize = 2048;
 const MAX_DIFF_BYTES: usize = 128 * 1024;
 const GITLINK_MODE: u32 = 0o160000;
+const INDEX_SKIP_WORKTREE: u16 = 1 << 14;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded Git tool arguments";
 const REPOSITORY_REJECTED_DETAIL: &str = "injected Git repository was rejected";
 const PATH_REJECTED_DETAIL: &str = "Git path was rejected by the workspace boundary";
@@ -1708,9 +1709,9 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let current_tree = worktree_head_tree(repository)?;
         let target_tree = find_bounded_tree(repository, target_commit.tree_id())?;
         if let Some(current_tree) = &current_tree {
-            validate_tree_discovery(repository, current_tree)?;
+            validate_checkout_tree_discovery(repository, current_tree)?;
         }
-        validate_tree_discovery(repository, &target_tree)?;
+        validate_checkout_tree_discovery(repository, &target_tree)?;
         let mut current_index = repository.index().map_err(|_| LocalGitFailure::Operation)?;
         if current_index.has_conflicts() {
             return Err(LocalGitFailure::Operation);
@@ -2853,7 +2854,9 @@ const fn delta_status(status: Delta) -> &'static str {
 fn index_files(index: &Index) -> BTreeMap<PathBuf, (git2::Oid, u32)> {
     index
         .iter()
-        .filter(|entry| entry.flags & 0x3000 == 0)
+        .filter(|entry| {
+            entry.flags & 0x3000 == 0 && entry.flags_extended & INDEX_SKIP_WORKTREE == 0
+        })
         .map(|entry| {
             (
                 PathBuf::from(std::ffi::OsString::from_vec(entry.path)),
@@ -2938,6 +2941,13 @@ fn worktree_diff<FileSystem: WorkspaceFileSystem>(
     };
     let index = repository.index().map_err(|_| LocalGitFailure::Operation)?;
     let index_files = index_files(&index);
+    let skip_worktree_paths = index
+        .iter()
+        .filter(|entry| {
+            entry.flags & 0x3000 == 0 && entry.flags_extended & INDEX_SKIP_WORKTREE != 0
+        })
+        .map(|entry| PathBuf::from(OsString::from_vec(entry.path)))
+        .collect::<BTreeSet<_>>();
     let untracked_files = untracked
         .into_iter()
         .filter(|path| {
@@ -2968,6 +2978,9 @@ fn worktree_diff<FileSystem: WorkspaceFileSystem>(
         .cloned()
         .collect::<BTreeSet<_>>();
     for path in paths {
+        if skip_worktree_paths.contains(&path) {
+            continue;
+        }
         if head_files
             .get(&path)
             .is_some_and(|(_, mode)| *mode == GITLINK_MODE)
@@ -3234,15 +3247,10 @@ fn log(
 ) -> Result<LogResult, LocalGitFailure> {
     let start = resolve_bounded_commit(repository, &arguments.revision)?.id();
     let shallow = read_shallow_boundaries(authority)?;
-    let ordered = bounded_topological_page(
-        repository,
-        start,
-        arguments.max_entries.saturating_add(1),
-        &shallow,
-    )?;
+    let (ordered, truncated) =
+        bounded_topological_page(repository, start, arguments.max_entries, &shallow)?;
     let mut commits = Vec::new();
-    let truncated = ordered.len() > arguments.max_entries;
-    for oid in ordered.into_iter().take(arguments.max_entries) {
+    for oid in ordered {
         let commit = find_bounded_commit(repository, oid)?;
         let author = commit.author();
         let (author_name, author_name_truncated) =
@@ -3306,7 +3314,7 @@ fn bounded_topological_page(
     start: git2::Oid,
     limit: usize,
     shallow: &HashSet<git2::Oid>,
-) -> Result<Vec<git2::Oid>, LocalGitFailure> {
+) -> Result<(Vec<git2::Oid>, bool), LocalGitFailure> {
     let mut frontier = vec![start];
     let mut queued = HashSet::from([start]);
     let mut emitted = HashSet::new();
@@ -3340,7 +3348,8 @@ fn bounded_topological_page(
             }
         }
     }
-    Ok(ordered)
+    let truncated = !frontier.is_empty();
+    Ok((ordered, truncated))
 }
 
 fn select_topological_candidate(
@@ -3429,6 +3438,21 @@ fn validate_tree_discovery(
     repository: &Repository,
     root: &git2::Tree<'_>,
 ) -> Result<(), LocalGitFailure> {
+    validate_tree_discovery_with_symlinks(repository, root, true)
+}
+
+fn validate_checkout_tree_discovery(
+    repository: &Repository,
+    root: &git2::Tree<'_>,
+) -> Result<(), LocalGitFailure> {
+    validate_tree_discovery_with_symlinks(repository, root, false)
+}
+
+fn validate_tree_discovery_with_symlinks(
+    repository: &Repository,
+    root: &git2::Tree<'_>,
+    allow_symlinks: bool,
+) -> Result<(), LocalGitFailure> {
     let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
     let mut pending = vec![(root.id(), PathBuf::new())];
     let mut inspected = 0_usize;
@@ -3458,7 +3482,9 @@ fn validate_tree_discovery(
             match entry.kind() {
                 Some(git2::ObjectType::Tree) => pending.push((entry.id(), path)),
                 Some(git2::ObjectType::Blob) => {
-                    if !matches!(entry.filemode(), 0o100644 | 0o100755) {
+                    if !matches!(entry.filemode(), 0o100644 | 0o100755)
+                        && !(allow_symlinks && entry.filemode() == 0o120000)
+                    {
                         return Err(LocalGitFailure::Operation);
                     }
                     let (size, kind) = object_database
@@ -3922,6 +3948,19 @@ impl ReferenceLogLock {
             if !pack_lock_is_owned(&self.parent, &self.lock_name, &restoration, identity) {
                 return Err(LocalGitFailure::Operation);
             }
+            let published_identity = openat(
+                &self.parent,
+                &self.leaf,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .ok()
+            .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
+            .map(|metadata| file_identity(&metadata));
+            if published_identity != Some(self.identity) {
+                remove_owned_pack_lock(&self.parent, &self.lock_name, &restoration, identity);
+                return Err(LocalGitFailure::Operation);
+            }
             if renameat_with(
                 &self.parent,
                 &self.lock_name,
@@ -4125,6 +4164,26 @@ fn install_packed_object_file_with_hook<Hook: FnOnce()>(
     mode: Mode,
     before_publish: Hook,
 ) -> Result<(), LocalGitFailure> {
+    install_packed_object_file_with_copy_and_hook(
+        pack_directory,
+        source_path,
+        mode,
+        std::io::copy,
+        before_publish,
+    )
+}
+
+fn install_packed_object_file_with_copy_and_hook<Copy, Hook>(
+    pack_directory: &OwnedFd,
+    source_path: &Path,
+    mode: Mode,
+    copy: Copy,
+    before_publish: Hook,
+) -> Result<(), LocalGitFailure>
+where
+    Copy: FnOnce(&mut fs::File, &mut fs::File) -> std::io::Result<u64>,
+    Hook: FnOnce(),
+{
     let name = source_path.file_name().ok_or(LocalGitFailure::Operation)?;
     let mut temporary_name = OsString::from(name);
     temporary_name.push(".lock");
@@ -4141,16 +4200,25 @@ fn install_packed_object_file_with_hook<Hook: FnOnce()>(
     )
     .map_err(|_| LocalGitFailure::Operation)?;
     let mut destination = fs::File::from(descriptor);
-    destination
-        .set_permissions(fs::Permissions::from_mode(mode.bits()))
-        .map_err(|_| LocalGitFailure::Operation)?;
     let identity = file_identity(
         &destination
             .metadata()
             .map_err(|_| LocalGitFailure::Operation)?,
     );
-    let copied =
-        std::io::copy(&mut source, &mut destination).map_err(|_| LocalGitFailure::Operation)?;
+    if destination
+        .set_permissions(fs::Permissions::from_mode(mode.bits()))
+        .is_err()
+    {
+        remove_owned_pack_lock(pack_directory, &temporary_name, &destination, identity);
+        return Err(LocalGitFailure::Operation);
+    }
+    let copied = match copy(&mut source, &mut destination) {
+        Ok(copied) => copied,
+        Err(_) => {
+            remove_owned_pack_lock(pack_directory, &temporary_name, &destination, identity);
+            return Err(LocalGitFailure::Operation);
+        }
+    };
     if copied != source_length {
         remove_owned_pack_lock(pack_directory, &temporary_name, &destination, identity);
         return Err(LocalGitFailure::Operation);
@@ -4896,6 +4964,21 @@ mod tests {
             .expect("conflicted fixture path deletes");
     }
 
+    fn install_missing_skip_worktree_entry(fixture: &Fixture) {
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let mut index = repository.index().expect("fixture index opens");
+        let mut entry = clone_index_entry(
+            &index
+                .get_path(Path::new(TRACKED_PATH), 0)
+                .expect("fixture tracked entry exists"),
+        );
+        entry.flags_extended |= INDEX_SKIP_WORKTREE;
+        index.add(&entry).expect("skip-worktree entry installs");
+        index.write().expect("skip-worktree index writes");
+        fs::remove_file(fixture.root().join(TRACKED_PATH))
+            .expect("skip-worktree fixture file removes");
+    }
+
     fn invalid_utf8_commit(repository: &Repository, parent: Oid) -> Oid {
         let tree = repository
             .find_commit(parent)
@@ -5422,6 +5505,20 @@ mod tests {
     }
 
     #[test]
+    fn status_treats_a_missing_skip_worktree_entry_as_unchanged() {
+        let fixture = Fixture::new();
+        install_missing_skip_worktree_entry(&fixture);
+        let executor = fixture.executor();
+
+        let status = execute(&executor, LocalOperation::Status);
+        let entries = status["entries"]
+            .as_array()
+            .expect("status entries are an array");
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
     fn status_rejects_worktree_over_discovery_budget() {
         let fixture = Fixture::new();
         plant_over_budget_worktree(fixture.root());
@@ -5724,6 +5821,17 @@ mod tests {
     }
 
     #[test]
+    fn worktree_diff_treats_a_missing_skip_worktree_entry_as_unchanged() {
+        let fixture = Fixture::new();
+        install_missing_skip_worktree_entry(&fixture);
+        let executor = fixture.executor();
+
+        let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+
+        assert_eq!(diff["patch"], "");
+    }
+
+    #[test]
     fn worktree_diff_includes_an_untracked_file() {
         let fixture = Fixture::new();
         fs::write(fixture.root().join(UNTRACKED_PATH), UNTRACKED_CONTENT)
@@ -6009,6 +6117,32 @@ mod tests {
     }
 
     #[test]
+    fn revision_diff_admits_an_unchanged_tracked_symlink() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let link_path = "tracked-link";
+        symlink("target.txt", fixture.root().join(link_path))
+            .expect("tracked fixture symlink creates");
+        let with_symlink = commit_all(&repository, "add tracked symlink");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("fixture ordinary change writes");
+        let changed = commit_all(&repository, "change ordinary file");
+        let executor = fixture.executor();
+
+        let diff = execute(
+            &executor,
+            LocalOperation::Diff(GitDiffArguments::Revisions {
+                base: with_symlink.to_string(),
+                head: changed.to_string(),
+            }),
+        );
+        let patch = diff["patch"].as_str().expect("patch is text");
+
+        assert!(patch.contains(TRACKED_PATH));
+        assert!(patch.contains(&format!("+{}", CHANGED_CONTENT.trim_end())));
+    }
+
+    #[test]
     fn revision_diff_reports_a_gitlink_change() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -6122,6 +6256,33 @@ mod tests {
         );
 
         assert_eq!(log["commits"][0]["commit"], newest.to_string());
+        assert_eq!(log["truncated"], true);
+    }
+
+    #[test]
+    fn one_entry_log_does_not_order_an_unreturned_long_merge_parent() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let short_parent =
+            commit_with_parents(&repository, &[fixture.initial], "short independent parent");
+        let long_parent =
+            plant_linear_history(&repository, fixture.initial, MAX_WORKTREE_INSPECTIONS + 1);
+        let merge = commit_with_parents(
+            &repository,
+            &[short_parent, long_parent],
+            "bounded merge page",
+        );
+        let executor = fixture.executor();
+
+        let log = execute(
+            &executor,
+            LocalOperation::Log(GitLogArguments {
+                revision: merge.to_string(),
+                max_entries: 1,
+            }),
+        );
+
+        assert_eq!(log["commits"][0]["commit"], merge.to_string());
         assert_eq!(log["truncated"], true);
     }
 
@@ -9133,6 +9294,42 @@ mod tests {
     }
 
     #[test]
+    fn reflog_rollback_preserves_a_replacement_published_path() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let tree = repository
+            .find_commit(fixture.initial)
+            .expect("fixture commit opens")
+            .tree_id();
+        let new = raw_commit_with_tree(&repository, tree, fixture.initial);
+        let executor = fixture.executor();
+        let mut log = ReferenceLogLock::acquire(&executor.repository_authority, "HEAD")
+            .expect("fixture HEAD reflog locks");
+        let signature = identity()
+            .signature()
+            .expect("fixture signature constructs");
+        log.append(fixture.initial, new, &signature)
+            .expect("fixture reflog appends");
+        log.publish().expect("fixture reflog publishes");
+        let head_log = fixture.root().join(".git/logs/HEAD");
+        let retired_log = fixture.root().join(".git/logs/HEAD.retired");
+        let replacement_content = b"replacement reflog remains exact\n";
+        fs::rename(&head_log, &retired_log).expect("published reflog retires");
+        fs::write(&head_log, replacement_content).expect("replacement reflog writes");
+
+        let failure = log
+            .rollback()
+            .expect_err("replacement published reflog rejects rollback");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            fs::read(head_log).expect("replacement reflog reads"),
+            replacement_content
+        );
+        assert!(retired_log.exists());
+    }
+
+    #[test]
     fn packed_object_install_uses_the_pack_directory_shared_mode() {
         let source = tempfile::tempdir().expect("fixture source directory constructs");
         let destination = tempfile::tempdir().expect("fixture pack directory constructs");
@@ -9164,6 +9361,47 @@ mod tests {
             & 0o777;
 
         assert_eq!(installed_mode, expected_file_mode);
+    }
+
+    #[test]
+    fn packed_object_install_removes_its_lock_after_copy_failure() {
+        let source = tempfile::tempdir().expect("fixture source directory constructs");
+        let destination = tempfile::tempdir().expect("fixture pack directory constructs");
+        let name = "pack-copy-failure.pack";
+        let lock_name = format!("{name}.lock");
+        let source_path = source.path().join(name);
+        let destination_path = destination.path().join(name);
+        let lock_path = destination.path().join(lock_name);
+        let source_content = b"trusted pack fixture";
+        fs::write(&source_path, source_content).expect("fixture source pack writes");
+        let directory = openat(
+            CWD,
+            destination.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("fixture pack directory pins");
+        let mode = pack_installation_mode(&directory).expect("fixture pack mode resolves");
+
+        let failure = install_packed_object_file_with_copy_and_hook(
+            &directory,
+            &source_path,
+            mode,
+            |_source, destination| {
+                destination.write_all(b"partial pack lock")?;
+                Err(std::io::Error::other("fixture copy failure"))
+            },
+            || {},
+        )
+        .expect_err("failed pack copy rejects publication");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert!(!lock_path.exists());
+        assert!(!destination_path.exists());
+        assert_eq!(
+            fs::read(source_path).expect("fixture source pack reads"),
+            source_content
+        );
     }
 
     #[test]
