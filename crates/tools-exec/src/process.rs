@@ -535,22 +535,10 @@ impl TokioProcessRunner {
         supervisor_program: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
         let supplied = supervisor_program.as_ref();
-        let canonical = supplied.canonicalize().map_err(|source| {
-            ExecToolConstructionError::SupervisorProgram {
-                path: supplied.to_owned(),
-                source: Some(source),
-            }
-        })?;
-        if !canonical.is_absolute() || !canonical.is_file() {
-            return Err(ExecToolConstructionError::SupervisorProgram {
-                path: supplied.to_owned(),
-                source: None,
-            });
-        }
         #[cfg(target_os = "linux")]
         let (supervisor_program, _supervisor) = {
             let supervisor = rustix::fs::open(
-                &canonical,
+                supplied,
                 rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
                 rustix::fs::Mode::empty(),
             )
@@ -558,41 +546,72 @@ impl TokioProcessRunner {
                 path: supplied.to_owned(),
                 source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
             })?;
-            let supervisor =
-                inherited_descriptor_above_standard_streams(supervisor).map_err(|source| {
-                    ExecToolConstructionError::SupervisorProgram {
-                        path: supplied.to_owned(),
-                        source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
-                    }
-                })?;
-            let metadata = rustix::fs::fstat(&supervisor).map_err(|source| {
+            pin_supervisor_program(supplied, supervisor)?
+        };
+        #[cfg(not(target_os = "linux"))]
+        let supervisor_program = {
+            let canonical = supplied.canonicalize().map_err(|source| {
                 ExecToolConstructionError::SupervisorProgram {
                     path: supplied.to_owned(),
-                    source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                    source: Some(source),
                 }
             })?;
-            if rustix::fs::FileType::from_raw_mode(metadata.st_mode)
-                != rustix::fs::FileType::RegularFile
-            {
+            if !canonical.is_absolute() || !canonical.is_file() {
                 return Err(ExecToolConstructionError::SupervisorProgram {
                     path: supplied.to_owned(),
                     source: None,
                 });
             }
-            let pinned_program = PathBuf::from(format!(
-                "/proc/self/fd/{}",
-                rustix::fd::AsRawFd::as_raw_fd(&supervisor)
-            ));
-            (pinned_program, Arc::new(supervisor))
+            canonical
         };
-        #[cfg(not(target_os = "linux"))]
-        let supervisor_program = canonical;
         Ok(Self {
             supervisor_program,
             #[cfg(target_os = "linux")]
             _supervisor,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn pin_supervisor_program(
+    supplied_path: &Path,
+    supervisor: rustix::fd::OwnedFd,
+) -> Result<(PathBuf, Arc<rustix::fd::OwnedFd>), ExecToolConstructionError> {
+    let supervisor = inherited_descriptor_above_standard_streams(supervisor).map_err(|source| {
+        ExecToolConstructionError::SupervisorProgram {
+            path: supplied_path.to_owned(),
+            source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+        }
+    })?;
+    let metadata = rustix::fs::fstat(&supervisor).map_err(|source| {
+        ExecToolConstructionError::SupervisorProgram {
+            path: supplied_path.to_owned(),
+            source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+        }
+    })?;
+    if rustix::fs::FileType::from_raw_mode(metadata.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(ExecToolConstructionError::SupervisorProgram {
+            path: supplied_path.to_owned(),
+            source: None,
+        });
+    }
+    let pinned_program = PathBuf::from(format!(
+        "/proc/self/fd/{}",
+        rustix::fd::AsRawFd::as_raw_fd(&supervisor)
+    ));
+    let canonical = pinned_program.canonicalize().map_err(|source| {
+        ExecToolConstructionError::SupervisorProgram {
+            path: supplied_path.to_owned(),
+            source: Some(source),
+        }
+    })?;
+    if !canonical.is_absolute() {
+        return Err(ExecToolConstructionError::SupervisorProgram {
+            path: supplied_path.to_owned(),
+            source: None,
+        });
+    }
+    Ok((pinned_program, Arc::new(supervisor)))
 }
 
 impl ProcessRunner for TokioProcessRunner {
@@ -1490,18 +1509,15 @@ async fn read_supervised_stdout(
     let encoded = &tail[marker + SUPERVISOR_STATUS_TRAILER.len()..tail.len() - 1];
     let status = serde_json::from_slice(encoded)
         .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
-    let launcher_status = match (status_protocol, status) {
-        (
-            ProcessStatusProtocol::SandboxDispatch,
-            SupervisorStatus::Exited { code: Some(0), .. },
-        ) => {
+    let launcher_status = match status_protocol {
+        ProcessStatusProtocol::SandboxDispatch => {
             let (launcher_marker, launcher_status) = parse_launcher_status(&tail[..marker])
                 .ok_or_else(|| {
                     std::io::Error::other("sandbox launcher status trailer is malformed")
                 })?;
             Some((launcher_marker, launcher_status))
         }
-        (ProcessStatusProtocol::Direct, _) | (ProcessStatusProtocol::SandboxDispatch, _) => None,
+        ProcessStatusProtocol::Direct => None,
     };
     let first_trailer = launcher_status
         .map(|(launcher_marker, _)| launcher_marker)
@@ -1778,7 +1794,7 @@ fn outer_observe_descendants(
                 if known.contains_key(&raw_pid) {
                     continue;
                 }
-                if let Some(process) = outer_pin_process(raw_pid)? {
+                if let Some(process) = outer_pin_child_process(parent, raw_pid)? {
                     known.insert(raw_pid, process.start_time);
                     additions.push((raw_pid, process));
                 }
@@ -1873,6 +1889,18 @@ fn outer_pin_process(raw_pid: u32) -> Result<Option<OuterTrackedProcess>, ()> {
 }
 
 #[cfg(target_os = "linux")]
+fn outer_pin_child_process(parent: u32, raw_pid: u32) -> Result<Option<OuterTrackedProcess>, ()> {
+    let Some(process) = outer_pin_process(raw_pid)? else {
+        return Ok(None);
+    };
+    let expected = OuterProcessIdentity {
+        parent,
+        start_time: process.start_time,
+    };
+    Ok((outer_process_identity(raw_pid)? == Some(expected)).then_some(process))
+}
+
+#[cfg(target_os = "linux")]
 fn outer_pidfd_has_exited(pidfd: &rustix::fd::OwnedFd) -> Result<bool, ()> {
     let mut descriptors = [rustix::event::PollFd::new(
         pidfd,
@@ -1891,19 +1919,33 @@ fn outer_pidfd_has_exited(pidfd: &rustix::fd::OwnedFd) -> Result<bool, ()> {
 
 #[cfg(target_os = "linux")]
 fn outer_process_start_time(pid: u32) -> Result<Option<u64>, ()> {
+    Ok(outer_process_identity(pid)?.map(|identity| identity.start_time))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OuterProcessIdentity {
+    parent: u32,
+    start_time: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn outer_process_identity(pid: u32) -> Result<Option<OuterProcessIdentity>, ()> {
     let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat,
         Err(error) if outer_process_gone(&error) => return Ok(None),
         Err(_) => return Err(()),
     };
     let command_end = stat.rfind(')').ok_or(())?;
-    let start_time = stat[command_end + 1..]
-        .split_whitespace()
-        .nth(19)
+    let mut fields = stat[command_end + 1..].split_whitespace();
+    let parent = fields
+        .clone()
+        .nth(1)
         .ok_or(())?
-        .parse::<u64>()
+        .parse::<u32>()
         .map_err(|_| ())?;
-    Ok(Some(start_time))
+    let start_time = fields.nth(19).ok_or(())?.parse::<u64>().map_err(|_| ())?;
+    Ok(Some(OuterProcessIdentity { parent, start_time }))
 }
 
 #[cfg(target_os = "linux")]
@@ -2027,7 +2069,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         None => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            return empty_process_result(ProcessOutcome::SupervisionFailed {
+            return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Cleanup,
             });
         }
@@ -2038,7 +2080,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             kill_supervisor_process_group(supervisor_pid);
             let _ = child.kill().await;
             let _ = child.wait().await;
-            return empty_process_result(ProcessOutcome::SupervisionFailed {
+            return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Cleanup,
             });
         }
@@ -2051,7 +2093,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             drop(control);
             outer_tree.kill_all();
             let _ = child.wait().await;
-            return empty_process_result(ProcessOutcome::SupervisionFailed {
+            return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stdout,
             });
         }
@@ -2062,7 +2104,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             drop(control);
             outer_tree.kill_all();
             let _ = child.wait().await;
-            return empty_process_result(ProcessOutcome::SupervisionFailed {
+            return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stderr,
             });
         }
@@ -2088,7 +2130,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         let cleanup = outer_tree.finish();
         stdout_task.abort();
         stderr_task.abort();
-        return empty_process_result(if timed_out && cleanup == OuterCleanupStatus::Complete {
+        return discarded_process_result(if timed_out && cleanup == OuterCleanupStatus::Complete {
             ProcessOutcome::TimedOut
         } else {
             ProcessOutcome::SupervisionFailed {
@@ -2158,7 +2200,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         Err(_) => {
             stdout_task.abort();
             stderr_task.abort();
-            return empty_process_result(ProcessOutcome::SupervisionFailed {
+            return discarded_process_result(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Cleanup,
             });
         }
@@ -2187,12 +2229,12 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             }
         }
         (Ok(Err(_)) | Err(_), _) => {
-            empty_process_result(wait_failure.unwrap_or(ProcessOutcome::SupervisionFailed {
+            discarded_process_result(wait_failure.unwrap_or(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stdout,
             }))
         }
         (_, Ok(Err(_)) | Err(_)) => {
-            empty_process_result(wait_failure.unwrap_or(ProcessOutcome::SupervisionFailed {
+            discarded_process_result(wait_failure.unwrap_or(ProcessOutcome::SupervisionFailed {
                 reason: ProcessSupervisionFailure::Stderr,
             }))
         }
@@ -2327,6 +2369,20 @@ fn empty_process_result(outcome: ProcessOutcome) -> ProcessRunResult {
     }
 }
 
+fn discarded_process_result(outcome: ProcessOutcome) -> ProcessRunResult {
+    ProcessRunResult {
+        outcome,
+        stdout: ProcessOutput {
+            bytes: Vec::new(),
+            completeness: CaptureCompleteness::Truncated,
+        },
+        stderr: ProcessOutput {
+            bytes: Vec::new(),
+            completeness: CaptureCompleteness::Truncated,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
@@ -2367,6 +2423,12 @@ mod tests {
     }
 
     struct ReplacementWorkspace {
+        path: PathBuf,
+        retired: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ReplacementSupervisor {
         path: PathBuf,
         retired: PathBuf,
     }
@@ -2452,6 +2514,29 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    impl ReplacementSupervisor {
+        fn new() -> Result<Self, std::io::Error> {
+            let identity = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(std::io::Error::other)?
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "signalbox-exec-supervisor-{}-{identity}",
+                std::process::id()
+            ));
+            let retired = path.with_extension("retired");
+            std::fs::copy(std::env::current_exe()?, &path)?;
+            Ok(Self { path, retired })
+        }
+
+        fn replace(&self) -> Result<(), std::io::Error> {
+            std::fs::rename(&self.path, &self.retired)?;
+            std::fs::copy(std::env::current_exe()?, &self.path)?;
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn workspace_identity_is_derived_from_the_open_directory_after_path_replacement()
     -> Result<(), Box<dyn Error>> {
@@ -2471,6 +2556,79 @@ mod tests {
         );
         assert!(!identity.matches(workspace.path()));
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervisor_identity_is_derived_from_the_open_file_after_path_replacement()
+    -> Result<(), Box<dyn Error>> {
+        let supervisor = ReplacementSupervisor::new()?;
+        let descriptor = rustix::fs::open(
+            &supervisor.path,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )?;
+        supervisor.replace()?;
+
+        let (pinned, _descriptor) = pin_supervisor_program(&supervisor.path, descriptor)?;
+
+        assert_eq!(pinned.canonicalize()?, supervisor.retired.canonicalize()?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandbox_dispatch_rejects_a_missing_launcher_status_after_nonzero_exit()
+    -> Result<(), Box<dyn Error>> {
+        let mut output = Vec::new();
+        output.extend_from_slice(SUPERVISOR_STATUS_TRAILER);
+        serde_json::to_writer(
+            &mut output,
+            &SupervisorStatus::Exited {
+                code: Some(1),
+                stdout: SupervisorCaptureCompleteness::Complete,
+                stderr: SupervisorCaptureCompleteness::Complete,
+            },
+        )?;
+        output.push(b'\n');
+
+        let result = read_supervised_stdout(
+            output.as_slice(),
+            EXEC_CAPTURE_BYTES,
+            ProcessStatusProtocol::SandboxDispatch,
+        )
+        .await;
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_outer_child_must_still_name_its_observed_parent() -> Result<(), Box<dyn Error>> {
+        let raw_pid = std::process::id();
+        let identity = outer_process_identity(raw_pid)
+            .map_err(|()| std::io::Error::other("read current process identity"))?
+            .ok_or_else(|| std::io::Error::other("current process disappeared"))?;
+
+        let accepted = outer_pin_child_process(identity.parent, raw_pid)
+            .map_err(|()| std::io::Error::other("pin current process as child"))?;
+        let rejected = outer_pin_child_process(raw_pid, raw_pid)
+            .map_err(|()| std::io::Error::other("reject wrong process parent"))?;
+
+        assert!(accepted.is_some());
+        assert!(rejected.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn discarded_captures_are_reported_as_truncated() {
+        let result = discarded_process_result(ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Stdout,
+        });
+
+        assert_eq!(result.stdout.completeness, CaptureCompleteness::Truncated);
+        assert_eq!(result.stderr.completeness, CaptureCompleteness::Truncated);
     }
 
     #[cfg(target_os = "linux")]
@@ -2499,6 +2657,14 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
             let _ = std::fs::remove_dir_all(&self.retired);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ReplacementSupervisor {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_file(&self.retired);
         }
     }
 
