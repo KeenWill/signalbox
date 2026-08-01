@@ -79,7 +79,7 @@ impl ToolContract for CargoDiagnosticsContract {
 /// Why Cargo diagnostics tool construction failed.
 #[derive(Debug)]
 pub enum CargoDiagnosticsToolConstructionError {
-    /// The sandboxed execution core rejected the workspace root.
+    /// The sandboxed execution core failed construction.
     Exec(ExecToolConstructionError),
     /// The static tool name was rejected.
     Name,
@@ -93,13 +93,15 @@ pub enum CargoDiagnosticsToolConstructionError {
 
 impl fmt::Display for CargoDiagnosticsToolConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Exec(_) => "cargo diagnostics workspace root is invalid",
-            Self::Name => "cargo diagnostics static name is invalid",
-            Self::Schema => "cargo diagnostics static schema is invalid",
-            Self::ErrorDetail => "cargo diagnostics static error detail is invalid",
-            Self::Duplicate => "cargo diagnostics catalog is duplicated",
-        })
+        match self {
+            Self::Exec(source) => source.fmt(formatter),
+            Self::Name => formatter.write_str("cargo diagnostics static name is invalid"),
+            Self::Schema => formatter.write_str("cargo diagnostics static schema is invalid"),
+            Self::ErrorDetail => {
+                formatter.write_str("cargo diagnostics static error detail is invalid")
+            }
+            Self::Duplicate => formatter.write_str("cargo diagnostics catalog is duplicated"),
+        }
     }
 }
 
@@ -775,6 +777,7 @@ mod tests {
     use std::{
         error::Error,
         ffi::OsString,
+        path::PathBuf,
         sync::{Arc, Mutex, PoisonError},
     };
 
@@ -801,6 +804,7 @@ mod tests {
     const TEST_EXECUTABLE: &str = "/workspace/target/debug/deps/example-a";
     const SECOND_TEST_EXECUTABLE: &str = "/workspace/target/debug/deps/example-b";
     const CARGO_FAILURE_MESSAGE: &str = "error: failed to parse manifest at /workspace/Cargo.toml";
+    const MISSING_SUPERVISOR: &str = "/fixture/missing-supervisor";
     const TEST_COUNT: usize = [PASSING_TEST, FAILING_TEST, IGNORED_TEST].len();
     const BOUNDED_TEXT_FIXTURE: &str = "abcé";
     const BOUNDED_TEXT_LIMIT: usize = 4;
@@ -1002,6 +1006,21 @@ mod tests {
 
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
         Ok(())
+    }
+
+    #[test]
+    fn construction_error_preserves_the_supervisor_program_distinction() {
+        let error = CargoDiagnosticsToolConstructionError::from(
+            ExecToolConstructionError::SupervisorProgram {
+                path: PathBuf::from(MISSING_SUPERVISOR),
+                source: None,
+            },
+        );
+
+        assert_eq!(
+            error.to_string(),
+            format!("exec supervisor program `{MISSING_SUPERVISOR}` is invalid")
+        );
     }
 
     #[tokio::test]
