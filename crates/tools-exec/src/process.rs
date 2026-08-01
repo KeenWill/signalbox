@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::MetadataExt;
+use std::os::{fd::AsFd, unix::fs::MetadataExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -2080,13 +2080,14 @@ fn outer_reap_tracked(
     deadline: Instant,
 ) -> Result<(), ()> {
     let descendants = descendants.lock().unwrap_or_else(PoisonError::into_inner);
-    for raw_pid in descendants.keys() {
+    for process in descendants.values() {
         if Instant::now() >= deadline {
             return Err(());
         }
-        if let Some(pid) = rustix::process::Pid::from_raw(*raw_pid as i32) {
-            let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
-        }
+        let _ = rustix::process::waitid(
+            rustix::process::WaitId::PidFd(process.pidfd.as_fd()),
+            rustix::process::WaitIdOptions::NOHANG | rustix::process::WaitIdOptions::EXITED,
+        );
     }
     (Instant::now() < deadline).then_some(()).ok_or(())
 }
@@ -2968,6 +2969,66 @@ mod tests {
         assert_eq!(signaling, Err(()));
         assert_eq!(reaping, Err(()));
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn outer_reaping_uses_the_pinned_identity_not_its_numeric_map_key() -> Result<(), Box<dyn Error>>
+    {
+        let mut tracked_child = exiting_test_process()?;
+        let mut replacement_child = exiting_test_process()?;
+        let tracked_process = outer_pin_process(tracked_child.id())
+            .map_err(|()| std::io::Error::other("pin tracked child"))?
+            .ok_or_else(|| std::io::Error::other("tracked child disappeared"))?;
+        let replacement_process = outer_pin_process(replacement_child.id())
+            .map_err(|()| std::io::Error::other("pin replacement child"))?
+            .ok_or_else(|| std::io::Error::other("replacement child disappeared"))?;
+        wait_for_pinned_exit(&tracked_process.pidfd)?;
+        wait_for_pinned_exit(&replacement_process.pidfd)?;
+        drop(replacement_process);
+        let descendants = Arc::new(Mutex::new(BTreeMap::from([(
+            replacement_child.id(),
+            tracked_process,
+        )])));
+
+        outer_reap_tracked(&descendants, Instant::now() + Duration::from_secs(1))
+            .map_err(|()| std::io::Error::other("reap tracked child"))?;
+        let replacement_status = replacement_child.wait()?;
+        let tracked_error = tracked_child
+            .wait()
+            .expect_err("the pinned tracked child was already reaped");
+
+        assert!(replacement_status.success());
+        assert_eq!(
+            tracked_error.raw_os_error(),
+            Some(rustix::io::Errno::CHILD.raw_os_error())
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn exiting_test_process() -> std::io::Result<std::process::Child> {
+        std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "no_test_has_this_name"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_pinned_exit(pidfd: &rustix::fd::OwnedFd) -> std::io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match outer_pidfd_has_exited(pidfd) {
+                Ok(true) => return Ok(()),
+                Ok(false) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(false) | Err(()) => {
+                    return Err(std::io::Error::other("child did not exit before deadline"));
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
