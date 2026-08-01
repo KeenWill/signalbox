@@ -530,7 +530,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   func testUnknownSnapshotTurnStateProjectsAsVisibleTimelineCard() throws {
-    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownTurnState()
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownTurnStates()
     var projector = SignalboxProcessTranscriptProjector()
 
     let projection = try projector.projectAuthoritativeSnapshot(snapshot)
@@ -793,6 +793,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     viewModel.apply(.event(try ProcessProjectionFixture.refusedEvent()))
 
+    XCTAssertNil(viewModel.activeTurnID)
+    XCTAssertTrue(viewModel.canSubmit)
     XCTAssertTrue(viewModel.canSend)
   }
 
@@ -4754,11 +4756,33 @@ private enum ProcessProjectionFixture {
         """,
         """
         {
+          "type":"transcript_text_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedUserEntry)",
+          "entry":{
+            "type":"user",
+            "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"1",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(userText)"
+        }
+        """,
+        """
+        {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
           "turn_count":"1",
-          "entry_count":"1"
+          "entry_count":"2"
         }
         """,
       ]
@@ -4776,7 +4800,7 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithUnknownTurnState() throws -> SignalboxSynchronizationSnapshot {
+  static func snapshotWithUnknownTurnStates() throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
         """
@@ -4816,6 +4840,38 @@ private enum ProcessProjectionFixture {
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
           "turn_count":"2",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithUnknownTurnState() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{"type":"\(futureTurnStateKind)","retained":"fixture"}
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
           "entry_count":"0"
         }
         """,
