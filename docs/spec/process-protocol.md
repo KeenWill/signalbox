@@ -3,6 +3,9 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The goal-mode process and terminal surface was re-verified through PR #384
+(`agent/goal-mode-runtime`).
+
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
