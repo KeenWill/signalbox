@@ -472,12 +472,6 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
             ?? "A malformed followed event could not be decoded."
         )
       }
-      guard !followed.event.hasUnknownNestedState else {
-        return protocolFailure(
-          stage: .replay,
-          message: "A known followed event contained an unknown closed state."
-        )
-      }
       let observedCursor = replayBufferLastCursor ?? snapshotCursor
       guard followed.cursor > observedCursor else {
         return diagnosticEffects(for: followed, stage: .replay)
@@ -592,12 +586,6 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         stage: .steady,
         message: followed.event.decodingDiagnostic?.message
           ?? "A malformed followed event could not be decoded."
-      )
-    }
-    guard !followed.event.hasUnknownNestedState else {
-      return protocolFailure(
-        stage: .steady,
-        message: "A known followed event contained an unknown closed state."
       )
     }
     guard followed.cursor > cursor else {
@@ -1021,6 +1009,13 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         kind: .protocolViolation,
         permitsRetry: false
       )
+    case .unknown:
+      return enterRecovery(
+        stage: failedStage,
+        message: message,
+        kind: .protocolViolation,
+        permitsRetry: false
+      )
     }
   }
 
@@ -1167,14 +1162,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     for followed: SignalboxFollowedSessionEvent,
     stage currentStage: SignalboxSynchronizationStage
   ) -> [SignalboxSessionSynchronizationEffect] {
-    guard
-      case .unknown(let kind, _, let decodingDiagnostic) = followed.event
-    else {
+    guard let unrecognized = followed.event.unrecognizedContent else {
       return []
     }
     let message =
-      decodingDiagnostic?.message
-      ?? "Preserved an unrecognized session-event kind: \(kind)."
+      unrecognized.decodingDiagnostic?.message
+      ?? "Preserved unrecognized session-event content: \(unrecognized.kind)."
     let diagnostic = SignalboxSynchronizationDiagnostic(
       kind: .decoding,
       stage: currentStage,
@@ -1511,7 +1504,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       entriesStarted = true
       guard
         modelCallsEnded,
-        !entry.entry.hasUnknownStoredVariant,
+        !entry.entry.hasMalformedStoredProjection,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1531,7 +1524,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       entriesStarted = true
       guard
         modelCallsEnded,
-        !entry.entry.hasUnknownStoredVariant,
+        !entry.entry.hasMalformedStoredProjection,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1644,8 +1637,10 @@ extension SignalboxSynchronizationSnapshot.Record {
 extension SignalboxTranscriptTurnState {
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
-    case .queued, .unknown:
+    case .queued:
       return .impossible
+    case .unknown:
+      return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
       return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
@@ -1675,15 +1670,14 @@ extension SignalboxTranscriptTurnState {
 
   fileprivate var isInvalidStoredProjection: Bool {
     switch self {
-    case .activeRunning(_, let currentModelCall):
-      return currentModelCall?.state.hasUnknownStoredVariant ?? false
     case .failed(_, let terminalAttemptID, let terminalModelCall):
       return terminalModelCall != nil && terminalAttemptID == nil
-    case .unknown:
-      return true
-    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
-      .reconciliationRequired, .toolReconciliationRequired:
+    case .unknown(_, _, let decodingDiagnostic):
+      return decodingDiagnostic != nil
+    case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed,
+      .refused, .cancelled, .reconciliationRequired,
+      .toolReconciliationRequired:
       return false
     }
   }
@@ -1719,13 +1713,6 @@ extension SignalboxSnapshotModelCallOwnership {
 }
 
 extension SignalboxCurrentModelCallState {
-  fileprivate var hasUnknownStoredVariant: Bool {
-    if case .unknown = self {
-      return true
-    }
-    return false
-  }
-
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .unknown(_, let payload):
@@ -1737,16 +1724,11 @@ extension SignalboxCurrentModelCallState {
 }
 
 extension SignalboxTranscriptEntry {
-  fileprivate var hasUnknownStoredVariant: Bool {
-    switch self {
-    case .imported(_, _, let sourceSpeaker, _):
-      return sourceSpeaker.hasUnknownStoredVariant
-    case .unknown:
-      return true
-    case .assistantToolUse, .toolExecutionResult, .toolDenied, .toolClosed,
-      .turnCompleted, .turnFailed, .turnCancelled:
-      return false
+  fileprivate var hasMalformedStoredProjection: Bool {
+    if case .unknown(_, _, let decodingDiagnostic) = self {
+      return decodingDiagnostic != nil
     }
+    return false
   }
 
   fileprivate var retainedUTF8Bytes: UInt {
@@ -1762,22 +1744,18 @@ extension SignalboxTranscriptEntry {
     case .unknown(_, let payload, let diagnostic):
       return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .turnCompleted, .turnFailed, .turnCancelled:
+    case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled:
       return 0
     }
   }
 }
 
 extension SignalboxTranscriptTextEntry {
-  fileprivate var hasUnknownStoredVariant: Bool {
-    switch self {
-    case .imported(_, _, let sourceSpeaker):
-      return sourceSpeaker.hasUnknownStoredVariant
-    case .unknown:
-      return true
-    case .user, .assistant, .contextSummary:
-      return false
+  fileprivate var hasMalformedStoredProjection: Bool {
+    if case .unknown(_, _, let decodingDiagnostic) = self {
+      return decodingDiagnostic != nil
     }
+    return false
   }
 
   fileprivate var retainedUTF8Bytes: UInt {
@@ -1794,13 +1772,6 @@ extension SignalboxTranscriptTextEntry {
 }
 
 extension SignalboxImportedSourceSpeaker {
-  fileprivate var hasUnknownStoredVariant: Bool {
-    if case .unknown = self {
-      return true
-    }
-    return false
-  }
-
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .unknown(_, let payload):
@@ -1812,16 +1783,21 @@ extension SignalboxImportedSourceSpeaker {
 }
 
 extension SignalboxProcessSessionEvent {
-  fileprivate var hasUnknownNestedState: Bool {
+  fileprivate var unrecognizedContent: (
+    kind: String, decodingDiagnostic: SignalboxDecodingDiagnostic?
+  )? {
     switch self {
-    case .modelCallTransition(_, _, let state):
-      return state.isUnknown
-    case .toolBatchTransition(_, _, let state):
-      return state.isUnknown
-    case .sessionCreated, .inputAccepted, .turnActivated, .contextCompacted, .turnCompleted,
-      .turnFailed, .turnRefused, .turnCancelled, .turnReconciliationRequired,
-      .turnToolReconciliationRequired, .unknown:
-      return false
+    case .modelCallTransition(_, _, .unknown(let kind, _)):
+      return ("model_call_transition.state.\(kind)", nil)
+    case .toolBatchTransition(_, _, .unknown(let kind, _)):
+      return ("tool_batch_transition.state.\(kind)", nil)
+    case .unknown(let kind, _, let diagnostic):
+      return (kind, diagnostic)
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
+      .turnRefused, .turnCancelled, .turnReconciliationRequired,
+      .turnToolReconciliationRequired:
+      return nil
     }
   }
 
@@ -1852,13 +1828,6 @@ extension SignalboxProcessSessionEvent {
 }
 
 extension SignalboxModelCallState {
-  fileprivate var isUnknown: Bool {
-    if case .unknown = self {
-      return true
-    }
-    return false
-  }
-
   fileprivate var retainedUTF8Bytes: UInt {
     if case .unknown(_, let payload) = self {
       return payload.encodedUTF8Bytes
@@ -1868,13 +1837,6 @@ extension SignalboxModelCallState {
 }
 
 extension SignalboxToolBatchState {
-  fileprivate var isUnknown: Bool {
-    if case .unknown = self {
-      return true
-    }
-    return false
-  }
-
   fileprivate var retainedUTF8Bytes: UInt {
     if case .unknown(_, let payload) = self {
       return payload.encodedUTF8Bytes

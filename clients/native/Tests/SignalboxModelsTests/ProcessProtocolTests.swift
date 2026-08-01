@@ -23,6 +23,15 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testNewerProtocolVersionRemainsClassifiable() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.newerVersionFrame()
+    )
+
+    XCTAssertEqual(frame.version, .unknown(ProcessProtocolFixture.newerVersion))
+    XCTAssertEqual(frame.message, .sessionsStart)
+  }
+
   /// INV-033: imported continuation requests retain their closed version-one shape.
   func testImportedContinuationRequestUsesTheVersionOneFrontierShape() throws {
     let importedConversationID = "33333333-3333-4333-8333-333333333333"
@@ -107,14 +116,25 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertTrue(diagnostic.message.contains("text_preview"))
   }
 
-  /// INV-033: an unknown imported source-speaker variant fails explicitly.
-  func testImportedConversationEntryRejectsUnknownSourceSpeaker() throws {
+  func testImportedConversationEntryPreservesUnknownSourceSpeaker() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.importedEntryWithUnknownSourceSpeakerFrame()
     )
-    let diagnostic = try ProcessProtocolFixture.unknownDiagnostic(in: frame.message)
+    let entry = try ProcessProtocolFixture.importedEntry(in: frame.message)
 
-    XCTAssertEqual(diagnostic, ProcessProtocolFixture.unknownImportedSourceSpeakerDiagnostic)
+    XCTAssertEqual(
+      entry.sourceSpeaker,
+      .unknown(
+        kind: ProcessProtocolFixture.unknownImportedSourceSpeakerKind,
+        payload: [
+          "type": .string(ProcessProtocolFixture.unknownImportedSourceSpeakerKind)
+        ]
+      )
+    )
+    XCTAssertEqual(
+      entry.sourceSpeakerLabel,
+      "Unknown speaker (\(ProcessProtocolFixture.unknownImportedSourceSpeakerKind))"
+    )
   }
 
   /// INV-033: explicit null preview admission stays distinct from an omitted member.
@@ -371,6 +391,45 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(try ProcessProtocolFixture.modelCallCount(in: endFrame.message), 1)
   }
 
+  func testModelIdentityChangedEntryDecodesAsKnownEntry() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.modelIdentityChangedFrame(
+        sessionID: sessionID,
+        turnID: turnID
+      )
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(entry.entryIndex.rawValue, ProcessProtocolFixture.firstEntryIndex)
+    XCTAssertEqual(entry.sourceSessionID.rawValue, sessionID)
+    XCTAssertEqual(
+      entry.entry,
+      .modelIdentityChanged(
+        turnID: try SignalboxCanonicalUUID(validating: turnID),
+        defaultsVersion: SignalboxCanonicalUInt64(
+          rawValue: ProcessProtocolFixture.modelIdentityDefaultsVersion
+        ),
+        selectedModelID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.selectedModelID
+        )
+      )
+    )
+  }
+
+  func testFutureProviderFailureCauseRemainsClassifiable() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.failedTurnFrame(
+        turnID: turnID,
+        cause: ProcessProtocolFixture.futureProviderFailureCause
+      )
+    )
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.failedProviderCause(in: frame.message),
+      .unknown(ProcessProtocolFixture.futureProviderFailureCause)
+    )
+  }
+
   func testFailedTerminalProviderCauseDecodesAsAClosedClassification() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.failedTurnFrame(
@@ -454,19 +513,14 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  func testUnadmittedFrameMemberFailsClosed() {
-    let encoded = Data(
-      """
-      {
-        "version":1,
-        "request_id":"9",
-        "unexpected":true,
-        "message":{"type":"sessions_start"}
-      }
-      """.utf8
-    )
+  func testAddedFrameMemberDoesNotEraseKnownMessage() throws {
+    let encoded = ProcessProtocolFixture.frameWithAddedMember()
 
-    XCTAssertThrowsError(try SignalboxProcessServerFrame.decode(from: encoded))
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(frame.version, .one)
+    XCTAssertEqual(frame.requestID.rawValue, ProcessProtocolFixture.requestID)
+    XCTAssertEqual(frame.message, .sessionsStart)
   }
 
   func testNestedDuplicateMemberDegradesEnclosingMessage() throws {
@@ -499,25 +553,30 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertThrowsError(try SignalboxProcessServerFrame.decode(from: encoded))
   }
 
-  func testExpandedErrorMessageDegradesBeforeProtocolProjection() throws {
+  func testExpandedErrorMessageRetainsProtocolProjection() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.expandedErrorFrame()
     )
 
-    XCTAssertEqual(
-      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
-      ProcessProtocolFixture.unadmittedErrorFieldDiagnostic
-    )
+    let error = try ProcessProtocolFixture.processError(in: frame.message)
+
+    XCTAssertEqual(error.code, .notFound)
+    XCTAssertEqual(error.message, ProcessProtocolFixture.expandedErrorMessage)
+    XCTAssertNil(error.detail)
   }
 
-  func testExpandedKnownErrorDetailDegradesBeforeProtocolProjection() throws {
+  func testExpandedKnownErrorDetailRetainsProtocolProjection() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.expandedErrorDetailFrame(sessionID: sessionID)
     )
 
+    let error = try ProcessProtocolFixture.processError(in: frame.message)
+
+    XCTAssertEqual(error.code, .rejected)
+    XCTAssertEqual(error.message, ProcessProtocolFixture.expandedRejectionMessage)
     XCTAssertEqual(
-      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
-      ProcessProtocolFixture.unadmittedDetailFieldDiagnostic
+      error.detail,
+      .sessionNotFound(sessionID: try SignalboxCanonicalUUID(validating: sessionID))
     )
   }
 
@@ -645,12 +704,14 @@ final class ProcessProtocolTests: XCTestCase {
 }
 
 private enum ProcessProtocolFixture {
-  static let unadmittedErrorFieldDiagnostic = SignalboxDecodingDiagnostic(
-    message: "Invalid field value at message.extra."
-  )
-  static let unadmittedDetailFieldDiagnostic = SignalboxDecodingDiagnostic(
-    message: "Invalid field value at message.detail.extra."
-  )
+  static let requestID: UInt64 = 9
+  static let firstEntryIndex: UInt64 = 0
+  static let newerVersion: UInt64 = 2
+  static let modelIdentityDefaultsVersion: UInt64 = 7
+  static let selectedModelID = "88888888-8888-4888-8888-888888888888"
+  static let futureProviderFailureCause = "future_provider_failure"
+  static let expandedErrorMessage = "fixture error"
+  static let expandedRejectionMessage = "fixture rejection"
   static let missingErrorDetailDiagnostic = SignalboxDecodingDiagnostic(
     message: "Missing required field at message.detail."
   )
@@ -667,9 +728,54 @@ private enum ProcessProtocolFixture {
     message: "Missing required field at message.conversation.title."
   )
   static let unknownImportedSourceSpeakerKind = "future_speaker"
-  static let unknownImportedSourceSpeakerDiagnostic = SignalboxDecodingDiagnostic(
-    message: "Invalid field value at message.source_speaker."
-  )
+
+  static func frameWithAddedMember() -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "unexpected":true,
+        "message":{"type":"sessions_start"}
+      }
+      """.utf8
+    )
+  }
+
+  static func newerVersionFrame() -> Data {
+    Data(
+      """
+      {
+        "version":\(newerVersion),
+        "request_id":"\(requestID)",
+        "message":{"type":"sessions_start"}
+      }
+      """.utf8
+    )
+  }
+
+  static func modelIdentityChangedFrame(sessionID: String, turnID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"\(firstEntryIndex)",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"33333333-3333-4333-8333-333333333333",
+          "entry":{
+            "type":"model_identity_changed",
+            "turn_id":"\(turnID)",
+            "defaults_version":"\(modelIdentityDefaultsVersion)",
+            "selected_model_id":"\(selectedModelID)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
 
   static func duplicateSnapshotBoundaryMessage(
     sessionID: String
@@ -718,11 +824,11 @@ private enum ProcessProtocolFixture {
       """
       {
         "version":1,
-        "request_id":"9",
+        "request_id":"\(requestID)",
         "message":{
           "type":"error",
           "code":"not_found",
-          "message":"fixture error",
+          "message":"\(expandedErrorMessage)",
           "extra":true
         }
       }
@@ -737,11 +843,11 @@ private enum ProcessProtocolFixture {
       """
       {
         "version":1,
-        "request_id":"9",
+        "request_id":"\(requestID)",
         "message":{
           "type":"error",
           "code":"rejected",
-          "message":"fixture rejection",
+          "message":"\(expandedRejectionMessage)",
           "detail":{
             "type":"session_not_found",
             "session_id":"\(sessionID)",
@@ -953,6 +1059,15 @@ private enum ProcessProtocolFixture {
     return detail
   }
 
+  static func processError(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxProcessError {
+    guard case .protocolError(let error) = message else {
+      throw ProcessProtocolFixtureError.missingProcessError
+    }
+    return error
+  }
+
   private static func rejectedFrame(detail: String) -> Data {
     Data(
       """
@@ -1099,6 +1214,15 @@ private enum ProcessProtocolFixture {
     return entry
   }
 
+  static func transcriptEntry(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxTranscriptEntryMessage {
+    guard case .transcriptEntry(let entry) = message else {
+      throw ProcessProtocolFixtureError.missingTranscriptEntry
+    }
+    return entry
+  }
+
   static func unknownDiagnostic(
     in message: SignalboxProcessServerMessage
   ) throws -> SignalboxDecodingDiagnostic {
@@ -1162,6 +1286,8 @@ private enum ProcessProtocolFixture {
 private enum ProcessProtocolFixtureError: Error {
   case missingImportedEntry
   case missingRejectionDetail
+  case missingProcessError
+  case missingTranscriptEntry
   case missingModelCallUsage
   case missingModelCallsEnd
   case missingProviderFailureCause

@@ -166,8 +166,10 @@ extension SignalboxImportedConversationEntry: Identifiable {
       return "User"
     case .attested(speaker: .assistant):
       return "Assistant"
-    case .unknown:
-      return "Unknown speaker"
+    case .attested(speaker: .unknown(let value)):
+      return "Unrecognized speaker (\(value))"
+    case .unknown(let kind, _):
+      return "Unknown speaker (\(kind))"
     }
   }
 
@@ -191,6 +193,8 @@ extension SignalboxImportedConversationEntry: Identifiable {
       return "Document"
     case .messageContentAbsent:
       return "Message content absent"
+    case .unknown(let value):
+      return "Unrecognized content (\(value))"
     }
   }
 }

@@ -1150,6 +1150,8 @@ private struct ProcessImportedConversationScreen: View {
       "Claude Code JSONL v2"
     case .codexRolloutJSONLV1:
       "Codex rollout JSONL v1"
+    case .unknown(let value):
+      "Unrecognized format (\(value))"
     case nil:
       "Unknown"
     }
@@ -2000,6 +2002,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         activity = .init(state: .recoveryRequired, label: "Recovery required")
       case .completed, .knownFailed, .refused, .cancelled:
         activity = .init(state: .running, label: "Running")
+      case .unknown(let value):
+        latestDiagnostic = "Preserved an unrecognized model-call disposition: \(value)."
       }
     case .unknown:
       break

@@ -224,6 +224,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     switch message.entry {
+    case .modelIdentityChanged(_, let defaultsVersion, let selectedModelID):
+      return try semanticRecord(
+        message,
+        event: .processConservative(
+          SignalboxProcessConservativeEvent(
+            kind: "model_identity_changed",
+            diagnostic:
+              "Model \(selectedModelID.rawValue) became active at defaults version \(defaultsVersion.rawValue)."
+          )
+        )
+      )
     case .assistantToolUse(
       let turnID,
       let modelCallID,
@@ -520,7 +531,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       requestID = request.rawValue
     case .assistantToolUse:
       return false
-    case .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
+    case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
       return false
     }
     guard let context = toolContextsByRequestID[requestID],
@@ -570,7 +581,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
               .toolClosed(let requestID, _):
               return requestID.rawValue
-            case .assistantToolUse, .turnCompleted, .turnFailed, .turnCancelled, .imported,
+            case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
+              .turnCancelled, .imported,
               .unknown:
               return nil
             }
@@ -655,6 +667,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return .user
     case .assistant:
       return .assistant
+    case .unknown:
+      return .unknown
     }
   }
 
@@ -709,6 +723,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return "provider internal error"
     case .unrecognized:
       return "unrecognized provider error"
+    case .unknown(let value):
+      return "unrecognized provider error (\(value))"
     }
   }
 

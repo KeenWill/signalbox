@@ -307,7 +307,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033UnadmittedNestedTurnFieldFailsSnapshotClosed() throws {
+  func testAddedNestedTurnFieldPreservesKnownSnapshotRecord() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -319,10 +319,10 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
 
-    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertTrue(effects.isEmpty)
     XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .history)
+      SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)
     )
   }
 
@@ -364,7 +364,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033FutureTurnStateFailsAuthoritativeSnapshotClosed() throws {
+  func testFutureTurnStateIsRetainedInAuthoritativeSnapshot() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -376,14 +376,14 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
 
-    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertTrue(effects.isEmpty)
     XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .history)
+      SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)
     )
   }
 
-  func testINV033FutureNestedModelCallStateFailsAuthoritativeSnapshotClosed() throws {
+  func testFutureNestedModelCallStateIsRetainedInAuthoritativeSnapshot() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -395,14 +395,14 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
 
-    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertTrue(effects.isEmpty)
     XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .history)
+      SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)
     )
   }
 
-  func testINV033UnadmittedCurrentModelCallFieldFailsSnapshotClosed() throws {
+  func testAddedCurrentModelCallFieldPreservesKnownSnapshotRecord() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -414,14 +414,14 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
 
-    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertTrue(effects.isEmpty)
     XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .history)
+      SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)
     )
   }
 
-  func testINV033UnadmittedTerminalModelCallFieldFailsSnapshotClosed() throws {
+  func testAddedTerminalModelCallFieldPreservesKnownSnapshotRecord() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -433,10 +433,10 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
 
-    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertTrue(effects.isEmpty)
     XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .history)
+      SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)
     )
   }
 
@@ -516,22 +516,94 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033FutureEntryVariantFailsAuthoritativeSnapshotClosed() throws {
+  func testFutureEntryVariantCompletesAuthoritativeSnapshot() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
 
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
     let effects = transport.send(
       .frame(
-        generation: 1,
+        generation: SynchronizationFixture.initialGeneration,
         message: try SynchronizationFixture.futureTranscriptEntry()
       )
     )
+    let completionEffects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 0,
+          entryCount: 1
+        )
+      )
+    )
+    let snapshot = try SynchronizationFixture.publishedSnapshot(in: completionEffects)
 
-    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertTrue(effects.isEmpty)
+    XCTAssertEqual(
+      snapshot.records.count,
+      SynchronizationFixture.futureEntrySnapshotRecordCount
+    )
     XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .history)
+      .replay(
+        generation: SynchronizationFixture.initialGeneration,
+        cursor: SignalboxCanonicalUInt64(rawValue: SynchronizationFixture.initialCursor)
+      )
+    )
+  }
+
+  func testFutureTextEntryVariantCompletesAuthoritativeSnapshot() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.futureTranscriptTextEntry()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.content()
+      )
+    )
+    let completionEffects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 0,
+          entryCount: 1
+        )
+      )
+    )
+    let snapshot = try SynchronizationFixture.publishedSnapshot(in: completionEffects)
+
+    XCTAssertEqual(
+      snapshot.records.count,
+      SynchronizationFixture.futureTextEntrySnapshotRecordCount
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      .replay(
+        generation: SynchronizationFixture.initialGeneration,
+        cursor: SignalboxCanonicalUInt64(rawValue: SynchronizationFixture.initialCursor)
+      )
     )
   }
 
@@ -597,7 +669,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033UnknownModelCallStateCannotAdvanceReplayCursor() throws {
+  func testUnknownModelCallStateAdvancesReplayCursorWithDiagnostic() throws {
     var transport = try SynchronizationFixture.transportAtReplay(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -610,15 +682,26 @@ final class SessionSynchronizationTests: XCTestCase {
         )
       )
     )
+    let replayEffects = transport.send(
+      .replayCompleted(generation: SynchronizationFixture.initialGeneration)
+    )
 
     XCTAssertFalse(SynchronizationFixture.containsPublishedEvent(effects))
     XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      SynchronizationFixture.unknownNestedReplayEffectNames
+    )
+    XCTAssertEqual(
+      SynchronizationFixture.publishedEventCursors(in: replayEffects),
+      [SynchronizationFixture.unknownCursor]
+    )
+    XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .replay)
+      SynchronizationFixture.steady(cursor: SynchronizationFixture.unknownCursor)
     )
   }
 
-  func testINV033UnknownToolBatchStateCannotAdvanceSteadyCursor() throws {
+  func testUnknownToolBatchStateAdvancesSteadyCursorWithDiagnostic() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -632,10 +715,14 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
 
-    XCTAssertFalse(SynchronizationFixture.containsPublishedEvent(effects))
+    XCTAssertTrue(SynchronizationFixture.containsPublishedEvent(effects))
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      SynchronizationFixture.unknownNestedSteadyEffectNames
+    )
     XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.firstRecovery(failedStage: .steady)
+      SynchronizationFixture.steady(cursor: SynchronizationFixture.unknownCursor)
     )
   }
 
@@ -2059,6 +2146,10 @@ private struct ScriptedSynchronizationTransport {
 }
 
 private enum SynchronizationFixture {
+  static let futureEntrySnapshotRecordCount = 1
+  static let futureTextEntrySnapshotRecordCount = 2
+  static let unknownNestedReplayEffectNames = ["report_diagnostic"]
+  static let unknownNestedSteadyEffectNames = ["report_diagnostic", "publish_event"]
   static let initialGeneration: UInt64 = 1
   static let firstRefreshID: UInt64 = 1
   static let initialCursor: UInt64 = 10
@@ -2125,6 +2216,14 @@ private enum SynchronizationFixture {
       generation: initialGeneration,
       cursor: SignalboxCanonicalUInt64(rawValue: cursor),
       refreshID: refreshID
+    )
+  }
+
+  static func history(cursor: UInt64) -> SignalboxSessionSynchronizationPhase {
+    .history(
+      generation: initialGeneration,
+      reconnectAttempt: 0,
+      cursor: SignalboxCanonicalUInt64(rawValue: cursor)
     )
   }
 
@@ -2514,6 +2613,20 @@ private enum SynchronizationFixture {
         "source_session_id":"\(session)",
         "entry_id":"\(entry)",
         "entry":{"type":"fixture_future_entry"}
+      }
+      """
+    )
+  }
+
+  static func futureTranscriptTextEntry() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_text_entry",
+        "entry_index":"0",
+        "source_session_id":"\(session)",
+        "entry_id":"\(entry)",
+        "entry":{"type":"fixture_future_text_entry"}
       }
       """
     )
