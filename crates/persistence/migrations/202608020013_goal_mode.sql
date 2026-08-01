@@ -177,7 +177,7 @@ CREATE TABLE goal_event (
 
 -- Goal turns reuse the accepted-input turn engine without inventing user
 -- commands. A null accepting command is admitted only when this migration's
--- deferred correlation proves an exact goal_turn owner.
+-- deferred correlation proves an exact goal_turn source.
 ALTER TABLE accepted_input
     ALTER COLUMN accepting_command_id DROP NOT NULL;
 
@@ -571,25 +571,25 @@ CREATE CONSTRAINT TRIGGER goal_turn_shape
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION require_goal_turn_shape();
 
-CREATE FUNCTION require_accepted_input_owner()
+CREATE FUNCTION require_accepted_input_source()
 RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE goal_owners bigint;
+DECLARE goal_sources bigint;
 BEGIN
-    SELECT count(*) INTO goal_owners FROM goal_turn
+    SELECT count(*) INTO goal_sources FROM goal_turn
      WHERE accepted_input_id = NEW.accepted_input_id;
-    IF (NEW.accepting_command_id IS NULL AND goal_owners <> 1)
-        OR (NEW.accepting_command_id IS NOT NULL AND goal_owners <> 0) THEN
-        RAISE EXCEPTION 'accepted input requires exactly one command or goal owner'
-            USING ERRCODE = '23514', CONSTRAINT = 'accepted_input_owner_closed';
+    IF (NEW.accepting_command_id IS NULL AND goal_sources <> 1)
+        OR (NEW.accepting_command_id IS NOT NULL AND goal_sources <> 0) THEN
+        RAISE EXCEPTION 'accepted input requires exactly one command or goal source'
+            USING ERRCODE = '23514', CONSTRAINT = 'accepted_input_source_closed';
     END IF;
     RETURN NULL;
 END;
 $$;
 
-CREATE CONSTRAINT TRIGGER accepted_input_owner_closed
+CREATE CONSTRAINT TRIGGER accepted_input_source_closed
     AFTER INSERT OR UPDATE ON accepted_input
     DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION require_accepted_input_owner();
+    FOR EACH ROW EXECUTE FUNCTION require_accepted_input_source();
 
 ALTER TABLE goal_command
     ADD CONSTRAINT goal_command_applied_event_fk
