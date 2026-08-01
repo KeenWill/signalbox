@@ -1781,9 +1781,18 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           ["type", "turn_id", "defaults_version", "selected_model_id"],
           decoder: decoder
         )
+        let defaultsVersion: SignalboxCanonicalUInt64 = try decoder.decode("defaults_version")
+        guard defaultsVersion.rawValue > 0 else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("defaults_version")],
+              debugDescription: "A model identity defaults version must be greater than zero."
+            )
+          )
+        }
         self = .modelIdentityChanged(
           turnID: try decoder.decode("turn_id"),
-          defaultsVersion: try decoder.decode("defaults_version"),
+          defaultsVersion: defaultsVersion,
           selectedModelID: try decoder.decode("selected_model_id")
         )
       case "assistant_tool_use":
@@ -2660,11 +2669,20 @@ private struct SignalboxTaggedPayload: Decodable {
   }
 
   func rejectUnadmittedFields(
-    _: Set<String>,
-    decoder _: Decoder
+    _ admittedFields: Set<String>,
+    decoder: Decoder
   ) throws {
-    // The daemon enforces the closed writer shape. Native is a tolerant reader:
-    // added members must not erase fields it already understands.
+    guard
+      let field = payload.keys.sorted().first(where: { !admittedFields.contains($0) })
+    else {
+      return
+    }
+    throw DecodingError.dataCorrupted(
+      .init(
+        codingPath: decoder.codingPath + [SignalboxDynamicCodingKey(field)],
+        debugDescription: "Tagged object contains an unadmitted field."
+      )
+    )
   }
 
   func requireFields(
@@ -2702,10 +2720,20 @@ private struct SignalboxUntaggedPayload: Decodable {
   }
 
   func rejectUnadmittedFields(
-    _: Set<String>,
-    decoder _: Decoder
+    _ admittedFields: Set<String>,
+    decoder: Decoder
   ) throws {
-    // Required known members remain presence- and type-checked by each decoder.
+    guard
+      let field = payload.keys.sorted().first(where: { !admittedFields.contains($0) })
+    else {
+      return
+    }
+    throw DecodingError.dataCorrupted(
+      .init(
+        codingPath: decoder.codingPath + [SignalboxDynamicCodingKey(field)],
+        debugDescription: "Closed object contains an unadmitted field."
+      )
+    )
   }
 
   func requireFields(
