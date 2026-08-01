@@ -26,7 +26,9 @@ templates, and orchestration template digests are verified through PR #349
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
-verified through PR #373 (`agent/adapter-wiring`). Invariant law lives in
+verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
+pull-request, workspace, and conversation tool families are verified through PR
+#377 (`agent/tools-daemon-wiring`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
@@ -54,8 +56,8 @@ the process environment at startup, and also consults `HOME`:
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value. It is required only when at least one static model mapping selects
   the Anthropic adapter; a Codex-only configuration does not consult it.
-- `GITHUB_TOKEN_FILE` — path to the file holding the current GitHub code-host
-  token value.
+- `GITHUB_TOKEN_FILE` — path to the file holding the current token shared by the
+  GitHub-backed code-host and pull-request tool adapters.
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
   [process protocol](process-protocol.md), which owns its binding and trust
   semantics.
@@ -102,17 +104,23 @@ and ambient configuration, not that path's name.
 A missing or empty required value, an unreadable or invalid model or template
 catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic
 or GitHub transport construction fails startup at the `Configuration` phase,
-before any database contact. Startup and shutdown logs carry the phase, an
-operator failure class, and small typed fields where present (session and turn
-ids, recovered-turn count, grace-window seconds) — never configuration values,
-paths, or URLs. The typed configuration error does not survive to the log:
-`run_hub` collapses every catalog-parse and adapter-construction variant (and
-likewise connection and migration errors) into a generic `Infrastructure` class
-carrying only its phase, so an operator cannot distinguish an unreadable catalog
-from an unknown field, bad version, or invalid limit (see Open edges). The six
-deployment paths are accepted without I/O at environment parsing time; both
-catalogs and every template prompt file are read during startup. Neither
-credential file is read at startup (see credential lifecycle below).
+before any database contact. A present invalid static tool mapping fails during
+that same pre-database configuration pass. After the database connects, an
+invalid workspace root or any failed tool-suite construction also fails at the
+`Configuration` phase. All tool dependencies are supplied by parsed
+configuration, the already-constructed database pool, or explicit credential and
+transport values; no tool family discovers ambient authority. Startup and
+shutdown logs carry the phase, an operator failure class, and small typed fields
+where present (session and turn ids, recovered-turn count, grace-window seconds)
+— never configuration values, paths, or URLs. The typed configuration error does
+not survive to the log: `run_hub` collapses every catalog-parse and
+adapter-construction variant (and likewise connection and migration errors) into
+a generic `Infrastructure` class carrying only its phase, so an operator cannot
+distinguish an unreadable catalog from an unknown field, bad version, or invalid
+limit (see Open edges). The six deployment paths are accepted without I/O at
+environment parsing time; both catalogs and every template prompt file are read
+during startup. Neither credential file is read at startup (see credential
+lifecycle below).
 
 The deployed daemon supplies no Anthropic endpoint or timeout knob; it
 constructs the adapter with its defaults. The
@@ -409,6 +417,60 @@ request must match one configured canonical origin before dispatch, so automatic
 approval cannot silently egress to an arbitrary host. Paths and queries remain
 unrestricted request data at an admitted origin.
 
+Production signalboxd composition requires exactly one mapping for each of the
+four implemented tool families in the same closed-table style as
+`[[adapter_mappings]]`:
+
+- `code_host` selects adapter `github`, credential profile `github-primary`, and
+  egress policy `github_api_only` for authenticated GitHub API requests; the
+  credential-free job-log redirect remains the bounded public-HTTPS exception
+  owned by [tool-loop](tool-loop.md);
+- `github` selects the same adapter, profile, and policy;
+- `workspace` selects adapter `local` and supplies one absolute
+  `workspace_root`; and
+- `conversations` selects adapter `application` and has no credential, egress,
+  or filesystem field.
+
+The `[[tool_mappings]]` array may be absent for compatibility with deployments
+that have not enabled the configured composition. In that case production
+preserves the base catalog, including the code-host suite, without constructing
+pull-request, workspace, or conversation dependencies. When the array is present
+it must already be complete: an unknown, missing, or duplicate family; an
+unknown field; any fixed value with another spelling; a relative workspace root;
+or a dependency field on the wrong family is a sanitized configuration failure.
+The root is opened once during tool construction and its pinned authority is
+cloned into both workspace suites, so a nonexistent, non-directory, or
+final-symlink root also fails startup. The GitHub policy admits exactly
+`https://api.github.com:443` for authenticated requests. The code-host
+`change_request_ci_job_log` operation retains the tool-loop-owned exception for
+one credential-free download from its validated, pinned, bounded public HTTPS
+redirect destination; the pull-request suite has no such exception. Model
+arguments cannot widen either admission rule.
+
+Composition preserves each compiled declaration's permission default and feeds
+it unchanged into the existing durable approval flow. Exact-revision code-host
+and pull-request reads and all workspace reads default to `Auto`; code-host
+mutations, GitHub review publication, and every workspace mutation default to
+`Confirm`. Reading the invoking session's transcript defaults to `Auto`, while
+listing conversations and reading another native or imported conversation
+default to `Confirm`. With the session posture disabled, a confirmed request
+creates the ordinary durable approval wait exposed by the process protocol;
+execution does not enter its transport or filesystem boundary until a
+per-request approval is recorded. A session frozen with `ApproveAll` instead
+receives the existing explicit `SessionBlanket` approval and does not park. No
+composition layer changes a declaration from `Confirm` to `Auto`.
+
+The conversation adapter uses the existing application listing service and the
+established persistence projections for native semantic transcripts and
+immutable imported conversations. It exposes only persisted visible semantic
+content in tool results: source-attested imported text remains text, while
+unattested, non-text, thinking, redacted-thinking, document, and absent-content
+entries are content-silent typed markers. Native reads stream from the
+repeatable-read projection. Imported reads currently materialize the complete
+immutable aggregate, including its persisted raw source records, before the
+adapter projects normalized visible entries and enforces the tool page's entry
+and byte bounds; raw source records are never returned in the tool result.
+
 Each `[[models]]` entry defines one direct selection:
 
 - `selection_id` — UUID of the immutable `DirectModelSelection` key.
@@ -640,12 +702,13 @@ deployment-side rules that code cannot enforce are stated in
   `github-primary`.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
   the Anthropic and GitHub references to their corresponding deployment paths
-  and reads the file for every Anthropic model-call or code-host operation
-  preparation; nothing is cached. Why: atomic file replacement rotates either
-  credential without restarting signalboxd, and an in-flight operation keeps the
-  value it authenticated with. Resolution is reference-scoped: a foreign
-  reference fails typed `Unmapped`; a missing file is `Unavailable`; an
-  unreadable file is `Unreadable` — all reference-only errors.
+  and reads the file for every Anthropic model-call, code-host operation, or
+  pull-request tool operation preparation; nothing is cached. Why: atomic file
+  replacement rotates either credential without restarting signalboxd, and an
+  in-flight operation keeps the value it authenticated with. Resolution is
+  reference-scoped: a foreign reference fails typed `Unmapped`; a missing file
+  is `Unavailable`; an unreadable file is `Unreadable` — all reference-only
+  errors.
 - **External Codex login.** `codex-subscription-primary` names the
   operator-selected ambient Codex CLI login. The daemon and adapter neither
   locate nor read its credential store and invent no credential-value shape; the
@@ -692,7 +755,8 @@ deployment-side rules that code cannot enforce are stated in
   tool resolves its fixed `github-primary` reference only after the durable tool
   attempt is authorized `InFlight` and immediately before its typed transport
   call; no model argument, client, or runner can select or receive the
-  credential.
+  credential. The pull-request suite follows the same timing with its fixed
+  GitHub API egress policy.
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
@@ -812,7 +876,9 @@ Enforcement as implemented:
   sensitive. `FileCredentialAccess`'s `Debug` redacts its path;
   `AnthropicRuntime`'s `Debug` redacts its credential source and version header.
   The GitHub adapter marks its `Authorization` header sensitive and retains no
-  credential value. Access errors carry reference and typed failure class only.
+  credential value. The separate pull-request adapter does the same and retains
+  neither its request-scoped value nor a response body in errors. Access errors
+  carry reference and typed failure class only.
 - signalboxd logging is a compact INFO tracing subscriber; startup and runtime
   errors log phase, failure class, counts, and aggregate ids only. The
   `crates/application` tracing sites emit the same typed fields, plus the closed

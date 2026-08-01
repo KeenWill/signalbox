@@ -26,7 +26,8 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::MAX_MODEL_ALIAS_CATALOG_ENTRIES;
 use signalbox_tools_basic::WebFetchEgressPolicy;
-use toml_edit::{DocumentMut, Table};
+use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
+use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
 /// Non-secret reference pinned into every Anthropic operation.
@@ -132,6 +133,29 @@ struct AdapterMapping {
     credential_profile: Arc<str>,
 }
 
+/// Validated deployment dependencies injected into daemon tool families.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaemonToolConfiguration {
+    workspace_root: PathBuf,
+}
+
+impl DaemonToolConfiguration {
+    /// Absolute root pinned into both workspace tool families.
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    /// Fixed public-GitHub-only egress policy selected by the tool registry.
+    pub const fn github_egress_policy(&self) -> GitHubEgressPolicy {
+        GitHubEgressPolicy::github_api_only()
+    }
+
+    /// Non-secret profile shared by both GitHub-backed tool adapters.
+    pub const fn github_credential_profile(&self) -> &'static str {
+        GITHUB_CREDENTIAL_REFERENCE
+    }
+}
+
 /// Maximum exact deployment compaction-prompt bytes.
 pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 
@@ -149,6 +173,7 @@ pub struct HubModelConfiguration {
     codex_cli: Option<CodexCliConfiguration>,
     compaction_prompt: Arc<str>,
     web_fetch_egress_policy: WebFetchEgressPolicy,
+    daemon_tools: Option<DaemonToolConfiguration>,
 }
 
 impl HubModelConfiguration {
@@ -172,6 +197,7 @@ impl HubModelConfiguration {
                 "aliases",
                 "compaction",
                 "web_fetch",
+                "tool_mappings",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -216,6 +242,7 @@ impl HubModelConfiguration {
             })
             .transpose()?
             .unwrap_or_default();
+        let daemon_tools = parse_tool_mappings(document.get("tool_mappings"))?;
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -413,6 +440,7 @@ impl HubModelConfiguration {
             codex_cli,
             compaction_prompt,
             web_fetch_egress_policy,
+            daemon_tools,
         })
     }
 
@@ -512,6 +540,11 @@ impl HubModelConfiguration {
         self.web_fetch_egress_policy.clone()
     }
 
+    /// Returns explicitly configured daemon tool dependencies, when present.
+    pub const fn daemon_tools(&self) -> Option<&DaemonToolConfiguration> {
+        self.daemon_tools.as_ref()
+    }
+
     /// Reports whether the configuration contains one direct selection key.
     pub fn contains_selection(&self, selection: DirectModelSelection) -> bool {
         self.direct_selections.contains(&selection)
@@ -529,6 +562,94 @@ impl HubModelConfiguration {
             .iter()
             .map(|(alias, definition)| (*alias, definition.selected()))
     }
+}
+
+fn parse_tool_mappings(
+    item: Option<&Item>,
+) -> Result<Option<DaemonToolConfiguration>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let mappings = item
+        .as_array_of_tables()
+        .ok_or(HubModelConfigurationError::InvalidToolMappings)?;
+    if mappings.is_empty() {
+        return Err(HubModelConfigurationError::InvalidToolMappings);
+    }
+    let mut families = HashSet::with_capacity(mappings.len());
+    let mut workspace_root = None;
+    for mapping in mappings {
+        reject_unknown_fields(
+            mapping,
+            &[
+                "family",
+                "adapter",
+                "credential_profile",
+                "egress_policy",
+                "workspace_root",
+            ],
+        )?;
+        let family = required_string(mapping, "family")?;
+        if !families.insert(family.to_owned()) {
+            return Err(HubModelConfigurationError::DuplicateToolFamily);
+        }
+        match family {
+            "code_host" | "github" => validate_github_tool_mapping(mapping)?,
+            "workspace" => {
+                validate_workspace_tool_mapping(mapping)?;
+                workspace_root = Some(PathBuf::from(required_string(mapping, "workspace_root")?));
+            }
+            "conversations" => validate_conversation_tool_mapping(mapping)?,
+            _ => return Err(HubModelConfigurationError::InvalidToolMappings),
+        }
+    }
+    if families
+        != HashSet::from([
+            String::from("code_host"),
+            String::from("github"),
+            String::from("workspace"),
+            String::from("conversations"),
+        ])
+    {
+        return Err(HubModelConfigurationError::InvalidToolMappings);
+    }
+    Ok(Some(DaemonToolConfiguration {
+        workspace_root: workspace_root.ok_or(HubModelConfigurationError::InvalidToolMappings)?,
+    }))
+}
+
+fn validate_github_tool_mapping(mapping: &Table) -> Result<(), HubModelConfigurationError> {
+    if required_string(mapping, "adapter")? != "github"
+        || required_string(mapping, "credential_profile")? != GITHUB_CREDENTIAL_REFERENCE
+        || required_string(mapping, "egress_policy")? != "github_api_only"
+        || mapping.get("workspace_root").is_some()
+    {
+        return Err(HubModelConfigurationError::InvalidToolMappings);
+    }
+    Ok(())
+}
+
+fn validate_workspace_tool_mapping(mapping: &Table) -> Result<(), HubModelConfigurationError> {
+    let root = Path::new(required_string(mapping, "workspace_root")?);
+    if required_string(mapping, "adapter")? != "local"
+        || !root.is_absolute()
+        || mapping.get("credential_profile").is_some()
+        || mapping.get("egress_policy").is_some()
+    {
+        return Err(HubModelConfigurationError::InvalidToolMappings);
+    }
+    Ok(())
+}
+
+fn validate_conversation_tool_mapping(mapping: &Table) -> Result<(), HubModelConfigurationError> {
+    if required_string(mapping, "adapter")? != "application"
+        || mapping.get("credential_profile").is_some()
+        || mapping.get("egress_policy").is_some()
+        || mapping.get("workspace_root").is_some()
+    {
+        return Err(HubModelConfigurationError::InvalidToolMappings);
+    }
+    Ok(())
 }
 
 fn validate_alias_count(count: usize) -> Result<(), HubModelConfigurationError> {
@@ -596,6 +717,10 @@ pub enum HubModelConfigurationError {
     MissingModels,
     /// No nonempty static adapter mapping table exists.
     MissingAdapterMappings,
+    /// The daemon tool mapping registry was incomplete or malformed.
+    InvalidToolMappings,
+    /// One daemon tool family appeared more than once.
+    DuplicateToolFamily,
     /// The required compaction configuration table is absent.
     MissingCompaction,
     /// An unrecognized root or table field was present.
@@ -662,6 +787,10 @@ impl fmt::Display for HubModelConfigurationError {
             Self::UnsupportedVersion => "model configuration version is unsupported",
             Self::MissingModels => "model configuration has no model definitions",
             Self::MissingAdapterMappings => "model configuration has no adapter mappings",
+            Self::InvalidToolMappings => {
+                "model configuration contains invalid daemon tool mappings"
+            }
+            Self::DuplicateToolFamily => "model configuration repeats a daemon tool family",
             Self::MissingCompaction => "model configuration has no compaction settings",
             Self::UnknownField => "model configuration contains an unknown field",
             Self::InvalidField => "model configuration has a missing or mistyped field",
@@ -836,6 +965,27 @@ prompt = "Summarize the prior conversation faithfully for continuation."
 [web_fetch]
 allowed_origins = ["https://example.com"]
 
+[[tool_mappings]]
+family = "code_host"
+adapter = "github"
+credential_profile = "github-primary"
+egress_policy = "github_api_only"
+
+[[tool_mappings]]
+family = "github"
+adapter = "github"
+credential_profile = "github-primary"
+egress_policy = "github_api_only"
+
+[[tool_mappings]]
+family = "workspace"
+adapter = "local"
+workspace_root = "/srv/signalbox/workspace"
+
+[[tool_mappings]]
+family = "conversations"
+adapter = "application"
+
 [[models]]
 selection_id = "10000000-0000-4000-8000-000000000001"
 target_id = "20000000-0000-4000-8000-000000000001"
@@ -866,6 +1016,16 @@ working_directory = "{}"
         )
     }
 
+    fn configuration_without_tool_mappings() -> String {
+        let start = CONFIGURATION
+            .find("[[tool_mappings]]")
+            .expect("fixture has tool mappings");
+        let end = CONFIGURATION
+            .find("[[models]]")
+            .expect("fixture has model definitions");
+        format!("{}{}", &CONFIGURATION[..start], &CONFIGURATION[end..])
+    }
+
     #[test]
     fn static_configuration_builds_correlated_domain_runtime_and_alias_mappings() {
         let configuration =
@@ -881,6 +1041,18 @@ working_directory = "{}"
             configuration.web_fetch_egress_policy(),
             WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])
                 .expect("fixture egress origin is valid")
+        );
+        let daemon_tools = configuration
+            .daemon_tools()
+            .expect("fixture tool mappings are complete");
+        assert_eq!(
+            daemon_tools.workspace_root(),
+            Path::new("/srv/signalbox/workspace")
+        );
+        assert_eq!(daemon_tools.github_credential_profile(), "github-primary");
+        assert_eq!(
+            daemon_tools.github_egress_policy().admitted_origin(),
+            "https://api.github.com"
         );
         assert_eq!(
             configuration
@@ -906,6 +1078,39 @@ working_directory = "{}"
         assert_eq!(
             route.migration_credential_family(),
             Some(MIGRATED_ANTHROPIC_MODEL_FAMILY)
+        );
+    }
+
+    #[test]
+    fn absent_tool_mappings_preserve_the_base_daemon_catalog() {
+        let configuration = HubModelConfiguration::parse(&configuration_without_tool_mappings())
+            .expect("model configuration without tool mappings remains parseable");
+
+        assert_eq!(configuration.daemon_tools(), None);
+    }
+
+    #[test]
+    fn tool_mapping_registry_rejects_a_duplicate_family() {
+        let duplicate = format!(
+            "{CONFIGURATION}\n[[tool_mappings]]\nfamily = \"github\"\nadapter = \"github\"\ncredential_profile = \"github-primary\"\negress_policy = \"github_api_only\"\n"
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&duplicate).err(),
+            Some(HubModelConfigurationError::DuplicateToolFamily)
+        );
+    }
+
+    #[test]
+    fn tool_mapping_registry_rejects_an_unpinned_workspace_root() {
+        let relative = CONFIGURATION.replace(
+            "workspace_root = \"/srv/signalbox/workspace\"",
+            "workspace_root = \"relative/workspace\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&relative).err(),
+            Some(HubModelConfigurationError::InvalidToolMappings)
         );
     }
 
