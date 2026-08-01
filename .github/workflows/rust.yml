@@ -136,8 +136,12 @@ jobs:
           exit "$benchmark_status"
 
   # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
-  # pinned PostgreSQL container through testcontainers, so the four runner CPUs
-  # can execute isolated tests concurrently without sharing database state.
+  # pinned PostgreSQL container through testcontainers, so tests execute
+  # concurrently without sharing database state. The persistence and signalboxd
+  # suites spend most of their wall clock waiting on container startup and
+  # database IO rather than on CPU, so they oversubscribe the four runner vCPUs
+  # with eight test threads. The terminal-client suite asserts on signal and PTY
+  # timing, so it stays at one thread per vCPU.
   postgres-integration-suite:
     name: postgres-integration (${{ matrix.suite }})
     runs-on: ubuntu-latest
@@ -151,12 +155,12 @@ jobs:
               cargo test --no-fail-fast -p signalbox-persistence
               --features postgres-integration
               --tests
-              -- --ignored --test-threads=4
+              -- --ignored --test-threads=8
           - suite: signalboxd
             command: >-
               cargo test --no-fail-fast -p signalboxd
               --tests
-              -- --ignored --test-threads=4
+              -- --ignored --test-threads=8
           - suite: terminal-client
             command: >-
               cargo test --no-fail-fast -p signalbox-client
