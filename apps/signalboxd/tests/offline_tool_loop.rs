@@ -598,7 +598,7 @@ fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>) {
         .iter()
         .map(|definition| definition.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 35);
+    assert_eq!(names.len(), 37);
     assert!(names.contains(&REPOSITORY_READ_FILE_NAME));
     assert!(names.contains(&PULL_REQUEST_METADATA_NAME));
     assert!(names.contains(&PULL_REQUEST_PUBLISH_REVIEW_NAME));
@@ -918,8 +918,8 @@ type OfflineDaemonTools<Writer, HostTransport> = DaemonTools<
     UnusedGitHubTransport,
     LocalWorkspaceFileSystem,
     UnusedConversationPort,
+    UnusedConversationPort,
 >;
-
 fn offline_daemon_tools<Writer, HostTransport>(
     web: OfflineWebTransport,
     writer: Writer,
@@ -943,10 +943,10 @@ fn offline_daemon_tools<Writer, HostTransport>(
         LocalWorkspaceFileSystem,
         workspace.path(),
         UnusedConversationPort,
+        UnusedConversationPort,
         web_fetch_egress_policy,
     )
 }
-
 #[derive(Clone, Debug)]
 struct RecordingGitHubTransport {
     result: GitHubResult,
@@ -1019,8 +1019,8 @@ type CommissionedDaemonTools<HostTransport, GitHubTransportType> = DaemonTools<
     GitHubTransportType,
     LocalWorkspaceFileSystem,
     PostgresConversationIntrospection,
+    signalbox_persistence::plan::SessionPlanRepository,
 >;
-
 fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
     pool: &PgPool,
     code_host: HostTransport,
@@ -1044,10 +1044,10 @@ fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
         LocalWorkspaceFileSystem,
         workspace_root,
         PostgresConversationIntrospection::new(pool.clone()),
+        signalbox_persistence::plan::SessionPlanRepository::new(pool.clone()),
         WebFetchEgressPolicy::deny_all(),
     )
 }
-
 #[derive(Clone, Debug)]
 struct RecordingCodeHostTransport {
     result: CodeHostResult,
@@ -4088,4 +4088,22 @@ async fn s06_inv005_inv024_inv025_inv026_inv034_external_crash_parks_without_ret
         vec![String::from("assistant_tool_use")]
     );
     Ok(())
+}
+
+impl signalbox_tools_plan::SessionPlanPort for UnusedConversationPort {
+    type Error = UnusedSessionStatusWriterError;
+
+    async fn append_plan_event(
+        &mut self,
+        _request: signalbox_tools_plan::PlanAppendRequest,
+    ) -> Result<signalbox_tools_plan::PlanAppendOutcome, Self::Error> {
+        Err(UnusedSessionStatusWriterError)
+    }
+
+    async fn read_plan(
+        &mut self,
+        _request: signalbox_tools_plan::PlanReadRequest,
+    ) -> Result<signalbox_tools_plan::PlanReadPage, Self::Error> {
+        Err(UnusedSessionStatusWriterError)
+    }
 }
