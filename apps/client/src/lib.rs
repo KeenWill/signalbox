@@ -10,8 +10,9 @@ use std::{
 };
 
 use arguments::{
-    Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome, ReviewCommand,
-    SendDeliveryArgument, SystemPromptArgument, ThroughPositionArgument,
+    Command, DangerousToolAutoApprovalArgument, GoalCommand, GoalTextArgument,
+    ImportSourceArgument, ParseOutcome, ReviewCommand, SendDeliveryArgument, SystemPromptArgument,
+    ThroughPositionArgument,
 };
 use connection::ProcessClient;
 use error::ClientError;
@@ -26,17 +27,18 @@ use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, ErrorCode, FrameEncodeError, InputContent,
-    InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES,
-    MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
-    ProtocolVersion, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
-    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
-    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
-    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
-    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
-    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
-    decode_server_line, encode_client_line, encode_server_line,
+    ConversationOriginFilter, ConversationSummary, ErrorCode, FrameEncodeError, GoalHistoryEvent,
+    GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+    MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
+    ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, RequestId,
+    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
+    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
+    ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SystemPromptMember,
+    SystemPromptText, ToolBatchState, ToolDecision, TurnState, decode_server_line,
+    encode_client_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -283,6 +285,7 @@ async fn execute(
         Command::Create { .. }
         | Command::Continue { .. }
         | Command::Compact { .. }
+        | Command::Goal(_)
         | Command::Imported { .. }
         | Command::List
         | Command::Templates
@@ -311,6 +314,7 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::Compact { .. }
+        | Command::Goal(_)
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -393,6 +397,7 @@ async fn execute(
         Command::Imported {
             imported_conversation_id,
         } => imported(&mut client, &mut output, imported_conversation_id).await,
+        Command::Goal(command) => goal(&mut client, &mut output, command).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
@@ -622,6 +627,52 @@ async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, Client
         .map_err(|_| ClientError::Input("the system prompt must be valid UTF-8"))?;
     SystemPromptText::try_new(text)
         .map_err(|_| ClientError::Input("the system prompt must not contain U+0000"))
+}
+
+async fn read_goal_text_argument(argument: GoalTextArgument) -> Result<String, ClientError> {
+    match argument {
+        GoalTextArgument::Inline(text) => validate_goal_text_input(text),
+        GoalTextArgument::File(path) => read_goal_text_file(&path).await,
+    }
+}
+
+async fn read_goal_text_file(path: &Path) -> Result<String, ClientError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| ClientError::goal_text_file(path, error))?;
+    let read_limit = u64::try_from(MAX_CONTENT_FRAGMENT_BYTES)
+        .ok()
+        .and_then(|bound| bound.checked_add(1))
+        .ok_or(ClientError::Protocol("goal text read bound overflow"))?;
+    let mut bounded = file.take(read_limit);
+    let mut bytes = Vec::new();
+    bounded
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| ClientError::goal_text_file(path, error))?;
+    if bytes.len() > MAX_CONTENT_FRAGMENT_BYTES {
+        return Err(ClientError::Input(
+            "goal text exceeds the 1 MiB UTF-8 byte limit",
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ClientError::Input("goal text must be valid UTF-8"))?;
+    validate_goal_text_input(text)
+}
+
+fn validate_goal_text_input(text: String) -> Result<String, ClientError> {
+    if text.is_empty() {
+        return Err(ClientError::Input("goal text must not be empty"));
+    }
+    if text.len() > MAX_CONTENT_FRAGMENT_BYTES {
+        return Err(ClientError::Input(
+            "goal text exceeds the 1 MiB UTF-8 byte limit",
+        ));
+    }
+    if text.contains('\0') {
+        return Err(ClientError::Input("goal text must not contain U+0000"));
+    }
+    Ok(text)
 }
 
 fn socket_path(
@@ -1560,6 +1611,391 @@ async fn read_imported_conversation(
             }
         }
     }
+}
+
+async fn goal(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    command: GoalCommand,
+) -> Result<(), ClientError> {
+    match command {
+        GoalCommand::Attach {
+            session_id,
+            statement,
+            command_id,
+        } => {
+            let statement = read_goal_text_argument(statement).await?;
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::AttachGoal {
+                    command_id,
+                    session_id,
+                    statement,
+                }
+            })
+            .await
+        }
+        GoalCommand::Show { session_id } => goal_show(client, output, session_id).await,
+        GoalCommand::Resume {
+            session_id,
+            guidance,
+            command_id,
+        } => {
+            let guidance = match guidance {
+                Some(guidance) => Some(read_goal_text_argument(guidance).await?),
+                None => None,
+            };
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::ResumeGoal {
+                    command_id,
+                    session_id,
+                    guidance,
+                }
+            })
+            .await
+        }
+        GoalCommand::Stop {
+            session_id,
+            command_id,
+        } => {
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::StopGoal {
+                    command_id,
+                    session_id,
+                }
+            })
+            .await
+        }
+        GoalCommand::Supersede {
+            session_id,
+            statement,
+            command_id,
+        } => {
+            let statement = read_goal_text_argument(statement).await?;
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::SupersedeGoal {
+                    command_id,
+                    session_id,
+                    statement,
+                }
+            })
+            .await
+        }
+    }
+}
+
+async fn goal_mutation<BuildRequest>(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    expected_session: CanonicalUuid,
+    command_id: Option<CommandId>,
+    build_request: BuildRequest,
+) -> Result<(), ClientError>
+where
+    BuildRequest: FnOnce(CommandId) -> ClientRequest,
+{
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client.mutation_request(build_request(command_id)).await?;
+    let receipt = decode_goal_mutation_receipt(
+        expected_session,
+        connection.message().await.map_err(ClientError::mutation)?,
+    )?;
+    output
+        .goal_transition_applied(
+            receipt.session_id,
+            receipt.event_ordinal,
+            receipt.generation,
+        )
+        .map_err(ClientError::from)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GoalMutationReceipt {
+    session_id: CanonicalUuid,
+    event_ordinal: u64,
+    generation: u64,
+}
+
+fn decode_goal_mutation_receipt(
+    expected_session: CanonicalUuid,
+    message: ServerMessage,
+) -> Result<GoalMutationReceipt, ClientError> {
+    match message {
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal,
+            generation,
+        } if session_id == expected_session => Ok(GoalMutationReceipt {
+            session_id,
+            event_ordinal: event_ordinal.value(),
+            generation: generation.value(),
+        }),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("goal mutation returned an unexpected response").mutation()),
+    }
+}
+
+#[derive(Debug)]
+struct GoalHistoryProjection {
+    generation: u64,
+    statement: String,
+    state: GoalLifecycleState,
+}
+
+#[derive(Debug, Default)]
+struct GoalHistoryReplay {
+    current: Option<GoalHistoryProjection>,
+}
+
+impl GoalHistoryReplay {
+    fn apply(&mut self, generation: u64, event: &GoalHistoryEvent) -> Result<(), ClientError> {
+        let current = self.current.take();
+        let next = match (current, event) {
+            (None, GoalHistoryEvent::Commissioned { statement, .. }) if generation == 1 => {
+                GoalHistoryProjection {
+                    generation,
+                    statement: statement.clone(),
+                    state: GoalLifecycleState::Pursuing {},
+                }
+            }
+            (Some(current), GoalHistoryEvent::Commissioned { statement, .. })
+                if goal_state_admits_commission(&current.state)
+                    && current.generation.checked_add(1) == Some(generation) =>
+            {
+                GoalHistoryProjection {
+                    generation,
+                    statement: statement.clone(),
+                    state: GoalLifecycleState::Pursuing {},
+                }
+            }
+            (Some(mut current), GoalHistoryEvent::Blocked { reason, need, .. })
+                if generation == current.generation && goal_state_is_pursuing(&current.state) =>
+            {
+                current.state = GoalLifecycleState::Blocked {
+                    reason: *reason,
+                    need: need.clone(),
+                };
+                current
+            }
+            (Some(mut current), GoalHistoryEvent::Resumed { .. })
+                if generation == current.generation && goal_state_is_blocked(&current.state) =>
+            {
+                current.state = GoalLifecycleState::Pursuing {};
+                current
+            }
+            (
+                Some(mut current),
+                GoalHistoryEvent::Achieved {
+                    turn_id,
+                    tool_request_id,
+                    ..
+                },
+            ) if generation == current.generation && goal_state_is_pursuing(&current.state) => {
+                current.state = GoalLifecycleState::Achieved {
+                    turn_id: *turn_id,
+                    tool_request_id: *tool_request_id,
+                };
+                current
+            }
+            (Some(mut current), GoalHistoryEvent::UserStopped { .. })
+                if generation == current.generation && goal_state_is_open(&current.state) =>
+            {
+                current.state = GoalLifecycleState::UserStopped {};
+                current
+            }
+            (
+                Some(current),
+                GoalHistoryEvent::Superseded {
+                    replacement_statement,
+                    ..
+                },
+            ) if generation == current.generation && goal_state_is_open(&current.state) => {
+                let successor = current
+                    .generation
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("goal history generation overflowed"))?;
+                GoalHistoryProjection {
+                    generation: successor,
+                    statement: replacement_statement.clone(),
+                    state: GoalLifecycleState::Pursuing {},
+                }
+            }
+            _ => {
+                return Err(ClientError::Protocol(
+                    "goal history contained an invalid lifecycle transition",
+                ));
+            }
+        };
+        self.current = Some(next);
+        Ok(())
+    }
+
+    fn validate_projection(
+        self,
+        generation: u64,
+        statement: &str,
+        state: &GoalLifecycleState,
+    ) -> Result<(), ClientError> {
+        match self.current {
+            Some(current)
+                if current.generation == generation
+                    && current.statement == statement
+                    && current.state == *state =>
+            {
+                Ok(())
+            }
+            Some(_) | None => Err(ClientError::Protocol(
+                "goal history did not derive its declared current projection",
+            )),
+        }
+    }
+}
+
+const fn goal_state_is_pursuing(state: &GoalLifecycleState) -> bool {
+    match state {
+        GoalLifecycleState::Pursuing {} => true,
+        GoalLifecycleState::Blocked { .. }
+        | GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
+}
+
+const fn goal_state_is_blocked(state: &GoalLifecycleState) -> bool {
+    match state {
+        GoalLifecycleState::Blocked { .. } => true,
+        GoalLifecycleState::Pursuing {}
+        | GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
+}
+
+const fn goal_state_is_open(state: &GoalLifecycleState) -> bool {
+    match state {
+        GoalLifecycleState::Pursuing {} | GoalLifecycleState::Blocked { .. } => true,
+        GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
+}
+
+const fn goal_state_admits_commission(state: &GoalLifecycleState) -> bool {
+    match state {
+        GoalLifecycleState::Achieved { .. } | GoalLifecycleState::UserStopped {} => true,
+        GoalLifecycleState::Pursuing {}
+        | GoalLifecycleState::Blocked { .. }
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
+}
+
+async fn goal_show(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+) -> Result<(), ClientError> {
+    let mut connection = client
+        .request(ClientRequest::ReadGoal { session_id })
+        .await?;
+    let first = connection.frame().await?;
+    let (current_generation, current_statement) = match first.message() {
+        ServerMessage::GoalHistoryStart {
+            session_id: observed,
+            current_generation,
+            current_statement,
+        } if *observed == session_id => (current_generation.value(), current_statement.clone()),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "goal history did not begin with its selected session",
+            ));
+        }
+    };
+    let state_frame = connection.frame().await?;
+    let current_state = match state_frame.message() {
+        ServerMessage::GoalHistoryState { current_state } => current_state.clone(),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "goal history did not carry its current state after its projection",
+            ));
+        }
+    };
+    let mut spool = tempfile::tempfile()?;
+    let mut replay = GoalHistoryReplay::default();
+    let mut event_count = 0_u64;
+    loop {
+        let frame = connection.frame().await?;
+        match frame.message() {
+            ServerMessage::GoalHistoryItem {
+                event_ordinal,
+                generation,
+                event,
+            } if event_ordinal.value() == event_count.saturating_add(1) => {
+                event_count = event_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("goal event count overflowed"))?;
+                replay.apply(generation.value(), event)?;
+                spool.write_all(&encode_server_line(&frame)?)?;
+            }
+            ServerMessage::GoalHistoryEnd {
+                event_count: declared,
+            } if declared.value() == event_count => break,
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "goal history sequence or count was invalid",
+                ));
+            }
+        }
+    }
+    replay.validate_projection(current_generation, &current_statement, &current_state)?;
+    output.goal_current(
+        session_id,
+        current_generation,
+        &current_statement,
+        &current_state,
+    )?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::GoalHistoryItem {
+                event_ordinal,
+                generation,
+                event,
+            } => output.goal_history_event(event_ordinal.value(), generation.value(), event)?,
+            _ => {
+                return Err(ClientError::Protocol(
+                    "goal-history spool contained an unexpected frame",
+                ));
+            }
+        }
+        line.clear();
+    }
+    Ok(())
 }
 
 async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
@@ -2538,6 +2974,7 @@ fn terminal_event_state(
         }
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
+        | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. }
@@ -2689,6 +3126,7 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
+        | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. } => None,
@@ -3806,14 +4244,15 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         ConversationImportFormat, ConversationOriginFilter, ConversationSummary, FrameEncodeError,
-        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
-        InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
-        ModelCallState, ModelSelection, ProtocolVersion, RequestId, ReviewConcernTerminalOutcome,
-        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
-        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
-        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
-        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedSessionRelationship,
+        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
+        MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
+        RequestId, ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
+        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
+        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
         encode_server_line,
     };
     use tokio::{
@@ -3824,23 +4263,147 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ConversationImportOutcome, ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES,
-        MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES,
-        MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ProcessClient, ReviewCommand, ReviewConcernsFile,
-        ReviewFindingsFile, SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt,
-        ThroughPositionArgument, TurnTerminal, TurnWaitMode, await_turn_terminal,
-        collect_import_paths, continue_imported, conversations, create, decide,
-        import_conversation_file, imported, model_call_recovery_transition,
-        open_scanned_import_source, read_import_file, read_input, read_review_json_file,
-        read_system_prompt_file, reconcile_turn, review, review_concern_state_is_coherent,
-        review_finding_event_status, review_judgment_effect_state_is_coherent,
-        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
-        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
-        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
-        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition,
+        ConversationImportOutcome, ConversationsPageRequest, GoalHistoryReplay,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_INPUT_CONTENT_BYTES, MAX_REVIEW_FINDINGS_PER_RUN,
+        MAX_REVIEW_JSON_INPUT_BYTES, MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ProcessClient,
+        ReviewCommand, ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest,
+        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
+        await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
+        decide, decode_goal_mutation_receipt, import_conversation_file, imported,
+        model_call_recovery_transition, open_scanned_import_source, read_goal_text_file,
+        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
+        reconcile_turn, review, review_concern_state_is_coherent, review_finding_event_status,
+        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
+        review_pass_completion_is_coherent, review_publication_state_is_coherent,
+        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
+        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    #[test]
+    fn inv033_goal_history_replay_accepts_supersession_lineage() -> Result<(), ClientError> {
+        let first_command = CommandId::try_from_uuid(Uuid::from_u128(11))
+            .expect("fixture command identity is admitted");
+        let supersede_command = CommandId::try_from_uuid(Uuid::from_u128(12))
+            .expect("fixture command identity is admitted");
+        let stop_command = CommandId::try_from_uuid(Uuid::from_u128(13))
+            .expect("fixture command identity is admitted");
+        let mut replay = GoalHistoryReplay::default();
+
+        replay.apply(
+            1,
+            &GoalHistoryEvent::Commissioned {
+                statement: String::from("first scope"),
+                command_id: first_command,
+            },
+        )?;
+        replay.apply(
+            1,
+            &GoalHistoryEvent::Superseded {
+                replacement_statement: String::from("replacement scope"),
+                command_id: supersede_command,
+            },
+        )?;
+        replay.apply(
+            2,
+            &GoalHistoryEvent::UserStopped {
+                command_id: stop_command,
+            },
+        )?;
+
+        replay.validate_projection(2, "replacement scope", &GoalLifecycleState::UserStopped {})
+    }
+
+    #[test]
+    fn inv033_goal_history_replay_rejects_an_invalid_first_transition() {
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(14))
+            .expect("fixture command identity is admitted");
+        let mut replay = GoalHistoryReplay::default();
+
+        let result = replay.apply(1, &GoalHistoryEvent::UserStopped { command_id });
+
+        assert!(matches!(result, Err(ClientError::Protocol(_))));
+    }
+
+    #[test]
+    fn inv033_goal_history_replay_rejects_a_mismatched_current_projection() {
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(15))
+            .expect("fixture command identity is admitted");
+        let mut replay = GoalHistoryReplay::default();
+        replay
+            .apply(
+                1,
+                &GoalHistoryEvent::Commissioned {
+                    statement: String::from("commissioned scope"),
+                    command_id,
+                },
+            )
+            .expect("the commissioning event is valid");
+
+        let result =
+            replay.validate_projection(1, "different projection", &GoalLifecycleState::Pursuing {});
+
+        assert!(matches!(result, Err(ClientError::Protocol(_))));
+    }
+
+    #[test]
+    fn goal_mutation_receipt_rejects_a_cross_wired_session() {
+        let selected_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let message = ServerMessage::GoalTransitionApplied {
+            session_id: foreign_session,
+            event_ordinal: CanonicalU64::new(1),
+            generation: CanonicalU64::new(1),
+        };
+
+        let error = decode_goal_mutation_receipt(selected_session, message)
+            .expect_err("foreign session receipt is rejected");
+
+        assert!(error.is_ambiguous_mutation());
+    }
+
+    #[tokio::test]
+    async fn goal_text_file_reads_the_exact_maximum() -> Result<(), Box<dyn Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), vec![b'g'; MAX_CONTENT_FRAGMENT_BYTES])?;
+
+        let text = read_goal_text_file(file.path()).await?;
+
+        assert_eq!(text.len(), MAX_CONTENT_FRAGMENT_BYTES);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn goal_text_file_rejects_content_beyond_the_maximum() -> Result<(), Box<dyn Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), vec![b'g'; MAX_CONTENT_FRAGMENT_BYTES + 1])?;
+
+        let result = read_goal_text_file(file.path()).await;
+
+        assert!(matches!(result, Err(ClientError::Input(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn goal_text_file_error_retains_the_selected_path() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("missing-goal.txt");
+
+        let error = read_goal_text_file(&path)
+            .await
+            .expect_err("the absent goal text file is rejected");
+
+        assert!(error.to_string().contains(&path.display().to_string()));
+        assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn review_findings_file_decodes_an_empty_complete_inventory()
