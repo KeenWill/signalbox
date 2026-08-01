@@ -20746,6 +20746,7 @@ enum ConcurrentPlanAppendDisposition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PlanRepositoryErrorKind {
     AppendProvenance,
+    CurrentCreation,
     DependencyStatus,
     EventSequence,
 }
@@ -20957,6 +20958,9 @@ fn plan_repository_error_kind(error: SessionPlanRepositoryError) -> PlanReposito
         SessionPlanRepositoryError::InvalidAppendProvenance => {
             PlanRepositoryErrorKind::AppendProvenance
         }
+        SessionPlanRepositoryError::Corruption(SessionPlanCorruption::InvalidEventPayload(
+            "current creation",
+        )) => PlanRepositoryErrorKind::CurrentCreation,
         SessionPlanRepositoryError::Corruption(SessionPlanCorruption::InvalidEventPayload(
             "dependency status",
         )) => PlanRepositoryErrorKind::DependencyStatus,
@@ -21536,6 +21540,117 @@ async fn session_plan_read_rejects_an_invalid_edge_reached_outside_the_page()
         ))
         .await
         .expect_err("the traversed non-creation target is corruption");
+
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The current projection rejects a creation carrying dependency payload without
+/// requiring the optional history projection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_malformed_current_creation_payload() -> Result<(), Box<dyn Error>>
+{
+    const CREATION_EVENT_ORDINAL: u64 = 1;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = dependency_plan_fixture(&pool, Vec::new()).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DROP CONSTRAINT session_plan_event_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_plan_event
+            SET dependency_ordinal = $1
+          WHERE session_id = $2
+            AND event_ordinal = $3",
+    )
+    .bind(Decimal::from(fixture.dependent.as_u64()))
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(CREATION_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await
+        .expect_err("a creation carrying dependency payload is corruption");
+
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::CurrentCreation
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Relevant current-edge validation rejects forbidden text on a dependency
+/// event without requiring the optional history projection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_malformed_dependency_edge_payload() -> Result<(), Box<dyn Error>>
+{
+    const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const MALFORMED_EDGE_TEXT: &str = "dependency event must not carry text";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = dependency_plan_fixture(&pool, Vec::new()).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DROP CONSTRAINT session_plan_event_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_plan_event
+            SET entry_text = $1
+          WHERE session_id = $2
+            AND event_ordinal = $3",
+    )
+    .bind(MALFORMED_EDGE_TEXT)
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await
+        .expect_err("a dependency edge carrying text is corruption");
 
     assert_eq!(
         plan_repository_error_kind(error),

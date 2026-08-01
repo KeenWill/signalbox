@@ -27,20 +27,23 @@ const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE R
 
 const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_ordinal,
        created.entry_ordinal AS entry_ordinal,
+       created.dependency_ordinal AS created_dependency_ordinal,
        created.entry_text AS created_text,
        created.entry_status AS created_status,
        session_plan_event_has_authority(created) AS created_authorized,
        revision.event_ordinal AS revision_event_ordinal,
+       revision.dependency_ordinal AS revision_dependency_ordinal,
        revision.entry_text AS revised_text,
        revision.entry_status AS revised_status,
        revision.authorized AS revision_authorized,
        movement.event_ordinal AS status_event_ordinal,
+       movement.dependency_ordinal AS status_dependency_ordinal,
        movement.entry_text AS moved_text,
        movement.entry_status AS moved_status,
        movement.authorized AS movement_authorized
   FROM session_plan_event AS created
   LEFT JOIN LATERAL (
-      SELECT event_ordinal, entry_text, entry_status,
+      SELECT event_ordinal, dependency_ordinal, entry_text, entry_status,
              session_plan_event_has_authority(candidate) AS authorized
         FROM session_plan_event AS candidate
        WHERE session_id = created.session_id
@@ -50,7 +53,7 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
        LIMIT 1
   ) AS revision ON TRUE
   LEFT JOIN LATERAL (
-      SELECT event_ordinal, entry_text, entry_status,
+      SELECT event_ordinal, dependency_ordinal, entry_text, entry_status,
              session_plan_event_has_authority(candidate) AS authorized
         FROM session_plan_event AS candidate
        WHERE session_id = created.session_id
@@ -69,6 +72,14 @@ const CURRENT_DEPENDENCIES_SQL: &str = "WITH edge AS (
     SELECT candidate.entry_ordinal, candidate.dependency_ordinal,
            min(candidate.event_ordinal) AS first_event_ordinal,
            bool_and(session_plan_event_has_authority(candidate)) AS authorized,
+           bool_and(
+               candidate.dependency_ordinal IS NOT NULL
+               AND candidate.entry_text IS NULL
+               AND candidate.entry_status IS NULL
+               AND candidate.event_ordinal > candidate.entry_ordinal
+               AND candidate.event_ordinal > candidate.dependency_ordinal
+               AND candidate.entry_ordinal <> candidate.dependency_ordinal
+           ) AS payload_valid,
            row_number() OVER (
                PARTITION BY candidate.entry_ordinal
                ORDER BY min(candidate.event_ordinal)
@@ -80,7 +91,12 @@ const CURRENT_DEPENDENCIES_SQL: &str = "WITH edge AS (
      GROUP BY candidate.entry_ordinal, candidate.dependency_ordinal
 )
 SELECT edge.entry_ordinal, edge.dependency_ordinal,
-       edge.first_event_ordinal, edge.authorized,
+       edge.first_event_ordinal, edge.authorized, edge.payload_valid,
+       dependency.event_ordinal IS NOT NULL AS dependency_created,
+       dependency.entry_ordinal AS dependency_entry_ordinal,
+       dependency.dependency_ordinal AS dependency_payload_dependency_ordinal,
+       dependency.entry_text AS dependency_created_text,
+       dependency.entry_status AS dependency_created_status,
        session_plan_event_has_authority(dependency) AS dependency_authorized,
        movement.event_ordinal AS dependency_status_event_ordinal,
        movement.entry_status AS dependency_status,
@@ -106,43 +122,76 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
  WHERE edge.dependency_position <= $3
  ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
 
-const RELEVANT_DEPENDENCY_GRAPH_SQL: &str = "WITH RECURSIVE ranked_edge AS (
+const RELEVANT_DEPENDENCY_GRAPH_SQL: &str = "WITH RECURSIVE reachable_node(node) AS (
+    SELECT unnest($2::numeric[])
+    UNION
+    SELECT current_edge.dependency_ordinal
+      FROM reachable_node
+      JOIN LATERAL (
+          SELECT candidate.dependency_ordinal
+            FROM session_plan_event AS candidate
+           WHERE candidate.session_id = $1
+             AND candidate.event_kind = 'depends_on'
+             AND candidate.entry_ordinal = reachable_node.node
+           GROUP BY candidate.dependency_ordinal
+           ORDER BY min(candidate.event_ordinal)
+           LIMIT $3
+      ) AS current_edge ON TRUE
+),
+ranked_edge AS (
     SELECT candidate.entry_ordinal, candidate.dependency_ordinal,
            min(candidate.event_ordinal) AS first_event_ordinal,
            bool_and(session_plan_event_has_authority(candidate)) AS authorized,
+           bool_and(
+               candidate.dependency_ordinal IS NOT NULL
+               AND candidate.entry_text IS NULL
+               AND candidate.entry_status IS NULL
+               AND candidate.event_ordinal > candidate.entry_ordinal
+               AND candidate.event_ordinal > candidate.dependency_ordinal
+               AND candidate.entry_ordinal <> candidate.dependency_ordinal
+           ) AS payload_valid,
            row_number() OVER (
                PARTITION BY candidate.entry_ordinal
                ORDER BY min(candidate.event_ordinal)
            ) AS dependency_position
       FROM session_plan_event AS candidate
+      JOIN reachable_node
+        ON reachable_node.node = candidate.entry_ordinal
      WHERE candidate.session_id = $1
        AND candidate.event_kind = 'depends_on'
      GROUP BY candidate.entry_ordinal, candidate.dependency_ordinal
 ),
 edge AS (
     SELECT entry_ordinal, dependency_ordinal,
-           first_event_ordinal, authorized, dependency_position
+           first_event_ordinal, authorized, payload_valid, dependency_position
       FROM ranked_edge
      WHERE dependency_position <= $3
-),
-reachable_node(node) AS (
-    SELECT unnest($2::numeric[])
-    UNION
-    SELECT edge.dependency_ordinal
-      FROM reachable_node
-      JOIN edge
-        ON edge.entry_ordinal = reachable_node.node
 )
 SELECT edge.entry_ordinal, edge.dependency_ordinal,
        edge.first_event_ordinal, edge.dependency_position,
        edge.authorized AS edge_authorized,
+       edge.payload_valid AS edge_payload_valid,
        entry.event_ordinal IS NOT NULL AS entry_created,
+       coalesce(
+           entry.entry_ordinal = entry.event_ordinal
+           AND entry.dependency_ordinal IS NULL
+           AND entry.entry_text IS NOT NULL
+           AND char_length(entry.entry_text) BETWEEN 1 AND 4096
+           AND entry.entry_status IS NULL,
+           FALSE
+       ) AS entry_payload_valid,
        session_plan_event_has_authority(entry) AS entry_authorized,
        dependency.event_ordinal IS NOT NULL AS dependency_created,
+       coalesce(
+           dependency.entry_ordinal = dependency.event_ordinal
+           AND dependency.dependency_ordinal IS NULL
+           AND dependency.entry_text IS NOT NULL
+           AND char_length(dependency.entry_text) BETWEEN 1 AND 4096
+           AND dependency.entry_status IS NULL,
+           FALSE
+       ) AS dependency_payload_valid,
        session_plan_event_has_authority(dependency) AS dependency_authorized
   FROM edge
-  JOIN reachable_node
-    ON reachable_node.node = edge.entry_ordinal
   LEFT JOIN session_plan_event AS entry
     ON entry.session_id = $1
    AND entry.event_ordinal = edge.entry_ordinal
@@ -153,44 +202,77 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
    AND dependency.event_kind = 'created'
  ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
 
-const RELEVANT_DEPENDENCY_VALIDATION_SQL: &str = "WITH RECURSIVE ranked_edge AS (
+const RELEVANT_DEPENDENCY_VALIDATION_SQL: &str = "WITH RECURSIVE reachable_node(node) AS (
+    SELECT unnest($2::numeric[])
+    UNION
+    SELECT current_edge.dependency_ordinal
+      FROM reachable_node
+      JOIN LATERAL (
+          SELECT candidate.dependency_ordinal
+            FROM session_plan_event AS candidate
+           WHERE candidate.session_id = $1
+             AND candidate.event_kind = 'depends_on'
+             AND candidate.entry_ordinal = reachable_node.node
+           GROUP BY candidate.dependency_ordinal
+           ORDER BY min(candidate.event_ordinal)
+           LIMIT $3
+      ) AS current_edge ON TRUE
+),
+ranked_edge AS (
     SELECT candidate.entry_ordinal, candidate.dependency_ordinal,
            min(candidate.event_ordinal) AS first_event_ordinal,
            bool_and(session_plan_event_has_authority(candidate)) AS authorized,
+           bool_and(
+               candidate.dependency_ordinal IS NOT NULL
+               AND candidate.entry_text IS NULL
+               AND candidate.entry_status IS NULL
+               AND candidate.event_ordinal > candidate.entry_ordinal
+               AND candidate.event_ordinal > candidate.dependency_ordinal
+               AND candidate.entry_ordinal <> candidate.dependency_ordinal
+           ) AS payload_valid,
            row_number() OVER (
                PARTITION BY candidate.entry_ordinal
                ORDER BY min(candidate.event_ordinal)
            ) AS dependency_position
       FROM session_plan_event AS candidate
+      JOIN reachable_node
+        ON reachable_node.node = candidate.entry_ordinal
      WHERE candidate.session_id = $1
        AND candidate.event_kind = 'depends_on'
      GROUP BY candidate.entry_ordinal, candidate.dependency_ordinal
 ),
 edge AS (
     SELECT entry_ordinal, dependency_ordinal, first_event_ordinal,
-           authorized, dependency_position
+           authorized, payload_valid, dependency_position
       FROM ranked_edge
      WHERE dependency_position <= $3
-),
-reachable_node(node) AS (
-    SELECT unnest($2::numeric[])
-    UNION
-    SELECT edge.dependency_ordinal
-      FROM reachable_node
-      JOIN edge
-        ON edge.entry_ordinal = reachable_node.node
 ),
 relevant_edge AS (
     SELECT edge.entry_ordinal, edge.dependency_ordinal,
            edge.first_event_ordinal, edge.dependency_position,
            edge.authorized AS edge_authorized,
+           edge.payload_valid AS edge_payload_valid,
            entry.event_ordinal IS NOT NULL AS entry_created,
+           coalesce(
+               entry.entry_ordinal = entry.event_ordinal
+               AND entry.dependency_ordinal IS NULL
+               AND entry.entry_text IS NOT NULL
+               AND char_length(entry.entry_text) BETWEEN 1 AND 4096
+               AND entry.entry_status IS NULL,
+               FALSE
+           ) AS entry_payload_valid,
            session_plan_event_has_authority(entry) AS entry_authorized,
            dependency.event_ordinal IS NOT NULL AS dependency_created,
+           coalesce(
+               dependency.entry_ordinal = dependency.event_ordinal
+               AND dependency.dependency_ordinal IS NULL
+               AND dependency.entry_text IS NOT NULL
+               AND char_length(dependency.entry_text) BETWEEN 1 AND 4096
+               AND dependency.entry_status IS NULL,
+               FALSE
+           ) AS dependency_payload_valid,
            session_plan_event_has_authority(dependency) AS dependency_authorized
       FROM edge
-      JOIN reachable_node
-        ON reachable_node.node = edge.entry_ordinal
       LEFT JOIN session_plan_event AS entry
         ON entry.session_id = $1
        AND entry.event_ordinal = edge.entry_ordinal
@@ -200,21 +282,24 @@ relevant_edge AS (
        AND dependency.event_ordinal = edge.dependency_ordinal
        AND dependency.event_kind = 'created'
 ),
-walk(node) AS (
-    SELECT unnest($2::numeric[])
-    UNION ALL
-    SELECT edge.dependency_ordinal
+walk(origin, node) AS (
+    SELECT edge.entry_ordinal, edge.dependency_ordinal
+      FROM edge
+    UNION
+    SELECT walk.origin, edge.dependency_ordinal
       FROM walk
       JOIN edge
         ON edge.entry_ordinal = walk.node
-     WHERE NOT walk.is_cycle
-) CYCLE node SET is_cycle USING cycle_path
+)
 SELECT EXISTS (
            SELECT 1
              FROM relevant_edge
             WHERE dependency_position > $4
+               OR NOT edge_payload_valid
                OR NOT entry_created
+               OR NOT entry_payload_valid
                OR NOT dependency_created
+               OR NOT dependency_payload_valid
                OR first_event_ordinal <= entry_ordinal
                OR first_event_ordinal <= dependency_ordinal
                OR entry_ordinal = dependency_ordinal
@@ -229,7 +314,7 @@ SELECT EXISTS (
        EXISTS (
            SELECT 1
              FROM walk
-            WHERE is_cycle
+            WHERE origin = node
        ) AS cyclic";
 
 const DEPENDENCY_LIMIT_REACHED_SQL: &str = "SELECT
@@ -927,8 +1012,11 @@ async fn load_relevant_dependency_graph(
     for row in &rows {
         let position: i64 = required(row, "dependency_position")?;
         if position > capacity
+            || !required::<bool>(row, "edge_payload_valid")?
             || !required::<bool>(row, "entry_created")?
+            || !required::<bool>(row, "entry_payload_valid")?
             || !required::<bool>(row, "dependency_created")?
+            || !required::<bool>(row, "dependency_payload_valid")?
         {
             return Err(SessionPlanCorruption::InvalidEventSequence.into());
         }
@@ -1006,23 +1094,32 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     if created_authority == ProjectedAuthority::Untrusted {
         return Err(SessionPlanCorruption::UntrustedProvenance.into());
     }
+    let created_dependency: Option<Decimal> = row.try_get("created_dependency_ordinal")?;
     let created_text: String = required(row, "created_text")?;
     let created_status: Option<String> = row.try_get("created_status")?;
-    if created_status.is_some() {
+    if created_dependency.is_some() || created_status.is_some() {
         return Err(SessionPlanCorruption::InvalidEventPayload("current creation").into());
     }
     let revision_ordinal: Option<Decimal> = row.try_get("revision_event_ordinal")?;
+    let revision_dependency: Option<Decimal> = row.try_get("revision_dependency_ordinal")?;
     let revised_text: Option<String> = row.try_get("revised_text")?;
     let revised_status: Option<String> = row.try_get("revised_status")?;
     let revision_authority = optional_projected_authority(row, "revision_authorized")?;
     let text = match (
         revision_ordinal,
+        revision_dependency,
         revised_text,
         revised_status,
         revision_authority,
     ) {
-        (None, None, None, None) => created_text,
-        (Some(revision_ordinal), Some(revised_text), None, Some(ProjectedAuthority::Trusted)) => {
+        (None, None, None, None, None) => created_text,
+        (
+            Some(revision_ordinal),
+            None,
+            Some(revised_text),
+            None,
+            Some(ProjectedAuthority::Trusted),
+        ) => {
             let revision_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
                 revision_ordinal,
                 "revision event ordinal",
@@ -1037,7 +1134,7 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
             }
             revised_text
         }
-        (Some(_), Some(_), None, Some(ProjectedAuthority::Untrusted)) => {
+        (Some(_), None, Some(_), None, Some(ProjectedAuthority::Untrusted)) => {
             return Err(SessionPlanCorruption::UntrustedProvenance.into());
         }
         _ => {
@@ -1047,12 +1144,25 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     let text = PlanText::try_new(text).map_err(|_| SessionPlanCorruption::InvalidText)?;
 
     let status_ordinal: Option<Decimal> = row.try_get("status_event_ordinal")?;
+    let status_dependency: Option<Decimal> = row.try_get("status_dependency_ordinal")?;
     let moved_text: Option<String> = row.try_get("moved_text")?;
     let moved_status: Option<String> = row.try_get("moved_status")?;
     let movement_authority = optional_projected_authority(row, "movement_authorized")?;
-    let status = match (status_ordinal, moved_text, moved_status, movement_authority) {
-        (None, None, None, None) => PlanStatus::Pending,
-        (Some(status_ordinal), None, Some(moved_status), Some(ProjectedAuthority::Trusted)) => {
+    let status = match (
+        status_ordinal,
+        status_dependency,
+        moved_text,
+        moved_status,
+        movement_authority,
+    ) {
+        (None, None, None, None, None) => PlanStatus::Pending,
+        (
+            Some(status_ordinal),
+            None,
+            None,
+            Some(moved_status),
+            Some(ProjectedAuthority::Trusted),
+        ) => {
             let status_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
                 status_ordinal,
                 "status event ordinal",
@@ -1072,7 +1182,7 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
                 }
             })?
         }
-        (Some(_), None, Some(_), Some(ProjectedAuthority::Untrusted)) => {
+        (Some(_), None, None, Some(_), Some(ProjectedAuthority::Untrusted)) => {
             return Err(SessionPlanCorruption::UntrustedProvenance.into());
         }
         _ => {
@@ -1100,9 +1210,26 @@ fn apply_dependency_rows(
         if entry == dependency
             || entry.creation_ordinal() >= first_event
             || dependency.creation_ordinal() >= first_event
+            || !required::<bool>(row, "payload_valid")?
+            || !required::<bool>(row, "dependency_created")?
         {
             return Err(SessionPlanCorruption::InvalidEventSequence.into());
         }
+        let dependency_entry: Option<Decimal> = row.try_get("dependency_entry_ordinal")?;
+        let dependency_payload_dependency: Option<Decimal> =
+            row.try_get("dependency_payload_dependency_ordinal")?;
+        let dependency_text: Option<String> = row.try_get("dependency_created_text")?;
+        let dependency_status: Option<String> = row.try_get("dependency_created_status")?;
+        if dependency_entry != Some(Decimal::from(dependency.as_u64()))
+            || dependency_payload_dependency.is_some()
+            || dependency_status.is_some()
+        {
+            return Err(SessionPlanCorruption::InvalidEventPayload("dependency creation").into());
+        }
+        let dependency_text = dependency_text.ok_or(SessionPlanCorruption::InvalidEventPayload(
+            "dependency creation",
+        ))?;
+        PlanText::try_new(dependency_text).map_err(|_| SessionPlanCorruption::InvalidText)?;
         if required_projected_authority(row, "authorized")? != ProjectedAuthority::Trusted
             || required_projected_authority(row, "dependency_authorized")?
                 != ProjectedAuthority::Trusted
@@ -1423,10 +1550,33 @@ fn optional_projected_authority(
 
 #[cfg(test)]
 mod tests {
-    use super::MAX_PLAN_DEPENDENCIES_PER_ENTRY;
+    use super::{
+        MAX_PLAN_DEPENDENCIES_PER_ENTRY, RELEVANT_DEPENDENCY_GRAPH_SQL,
+        RELEVANT_DEPENDENCY_VALIDATION_SQL,
+    };
 
     const SESSION_PLAN_MIGRATION: &str =
         include_str!("../migrations/202608020011_session_plan.sql");
+
+    #[test]
+    fn dependency_validation_deduplicates_transitive_origin_node_pairs() {
+        assert!(RELEVANT_DEPENDENCY_VALIDATION_SQL.contains("walk(origin, node) AS"));
+        assert!(
+            RELEVANT_DEPENDENCY_VALIDATION_SQL
+                .contains("    UNION\n    SELECT walk.origin, edge.dependency_ordinal")
+        );
+        assert!(!RELEVANT_DEPENDENCY_VALIDATION_SQL.contains("UNION ALL"));
+    }
+
+    #[test]
+    fn dependency_queries_seed_edge_ranking_from_reachable_roots() {
+        const ROOT_SEEDED_EDGE_JOIN: &str = "FROM session_plan_event AS candidate
+      JOIN reachable_node
+        ON reachable_node.node = candidate.entry_ordinal";
+
+        assert!(RELEVANT_DEPENDENCY_GRAPH_SQL.contains(ROOT_SEEDED_EDGE_JOIN));
+        assert!(RELEVANT_DEPENDENCY_VALIDATION_SQL.contains(ROOT_SEEDED_EDGE_JOIN));
+    }
 
     #[test]
     fn migration_dependency_limit_matches_the_tools_plan_constant() {

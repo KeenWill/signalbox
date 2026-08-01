@@ -874,6 +874,38 @@ fn read_rejects_page_local_readiness_that_contradicts_dependency_status() {
 }
 
 #[test]
+fn read_rejects_ready_when_a_visible_dependency_is_incomplete_among_hidden_dependencies() {
+    let dispatch = correlation(10);
+    let prerequisite = entry(1);
+    let dependent = entry(2);
+    let hidden_dependency = entry(3);
+    let prerequisite_entry = PlanEntry::new(prerequisite, text(INITIAL_TEXT), PlanStatus::Pending);
+    let dependent_entry = PlanEntry::with_dependencies(
+        dependent,
+        text(SECOND_TEXT),
+        PlanStatus::Pending,
+        vec![prerequisite, hidden_dependency],
+        PlanReadiness::Ready,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![prerequisite_entry, dependent_entry],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("a visible pending dependency proves ready is contradictory");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
 fn read_output_exposes_dependencies_and_waiting_readiness() {
     const PREREQUISITE_ENTRY_ID: u64 = 1;
     let dispatch = correlation(10);

@@ -416,17 +416,16 @@ BEGIN
         WITH RECURSIVE dependency_node(node) AS (
             SELECT NEW.dependency_ordinal
             UNION
-            SELECT edge.dependency_ordinal
+            SELECT current_edge.dependency_ordinal
               FROM dependency_node
-              JOIN (
-                  SELECT DISTINCT
-                      existing.entry_ordinal,
-                      existing.dependency_ordinal
+              JOIN LATERAL (
+                  SELECT existing.dependency_ordinal
                     FROM session_plan_event AS existing
                    WHERE existing.session_id = NEW.session_id
                      AND existing.event_kind = 'depends_on'
-              ) AS edge
-                ON edge.entry_ordinal = dependency_node.node
+                     AND existing.entry_ordinal = dependency_node.node
+                   GROUP BY existing.dependency_ordinal
+              ) AS current_edge ON TRUE
         )
         SELECT EXISTS (
             SELECT 1

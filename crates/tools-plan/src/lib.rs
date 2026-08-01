@@ -1433,23 +1433,19 @@ fn validate_read_page<PortError>(
         {
             return Err(PlanExecutorError::PortContract);
         }
-        if entry
+        let visible_incomplete = entry.dependencies().iter().any(|dependency| {
+            page_statuses
+                .get(dependency)
+                .is_some_and(|status| *status != PlanStatus::Completed)
+        });
+        let all_visible_completed = entry
             .dependencies()
             .iter()
-            .all(|dependency| page_statuses.contains_key(dependency))
+            .all(|dependency| page_statuses.get(dependency) == Some(&PlanStatus::Completed));
+        if (entry.readiness() == PlanReadiness::Ready && visible_incomplete)
+            || (entry.readiness() == PlanReadiness::Waiting && all_visible_completed)
         {
-            let expected_readiness = if entry
-                .dependencies()
-                .iter()
-                .all(|dependency| page_statuses.get(dependency) == Some(&PlanStatus::Completed))
-            {
-                PlanReadiness::Ready
-            } else {
-                PlanReadiness::Waiting
-            };
-            if entry.readiness() != expected_readiness {
-                return Err(PlanExecutorError::PortContract);
-            }
+            return Err(PlanExecutorError::PortContract);
         }
         previous = Some(entry.id());
     }
