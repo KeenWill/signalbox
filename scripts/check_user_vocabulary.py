@@ -102,7 +102,7 @@ ALLOWLIST = (
         re.compile(
             r"[\"']owner_initiated[\"']|[\"']owner_command(?:_id)?[\"']|"
             r"[\"']owner[\"']|`owner`|legacy owner|owner/tool|"
-            r"truthful `Owner`|\bowner_command_id\b"
+            r"\bowner_command_id\b"
         ),
     ),
     Allowance(
