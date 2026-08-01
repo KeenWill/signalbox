@@ -1001,7 +1001,7 @@ mod linux {
                 return;
             }
             if Instant::now() >= deadline {
-                reap_all_children();
+                reap_all_children_until(deadline);
                 return;
             }
             std::thread::sleep(MINIMUM_POLL_INTERVAL);
@@ -1154,10 +1154,9 @@ mod linux {
                 if self.kill_tracked_descendants(deadline).is_err() {
                     self.kill_root();
                     let _ = child.kill();
-                    let root_success = root_success
-                        .or_else(|| child.wait().ok().map(|status| status.success()))
-                        .unwrap_or(false);
-                    reap_all_children();
+                    let root_success =
+                        wait_for_root_until(child, root_success, deadline).unwrap_or(false);
+                    reap_all_children_until(deadline);
                     self.armed = false;
                     return CleanupStatus::Failed { root_success };
                 }
@@ -1182,10 +1181,9 @@ mod linux {
                 if Instant::now() >= deadline {
                     self.kill_root();
                     let _ = child.kill();
-                    let root_success = root_success
-                        .or_else(|| child.wait().ok().map(|status| status.success()))
-                        .unwrap_or(false);
-                    reap_all_children();
+                    let root_success =
+                        wait_for_root_until(child, root_success, deadline).unwrap_or(false);
+                    reap_all_children_until(deadline);
                     self.armed = false;
                     return if process_tree_supported {
                         CleanupStatus::Failed { root_success }
@@ -1195,10 +1193,13 @@ mod linux {
                 }
                 std::thread::sleep(MINIMUM_POLL_INTERVAL);
             }
-            let root_success = root_success
-                .or_else(|| child.wait().ok().map(|status| status.success()))
-                .unwrap_or(false);
-            reap_all_children();
+            let Some(root_success) = wait_for_root_until(child, root_success, deadline) else {
+                self.armed = false;
+                return CleanupStatus::Failed {
+                    root_success: false,
+                };
+            };
+            reap_all_children_until(deadline);
             self.armed = false;
             if process_tree_supported {
                 CleanupStatus::Complete { root_success }
@@ -1207,7 +1208,7 @@ mod linux {
             }
         }
 
-        fn kill_all(&mut self) {
+        fn kill_all(&mut self) -> Instant {
             self.stop_watcher();
             let deadline = Instant::now() + REAP_DEADLINE;
             let _ = observe_descendants(
@@ -1219,6 +1220,7 @@ mod linux {
             );
             let _ = self.kill_tracked_descendants(deadline);
             self.kill_root();
+            deadline
         }
 
         fn kill_tracked_descendants(&self, deadline: Instant) -> Result<(), ()> {
@@ -1296,8 +1298,8 @@ mod linux {
     impl Drop for ProcessTreeGuard {
         fn drop(&mut self) {
             if self.armed {
-                self.kill_all();
-                reap_all_children();
+                let deadline = self.kill_all();
+                reap_all_children_until(deadline);
             }
         }
     }
@@ -1566,12 +1568,39 @@ mod linux {
         }
     }
 
-    fn reap_all_children() {
-        let deadline = Instant::now() + REAP_DEADLINE;
-        while Instant::now() < deadline {
+    fn wait_for_root_until(
+        child: &mut std::process::Child,
+        root_success: Option<bool>,
+        deadline: Instant,
+    ) -> Option<bool> {
+        if root_success.is_some() {
+            return root_success;
+        }
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status.success()),
+                Ok(None) => {}
+                Err(_) => return Some(false),
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            std::thread::sleep(remaining.min(MINIMUM_POLL_INTERVAL));
+        }
+    }
+
+    fn reap_all_children_until(deadline: Instant) {
+        loop {
             match rustix::process::wait(rustix::process::WaitOptions::NOHANG) {
                 Ok(Some(_)) => continue,
-                Ok(None) => std::thread::sleep(Duration::from_millis(1)),
+                Ok(None) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return;
+                    }
+                    std::thread::sleep(remaining.min(Duration::from_millis(1)));
+                }
                 Err(rustix::io::Errno::CHILD) => return,
                 Err(_) => return,
             }
@@ -1585,6 +1614,7 @@ mod linux {
         use super::*;
 
         const CHILD_FIXTURE_NAME: &str = "linux::tests::child_fixture";
+        const LONG_RUNNING_CHILD_FIXTURE_NAME: &str = "linux::tests::long_running_child_fixture";
         const CARGO_TEST_EXECUTABLE: &str = "/workspace/target/debug/deps/example-target";
         const CARGO_PASSING_TEST: &str = "example::passes";
         const CARGO_IGNORED_TEST: &str = "example::ignored";
@@ -1705,7 +1735,6 @@ mod linux {
             );
             Ok(())
         }
-
         #[test]
         fn esrch_is_process_absence_evidence() {
             let error = std::io::Error::from_raw_os_error(rustix::io::Errno::SRCH.raw_os_error());
@@ -1855,6 +1884,23 @@ mod linux {
         }
 
         #[test]
+        fn root_wait_honors_an_elapsed_cleanup_deadline() -> Result<(), Box<dyn std::error::Error>>
+        {
+            let mut child = Command::new(std::env::current_exe()?)
+                .args(["--ignored", "--exact", LONG_RUNNING_CHILD_FIXTURE_NAME])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+
+            let result = wait_for_root_until(&mut child, None, Instant::now());
+
+            assert_eq!(result, None);
+            child.kill()?;
+            child.wait()?;
+            Ok(())
+        }
+
+        #[test]
         fn process_tree_preflight_pins_the_supervisor_before_dispatch()
         -> Result<(), Box<dyn std::error::Error>> {
             with_procfs_children_support(|| {
@@ -1908,6 +1954,12 @@ mod linux {
         #[ignore = "subprocess fixture for pidfd retirement"]
         fn child_fixture() {
             std::thread::sleep(Duration::from_millis(100));
+        }
+
+        #[test]
+        #[ignore = "long-running subprocess fixture for bounded root waits"]
+        fn long_running_child_fixture() {
+            std::thread::sleep(Duration::from_secs(10));
         }
     }
 }
