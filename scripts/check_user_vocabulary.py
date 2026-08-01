@@ -12,7 +12,9 @@ from pathlib import Path
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
-    r"(?i:\bowner\b|owner[_-])|\bOwner[A-Z][A-Za-z0-9_]*|\b[A-Za-z0-9_]+Owner(?:[A-Z][A-Za-z0-9_]*)?"
+    r"(?i:\bowners?\b|owners?[_-]|(?<=[_-])owners?\b)|"
+    r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
+    r"\b[A-Za-z0-9_]+Owners?(?:[A-Z][A-Za-z0-9_]*)?"
 )
 
 @dataclass(frozen=True)
@@ -115,11 +117,13 @@ ALLOWLIST = (
             r"owner (?:slot|lease|row|record|entry|event|attachment|observation|snapshot|"
             r"frontier|session|turn|attempt|call|projection|facts|field|replacement|"
             r"usage|path|identity)|owner cross-wired|OwnerMismatch|OwnerIDs?|"
-            r"ModelCallOwners|wrong_owner|different_owner|returned_owner|"
+            r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
+            r"cross_wired_[A-Za-z0-9_]+_owner|"
+            r"foreign(?:_[A-Za-z0-9_]+)?_owner|different_owner|returned_owner|"
             r"one owner for bounds|current owner prevents|one owner:|owner must equal|owner, defaults owner|"
             r"cross-wired owner|foreign-owner|foreign owner|member.s owner|"
             r"let owner = stored[.]owning_session|owner != session|owner, non-successor|"
-            r"already-claimed owner|process-lifetime root owner|"
+            r"already-claimed owner|process-lifetime root owner|extension owners|"
             r"named as owner|validated owner|checked owner placement|file-owner|"
             r"one owner for bounds|current owner prevents|one owner:|owner must equal",
             re.IGNORECASE,

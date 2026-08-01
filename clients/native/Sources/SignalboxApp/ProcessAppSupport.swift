@@ -169,4 +169,4 @@ enum ConnectionStatus: Equatable {
 // This is a product gate, not a recoverable connection error: the admitted
 // protocol has no remote endpoint or authentication shape to configure.
 let remoteTransportGateMessage =
-  "signalboxd currently exposes only a local Unix socket. Remote and mobile transport requires a user-approved server design."
+  "signalboxd currently exposes only a local Unix socket. Remote and mobile transport requires a maintainer-approved server design."
