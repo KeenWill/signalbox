@@ -48,6 +48,8 @@ pub const PULL_REQUEST_DIFF_NAME: &str = "github_pull_request_diff";
 pub const PULL_REQUEST_REVIEW_THREADS_NAME: &str = "github_pull_request_review_threads";
 /// Review-publication tool name.
 pub const PULL_REQUEST_PUBLISH_REVIEW_NAME: &str = "github_pull_request_publish_review";
+/// Pull-request creation tool name.
+pub const PULL_REQUEST_CREATE_NAME: &str = "github_pull_request_create";
 /// Non-secret deployment credential reference.
 pub const GITHUB_CREDENTIAL_REFERENCE: &str = "github-primary";
 /// Fixed catalog order.
@@ -78,6 +80,7 @@ const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_OPAQUE_ID_BYTES: usize = 512;
 const MIN_INLINE_COMMENT_LINE: u32 = 1;
 const MAX_INLINE_COMMENTS: usize = 50;
+const MAX_GIT_REF_BYTES: usize = 255;
 const ERROR_TRUNCATION_SUFFIX: &str = " … [truncated]";
 const INVALID_ARGUMENTS_DETAIL: &str = "GitHub pull-request tool arguments are invalid";
 const CREDENTIAL_UNAVAILABLE_DETAIL: &str = "GitHub credential is unavailable";
@@ -308,6 +311,63 @@ impl PullRequestArguments {
     pub const fn number(&self) -> PullRequestNumber {
         self.number
     }
+}
+
+/// Pull-request creation arguments. The target repository is injected into the
+/// creation suite and deliberately absent from this model-owned shape.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePullRequestArguments {
+    /// Non-empty pull-request title.
+    #[schemars(length(min = 1, max = MAX_TEXT_BYTES))]
+    title: String,
+    /// Pull-request body, including an intentionally empty body.
+    #[schemars(length(max = MAX_TEXT_BYTES))]
+    body: String,
+    /// Source branch or GitHub head selector.
+    #[schemars(length(min = 1, max = MAX_GIT_REF_BYTES))]
+    head: String,
+    /// Target branch.
+    #[schemars(length(min = 1, max = MAX_GIT_REF_BYTES))]
+    base: String,
+}
+
+impl CreatePullRequestArguments {
+    /// Borrows the model-supplied title.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Borrows the model-supplied body.
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// Borrows the source selector.
+    pub fn head(&self) -> &str {
+        &self.head
+    }
+
+    /// Borrows the target branch.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    fn validate(&self) -> Result<(), InvalidGitHubArguments> {
+        if valid_text(&self.title, TextPresence::Required)
+            && valid_text(&self.body, TextPresence::Optional)
+            && valid_git_ref(&self.head)
+            && valid_git_ref(&self.base)
+        {
+            Ok(())
+        } else {
+            Err(InvalidGitHubArguments)
+        }
+    }
+}
+
+fn valid_git_ref(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_GIT_REF_BYTES && !value.chars().any(char::is_control)
 }
 
 /// Review action accepted by GitHub.
@@ -631,6 +691,13 @@ impl ToolContract for PublishReviewContract {
     const DESCRIPTION: &'static str = "Publishes a comment, approval, or change request against an exact GitHub pull-request head, optionally with inline comments.";
 }
 
+struct CreatePullRequestContract;
+impl ToolContract for CreatePullRequestContract {
+    type Arguments = CreatePullRequestArguments;
+    const NAME: &'static str = PULL_REQUEST_CREATE_NAME;
+    const DESCRIPTION: &'static str = "Creates one pull request in the deployment-configured GitHub repository from exact title, body, head, and base values.";
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolKind {
     Diff,
@@ -715,6 +782,13 @@ fn kind_for_name(name: &str) -> Option<ToolKind> {
 /// Typed operation crossing the injected transport boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitHubOperation {
+    /// Pull-request creation in a deployment-configured repository.
+    CreatePullRequest {
+        /// Checked deployment repository, never model supplied.
+        repository: GitHubRepository,
+        /// Model-owned pull-request content and refs.
+        arguments: CreatePullRequestArguments,
+    },
     /// Metadata read.
     Metadata(PullRequestArguments),
     /// Exact-revision diff read.
@@ -729,6 +803,7 @@ impl GitHubOperation {
     /// Returns the originating tool name.
     pub const fn tool_name(&self) -> &'static str {
         match self {
+            Self::CreatePullRequest { .. } => PULL_REQUEST_CREATE_NAME,
             Self::Metadata(_) => PULL_REQUEST_METADATA_NAME,
             Self::Diff(_) => PULL_REQUEST_DIFF_NAME,
             Self::ReviewThreads(_) => PULL_REQUEST_REVIEW_THREADS_NAME,
@@ -911,6 +986,8 @@ impl Error for GitHubTransportFailure {}
 /// Result category crossing the injected transport boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitHubResultKind {
+    /// Created pull-request acknowledgement.
+    CreatedPullRequest,
     /// Metadata.
     Metadata,
     /// Changed files.
@@ -929,6 +1006,14 @@ pub struct GitHubResult {
 }
 
 impl GitHubResult {
+    /// Constructs a pull-request creation result for an injected transport.
+    pub fn created_pull_request(value: serde_json::Value) -> Self {
+        Self {
+            kind: GitHubResultKind::CreatedPullRequest,
+            value,
+        }
+    }
+
     /// Constructs a metadata result for an injected transport.
     pub fn metadata(value: serde_json::Value) -> Self {
         Self {
@@ -970,6 +1055,7 @@ impl GitHubResult {
 impl fmt::Debug for GitHubResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self.kind {
+            GitHubResultKind::CreatedPullRequest => "GitHubResult::CreatedPullRequest([REDACTED])",
             GitHubResultKind::Metadata => "GitHubResult::Metadata([REDACTED])",
             GitHubResultKind::Diff => "GitHubResult::Diff([REDACTED])",
             GitHubResultKind::ReviewThreads => "GitHubResult::ReviewThreads([REDACTED])",
@@ -1053,6 +1139,203 @@ impl<Credentials> GitHubTools<Credentials, GitHubApiTransport> {
         let transport =
             GitHubApiTransport::try_new().map_err(|_| GitHubToolsConstructionError::Transport)?;
         Self::try_new(credentials, transport, egress_policy)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CreatePullRequestArgumentValidator {
+    detail: ToolExecutionErrorDetail,
+}
+
+impl ToolArgumentValidator for CreatePullRequestArgumentValidator {
+    fn validate(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolExecutionErrorDetail> {
+        decode_create_pull_request(arguments)
+            .map(|_| ())
+            .map_err(|_| self.detail.clone())
+    }
+}
+
+fn decode_create_pull_request(
+    arguments: &NormalizedToolArguments,
+) -> Result<CreatePullRequestArguments, InvalidGitHubArguments> {
+    let arguments: CreatePullRequestArguments = decode(arguments)?;
+    arguments.validate()?;
+    Ok(arguments)
+}
+
+/// One approval-gated pull-request creation declaration and executor.
+#[derive(Clone, Debug)]
+pub struct GitHubPullRequestCreateTools<Credentials, Transport> {
+    catalog: CompiledToolCatalog,
+    executor: GitHubPullRequestCreateExecutor<Credentials, Transport>,
+}
+
+impl<Credentials, Transport> GitHubPullRequestCreateTools<Credentials, Transport> {
+    /// Compiles creation around a configured repository, request-scoped
+    /// credentials, fixed egress policy, and injected transport.
+    pub fn try_new(
+        credentials: Credentials,
+        transport: Transport,
+        egress_policy: GitHubEgressPolicy,
+        repository: GitHubRepository,
+    ) -> Result<Self, GitHubToolsConstructionError> {
+        let invalid_detail = make_detail(INVALID_ARGUMENTS_DETAIL)?;
+        let credential_detail = make_detail(CREDENTIAL_UNAVAILABLE_DETAIL)?;
+        let rejected_detail = make_detail(REQUEST_REJECTED_DETAIL)?;
+        let definition = compile_contract_definition::<CreatePullRequestContract>(
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::ExternalEffect,
+        )
+        .map_err(|error| match error {
+            ToolContractCompileError::Name => GitHubToolsConstructionError::Name,
+            ToolContractCompileError::Schema => GitHubToolsConstructionError::Schema,
+        })?;
+        let catalog = CompiledToolCatalog::try_new(vec![CompiledTool::new(
+            definition,
+            CreatePullRequestArgumentValidator {
+                detail: invalid_detail,
+            },
+        )])
+        .map_err(|_| GitHubToolsConstructionError::Duplicate)?;
+        Ok(Self {
+            catalog,
+            executor: GitHubPullRequestCreateExecutor {
+                credentials,
+                credential_reference: CredentialReference::new(GITHUB_CREDENTIAL_REFERENCE),
+                transport,
+                egress_policy,
+                repository,
+                credential_detail,
+                rejected_detail,
+            },
+        })
+    }
+
+    /// Separates catalog and executor composition roles.
+    pub fn into_parts(
+        self,
+    ) -> (
+        CompiledToolCatalog,
+        GitHubPullRequestCreateExecutor<Credentials, Transport>,
+    ) {
+        (self.catalog, self.executor)
+    }
+}
+
+impl<Credentials> GitHubPullRequestCreateTools<Credentials, GitHubApiTransport> {
+    /// Builds creation with the production fixed-origin GitHub transport.
+    pub fn try_new_production(
+        credentials: Credentials,
+        egress_policy: GitHubEgressPolicy,
+        repository: GitHubRepository,
+    ) -> Result<Self, GitHubToolsConstructionError> {
+        let transport =
+            GitHubApiTransport::try_new().map_err(|_| GitHubToolsConstructionError::Transport)?;
+        Self::try_new(credentials, transport, egress_policy, repository)
+    }
+}
+
+/// Credential-resolving pull-request creation executor.
+#[derive(Clone, Debug)]
+pub struct GitHubPullRequestCreateExecutor<Credentials, Transport> {
+    credentials: Credentials,
+    credential_reference: CredentialReference,
+    transport: Transport,
+    egress_policy: GitHubEgressPolicy,
+    repository: GitHubRepository,
+    credential_detail: ToolExecutionErrorDetail,
+    rejected_detail: ToolExecutionErrorDetail,
+}
+
+impl<Credentials, Transport> ToolExecutor
+    for GitHubPullRequestCreateExecutor<Credentials, Transport>
+where
+    Credentials: CredentialAccess,
+    Transport: GitHubTransport,
+{
+    type Error = GitHubExecutorError;
+
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        if invocation.request().name().as_str() != PULL_REQUEST_CREATE_NAME {
+            return Err(caller_bug());
+        }
+        let arguments = decode_create_pull_request(invocation.request().arguments())
+            .map_err(|_| caller_bug())?;
+        let credential = match self.credentials.resolve(&self.credential_reference).await {
+            Ok(value) => value,
+            Err(error) => {
+                let correlation = invocation.correlation();
+                report_credential_access_failure(&error, &correlation);
+                return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                    detail: Some(self.credential_detail.clone()),
+                }));
+            }
+        };
+        let Some(scrubber) = CredentialScrubber::try_new(&credential) else {
+            let correlation = invocation.correlation();
+            report_credential_value_failure(&correlation);
+            return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.credential_detail.clone()),
+            }));
+        };
+        let operation = GitHubOperation::CreatePullRequest {
+            repository: self.repository.clone(),
+            arguments,
+        };
+        let mut result = match self
+            .transport
+            .execute(operation, &credential, &self.egress_policy)
+            .await
+        {
+            Ok(result) if result.kind() == GitHubResultKind::CreatedPullRequest => result,
+            Ok(_) => return Err(infrastructure(CommitOutcome::Ambiguous)),
+            Err(failure) => return self.failure_evidence(invocation, failure),
+        };
+        scrubber.redact_value(&mut result.value);
+        let content = serde_json::to_string(&result.value).map_err(|_| caller_bug())?;
+        if content.len() > MAX_RESULT_BYTES {
+            return Err(infrastructure(CommitOutcome::Ambiguous));
+        }
+        Ok(invocation.bind(ToolExecutorEvidence::CompletedText(content)))
+    }
+}
+
+impl<Credentials, Transport> GitHubPullRequestCreateExecutor<Credentials, Transport> {
+    fn failure_evidence(
+        &self,
+        invocation: ToolExecutionInvocation,
+        failure: GitHubTransportFailure,
+    ) -> Result<CorrelatedToolExecutorEvidence, GitHubExecutorError> {
+        let correlation = invocation.correlation();
+        report_transport_failure(&failure, &correlation);
+        let detail = match failure {
+            GitHubTransportFailure::InvalidCredential => self.credential_detail.clone(),
+            GitHubTransportFailure::Rejected { status, .. } if status_is_definitive(status) => {
+                self.rejected_detail.clone()
+            }
+            GitHubTransportFailure::GraphQlRejected | GitHubTransportFailure::EgressRejected => {
+                self.rejected_detail.clone()
+            }
+            GitHubTransportFailure::PreDispatchInfrastructure => {
+                return Err(infrastructure(CommitOutcome::Definite));
+            }
+            GitHubTransportFailure::Rejected { .. }
+            | GitHubTransportFailure::InvalidResponse { .. }
+            | GitHubTransportFailure::ResponseTooLarge
+            | GitHubTransportFailure::RevisionChanged
+            | GitHubTransportFailure::DispatchUnknown => {
+                return Err(infrastructure(CommitOutcome::Ambiguous));
+            }
+        };
+        Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        }))
     }
 }
 
@@ -1667,6 +1950,27 @@ impl GitHubApiTransport {
         Ok(url)
     }
 
+    async fn create_pull_request(
+        &self,
+        repository: GitHubRepository,
+        arguments: CreatePullRequestArguments,
+        credential: &CredentialValue,
+        policy: &GitHubEgressPolicy,
+    ) -> Result<GitHubResult, GitHubTransportFailure> {
+        let url = self.repository_url(&repository, &["pulls"], None)?;
+        let body = create_pull_request_body(&arguments)?;
+        let response = self
+            .send(Method::POST, url, Some(body), credential, policy)
+            .await?;
+        let value = self
+            .success_json(response, StatusCode::CREATED, credential)
+            .await
+            .map_err(mutation_failure)?;
+        normalize_created_pull_request(&value, &arguments)
+            .map(GitHubResult::created_pull_request)
+            .map_err(mutation_failure)
+    }
+
     async fn pull_request_value(
         &self,
         arguments: &PullRequestArguments,
@@ -1970,6 +2274,18 @@ fn publish_review_body(
     serde_json::to_vec(&serde_json::Value::Object(payload)).map_err(|_| invalid_response(None))
 }
 
+fn create_pull_request_body(
+    arguments: &CreatePullRequestArguments,
+) -> Result<Vec<u8>, GitHubTransportFailure> {
+    serde_json::to_vec(&serde_json::json!({
+        "title": arguments.title(),
+        "body": arguments.body(),
+        "head": arguments.head(),
+        "base": arguments.base(),
+    }))
+    .map_err(|_| invalid_response(None))
+}
+
 impl GitHubTransport for GitHubApiTransport {
     async fn execute(
         &mut self,
@@ -1978,6 +2294,13 @@ impl GitHubTransport for GitHubApiTransport {
         policy: &GitHubEgressPolicy,
     ) -> Result<GitHubResult, GitHubTransportFailure> {
         match operation {
+            GitHubOperation::CreatePullRequest {
+                repository,
+                arguments,
+            } => {
+                self.create_pull_request(repository, arguments, credential, policy)
+                    .await
+            }
             GitHubOperation::Metadata(arguments) => {
                 self.metadata(arguments, credential, policy).await
             }
@@ -2210,6 +2533,21 @@ fn normalize_metadata(
         "head_ref": checked_text(required_string(head, "ref")?, TextPresence::Required)?,
         "head_revision": checked_revision(required_string(head, "sha")?)?,
         "url": checked_url(required_string(object, "html_url")?)?,
+    }))
+}
+
+fn normalize_created_pull_request(
+    value: &serde_json::Value,
+    arguments: &CreatePullRequestArguments,
+) -> Result<serde_json::Value, GitHubTransportFailure> {
+    let object = required_object(value)?;
+    let number = PullRequestNumber::try_from(required_u64(object, "number")?)
+        .map_err(|_| invalid_response(None))?;
+    Ok(serde_json::json!({
+        "number": number.get(),
+        "url": checked_url(required_string(object, "html_url")?)?,
+        "head": arguments.head(),
+        "base": arguments.base(),
     }))
 }
 
@@ -2630,9 +2968,75 @@ mod tests {
     const ATTEMPT_IDENTITY: u128 = 5;
     const SESSION_ID_DIAGNOSTIC: &str = "session_id=00000000-0000-0000-0000-000000000001";
     const TURN_ID_DIAGNOSTIC: &str = "turn_id=00000000-0000-0000-0000-000000000002";
+    const CONFIGURED_REPOSITORY: &str = "KeenWill/signalbox";
+    const CREATED_PULL_REQUEST_NUMBER: u64 = 379;
+    const CREATED_PULL_REQUEST_URL: &str = "https://github.com/KeenWill/signalbox/pull/379";
+    const CREATE_TITLE: &str = "Repair the failing invariant";
+    const CREATE_BODY: &str = "Synthetic repair body";
+    const CREATE_HEAD: &str = "agent/fix-invariant";
+    const CREATE_BASE: &str = "main";
 
     struct SyntheticCredentials;
     struct SyntheticTransport;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct RecordedCreateRequest {
+        repository: String,
+        title: String,
+        body: String,
+        head: String,
+        base: String,
+        credential: Vec<u8>,
+        origin: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingCreateTransport(Arc<Mutex<Option<RecordedCreateRequest>>>);
+
+    impl RecordingCreateTransport {
+        fn recorded(&self) -> RecordedCreateRequest {
+            self.0
+                .lock()
+                .expect("recording transport lock is available")
+                .clone()
+                .expect("creation request was recorded")
+        }
+    }
+
+    impl GitHubTransport for RecordingCreateTransport {
+        async fn execute(
+            &mut self,
+            operation: GitHubOperation,
+            credential: &CredentialValue,
+            policy: &GitHubEgressPolicy,
+        ) -> Result<GitHubResult, GitHubTransportFailure> {
+            let GitHubOperation::CreatePullRequest {
+                repository,
+                arguments,
+            } = operation
+            else {
+                return Err(GitHubTransportFailure::PreDispatchInfrastructure);
+            };
+            *self
+                .0
+                .lock()
+                .expect("recording transport lock is available") = Some(RecordedCreateRequest {
+                repository: repository.as_str().to_owned(),
+                title: arguments.title().to_owned(),
+                body: arguments.body().to_owned(),
+                head: arguments.head().to_owned(),
+                base: arguments.base().to_owned(),
+                credential: credential.expose_bytes().to_vec(),
+                origin: policy.admitted_origin().to_owned(),
+            });
+            Ok(GitHubResult::created_pull_request(serde_json::json!({
+                "number": CREATED_PULL_REQUEST_NUMBER,
+                "url": CREATED_PULL_REQUEST_URL,
+                "head": CREATE_HEAD,
+                "base": CREATE_BASE,
+            })))
+        }
+    }
 
     #[derive(Clone, Default)]
     struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
@@ -2868,6 +3272,105 @@ mod tests {
         assert_eq!(metadata.effect_class(), ToolEffectClass::ExternalEffect);
         assert_eq!(threads.effect_class(), ToolEffectClass::ExternalEffect);
         assert_eq!(publish.effect_class(), ToolEffectClass::ExternalEffect);
+    }
+
+    #[test]
+    fn create_contract_is_confirmed_and_repository_is_not_a_model_argument() {
+        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
+            .expect("configured repository is admitted");
+        let catalog = GitHubPullRequestCreateTools::try_new(
+            SyntheticCredentials,
+            RecordingCreateTransport::default(),
+            GitHubEgressPolicy::github_api_only(),
+            repository,
+        )
+        .expect("creation suite constructs")
+        .into_parts()
+        .0;
+        let create = definition(&catalog, PULL_REQUEST_CREATE_NAME);
+        let schema: serde_json::Value =
+            serde_json::from_str(create.input_schema().as_str()).expect("schema is valid JSON");
+        let injected_repository = normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": CREATE_HEAD,
+            "base": CREATE_BASE,
+            "repository": "attacker/exfiltration"
+        }));
+
+        assert_eq!(create.permission_default(), ToolPermissionDefault::Confirm);
+        assert_eq!(create.effect_class(), ToolEffectClass::ExternalEffect);
+        assert_eq!(
+            schema["additionalProperties"],
+            serde_json::Value::Bool(false)
+        );
+        assert!(schema["properties"].get("repository").is_none());
+        assert!(decode_create_pull_request(&injected_repository).is_err());
+    }
+
+    #[tokio::test]
+    async fn create_transport_records_configured_repository_credentials_and_fixed_origin() {
+        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
+            .expect("configured repository is admitted");
+        let arguments = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": CREATE_HEAD,
+            "base": CREATE_BASE
+        })))
+        .expect("creation arguments are admitted");
+        let operation = GitHubOperation::CreatePullRequest {
+            repository,
+            arguments,
+        };
+        let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
+        let policy = GitHubEgressPolicy::github_api_only();
+        let mut transport = RecordingCreateTransport::default();
+        let observer = transport.clone();
+
+        let result = transport
+            .execute(operation, &credential, &policy)
+            .await
+            .expect("synthetic creation succeeds");
+        let recorded = observer.recorded();
+
+        assert_eq!(result.kind(), GitHubResultKind::CreatedPullRequest);
+        assert_eq!(recorded.repository, CONFIGURED_REPOSITORY);
+        assert_eq!(recorded.title, CREATE_TITLE);
+        assert_eq!(recorded.body, CREATE_BODY);
+        assert_eq!(recorded.head, CREATE_HEAD);
+        assert_eq!(recorded.base, CREATE_BASE);
+        assert_eq!(recorded.credential, SYNTHETIC_TOKEN.as_bytes());
+        assert_eq!(recorded.origin, GITHUB_API_ORIGIN);
+    }
+
+    #[test]
+    fn create_body_and_response_are_exact_and_bounded() {
+        let arguments = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": CREATE_HEAD,
+            "base": CREATE_BASE
+        })))
+        .expect("creation arguments are admitted");
+        let body = create_pull_request_body(&arguments).expect("creation body serializes");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("creation body is JSON");
+        let response = serde_json::json!({
+            "number": CREATED_PULL_REQUEST_NUMBER,
+            "html_url": CREATED_PULL_REQUEST_URL
+        });
+
+        let normalized =
+            normalize_created_pull_request(&response, &arguments).expect("response normalizes");
+
+        assert_eq!(body["title"], CREATE_TITLE);
+        assert_eq!(body["body"], CREATE_BODY);
+        assert_eq!(body["head"], CREATE_HEAD);
+        assert_eq!(body["base"], CREATE_BASE);
+        assert_eq!(normalized["number"], CREATED_PULL_REQUEST_NUMBER);
+        assert_eq!(normalized["url"], CREATED_PULL_REQUEST_URL);
+        assert_eq!(normalized["head"], CREATE_HEAD);
+        assert_eq!(normalized["base"], CREATE_BASE);
     }
 
     #[test]

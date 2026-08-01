@@ -49,6 +49,8 @@ pub const GIT_CREATE_COMMIT_NAME: &str = "git_create_commit";
 pub const GIT_BRANCH_CREATE_NAME: &str = "git_branch_create";
 /// Local branch switch tool name.
 pub const GIT_BRANCH_SWITCH_NAME: &str = "git_branch_switch";
+/// Configured-remote branch push tool name.
+pub const GIT_PUSH_NAME: &str = "git_push";
 
 /// Fixed local-family catalog order.
 pub const LOCAL_GIT_TOOL_NAMES: [&str; 7] = [
@@ -78,6 +80,9 @@ const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded Git tool arguments";
 const REPOSITORY_REJECTED_DETAIL: &str = "injected Git repository was rejected";
 const PATH_REJECTED_DETAIL: &str = "Git path was rejected by the workspace boundary";
 const OPERATION_FAILED_DETAIL: &str = "local Git operation failed";
+const PUSH_REJECTED_DETAIL: &str = "configured Git push was rejected";
+const MAX_REMOTE_NAME_BYTES: usize = 255;
+const MAX_REMOTE_URL_BYTES: usize = 4096;
 
 /// Injected commit author and committer identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -221,6 +226,78 @@ pub struct GitBranchSwitchArguments {
     name: String,
 }
 
+/// Push arguments contain only a local branch; the destination is deployment
+/// configuration and cannot be supplied by a model.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GitPushArguments {
+    /// Existing local branch to push without force.
+    #[schemars(length(min = 1, max = MAX_BRANCH_BYTES))]
+    branch: String,
+}
+
+/// Exact deployment-owned remote configuration.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ConfiguredGitRemote {
+    name: String,
+    url: String,
+}
+
+impl ConfiguredGitRemote {
+    /// Constructs one fixed remote name and exact destination URL.
+    pub fn try_new(
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<Self, InvalidConfiguredGitRemote> {
+        let name = name.into();
+        let url = url.into();
+        let probe = format!("refs/remotes/{name}/probe");
+        if name.is_empty()
+            || name.len() > MAX_REMOTE_NAME_BYTES
+            || name.contains('/')
+            || !git2::Reference::is_valid_name(&probe)
+            || url.is_empty()
+            || url.len() > MAX_REMOTE_URL_BYTES
+            || url.chars().any(char::is_control)
+        {
+            return Err(InvalidConfiguredGitRemote);
+        }
+        Ok(Self { name, url })
+    }
+
+    /// Borrows the configured Git remote name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Borrows the exact configured destination URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+impl fmt::Debug for ConfiguredGitRemote {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConfiguredGitRemote")
+            .field("name", &self.name)
+            .field("url", &"[CONFIGURED]")
+            .finish()
+    }
+}
+
+/// Deployment remote configuration was not a bounded name and destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidConfiguredGitRemote;
+
+impl fmt::Display for InvalidConfiguredGitRemote {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid configured Git remote")
+    }
+}
+
+impl Error for InvalidConfiguredGitRemote {}
+
 struct StatusContract;
 impl ToolContract for StatusContract {
     type Arguments = GitStatusArguments;
@@ -273,6 +350,14 @@ impl ToolContract for BranchSwitchContract {
     const NAME: &'static str = GIT_BRANCH_SWITCH_NAME;
     const DESCRIPTION: &'static str =
         "Safely checks out one existing local branch in the injected worktree.";
+}
+
+struct PushContract;
+impl ToolContract for PushContract {
+    type Arguments = GitPushArguments;
+    const NAME: &'static str = GIT_PUSH_NAME;
+    const DESCRIPTION: &'static str =
+        "Pushes one named local branch without force to the deployment-configured remote.";
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1243,9 +1328,391 @@ fn branch_create(
     })
 }
 
+/// One fully resolved push handed to the deployment transport.
+#[derive(Clone, Eq, PartialEq)]
+pub struct GitPushRequest {
+    repository_root: PathBuf,
+    remote: ConfiguredGitRemote,
+    branch: String,
+    commit: String,
+}
+
+impl GitPushRequest {
+    /// Borrows the already-validated direct repository root.
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    /// Borrows the immutable deployment remote.
+    pub const fn remote(&self) -> &ConfiguredGitRemote {
+        &self.remote
+    }
+
+    /// Borrows the exact local branch shorthand.
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// Borrows the resolved commit expected at the remote branch.
+    pub fn commit(&self) -> &str {
+        &self.commit
+    }
+
+    /// Returns the non-forced exact branch refspec.
+    pub fn refspec(&self) -> String {
+        format!("refs/heads/{0}:refs/heads/{0}", self.branch)
+    }
+}
+
+impl fmt::Debug for GitPushRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GitPushRequest")
+            .field("repository_root", &"[INJECTED]")
+            .field("remote", &self.remote)
+            .field("branch", &self.branch)
+            .field("commit", &self.commit)
+            .finish()
+    }
+}
+
+/// Successful transport acknowledgement for the exact updated commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitPushReceipt {
+    commit: String,
+}
+
+impl GitPushReceipt {
+    /// Constructs a receipt only for a full Git object identifier.
+    pub fn try_new(commit: impl Into<String>) -> Result<Self, InvalidGitPushReceipt> {
+        let commit = commit.into();
+        Oid::from_str(&commit).map_err(|_| InvalidGitPushReceipt)?;
+        Ok(Self { commit })
+    }
+
+    /// Borrows the remote commit acknowledgement.
+    pub fn commit(&self) -> &str {
+        &self.commit
+    }
+}
+
+/// A push transport returned an invalid acknowledgement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidGitPushReceipt;
+
+impl fmt::Display for InvalidGitPushReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid Git push receipt")
+    }
+}
+
+impl Error for InvalidGitPushReceipt {}
+
+/// Physical push outcome classification supplied by the injected transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitPushTransportFailure {
+    /// The configured remote definitively rejected the update.
+    Rejected,
+    /// Dispatch could not begin.
+    PreDispatchInfrastructure,
+    /// Dispatch may have updated the remote.
+    DispatchUnknown,
+}
+
+impl fmt::Display for GitPushTransportFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Rejected => "configured Git remote rejected the push",
+            Self::PreDispatchInfrastructure => "Git push could not be dispatched",
+            Self::DispatchUnknown => "Git push outcome is unknown",
+        })
+    }
+}
+
+impl Error for GitPushTransportFailure {}
+
+/// Deployment-owned push boundary. Implementations receive the fixed remote;
+/// the model never supplies or modifies a destination.
+pub trait GitPushTransport: Send {
+    /// Pushes one non-forced branch refspec and acknowledges the remote commit.
+    fn push(&mut self, request: GitPushRequest) -> Result<GitPushReceipt, GitPushTransportFailure>;
+}
+
+#[derive(Clone, Debug)]
+struct GitPushArgumentValidator {
+    detail: ToolExecutionErrorDetail,
+}
+
+impl ToolArgumentValidator for GitPushArgumentValidator {
+    fn validate(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolExecutionErrorDetail> {
+        decode_push(arguments)
+            .map(|_| ())
+            .map_err(|_| self.detail.clone())
+    }
+}
+
+fn decode_push(
+    arguments: &NormalizedToolArguments,
+) -> Result<GitPushArguments, InvalidGitArguments> {
+    let arguments: GitPushArguments =
+        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidGitArguments)?;
+    validate_branch(&arguments.branch)?;
+    Ok(arguments)
+}
+
+/// One approval-gated push declaration and its configured-remote executor.
+#[derive(Debug)]
+pub struct GitPushTools<Transport> {
+    catalog: CompiledToolCatalog,
+    executor: GitPushExecutor<Transport>,
+}
+
+impl<Transport> GitPushTools<Transport> {
+    /// Compiles push around one pinned workspace root, configured remote, and
+    /// injected physical transport.
+    pub fn try_new<FileSystem: WorkspaceFileSystem>(
+        filesystem: &FileSystem,
+        root_path: impl AsRef<Path>,
+        remote: ConfiguredGitRemote,
+        transport: Transport,
+    ) -> Result<Self, GitPushToolsConstructionError> {
+        let supplied_root = root_path.as_ref();
+        let root = WorkspaceRoot::try_new(filesystem, supplied_root)
+            .map_err(GitPushToolsConstructionError::Root)?;
+        let root_path = fs::canonicalize(supplied_root)
+            .map_err(|_| GitPushToolsConstructionError::Repository)?;
+        let root_identity = validate_repository_layout(&root_path)
+            .map_err(|_| GitPushToolsConstructionError::Repository)?;
+        let invalid_detail = ToolExecutionErrorDetail::try_new(INVALID_ARGUMENTS_DETAIL.to_owned())
+            .map_err(|_| GitPushToolsConstructionError::ErrorDetail)?;
+        let repository_detail =
+            ToolExecutionErrorDetail::try_new(REPOSITORY_REJECTED_DETAIL.to_owned())
+                .map_err(|_| GitPushToolsConstructionError::ErrorDetail)?;
+        let rejected_detail = ToolExecutionErrorDetail::try_new(PUSH_REJECTED_DETAIL.to_owned())
+            .map_err(|_| GitPushToolsConstructionError::ErrorDetail)?;
+        let definition = compile_contract_definition::<PushContract>(
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::ExternalEffect,
+        )
+        .map_err(|error| match error {
+            ToolContractCompileError::Name => GitPushToolsConstructionError::Name,
+            ToolContractCompileError::Schema => GitPushToolsConstructionError::Schema,
+        })?;
+        let catalog = CompiledToolCatalog::try_new(vec![CompiledTool::new(
+            definition,
+            GitPushArgumentValidator {
+                detail: invalid_detail,
+            },
+        )])
+        .map_err(|_| GitPushToolsConstructionError::Duplicate)?;
+        Ok(Self {
+            catalog,
+            executor: GitPushExecutor {
+                _root: root,
+                root_path,
+                root_identity,
+                remote,
+                transport,
+                repository_detail,
+                rejected_detail,
+            },
+        })
+    }
+
+    /// Separates catalog and executor composition roles.
+    pub fn into_parts(self) -> (CompiledToolCatalog, GitPushExecutor<Transport>) {
+        (self.catalog, self.executor)
+    }
+}
+
+/// Static push suite or injected-repository construction failure.
+#[derive(Debug)]
+pub enum GitPushToolsConstructionError {
+    /// Static tool name failed compilation.
+    Name,
+    /// Static schema failed compilation.
+    Schema,
+    /// Static detail failed construction.
+    ErrorDetail,
+    /// The fixed catalog unexpectedly contained a duplicate.
+    Duplicate,
+    /// The injected workspace root was invalid.
+    Root(WorkspaceRootError),
+    /// The repository layout escaped or did not match the injected root.
+    Repository,
+}
+
+impl fmt::Display for GitPushToolsConstructionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Git push tool construction failed")
+    }
+}
+
+impl Error for GitPushToolsConstructionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Root(error) => Some(error),
+            Self::Name | Self::Schema | Self::ErrorDetail | Self::Duplicate | Self::Repository => {
+                None
+            }
+        }
+    }
+}
+
+/// Approval-gated configured-remote push executor.
+#[derive(Debug)]
+pub struct GitPushExecutor<Transport> {
+    _root: WorkspaceRoot,
+    root_path: PathBuf,
+    root_identity: RootIdentity,
+    remote: ConfiguredGitRemote,
+    transport: Transport,
+    repository_detail: ToolExecutionErrorDetail,
+    rejected_detail: ToolExecutionErrorDetail,
+}
+
+/// Sanitized push executor failure with explicit commit certainty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitPushExecutorError {
+    class: OperatorFailureClass,
+}
+
+impl fmt::Display for GitPushExecutorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Git push executor failed")
+    }
+}
+
+impl Error for GitPushExecutorError {}
+
+impl ClassifyOperatorFailure for GitPushExecutorError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        self.class
+    }
+}
+
+impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
+    type Error = GitPushExecutorError;
+
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        if invocation.request().name().as_str() != GIT_PUSH_NAME {
+            return Err(push_caller_bug());
+        }
+        let arguments =
+            decode_push(invocation.request().arguments()).map_err(|_| push_caller_bug())?;
+        let evidence = match self.execute_push(arguments) {
+            Ok(result) => ToolExecutorEvidence::CompletedText(result),
+            Err(GitPushFailure::Repository) => ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.repository_detail.clone()),
+            },
+            Err(GitPushFailure::Rejected) => ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.rejected_detail.clone()),
+            },
+            Err(GitPushFailure::PreDispatchInfrastructure) => {
+                return Err(push_infrastructure(false));
+            }
+            Err(GitPushFailure::DispatchUnknown) => return Err(push_infrastructure(true)),
+            Err(GitPushFailure::PostDispatchInvalid) => return Err(push_infrastructure(true)),
+        };
+        Ok(invocation.bind(evidence))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GitPushFailure {
+    Repository,
+    Rejected,
+    PreDispatchInfrastructure,
+    DispatchUnknown,
+    PostDispatchInvalid,
+}
+
+#[derive(Debug, Serialize)]
+struct GitPushResult {
+    remote: String,
+    branch: String,
+    commit: String,
+}
+
+impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
+    fn execute_push(&mut self, arguments: GitPushArguments) -> Result<String, GitPushFailure> {
+        let root_identity =
+            validate_repository_layout(&self.root_path).map_err(|_| GitPushFailure::Repository)?;
+        if root_identity != self.root_identity {
+            return Err(GitPushFailure::Repository);
+        }
+        let repository = Repository::open_ext(
+            &self.root_path,
+            RepositoryOpenFlags::NO_SEARCH,
+            std::iter::empty::<&Path>(),
+        )
+        .map_err(|_| GitPushFailure::Repository)?;
+        let branch = repository
+            .find_branch(&arguments.branch, BranchType::Local)
+            .map_err(|_| GitPushFailure::Rejected)?;
+        let commit = branch
+            .get()
+            .peel_to_commit()
+            .map_err(|_| GitPushFailure::Rejected)?
+            .id()
+            .to_string();
+        let request = GitPushRequest {
+            repository_root: self.root_path.clone(),
+            remote: self.remote.clone(),
+            branch: arguments.branch.clone(),
+            commit: commit.clone(),
+        };
+        let receipt = self
+            .transport
+            .push(request)
+            .map_err(|failure| match failure {
+                GitPushTransportFailure::Rejected => GitPushFailure::Rejected,
+                GitPushTransportFailure::PreDispatchInfrastructure => {
+                    GitPushFailure::PreDispatchInfrastructure
+                }
+                GitPushTransportFailure::DispatchUnknown => GitPushFailure::DispatchUnknown,
+            })?;
+        if receipt.commit() != commit {
+            return Err(GitPushFailure::PostDispatchInvalid);
+        }
+        let encoded = serde_json::to_string(&GitPushResult {
+            remote: self.remote.name.clone(),
+            branch: arguments.branch,
+            commit,
+        })
+        .map_err(|_| GitPushFailure::PostDispatchInvalid)?;
+        ToolResultText::try_new(encoded)
+            .map(ToolResultText::into_string)
+            .map_err(|_| GitPushFailure::PostDispatchInvalid)
+    }
+}
+
+const fn push_caller_bug() -> GitPushExecutorError {
+    GitPushExecutorError {
+        class: OperatorFailureClass::CallerOrHubBug,
+    }
+}
+
+const fn push_infrastructure(commit_ambiguous: bool) -> GitPushExecutorError {
+    GitPushExecutorError {
+        class: OperatorFailureClass::Infrastructure { commit_ambiguous },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::symlink, path::Path};
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        path::Path,
+        sync::{Arc, Mutex},
+    };
 
     use git2::{IndexAddOption, Oid, Repository, Signature};
     use signalbox_application::ToolCatalog;
@@ -1265,10 +1732,40 @@ mod tests {
     const NESTED_TRACKED_DIRECTORY: &str = "removed";
     const NESTED_TRACKED_PATH: &str = "removed/tracked.txt";
     const SUBMODULE_PATH: &str = "dependency";
+    const REMOTE_NAME: &str = "origin";
+    const REMOTE_URL: &str = "https://github.com/KeenWill/signalbox.git";
 
     struct Fixture {
         directory: TempDir,
         initial: Oid,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingPushTransport(Arc<Mutex<Option<GitPushRequest>>>);
+
+    impl RecordingPushTransport {
+        fn request(&self) -> GitPushRequest {
+            self.0
+                .lock()
+                .expect("recording transport lock is available")
+                .clone()
+                .expect("push request was recorded")
+        }
+    }
+
+    impl GitPushTransport for RecordingPushTransport {
+        fn push(
+            &mut self,
+            request: GitPushRequest,
+        ) -> Result<GitPushReceipt, GitPushTransportFailure> {
+            let receipt = GitPushReceipt::try_new(request.commit().to_owned())
+                .expect("resolved commit forms a receipt");
+            *self
+                .0
+                .lock()
+                .expect("recording transport lock is available") = Some(request);
+            Ok(receipt)
+        }
     }
 
     impl Fixture {
@@ -1933,5 +2430,87 @@ mod tests {
             LocalToolKind::BranchSwitch.effect(),
             ToolEffectClass::ExternalEffect
         );
+    }
+
+    #[test]
+    fn push_contract_requires_confirmation_and_has_no_destination_argument() {
+        let fixture = Fixture::new();
+        let remote = ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL)
+            .expect("configured remote is admitted");
+        let catalog = GitPushTools::try_new(
+            &LocalWorkspaceFileSystem,
+            fixture.root(),
+            remote,
+            RecordingPushTransport::default(),
+        )
+        .expect("push suite constructs")
+        .into_parts()
+        .0;
+        let name = ToolName::try_new(GIT_PUSH_NAME.to_owned()).expect("fixture name is admitted");
+        let definition = catalog.definition(&name).expect("push definition exists");
+        let schema: serde_json::Value =
+            serde_json::from_str(definition.input_schema().as_str()).expect("push schema is JSON");
+        let injected_destination = NormalizedToolArguments::try_from_provider_text(
+            serde_json::json!({"branch": FIX_BRANCH, "remote": REMOTE_URL}).to_string(),
+        )
+        .expect("provider JSON normalizes");
+
+        assert_eq!(
+            definition.permission_default(),
+            ToolPermissionDefault::Confirm
+        );
+        assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
+        assert_eq!(schema["required"], serde_json::json!(["branch"]));
+        assert_eq!(
+            schema["additionalProperties"],
+            serde_json::Value::Bool(false)
+        );
+        assert!(decode_push(&injected_destination).is_err());
+    }
+
+    #[test]
+    fn push_resolves_real_branch_into_configured_synthetic_transport_request() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let branch = repository
+            .head()
+            .expect("fixture head exists")
+            .shorthand()
+            .expect("fixture head is named")
+            .to_owned();
+        let remote = ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL)
+            .expect("configured remote is admitted");
+        let transport = RecordingPushTransport::default();
+        let mut executor = GitPushTools::try_new(
+            &LocalWorkspaceFileSystem,
+            fixture.root(),
+            remote,
+            transport.clone(),
+        )
+        .expect("push suite constructs")
+        .into_parts()
+        .1;
+
+        let encoded = executor
+            .execute_push(GitPushArguments {
+                branch: branch.clone(),
+            })
+            .expect("synthetic push succeeds");
+        let result: serde_json::Value =
+            serde_json::from_str(&encoded).expect("push result is JSON");
+        let request = transport.request();
+
+        assert_eq!(request.repository_root(), fixture.root());
+        assert_eq!(request.remote().name(), REMOTE_NAME);
+        assert_eq!(request.remote().url(), REMOTE_URL);
+        assert_eq!(request.branch(), branch);
+        assert_eq!(request.commit(), fixture.initial.to_string());
+        assert_eq!(
+            request.refspec(),
+            format!("refs/heads/{0}:refs/heads/{0}", request.branch())
+        );
+        assert_eq!(result["remote"], REMOTE_NAME);
+        assert_eq!(result["branch"], request.branch());
+        assert_eq!(result["commit"], fixture.initial.to_string());
     }
 }
