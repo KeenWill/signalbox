@@ -138,7 +138,9 @@ applied receipt, and rejected reasons are closed over the operations that can
 produce them, including durable acceptance-position exhaustion for
 pursuit-starting commands. Every pursuit-starting user event reverse-correlates
 to exactly one queued goal turn, whose requested and frozen configuration
-derives from its exact defaults epoch. Model-declaration requests and
+derives from its exact defaults epoch. A continuation successor must name the
+acceptance-latest successfully completed goal turn in its generation, so an
+older turn cannot branch after resume. Model-declaration requests and
 scheduler-failure turns are single-use; composite foreign keys enforce
 user-command, model-invocation, and scheduler-turn provenance, while deferred
 constraints bind each model event to the current goal turn, the exact
