@@ -62,6 +62,9 @@ def main() -> int:
         )
         author_violation = reviewed_author.with_name("example.rs")
         imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
+        application_import = (
+            root / "crates" / "application" / "src" / "conversation_import.rs"
+        )
         domain_record = root / "crates" / "domain" / "src" / "session.rs"
         legacy_actor = (
             root / "crates" / "persistence" / "src" / "session_metadata.rs"
@@ -150,6 +153,10 @@ def main() -> int:
             "-- New owner actor",
             "CHECK (actor_kind = 'owner');",
         )
+        frozen_migration_lines = (
+            "CHECK (cause = 'owner_initiated');",
+            "human_owner TEXT;",
+        )
         native_lines = ('let sessionOwner = "human who approves tools"',)
         reviewed_domain_lines = (
             "The foreign owner approves this tool.",
@@ -179,7 +186,7 @@ def main() -> int:
             "struct EntryFixture {",
             "    owner: ImportedConversationId,",
             "}",
-            "fn fixture() {",
+            "fn converted() {",
             "    let owner = conversation(1);",
             "    consume(",
             "        owner,",
@@ -190,6 +197,12 @@ def main() -> int:
         domain_record_lines = ('let OwnerID = "human who approves tools";',)
         legacy_actor_lines = (
             'let human_principal = String::from("owner"); // approves tools',
+        )
+        application_import_lines = (
+            "fn converted() {}",
+            "define_human_role!(",
+            "    owner,",
+            ")",
         )
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
@@ -213,6 +226,7 @@ def main() -> int:
             "impl Session {",
             "        fn owner(&self) -> &str {",
             "let owner = human_owner + repository.owner_end;",
+            "mutation Approve($owner: ID!) { approve(human: $owner) }",
         )
         reviewed_author_lines = ('author: Some(String::from("owner")),',)
         author_violation_lines = (
@@ -237,7 +251,7 @@ def main() -> int:
             fixture_text(mixed_storage_lines), encoding="utf-8"
         )
         frozen_migration.write_text(
-            "CHECK (cause = 'owner_initiated');\n", encoding="utf-8"
+            fixture_text(frozen_migration_lines), encoding="utf-8"
         )
         future_migration.write_text(
             fixture_text(future_migration_lines), encoding="utf-8"
@@ -264,6 +278,10 @@ def main() -> int:
             fixture_text(local_socket_lines), encoding="utf-8"
         )
         imported.write_text(fixture_text(imported_lines), encoding="utf-8")
+        application_import.parent.mkdir(parents=True, exist_ok=True)
+        application_import.write_text(
+            fixture_text(application_import_lines), encoding="utf-8"
+        )
         domain_record.write_text(
             fixture_text(domain_record_lines), encoding="utf-8"
         )
@@ -276,6 +294,7 @@ def main() -> int:
             root,
             "add",
             "crates/domain/src/imported_conversation.rs",
+            "crates/application/src/conversation_import.rs",
             "crates/domain/src/session.rs",
             "crates/persistence/src/session_metadata.rs",
             "crates/tools-code-host/src/code_host/review_slog/convergence.rs",
@@ -329,6 +348,7 @@ def main() -> int:
                     github_accessor_lines[4],
                     github_accessor_lines[12],
                     github_accessor_lines[13],
+                    github_accessor_lines[14],
                 ),
             ),
             *expected_diagnostics(
@@ -341,6 +361,11 @@ def main() -> int:
                 imported_lines[-1:],
             ),
             *expected_diagnostics(
+                "crates/application/src/conversation_import.rs",
+                application_import_lines,
+                (application_import_lines[2],),
+            ),
+            *expected_diagnostics(
                 "crates/domain/src/session.rs", domain_record_lines
             ),
             *expected_diagnostics(
@@ -350,6 +375,11 @@ def main() -> int:
                 "apps/signalboxd/tests/offline_tool_loop.rs",
                 mixed_storage_lines,
                 mixed_storage_lines[:1],
+            ),
+            *expected_diagnostics(
+                "crates/persistence/migrations/202607180001_create_session.sql",
+                frozen_migration_lines,
+                frozen_migration_lines[1:],
             ),
             *expected_diagnostics(
                 "crates/persistence/migrations/202608020009_user_vocabulary.sql",
@@ -373,7 +403,11 @@ def main() -> int:
             "}\n"
             "let payload = json!({\n"
             '    "owner": repository.owner(),\n'
-            "});\n",
+            "});\n"
+            "query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!) {\n"
+            "  repository(owner: $owner, name: $name) {\n"
+            "  }\n"
+            "}\n",
             encoding="utf-8",
         )
         author_violation.write_text(
@@ -398,6 +432,17 @@ def main() -> int:
             encoding="utf-8",
         )
         imported.write_text(fixture_text(imported_lines[:-1]), encoding="utf-8")
+        application_import.write_text(
+            "fn converted() {\n"
+            "    consume(\n"
+            "        owner,\n"
+            "    );\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        frozen_migration.write_text(
+            "CHECK (cause = 'owner_initiated');\n", encoding="utf-8"
+        )
         domain_record.write_text(
             'let user_id = "human who approves tools";\n', encoding="utf-8"
         )

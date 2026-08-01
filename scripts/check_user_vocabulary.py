@@ -25,6 +25,8 @@ class Allowance:
     paths: re.Pattern[str]
     lines: re.Pattern[str]
     enclosing_impls: Mapping[str, str] | None = None
+    enclosing_functions: Mapping[str, frozenset[str]] | None = None
+    previous_line: re.Pattern[str] | None = None
 
     @staticmethod
     def _inside_impl(
@@ -45,6 +47,29 @@ class Allowance:
             for candidate in source_lines[start + 1 : index]
         )
 
+    @staticmethod
+    def _inside_function(
+        source_lines: list[str], index: int, expected_names: frozenset[str]
+    ) -> bool:
+        for candidate in range(index - 1, -1, -1):
+            declaration = re.match(
+                r"^(?P<indent>\s*)(?:async\s+)?fn\s+(?P<name>[A-Za-z0-9_]+)\b",
+                source_lines[candidate],
+            )
+            if declaration is None:
+                continue
+            if declaration.group("name") not in expected_names:
+                return False
+            if "}" in source_lines[candidate][declaration.end() :]:
+                return False
+            indentation = len(declaration.group("indent"))
+            return not any(
+                line.strip() == "}"
+                and len(line) - len(line.lstrip()) <= indentation
+                for line in source_lines[candidate + 1 : index]
+            )
+        return False
+
     def covers(
         self,
         path: str,
@@ -61,6 +86,17 @@ class Allowance:
                 source_lines, index, expected_impl
             ):
                 return False
+        if self.enclosing_functions is not None:
+            expected_names = self.enclosing_functions.get(path)
+            if expected_names is None or not self._inside_function(
+                source_lines, index, expected_names
+            ):
+                return False
+        if self.previous_line is not None and (
+            index == 0
+            or self.previous_line.fullmatch(source_lines[index - 1]) is None
+        ):
+            return False
         token_start = match.start()
         while token_start > 0 and (
             line[token_start - 1].isalnum() or line[token_start - 1] == "_"
@@ -90,7 +126,7 @@ ALLOWLIST = (
             r"docs/spec/(?:configuration-and-credentials|runner-protocol|tool-loop)[.]md)$"
         ),
         re.compile(
-            r"owner/repository|owner/name|repos/owner/|repository\(owner:|\$owner\b|"
+            r"owner/repository|owner/name|repos/owner/|repository\(owner:|"
             r"(?:arguments[.]repository[(][)]|repository)[.]owner[(][)]|"
             r"let owner = &value\[\.\.owner_end\]|\bowner_end\b|"
             r"let \(owner, name\) = repository|"
@@ -101,6 +137,26 @@ ALLOWLIST = (
             r"author_association:\s*String::from\(\"OWNER\"\)|"
             r"valid_repository_segment\(owner\)",
             re.IGNORECASE,
+        ),
+    ),
+    Allowance(
+        "GitHub repository GraphQL owner variables",
+        re.compile(
+            r"^(?:crates/tools-github/src/lib[.]rs|"
+            r"crates/tools-code-host/src/code_host/github[.]rs)$"
+        ),
+        re.compile(
+            r"^query (?:PullRequestReviewThreads|ReviewThreads|Convergence|"
+            r"ThreadInventory)\(\$owner: String!,|"
+            r"^\s*repository\(owner: \$owner, name: \$name\) \{\s*$"
+        ),
+    ),
+    Allowance(
+        "GitHub stack GraphQL owner declarations",
+        re.compile(r"^crates/tools-code-host/src/code_host/github[.]rs$"),
+        re.compile(r"^\s*\$owner: String!\s*$"),
+        previous_line=re.compile(
+            r"^query (?:StackComparison|StackChildren)\(\s*$"
         ),
     ),
     Allowance(
@@ -207,7 +263,18 @@ ALLOWLIST = (
             r"202608020003_runner_wire_contract"
             r")[.]sql$"
         ),
-        re.compile(r"[A-Za-z0-9_]*owner[A-Za-z0-9_]*", re.IGNORECASE),
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:"
+            r"imported_conversation_raw_record_owner_fk|"
+            r"imported_transcript_entry_owner_fk|"
+            r"imported_transcript_entry_owner_identity_key|"
+            r"owner_command_id|owner_command|owner_initiated|"
+            r"owner_tool_approval_requires_command|"
+            r"review_pass_produced_finding_owner|"
+            r"tool_approval_decision_owner_command_fk|owner"
+            r")(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        ),
     ),
     Allowance(
         "imported-conversation record owner identifiers",
@@ -215,13 +282,50 @@ ALLOWLIST = (
         re.compile(
             r"returned_owner|"
             r"^\s*owner:\s*ImportedConversationId,\s*$|"
-            r"^\s*owner,\s*$|"
             r"^\s*self[.]owner,\s*$|"
             r"^\s*let owner = conversation\(\d+\);\s*$|"
             r"self[.]observed[.]push\(\(owner, source[.]to_vec\(\)\)\);|"
             r"self[.]returned_owner[.]unwrap_or\(owner\)|"
             r"self[.]convert\(owner, source, next_entry_id\)\?",
         ),
+    ),
+    Allowance(
+        "imported-conversation fixture owner arguments",
+        re.compile(
+            r"^crates/(?:application/src/conversation_import|"
+            r"domain/src/imported_conversation)[.]rs$"
+        ),
+        re.compile(r"^\s*owner,\s*$"),
+        enclosing_functions={
+            "crates/application/src/conversation_import.rs": frozenset(
+                {"converted"}
+            ),
+            "crates/domain/src/imported_conversation.rs": frozenset(
+                {
+                    "new",
+                    "claude_code_summary_fixture",
+                    "claude_code_user_text_fixture",
+                    "codex_session_meta_fixture",
+                    "converted",
+                    "inv002_inv038_raw_hash_corruption_retains_complete_input",
+                    "inv038_complete_normalized_record_rejects_129_containers",
+                    "inv038_coordinated_normalized_and_entry_corruption_fails_closed",
+                    "inv038_empty_raw_source_record_fails_closed",
+                    "inv038_entry_carried_structured_value_rejects_129_containers",
+                    "inv038_entry_content_must_match_the_complete_normalized_record",
+                    "inv038_entry_metadata_must_match_the_complete_normalized_record",
+                    "inv038_first_entry_cannot_skip_first_raw_record",
+                    "inv038_message_content_without_source_speaker_fails_closed",
+                    "inv038_message_speaker_must_match_the_raw_record_type",
+                    "inv038_raw_record_entry_count_must_match_its_normalized_projection",
+                    "inv038_source_event_rejects_a_message_record_type",
+                    "s28_inv002_inv038_checks_raw_depth_before_recursive_conversion_digest",
+                    "s28_inv002_inv038_converted_raw_depth_fails_closed_and_drops_safely",
+                    "s28_inv038_converter_versions_do_not_reinterpret_result_blocks",
+                    "s28_inv038_converter_versions_do_not_reinterpret_source_blocks",
+                }
+            ),
+        },
     ),
     Allowance(
         "context-frontier fixture owner identifiers",
