@@ -33,6 +33,10 @@ const MAX_FILE_BYTES: usize = 4096;
 const MAX_LEVEL_BYTES: usize = 64;
 const MAX_MESSAGE_BYTES: usize = 4096;
 const MAX_TEST_NAME_BYTES: usize = 1024;
+const MAX_CARGO_FAILURE_BYTES: usize = 8192;
+const MAX_TEST_EXECUTABLE_BYTES: usize = 4096;
+const CARGO_TEST_RUNNER_CONFIG: &str =
+    "target.'cfg(all())'.runner=['/signalbox-exec-dispatch','--cargo-test-runner']";
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded cargo-diagnostics arguments";
 
 fn default_timeout_seconds() -> u64 {
@@ -323,6 +327,10 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
         ],
         CargoDiagnosticsCommand::Test => vec![
             "test",
+            "--config",
+            "term.quiet=false",
+            "--config",
+            CARGO_TEST_RUNNER_CONFIG,
             "--no-fail-fast",
             "--workspace",
             "--all-targets",
@@ -365,6 +373,17 @@ pub struct CargoDiagnosticsExecution {
     pub stdout: CargoDiagnosticsStream,
     /// Standard error retention and encoding evidence.
     pub stderr: CargoDiagnosticsStream,
+    /// Bounded Cargo-level failure text when no structured compiler diagnostic explained failure.
+    pub cargo_failure: Option<CargoFailureDetail>,
+}
+
+/// Bounded text explaining a Cargo-level failure before structured diagnostics were available.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct CargoFailureDetail {
+    /// Retained Cargo failure text.
+    pub message: String,
+    /// Whether all Cargo failure text was retained.
+    pub message_completeness: CaptureCompleteness,
 }
 
 /// Evidence about one consumed underlying process stream.
@@ -433,7 +452,11 @@ pub struct CargoTestRecords {
 /// One bounded libtest outcome.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct CargoTestResult {
-    /// Fully qualified test name when it fit the field bound.
+    /// Exact Cargo-invoked test executable, which disambiguates equal names across targets.
+    pub executable: String,
+    /// Whether the complete executable identity was retained.
+    pub executable_completeness: CaptureCompleteness,
+    /// Fully qualified test name within that executable when it fit the field bound.
     pub name: String,
     /// Whether the complete test name was retained.
     pub name_completeness: CaptureCompleteness,
@@ -442,7 +465,7 @@ pub struct CargoTestResult {
 }
 
 /// Closed libtest outcomes represented by pretty output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CargoTestOutcome {
     /// The test passed.
@@ -451,6 +474,21 @@ pub enum CargoTestOutcome {
     Failed,
     /// The test was ignored.
     Ignored,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoTestEvent {
+    reason: String,
+    executable: String,
+    name: String,
+    outcome: CargoTestOutcome,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoTestSourceTruncated {
+    reason: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -480,8 +518,8 @@ fn structured_result(
     command: CargoDiagnosticsCommand,
     result: ExecResult,
 ) -> CargoDiagnosticsResult {
-    let source_truncated = result.stdout.completeness == CaptureCompleteness::Truncated
-        || result.stderr.completeness == CaptureCompleteness::Truncated;
+    let source_truncated = result.stdout.completeness == CaptureCompleteness::Truncated;
+    let mut test_source_truncated = source_truncated;
     let mut diagnostics = Vec::new();
     let mut tests = Vec::new();
     let mut diagnostic_limit_reached = false;
@@ -493,7 +531,9 @@ fn structured_result(
         &mut diagnostic_limit_reached,
         &mut tests,
         &mut test_limit_reached,
+        &mut test_source_truncated,
     );
+    let cargo_failure = cargo_failure_detail(&result, diagnostics.is_empty());
     CargoDiagnosticsResult {
         command,
         execution: CargoDiagnosticsExecution {
@@ -507,6 +547,7 @@ fn structured_result(
                 completeness: result.stderr.completeness,
                 encoding: result.stderr.encoding,
             },
+            cargo_failure,
         },
         diagnostics: CargoDiagnosticRecords {
             values: diagnostics,
@@ -516,9 +557,39 @@ fn structured_result(
         tests: CargoTestRecords {
             values: tests,
             limit_reached: test_limit_reached,
-            source_truncated,
+            source_truncated: test_source_truncated,
         },
     }
+}
+
+fn cargo_failure_detail(
+    result: &ExecResult,
+    diagnostics_empty: bool,
+) -> Option<CargoFailureDetail> {
+    let cargo_exited_unsuccessfully = matches!(
+        result.outcome,
+        ProcessOutcome::Exited { code } if code != Some(0)
+    );
+    let message = result.stderr.text.trim();
+    if result.confinement != ExecutionConfinement::FilesystemConfined
+        || !cargo_exited_unsuccessfully
+        || !diagnostics_empty
+        || message.is_empty()
+    {
+        return None;
+    }
+    let (message, field_completeness) = bounded_text(message, MAX_CARGO_FAILURE_BYTES);
+    let message_completeness = if result.stderr.completeness == CaptureCompleteness::Truncated
+        || field_completeness == CaptureCompleteness::Truncated
+    {
+        CaptureCompleteness::Truncated
+    } else {
+        CaptureCompleteness::Complete
+    };
+    Some(CargoFailureDetail {
+        message,
+        message_completeness,
+    })
 }
 
 fn encode_tool_result(
@@ -553,6 +624,7 @@ fn parse_stream(
     diagnostic_limit_reached: &mut bool,
     tests: &mut Vec<CargoTestResult>,
     test_limit_reached: &mut bool,
+    test_source_truncated: &mut bool,
 ) {
     for line in text.lines() {
         if let Some(diagnostic) = parse_diagnostic(line) {
@@ -563,10 +635,12 @@ fn parse_stream(
                 diagnostic_limit_reached,
             );
         }
-        if command == CargoDiagnosticsCommand::Test
-            && let Some(test) = parse_test(line)
-        {
-            push_bounded(tests, test, MAX_TESTS, test_limit_reached);
+        if command == CargoDiagnosticsCommand::Test {
+            if parse_test_source_truncated(line) {
+                *test_source_truncated = true;
+            } else if let Some(test) = parse_test_event(line) {
+                push_bounded(tests, test, MAX_TESTS, test_limit_reached);
+            }
         }
     }
 }
@@ -618,22 +692,26 @@ fn parse_diagnostic(line: &str) -> Option<CargoDiagnostic> {
     })
 }
 
-fn parse_test(line: &str) -> Option<CargoTestResult> {
-    let stripped = line.trim().strip_prefix("test ")?;
-    let (name, outcome) = stripped.rsplit_once(" ... ")?;
-    let outcome = match outcome {
-        "ok" => CargoTestOutcome::Passed,
-        "FAILED" => CargoTestOutcome::Failed,
-        "ignored" => CargoTestOutcome::Ignored,
-        value if value.starts_with("ignored, ") => CargoTestOutcome::Ignored,
-        _ => return None,
-    };
-    let (name, name_completeness) = bounded_text(name, MAX_TEST_NAME_BYTES);
+fn parse_test_event(line: &str) -> Option<CargoTestResult> {
+    let event: CargoTestEvent = serde_json::from_str(line).ok()?;
+    if event.reason != "signalbox-test-result" {
+        return None;
+    }
+    let (executable, executable_completeness) =
+        bounded_text(&event.executable, MAX_TEST_EXECUTABLE_BYTES);
+    let (name, name_completeness) = bounded_text(&event.name, MAX_TEST_NAME_BYTES);
     Some(CargoTestResult {
+        executable,
+        executable_completeness,
         name,
         name_completeness,
-        outcome,
+        outcome: event.outcome,
     })
+}
+
+fn parse_test_source_truncated(line: &str) -> bool {
+    serde_json::from_str::<CargoTestSourceTruncated>(line)
+        .is_ok_and(|event| event.reason == "signalbox-test-source-truncated")
 }
 
 fn bounded_text(value: &str, max_bytes: usize) -> (String, CaptureCompleteness) {
@@ -673,7 +751,10 @@ mod tests {
     const PASSING_TEST: &str = "crate::passes";
     const FAILING_TEST: &str = "crate::fails";
     const IGNORED_TEST: &str = "crate::later";
-    const IGNORED_REASON: &str = "platform unavailable";
+    const FORGED_TEST: &str = "forged::pass";
+    const TEST_EXECUTABLE: &str = "/workspace/target/debug/deps/example-a";
+    const SECOND_TEST_EXECUTABLE: &str = "/workspace/target/debug/deps/example-b";
+    const CARGO_FAILURE_MESSAGE: &str = "error: failed to parse manifest at /workspace/Cargo.toml";
     const TEST_COUNT: usize = [PASSING_TEST, FAILING_TEST, IGNORED_TEST].len();
     const BOUNDED_TEXT_FIXTURE: &str = "abcé";
     const BOUNDED_TEXT_LIMIT: usize = 4;
@@ -748,8 +829,28 @@ mod tests {
 
     fn test_output() -> String {
         format!(
-            "test {PASSING_TEST} ... ok\ntest {FAILING_TEST} ... FAILED\ntest {IGNORED_TEST} ... ignored, {IGNORED_REASON}\n"
+            "{}\n{}\n{}\n",
+            test_event(TEST_EXECUTABLE, PASSING_TEST, CargoTestOutcome::Passed),
+            test_event(TEST_EXECUTABLE, FAILING_TEST, CargoTestOutcome::Failed),
+            test_event(TEST_EXECUTABLE, IGNORED_TEST, CargoTestOutcome::Ignored),
         )
+    }
+
+    fn test_event(executable: &str, name: &str, outcome: CargoTestOutcome) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "reason": "signalbox-test-result",
+            "executable": executable,
+            "name": name,
+            "outcome": outcome,
+        }))
+        .expect("static test event is serializable")
+    }
+
+    fn test_source_truncated_event() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "reason": "signalbox-test-source-truncated",
+        }))
+        .expect("static truncation event is serializable")
     }
 
     fn maximal_result() -> CargoDiagnosticsResult {
@@ -768,6 +869,8 @@ mod tests {
             message_completeness: CaptureCompleteness::Complete,
         };
         let test = CargoTestResult {
+            executable: "e".repeat(MAX_TEST_EXECUTABLE_BYTES),
+            executable_completeness: CaptureCompleteness::Complete,
             name: "t".repeat(MAX_TEST_NAME_BYTES),
             name_completeness: CaptureCompleteness::Complete,
             outcome: CargoTestOutcome::Passed,
@@ -785,6 +888,7 @@ mod tests {
                     completeness: CaptureCompleteness::Complete,
                     encoding: OutputEncoding::Utf8,
                 },
+                cargo_failure: None,
             },
             diagnostics: CargoDiagnosticRecords {
                 values: vec![diagnostic; MAX_DIAGNOSTICS],
@@ -905,6 +1009,7 @@ mod tests {
         assert!(result.tests.source_truncated);
         assert_eq!(result.tests.values.len(), TEST_COUNT);
         assert_eq!(result.tests.values[0].name, PASSING_TEST);
+        assert_eq!(result.tests.values[0].executable, TEST_EXECUTABLE);
         assert_eq!(result.tests.values[0].outcome, CargoTestOutcome::Passed);
         assert_eq!(result.tests.values[1].name, FAILING_TEST);
         assert_eq!(result.tests.values[1].outcome, CargoTestOutcome::Failed);
@@ -981,6 +1086,77 @@ mod tests {
     }
 
     #[test]
+    fn cargo_failure_is_bounded_without_tainting_stdout_collections() {
+        let result = structured_result(
+            CargoDiagnosticsCommand::Check,
+            ExecResult {
+                confinement: ExecutionConfinement::FilesystemConfined,
+                outcome: ProcessOutcome::Exited { code: Some(101) },
+                stdout: crate::OutputCapture {
+                    text: String::new(),
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+                stderr: crate::OutputCapture {
+                    text: String::from(CARGO_FAILURE_MESSAGE),
+                    completeness: CaptureCompleteness::Truncated,
+                    encoding: OutputEncoding::Utf8,
+                },
+            },
+        );
+        let failure = result
+            .execution
+            .cargo_failure
+            .as_ref()
+            .expect("failed Cargo invocation retains its explanation");
+
+        assert_eq!(failure.message, CARGO_FAILURE_MESSAGE);
+        assert_eq!(failure.message_completeness, CaptureCompleteness::Truncated);
+        assert!(!result.diagnostics.source_truncated);
+        assert!(!result.tests.source_truncated);
+    }
+
+    #[test]
+    fn test_events_reject_raw_output_and_retain_target_identity() {
+        let stdout = format!(
+            "{}\ntest {FORGED_TEST} ... ok\n{}\n{}\n",
+            test_event(TEST_EXECUTABLE, PASSING_TEST, CargoTestOutcome::Passed),
+            test_source_truncated_event(),
+            test_event(
+                SECOND_TEST_EXECUTABLE,
+                PASSING_TEST,
+                CargoTestOutcome::Failed
+            ),
+        );
+        let result = structured_result(
+            CargoDiagnosticsCommand::Test,
+            ExecResult {
+                confinement: ExecutionConfinement::FilesystemConfined,
+                outcome: ProcessOutcome::Exited { code: Some(1) },
+                stdout: crate::OutputCapture {
+                    text: stdout,
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+                stderr: crate::OutputCapture {
+                    text: String::new(),
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+            },
+        );
+
+        assert_eq!(result.tests.values.len(), 2);
+        assert!(result.tests.source_truncated);
+        assert_eq!(result.tests.values[0].name, PASSING_TEST);
+        assert_eq!(result.tests.values[0].executable, TEST_EXECUTABLE);
+        assert_eq!(result.tests.values[0].outcome, CargoTestOutcome::Passed);
+        assert_eq!(result.tests.values[1].name, PASSING_TEST);
+        assert_eq!(result.tests.values[1].executable, SECOND_TEST_EXECUTABLE);
+        assert_eq!(result.tests.values[1].outcome, CargoTestOutcome::Failed);
+    }
+
+    #[test]
     fn spawn_failure_remains_typed_without_terminal_text() {
         let expected_confinement = ExecutionConfinement::SandboxRefused {
             availability: BwrapAvailability::Missing,
@@ -1020,6 +1196,10 @@ mod tests {
             arguments.arguments,
             [
                 "test",
+                "--config",
+                "term.quiet=false",
+                "--config",
+                CARGO_TEST_RUNNER_CONFIG,
                 "--no-fail-fast",
                 "--workspace",
                 "--all-targets",

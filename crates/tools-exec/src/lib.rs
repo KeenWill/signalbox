@@ -38,8 +38,8 @@ pub use diagnostics::{
     CargoDiagnosticsArguments, CargoDiagnosticsCommand, CargoDiagnosticsExecution,
     CargoDiagnosticsExecutor, CargoDiagnosticsExecutorError, CargoDiagnosticsResult,
     CargoDiagnosticsRunner, CargoDiagnosticsStream, CargoDiagnosticsTool,
-    CargoDiagnosticsToolConstructionError, CargoTestOutcome, CargoTestRecords, CargoTestResult,
-    InvalidCargoDiagnosticsArguments,
+    CargoDiagnosticsToolConstructionError, CargoFailureDetail, CargoTestOutcome, CargoTestRecords,
+    CargoTestResult, InvalidCargoDiagnosticsArguments,
 };
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,

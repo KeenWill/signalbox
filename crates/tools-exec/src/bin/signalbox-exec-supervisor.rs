@@ -33,11 +33,13 @@ mod linux {
     const MAXIMUM_POLL_INTERVAL: Duration = Duration::from_millis(100);
     const REAP_DEADLINE: Duration = Duration::from_secs(1);
     const DISPATCH_MODE: &str = "--dispatch";
+    const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
     const LAUNCH_MODE: &str = "--launch";
     const OUTER_MODE: &str = "--outer";
     const SELF_EXE: &str = "/proc/self/exe";
     const DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
     const STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
+    const MAX_TEST_OUTPUT_LINE_BYTES: usize = 16 * 1024;
 
     enum TargetFailure {
         Spawn(std::io::Error),
@@ -68,6 +70,9 @@ mod linux {
         };
         if mode_or_timeout == DISPATCH_MODE {
             return dispatch(arguments.collect());
+        }
+        if mode_or_timeout == CARGO_TEST_RUNNER_MODE {
+            return cargo_test_runner(arguments.collect());
         }
         if mode_or_timeout == LAUNCH_MODE {
             return launch(arguments.collect());
@@ -219,6 +224,190 @@ mod linux {
             return ExitCode::FAILURE;
         }
         emit_target_status(arguments)
+    }
+
+    #[derive(Clone, Copy, serde::Serialize)]
+    #[serde(rename_all = "snake_case")]
+    enum CargoTestEventOutcome {
+        Passed,
+        Failed,
+        Ignored,
+    }
+
+    #[derive(serde::Serialize)]
+    struct CargoTestEvent<'a> {
+        reason: &'static str,
+        executable: &'a str,
+        name: &'a str,
+        outcome: CargoTestEventOutcome,
+    }
+
+    #[derive(serde::Serialize)]
+    struct CargoTestSourceTruncated {
+        reason: &'static str,
+    }
+
+    #[derive(Default)]
+    struct CargoTestOutputParser {
+        started: bool,
+        remaining: usize,
+    }
+
+    impl CargoTestOutputParser {
+        fn observe_line<Target: Write>(
+            &mut self,
+            line: &[u8],
+            executable: &str,
+            target: &mut Target,
+        ) -> std::io::Result<()> {
+            let Ok(line) = std::str::from_utf8(line) else {
+                return Ok(());
+            };
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if !self.started
+                && let Some(count) = parse_libtest_count(line)
+            {
+                self.started = true;
+                self.remaining = count;
+                return Ok(());
+            }
+            if self.remaining == 0 {
+                return Ok(());
+            }
+            let Some((name, outcome)) = parse_libtest_status(line) else {
+                return Ok(());
+            };
+            self.remaining -= 1;
+            serde_json::to_writer(
+                &mut *target,
+                &CargoTestEvent {
+                    reason: "signalbox-test-result",
+                    executable,
+                    name,
+                    outcome,
+                },
+            )
+            .map_err(std::io::Error::other)?;
+            target.write_all(b"\n")?;
+            target.flush()
+        }
+
+        fn observe_truncated<Target: Write>(&self, target: &mut Target) -> std::io::Result<()> {
+            if !self.started || self.remaining == 0 {
+                return Ok(());
+            }
+            serde_json::to_writer(
+                &mut *target,
+                &CargoTestSourceTruncated {
+                    reason: "signalbox-test-source-truncated",
+                },
+            )
+            .map_err(std::io::Error::other)?;
+            target.write_all(b"\n")?;
+            target.flush()
+        }
+    }
+
+    fn parse_libtest_count(line: &str) -> Option<usize> {
+        let count = line.strip_prefix("running ")?;
+        count
+            .strip_suffix(" tests")
+            .or_else(|| count.strip_suffix(" test"))?
+            .parse()
+            .ok()
+    }
+
+    fn parse_libtest_status(line: &str) -> Option<(&str, CargoTestEventOutcome)> {
+        let stripped = line.strip_prefix("test ")?;
+        let (name, outcome) = stripped.rsplit_once(" ... ")?;
+        let outcome = match outcome {
+            "ok" => CargoTestEventOutcome::Passed,
+            "FAILED" => CargoTestEventOutcome::Failed,
+            "ignored" => CargoTestEventOutcome::Ignored,
+            value if value.starts_with("ignored, ") => CargoTestEventOutcome::Ignored,
+            _ => return None,
+        };
+        Some((name, outcome))
+    }
+
+    fn cargo_test_runner(mut arguments: Vec<OsString>) -> ExitCode {
+        if arguments.is_empty() {
+            return ExitCode::FAILURE;
+        }
+        let program = arguments.remove(0);
+        let executable = program.to_string_lossy().into_owned();
+        let mut command = Command::new(program);
+        command
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let Ok(mut child) = command.spawn() else {
+            return ExitCode::FAILURE;
+        };
+        let Some(mut child_stdout) = child.stdout.take() else {
+            terminate_child(&mut child);
+            return ExitCode::FAILURE;
+        };
+        let emitted = emit_cargo_test_events(
+            &mut child_stdout,
+            &executable,
+            &mut std::io::stdout().lock(),
+        );
+        if emitted.is_err() {
+            terminate_child(&mut child);
+            return ExitCode::FAILURE;
+        }
+        match child.wait() {
+            Ok(status) if status.success() => ExitCode::SUCCESS,
+            Ok(status) => status
+                .code()
+                .and_then(|code| u8::try_from(code).ok())
+                .map(ExitCode::from)
+                .unwrap_or(ExitCode::FAILURE),
+            Err(_) => {
+                terminate_child(&mut child);
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    fn emit_cargo_test_events<Source: Read, Target: Write>(
+        source: &mut Source,
+        executable: &str,
+        target: &mut Target,
+    ) -> std::io::Result<()> {
+        let mut parser = CargoTestOutputParser::default();
+        let mut read_buffer = [0_u8; 8 * 1024];
+        let mut line = Vec::new();
+        let mut discarding = false;
+        loop {
+            let read = source.read(&mut read_buffer)?;
+            if read == 0 {
+                if discarding {
+                    parser.observe_truncated(target)?;
+                } else if !line.is_empty() {
+                    parser.observe_line(&line, executable, target)?;
+                }
+                return Ok(());
+            }
+            for byte in &read_buffer[..read] {
+                if *byte == b'\n' {
+                    if discarding {
+                        parser.observe_truncated(target)?;
+                    } else {
+                        parser.observe_line(&line, executable, target)?;
+                    }
+                    line.clear();
+                    discarding = false;
+                } else if line.len() < MAX_TEST_OUTPUT_LINE_BYTES {
+                    line.push(*byte);
+                } else {
+                    line.clear();
+                    discarding = true;
+                }
+            }
+        }
     }
 
     fn launch(arguments: Vec<OsString>) -> ExitCode {
@@ -1116,6 +1305,88 @@ mod linux {
         use super::*;
 
         const CHILD_FIXTURE_NAME: &str = "linux::tests::child_fixture";
+        const CARGO_TEST_EXECUTABLE: &str = "/workspace/target/debug/deps/example-target";
+        const CARGO_PASSING_TEST: &str = "example::passes";
+        const CARGO_IGNORED_TEST: &str = "example::ignored";
+        const CARGO_FORGED_TEST: &str = "captured::forged";
+        const CARGO_IGNORED_REASON: &str = "platform unavailable";
+
+        #[test]
+        fn cargo_test_runner_frames_declared_outcomes_and_rejects_captured_forgery()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let mut parser = CargoTestOutputParser::default();
+            let mut output = Vec::new();
+            parser.observe_line(b"running 2 tests", CARGO_TEST_EXECUTABLE, &mut output)?;
+            parser.observe_line(
+                format!("test {CARGO_PASSING_TEST} ... ok").as_bytes(),
+                CARGO_TEST_EXECUTABLE,
+                &mut output,
+            )?;
+            parser.observe_line(
+                format!("test {CARGO_IGNORED_TEST} ... ignored, {CARGO_IGNORED_REASON}").as_bytes(),
+                CARGO_TEST_EXECUTABLE,
+                &mut output,
+            )?;
+            parser.observe_line(b"running 1 tests", CARGO_TEST_EXECUTABLE, &mut output)?;
+            parser.observe_line(
+                format!("test {CARGO_FORGED_TEST} ... ok").as_bytes(),
+                CARGO_TEST_EXECUTABLE,
+                &mut output,
+            )?;
+            let first = serde_json::to_string(&CargoTestEvent {
+                reason: "signalbox-test-result",
+                executable: CARGO_TEST_EXECUTABLE,
+                name: CARGO_PASSING_TEST,
+                outcome: CargoTestEventOutcome::Passed,
+            })?;
+            let second = serde_json::to_string(&CargoTestEvent {
+                reason: "signalbox-test-result",
+                executable: CARGO_TEST_EXECUTABLE,
+                name: CARGO_IGNORED_TEST,
+                outcome: CargoTestEventOutcome::Ignored,
+            })?;
+            let expected = format!("{first}\n{second}\n").into_bytes();
+
+            assert_eq!(output, expected);
+            Ok(())
+        }
+
+        #[test]
+        fn cargo_test_runner_accepts_the_singular_libtest_count()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let mut parser = CargoTestOutputParser::default();
+            let mut output = Vec::new();
+            parser.observe_line(b"running 1 test", CARGO_TEST_EXECUTABLE, &mut output)?;
+            parser.observe_line(
+                format!("test {CARGO_PASSING_TEST} ... ok").as_bytes(),
+                CARGO_TEST_EXECUTABLE,
+                &mut output,
+            )?;
+            let expected = serde_json::to_string(&CargoTestEvent {
+                reason: "signalbox-test-result",
+                executable: CARGO_TEST_EXECUTABLE,
+                name: CARGO_PASSING_TEST,
+                outcome: CargoTestEventOutcome::Passed,
+            })? + "\n";
+
+            assert_eq!(String::from_utf8(output)?, expected);
+            Ok(())
+        }
+
+        #[test]
+        fn cargo_test_runner_reports_an_overlong_in_progress_status_line()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let mut parser = CargoTestOutputParser::default();
+            let mut output = Vec::new();
+            parser.observe_line(b"running 1 test", CARGO_TEST_EXECUTABLE, &mut output)?;
+            parser.observe_truncated(&mut output)?;
+            let expected = serde_json::to_string(&CargoTestSourceTruncated {
+                reason: "signalbox-test-source-truncated",
+            })? + "\n";
+
+            assert_eq!(String::from_utf8(output)?, expected);
+            Ok(())
+        }
 
         #[test]
         fn esrch_is_process_absence_evidence() {
