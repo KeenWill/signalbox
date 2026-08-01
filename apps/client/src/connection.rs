@@ -42,17 +42,51 @@ impl ProcessClient {
         self.open(request, RequestDelivery::Mutation).await
     }
 
-    async fn open(
+    pub(crate) async fn setup_request(
         &mut self,
         request: ClientRequest,
-        delivery: RequestDelivery,
     ) -> Result<Connection, ClientError> {
+        self.open(request, RequestDelivery::Setup).await
+    }
+
+    pub(crate) async fn continue_setup_request(
+        &mut self,
+        connection: &mut Connection,
+        request: ClientRequest,
+    ) -> Result<(), ClientError> {
+        let request_id = self.next_request_id()?;
+        connection
+            .send(request_id, request, RequestDelivery::Setup)
+            .await
+    }
+
+    pub(crate) async fn continue_mutation_request(
+        &mut self,
+        connection: &mut Connection,
+        request: ClientRequest,
+    ) -> Result<(), ClientError> {
+        let request_id = self.next_request_id()?;
+        connection
+            .send(request_id, request, RequestDelivery::Mutation)
+            .await
+    }
+
+    fn next_request_id(&mut self) -> Result<RequestId, ClientError> {
         let request_id = RequestId::try_new(self.next_request_id)
             .map_err(|_| ClientError::Protocol("request identity exhausted"))?;
         self.next_request_id = self
             .next_request_id
             .checked_add(1)
             .ok_or(ClientError::Protocol("request identity exhausted"))?;
+        Ok(request_id)
+    }
+
+    async fn open(
+        &mut self,
+        request: ClientRequest,
+        delivery: RequestDelivery,
+    ) -> Result<Connection, ClientError> {
+        let request_id = self.next_request_id()?;
         Connection::open(&self.socket, request_id, request, delivery).await
     }
 }
@@ -60,6 +94,7 @@ impl ProcessClient {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestDelivery {
     ReadOnly,
+    Setup,
     Mutation,
 }
 
@@ -78,14 +113,8 @@ impl Connection {
         request: ClientRequest,
         delivery: RequestDelivery,
     ) -> Result<Self, ClientError> {
-        let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
         let version = ProtocolVersion::One;
-        let frame = ClientFrame::try_new_for_version(version, request_id, request)
-            .map_err(FrameEncodeError::Validation)?;
-        let encoded = encode_client_line(&frame).map_err(|error| match error {
-            FrameEncodeError::OversizedFrame if import_request => ClientError::SourceExceedsFrame,
-            error => ClientError::Encode(error),
-        })?;
+        let encoded = encode_request(version, request_id, request)?;
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
@@ -95,18 +124,34 @@ impl Connection {
             writer,
             partial_frame_line: Vec::new(),
         };
-        connection
-            .writer
-            .write_all(&encoded)
-            .await
-            .map_err(|error| {
-                let error = ClientError::Io(error);
-                match delivery {
-                    RequestDelivery::ReadOnly => error,
-                    RequestDelivery::Mutation => error.mutation(),
-                }
-            })?;
+        connection.write_request(&encoded, delivery).await?;
         Ok(connection)
+    }
+
+    async fn send(
+        &mut self,
+        request_id: RequestId,
+        request: ClientRequest,
+        delivery: RequestDelivery,
+    ) -> Result<(), ClientError> {
+        let encoded = encode_request(self.version, request_id, request)?;
+        self.write_request(&encoded, delivery).await?;
+        self.request_id = request_id;
+        Ok(())
+    }
+
+    async fn write_request(
+        &mut self,
+        encoded: &[u8],
+        delivery: RequestDelivery,
+    ) -> Result<(), ClientError> {
+        self.writer.write_all(encoded).await.map_err(|error| {
+            let error = ClientError::Io(error);
+            match delivery {
+                RequestDelivery::ReadOnly | RequestDelivery::Setup => error,
+                RequestDelivery::Mutation => error.mutation(),
+            }
+        })
     }
 
     pub(crate) async fn message(&mut self) -> Result<ServerMessage, ClientError> {
@@ -124,6 +169,20 @@ impl Connection {
         }
         Ok(frame)
     }
+}
+
+fn encode_request(
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: ClientRequest,
+) -> Result<Vec<u8>, ClientError> {
+    let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
+    let frame = ClientFrame::try_new_for_version(version, request_id, request)
+        .map_err(FrameEncodeError::Validation)?;
+    encode_client_line(&frame).map_err(|error| match error {
+        FrameEncodeError::OversizedFrame if import_request => ClientError::SourceExceedsFrame,
+        error => ClientError::Encode(error),
+    })
 }
 
 fn response_version_is_admitted(expected: ProtocolVersion, frame: &ServerFrame) -> bool {

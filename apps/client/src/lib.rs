@@ -24,18 +24,19 @@ use rustix::{
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationCursor,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, ErrorCode, InputContent, InputDelivery,
-    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
-    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
-    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
-    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
-    ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SystemPromptMember,
-    SystemPromptText, ToolBatchState, ToolDecision, TurnState, decode_server_line,
-    encode_server_line,
+    ConversationOriginFilter, ConversationSummary, ErrorCode, FrameEncodeError, InputContent,
+    InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES,
+    MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
+    ProtocolVersion, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
+    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
+    decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -50,7 +51,6 @@ mod transcript;
 
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
-const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Smallest bounded metadata page the process protocol admits.
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
@@ -134,7 +134,7 @@ impl ConversationsPageRequest {
 }
 
 enum PreparedImport {
-    File(Vec<u8>),
+    File(tokio::fs::File),
     Scan(PreparedImportScan),
 }
 
@@ -274,7 +274,7 @@ async fn execute(
         Command::Import {
             source: ImportSourceArgument::File(path),
             ..
-        } => Some(PreparedImport::File(read_import_source(path).await?)),
+        } => Some(PreparedImport::File(open_import_source(path).await?)),
         Command::Import {
             source: ImportSourceArgument::Scan(path),
             ..
@@ -469,8 +469,8 @@ async fn execute(
         )),
         Command::Import { format, .. } => {
             match prepared_import.ok_or(ClientError::Input("import source was not prepared"))? {
-                PreparedImport::File(source) => {
-                    let outcome = import_conversation(&mut client, format, source).await?;
+                PreparedImport::File(file) => {
+                    let outcome = import_conversation_file(&mut client, format, file).await?;
                     write_single_import_outcome(&mut output, outcome)
                 }
                 PreparedImport::Scan(scan) => {
@@ -549,28 +549,17 @@ async fn execute(
     }
 }
 
-async fn read_import_source(path: &Path) -> Result<Vec<u8>, ClientError> {
-    let file = tokio::fs::File::open(path)
+async fn open_import_source(path: &Path) -> Result<tokio::fs::File, ClientError> {
+    tokio::fs::File::open(path)
         .await
-        .map_err(ClientError::source_file)?;
-    read_import_file(file).await
+        .map_err(ClientError::source_file)
 }
 
-async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
-    let read_limit = MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES
-        .checked_add(1)
-        .ok_or(ClientError::Protocol("import read bound overflow"))?;
-    let read_limit = u64::try_from(read_limit)
-        .map_err(|_| ClientError::Protocol("import read bound is not representable"))?;
-    let mut bounded = file.take(read_limit);
+async fn read_import_file(mut file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
     let mut source = Vec::new();
-    bounded
-        .read_to_end(&mut source)
+    file.read_to_end(&mut source)
         .await
         .map_err(ClientError::source_file)?;
-    if source.len() > MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES {
-        return Err(ClientError::SourceExceedsFrame);
-    }
     Ok(source)
 }
 
@@ -1198,6 +1187,166 @@ fn open_scanned_import_source(
     Ok(tokio::fs::File::from_std(File::from(descriptor)))
 }
 
+fn source_fits_single_shot_import(
+    format: ConversationImportFormat,
+    source: &[u8],
+) -> Result<bool, ClientError> {
+    if source.len() > MAX_FRAME_BYTES / 4 * 3 {
+        return Ok(false);
+    }
+    let frame = ClientFrame::try_new_for_version(
+        ProtocolVersion::One,
+        RequestId::try_new(u64::MAX)
+            .map_err(|_| ClientError::Protocol("maximum request identity is invalid"))?,
+        ClientRequest::ImportConversation {
+            format,
+            source: ConversationImportSource::new(source.to_vec()),
+        },
+    )
+    .map_err(FrameEncodeError::Validation)?;
+    match encode_client_line(&frame) {
+        Ok(_) => Ok(true),
+        Err(FrameEncodeError::OversizedFrame) => Ok(false),
+        Err(error) => Err(ClientError::Encode(error)),
+    }
+}
+
+async fn import_conversation_file(
+    client: &mut ProcessClient,
+    format: ConversationImportFormat,
+    file: tokio::fs::File,
+) -> Result<ConversationImportOutcome, ClientError> {
+    let declared_size_bytes = file
+        .metadata()
+        .await
+        .map_err(ClientError::source_file)?
+        .len();
+    if declared_size_bytes <= u64::try_from(MAX_FRAME_BYTES / 4 * 3).unwrap_or(u64::MAX) {
+        let source = read_import_file(file).await?;
+        import_conversation_source(client, format, source).await
+    } else {
+        import_conversation_chunked(client, format, CanonicalU64::new(declared_size_bytes), file)
+            .await
+    }
+}
+
+async fn import_conversation_source(
+    client: &mut ProcessClient,
+    format: ConversationImportFormat,
+    source: Vec<u8>,
+) -> Result<ConversationImportOutcome, ClientError> {
+    if source_fits_single_shot_import(format, &source)? {
+        import_conversation(client, format, source).await
+    } else {
+        let declared_size_bytes = u64::try_from(source.len())
+            .map(CanonicalU64::new)
+            .map_err(|_| ClientError::Protocol("import source size is not representable"))?;
+        import_conversation_chunked(client, format, declared_size_bytes, source.as_slice()).await
+    }
+}
+
+async fn import_conversation_chunked<Source>(
+    client: &mut ProcessClient,
+    format: ConversationImportFormat,
+    declared_size_bytes: CanonicalU64,
+    mut source: Source,
+) -> Result<ConversationImportOutcome, ClientError>
+where
+    Source: tokio::io::AsyncRead + Unpin,
+{
+    let mut connection = client
+        .setup_request(ClientRequest::BeginConversationImport {
+            format,
+            declared_size_bytes,
+        })
+        .await?;
+    match connection.message().await? {
+        ServerMessage::ConversationImportBegun {
+            declared_size_bytes: admitted,
+        } if admitted == declared_size_bytes => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "conversation import begin returned an unexpected response",
+            ));
+        }
+    }
+
+    let mut assembled_size_bytes = 0_u64;
+    let mut chunk = Vec::with_capacity(MAX_CONVERSATION_IMPORT_CHUNK_BYTES);
+    loop {
+        chunk.clear();
+        (&mut source)
+            .take(u64::try_from(MAX_CONVERSATION_IMPORT_CHUNK_BYTES).unwrap_or(u64::MAX))
+            .read_to_end(&mut chunk)
+            .await
+            .map_err(ClientError::source_file)?;
+        let chunk_size = chunk.len();
+        if chunk_size == 0 {
+            break;
+        }
+        assembled_size_bytes = assembled_size_bytes
+            .checked_add(u64::try_from(chunk_size).map_err(|_| {
+                ClientError::Protocol("conversation import chunk size is not representable")
+            })?)
+            .ok_or(ClientError::Protocol(
+                "conversation import assembled size overflowed",
+            ))?;
+        client
+            .continue_setup_request(
+                &mut connection,
+                ClientRequest::AppendConversationImport {
+                    chunk: ConversationImportSource::new(chunk.clone()),
+                },
+            )
+            .await?;
+        match connection.message().await? {
+            ServerMessage::ConversationImportAppended {
+                assembled_size_bytes: admitted,
+            } if admitted.value() == assembled_size_bytes => {}
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(code, message, detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "conversation import append returned an unexpected response",
+                ));
+            }
+        }
+    }
+
+    client
+        .continue_mutation_request(&mut connection, ClientRequest::CommitConversationImport {})
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::ConversationImportInserted {
+            imported_conversation_id,
+        } => Ok(ConversationImportOutcome::Inserted(
+            imported_conversation_id,
+        )),
+        ServerMessage::ConversationImportAlreadyImported {
+            imported_conversation_id,
+        } => Ok(ConversationImportOutcome::AlreadyImported(
+            imported_conversation_id,
+        )),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol(
+            "conversation import commit returned an unexpected response",
+        )
+        .mutation()),
+    }
+}
+
 async fn import_conversation(
     client: &mut ProcessClient,
     format: ConversationImportFormat,
@@ -1253,11 +1402,7 @@ async fn scan_conversations(
     let mut summary = ImportScanSummary::default();
     for path in scan.paths {
         let outcome = match open_scanned_import_source(&scan.root, &path.relative) {
-            Ok(file) => read_import_file(file).await,
-            Err(error) => Err(error),
-        };
-        let outcome = match outcome {
-            Ok(source) => import_conversation(client, format, source).await,
+            Ok(file) => import_conversation_file(client, format, file).await,
             Err(error) => Err(error),
         };
         match outcome {
@@ -3648,9 +3793,10 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationOriginFilter, ConversationSummary, FrameEncodeError, ImportedContentKind,
-        ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
-        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
+        ConversationImportFormat, ConversationOriginFilter,
+        ConversationSummary, FrameEncodeError, ImportedContentKind, ImportedSessionRelationship,
+        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
+        MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
         ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
         ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
@@ -3667,19 +3813,20 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
+        ConversationImportOutcome, ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES, ProcessClient, ReviewCommand,
         ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest, SnapshotSelection,
         SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
         await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
-        decide, imported, model_call_recovery_transition, open_scanned_import_source, read_input,
-        read_review_json_file, read_system_prompt_file, reconcile_turn, review,
-        review_concern_state_is_coherent, review_finding_event_status,
-        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
-        review_pass_completion_is_coherent, review_publication_state_is_coherent,
-        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
-        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
-        terminal_snapshot_state, tool_recovery_transition,
+        decide, import_conversation_file, imported, model_call_recovery_transition,
+        open_scanned_import_source, read_import_file, read_input, read_review_json_file,
+        read_system_prompt_file, reconcile_turn, review, review_concern_state_is_coherent,
+        review_finding_event_status, review_judgment_effect_state_is_coherent,
+        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
+        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
+        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
+        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -4490,74 +4637,159 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_source_beyond_the_possible_frame_payload_is_read_bounded()
+    async fn import_reader_retains_source_beyond_one_frame() -> Result<(), Box<dyn Error>> {
+        let source_file = tempfile::tempfile()?;
+        let source_size = MAX_FRAME_BYTES + 1;
+        source_file.set_len(u64::try_from(source_size)?)?;
+        let source_file = tokio::fs::File::from_std(source_file);
+
+        let source = read_import_file(source_file).await?;
+
+        assert_eq!(source.len(), source_size);
+        Ok(())
+    }
+
+    #[test]
+    fn import_transport_selects_single_shot_only_when_the_exact_frame_fits()
     -> Result<(), Box<dyn Error>> {
-        let directory = tempfile::tempdir()?;
-        let source_path = directory.path().join("oversized.jsonl");
-        let source_file = std::fs::File::create(&source_path)?;
-        source_file.set_len(u64::try_from(MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES + 1)?)?;
-        let mut input = Cursor::new(Vec::<u8>::new());
-        let mut output = Vec::new();
-        let mut error = Vec::new();
+        let small_source = b"{}\n";
+        let oversized_source = vec![b'x'; MAX_FRAME_BYTES];
 
-        let exit = run(
-            [
-                OsString::from("--socket"),
-                OsString::from("/does/not/exist/hub.sock"),
-                OsString::from("import"),
-                OsString::from("--format"),
-                OsString::from("claude-code"),
-                source_path.into_os_string(),
-            ],
-            None,
-            &mut input,
-            &mut output,
-            &mut error,
-        )
-        .await;
-
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert!(output.is_empty());
-        assert!(
-            String::from_utf8_lossy(&error)
-                .contains("conversation import source cannot fit within the process frame bound")
-        );
+        assert!(source_fits_single_shot_import(
+            ConversationImportFormat::CodexRolloutJsonlV1,
+            small_source,
+        )?);
+        assert!(!source_fits_single_shot_import(
+            ConversationImportFormat::CodexRolloutJsonlV1,
+            &oversized_source,
+        )?);
         Ok(())
     }
 
     #[tokio::test]
-    async fn import_source_at_the_reader_bound_is_encoded_before_connecting()
+    async fn large_file_import_streams_exact_bounded_assembly_and_commits()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
-        let source_path = directory.path().join("boundary.jsonl");
-        let source_file = std::fs::File::create(&source_path)?;
-        source_file.set_len(u64::try_from(MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES)?)?;
-        let mut input = Cursor::new(Vec::<u8>::new());
-        let mut output = Vec::new();
-        let mut error = Vec::new();
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let source = vec![b'x'; MAX_FRAME_BYTES / 4 * 3 + 1];
+        let source_path = directory.path().join("source.jsonl");
+        fs::write(&source_path, &source)?;
+        let source_file = tokio::fs::File::open(source_path).await?;
+        let expected_source = source;
+        let imported_conversation_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
 
-        let exit = run(
-            [
-                OsString::from("--socket"),
-                OsString::from("/does/not/exist/hub.sock"),
-                OsString::from("import"),
-                OsString::from("--format"),
-                OsString::from("claude-code"),
-                source_path.into_os_string(),
-            ],
-            None,
-            &mut input,
-            &mut output,
-            &mut error,
+            reader.read_until(b'\n', &mut line).await?;
+            assert!(line.len() <= MAX_FRAME_BYTES);
+            let begin = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                begin.request(),
+                &ClientRequest::BeginConversationImport {
+                    format: ConversationImportFormat::CodexRolloutJsonlV1,
+                    declared_size_bytes: CanonicalU64::new(
+                        u64::try_from(expected_source.len()).map_err(io::Error::other)?,
+                    ),
+                }
+            );
+            let begun = ServerFrame::try_new_for_version(
+                begin.version(),
+                begin.request_id(),
+                ServerMessage::ConversationImportBegun {
+                    declared_size_bytes: CanonicalU64::new(
+                        u64::try_from(expected_source.len()).map_err(io::Error::other)?,
+                    ),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&begun).map_err(io::Error::other)?)
+                .await?;
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).await?;
+            assert!(line.len() <= MAX_FRAME_BYTES);
+            let first_append = decode_client_line(&line).map_err(io::Error::other)?;
+            let ClientRequest::AppendConversationImport { chunk } = first_append.request() else {
+                panic!("the first source frame is an append");
+            };
+            assert!(chunk.as_bytes() == &expected_source[..MAX_CONVERSATION_IMPORT_CHUNK_BYTES]);
+            let first_appended = ServerFrame::try_new_for_version(
+                first_append.version(),
+                first_append.request_id(),
+                ServerMessage::ConversationImportAppended {
+                    assembled_size_bytes: CanonicalU64::new(
+                        u64::try_from(MAX_CONVERSATION_IMPORT_CHUNK_BYTES)
+                            .map_err(io::Error::other)?,
+                    ),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&first_appended).map_err(io::Error::other)?)
+                .await?;
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).await?;
+            assert!(line.len() <= MAX_FRAME_BYTES);
+            let second_append = decode_client_line(&line).map_err(io::Error::other)?;
+            let ClientRequest::AppendConversationImport { chunk } = second_append.request() else {
+                panic!("the second source frame is an append");
+            };
+            assert!(chunk.as_bytes() == &expected_source[MAX_CONVERSATION_IMPORT_CHUNK_BYTES..]);
+            let second_appended = ServerFrame::try_new_for_version(
+                second_append.version(),
+                second_append.request_id(),
+                ServerMessage::ConversationImportAppended {
+                    assembled_size_bytes: CanonicalU64::new(
+                        u64::try_from(expected_source.len()).map_err(io::Error::other)?,
+                    ),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&second_appended).map_err(io::Error::other)?)
+                .await?;
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).await?;
+            assert!(line.len() <= MAX_FRAME_BYTES);
+            let commit = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                commit.request(),
+                &ClientRequest::CommitConversationImport {}
+            );
+            let inserted = ServerFrame::try_new_for_version(
+                commit.version(),
+                commit.request_id(),
+                ServerMessage::ConversationImportInserted {
+                    imported_conversation_id,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&inserted).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut client = ProcessClient::new(socket);
+
+        let outcome = import_conversation_file(
+            &mut client,
+            ConversationImportFormat::CodexRolloutJsonlV1,
+            source_file,
         )
-        .await;
+        .await?;
 
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert!(output.is_empty());
-        assert!(
-            String::from_utf8_lossy(&error)
-                .contains("conversation import source cannot fit within the process frame bound")
+        assert_eq!(
+            outcome,
+            ConversationImportOutcome::Inserted(imported_conversation_id)
         );
+        server.await??;
         Ok(())
     }
 

@@ -390,7 +390,7 @@ never logs configuration paths, repository URLs, or values. The enrollment
 request identity and daemon-issued receipt are atomically fsynced runtime state
 below the root, not operator-authored configuration.
 
-## The static model, alias, and web-fetch catalog
+## The static model, alias, import, and web-fetch catalog
 
 The file named by `SIGNALBOX_CONFIG_FILE` is a versioned TOML document
 (`config/signalboxd.example.toml` is the checked-in example). Parsing is
@@ -410,6 +410,12 @@ fail-closed:
   unrecognized content fails explicitly instead.
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
+
+The optional `[conversation_import]` table has exactly one `max_source_bytes`
+positive integer. It bounds the exact source bytes retained while one
+per-connection chunked import is assembled. An absent table uses 268,435,456
+bytes (256 MiB). Begin rejects a declaration above the configured value before
+assembly, and commit rechecks the value against the actual appended byte count.
 
 The optional `[web_fetch]` table has exactly one `allowed_origins` array. It
 contains at most 64 distinct bare HTTP(S) origins: scheme, host, and optional

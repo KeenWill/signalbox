@@ -159,6 +159,9 @@ impl DaemonToolConfiguration {
 /// Maximum exact deployment compaction-prompt bytes.
 pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 
+/// Default maximum assembled source bytes for one conversation import.
+pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
+
 /// Validated static model and alias definitions used by hub composition.
 #[derive(Clone, Debug)]
 pub struct HubModelConfiguration {
@@ -172,6 +175,7 @@ pub struct HubModelConfiguration {
     credential_families: ModelCredentialFamilyCatalog,
     codex_cli: Option<CodexCliConfiguration>,
     compaction_prompt: Arc<str>,
+    conversation_import_max_source_bytes: usize,
     web_fetch_egress_policy: WebFetchEgressPolicy,
     daemon_tools: Option<DaemonToolConfiguration>,
 }
@@ -196,6 +200,7 @@ impl HubModelConfiguration {
                 "models",
                 "aliases",
                 "compaction",
+                "conversation_import",
                 "web_fetch",
                 "tool_mappings",
             ],
@@ -216,6 +221,28 @@ impl HubModelConfiguration {
             return Err(HubModelConfigurationError::InvalidCompactionPrompt);
         }
         let compaction_prompt: Arc<str> = Arc::from(compaction_prompt);
+        let conversation_import_max_source_bytes = document
+            .get("conversation_import")
+            .map(|item| {
+                let table = item
+                    .as_table()
+                    .ok_or(HubModelConfigurationError::InvalidConversationImportLimit)?;
+                reject_unknown_fields(table, &["max_source_bytes"])
+                    .map_err(|_| HubModelConfigurationError::InvalidConversationImportLimit)?;
+                let value = table
+                    .get("max_source_bytes")
+                    .and_then(|item| item.as_integer())
+                    .ok_or(HubModelConfigurationError::InvalidConversationImportLimit)?;
+                let value = usize::try_from(value)
+                    .map_err(|_| HubModelConfigurationError::InvalidConversationImportLimit)?;
+                if value == 0 {
+                    Err(HubModelConfigurationError::InvalidConversationImportLimit)
+                } else {
+                    Ok(value)
+                }
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES);
         let web_fetch_egress_policy = document
             .get("web_fetch")
             .map(|item| {
@@ -439,6 +466,7 @@ impl HubModelConfiguration {
             credential_families,
             codex_cli,
             compaction_prompt,
+            conversation_import_max_source_bytes,
             web_fetch_egress_policy,
             daemon_tools,
         })
@@ -533,6 +561,11 @@ impl HubModelConfiguration {
     /// Returns the exact configured compaction system prompt.
     pub fn compaction_prompt(&self) -> &str {
         &self.compaction_prompt
+    }
+
+    /// Returns the maximum assembled source bytes for one conversation import.
+    pub const fn conversation_import_max_source_bytes(&self) -> usize {
+        self.conversation_import_max_source_bytes
     }
 
     /// Returns the exact deployment-owned automatic web-fetch egress policy.
@@ -763,6 +796,8 @@ pub enum HubModelConfigurationError {
     InvalidLimit,
     /// The compaction prompt was empty, oversized, or contained NUL.
     InvalidCompactionPrompt,
+    /// The optional conversation-import byte bound was absent, zero, or invalid.
+    InvalidConversationImportLimit,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
     /// One direct selection appeared more than once.
@@ -818,6 +853,9 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidLimit => "model configuration contains an invalid token limit",
             Self::InvalidCompactionPrompt => {
                 "model configuration contains an invalid compaction prompt"
+            }
+            Self::InvalidConversationImportLimit => {
+                "model configuration contains an invalid conversation import byte limit"
             }
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"
@@ -945,10 +983,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
-        HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
-        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, UnknownSessionModel, credential_bytes,
-        validate_alias_count,
+        ANTHROPIC_CREDENTIAL_REFERENCE, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
+        FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
+        MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
+        UnknownSessionModel, credential_bytes, validate_alias_count,
     };
 
     const CONFIGURATION: &str = r#"
@@ -1024,6 +1062,58 @@ working_directory = "{}"
             .find("[[models]]")
             .expect("fixture has model definitions");
         format!("{}{}", &CONFIGURATION[..start], &CONFIGURATION[end..])
+    }
+
+    #[test]
+    fn conversation_import_bound_defaults_to_256_mib() {
+        let configuration = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the canonical configuration is valid");
+
+        assert_eq!(
+            configuration.conversation_import_max_source_bytes(),
+            DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES
+        );
+    }
+
+    #[test]
+    fn conversation_import_bound_accepts_an_explicit_positive_byte_count() {
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            "[conversation_import]\nmax_source_bytes = 1048576\n\n[compaction]",
+        );
+        let configuration =
+            HubModelConfiguration::parse(&configured).expect("the explicit import bound is valid");
+
+        assert_eq!(
+            configuration.conversation_import_max_source_bytes(),
+            1_048_576
+        );
+    }
+
+    #[test]
+    fn conversation_import_bound_rejects_zero() {
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            "[conversation_import]\nmax_source_bytes = 0\n\n[compaction]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidConversationImportLimit)
+        );
+    }
+
+    #[test]
+    fn conversation_import_bound_rejects_unknown_fields() {
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            "[conversation_import]\nmax_source_bytes = 1048576\nextra = 1\n\n[compaction]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidConversationImportLimit)
+        );
     }
 
     #[test]

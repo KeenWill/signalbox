@@ -304,9 +304,10 @@ descriptor must still name a regular file, so a special-file replacement is
 skipped instead of blocking the scan. Traversal selects only regular files whose
 extension is exactly lowercase `.jsonl`, sorts their full paths, and imposes no
 candidate-count cap. A traversal failure aborts before any request rather than
-hiding an unread subtree. Each candidate is then read and sent through the
-existing `import_conversation` request, one file per request and in that sorted
-order; scan mode adds no protocol request or server-side batching.
+hiding an unread subtree. Each candidate is then read and sent through one
+import operation in that sorted order; scan mode adds no protocol request or
+server-side batching. An operation uses `import_conversation` when the exact
+single-shot frame fits and the chunked request sequence otherwise.
 
 For every candidate, the terminal prints an escaped, quoted local path and one
 `imported`, `already_imported`, or `skipped` outcome. Successful outcomes name
@@ -319,35 +320,57 @@ candidates are processed, while an empty matching set succeeds with zero counts.
 The source path is local presentation only and is never transmitted or
 persisted.
 
-The wire encodes the exact bytes as canonical padded base64. The existing 8 MiB
-frame bound determines whether a complete encoded request fits; the importer
-adds no independent source-size admission rule. The client reads through that
-transport bound rather than allocating from the file's declared size: it stops
-after one byte beyond the greatest raw byte count that padded base64 could
-possibly fit, then rejects that impossible payload before socket I/O. Exact
-encoded-frame construction also happens before socket I/O and remains the final
-fit check. A single-file read failure happens before the request and is reported
-without its path. Scan-mode read and exact-frame-fit failures are reported
-against that candidate and do not truncate its bytes. The server decodes and
-validates canonical base64 once under the existing inbound-frame permit without
-constructing a second full-size canonical encoding. Invalid base64 is a
-malformed frame. A selected converter's content-silent conversion failure is an
-`invalid_request`; database failure is conservatively `commit_ambiguous`, so the
-operator may retry the exact format and source bytes; integrity failure is
-`internal`.
+The wire encodes exact source bytes as canonical padded base64 and retains the 8
+MiB per-frame bound. For a file whose descriptor metadata size could fit one
+frame, the terminal reads the complete bytes, constructs the exact worst-case
+single-shot request envelope, and uses the existing
+`import_conversation { format, source }` request unchanged when that frame fits.
+For a larger file it opens one connection, declares the descriptor metadata size
+in `begin_conversation_import { format, declared_size_bytes }`, streams the file
+through nonempty `append_conversation_import { chunk }` requests carrying at
+most 4 MiB of decoded bytes apiece, and finishes with
+`commit_conversation_import {}`. Acknowledgements echo the declared size at
+begin and cumulative assembled size at each append.
+`abort_conversation_import {}` explicitly discards a partial assembly;
+disconnect has the same effect. Invalid base64 remains a malformed frame.
 
-The daemon selects the fixed converter, supplies UUIDv7 conversation and entry
-candidates, and invokes `ImportConversationService` against the append-only
-Postgres repository. It admits one conversion-and-store operation at a time,
-keeps queued decoded sources inside the existing aggregate inbound-frame budget,
-and executes service conversion away from asynchronous runtime workers. A new
-exact snapshot returns
+The daemon configuration's optional `conversation_import.max_source_bytes` is
+the maximum assembled source size and defaults to 268,435,456 bytes (256 MiB).
+Begin rejects a larger declared size before retaining source bytes. Commit
+rechecks the bound and requires actual appended bytes to equal the declaration,
+so a file that changes size after metadata observation is rejected with both
+exact counts. The assembly and import permit are per-connection state and are
+released on commit, abort, rejection, or disconnect; no persistence migration is
+involved. Commit then supplies the whole assembled source to the same converter
+and `ImportConversationService` call as the single-shot path. Conversion remains
+whole-source and unchanged. The service executes away from asynchronous runtime
+workers against the append-only Postgres repository and admits one in-progress
+or single-shot import at a time.
+
+Every import refusal is `invalid_request` with typed, content-silent evidence.
+State refusals name `conversation_import_already_in_progress` or
+`conversation_import_not_in_progress`. Size refusals name the configured limit,
+declared size, and actual size when commit knows it; a declaration/assembly
+mismatch names both counts. Converter refusal names one of the closed classes
+`empty_source`, `blank_line`, `invalid_utf8`, `invalid_json`,
+`json_depth_exceeded`, `top_level_not_object`, `invalid_record_type`,
+`invalid_source_metadata`, `invalid_message_envelope`, `invalid_message_role`,
+`message_role_mismatch`, `invalid_message_content`, `invalid_content_block`,
+`invalid_tool_result_block`, `invalid_reasoning`, `invalid_tool_call`, or
+`invalid_tool_result`, plus the one-based offending physical-record ordinal when
+the converter knows it. Errors and logs contain classes and ordinals only, never
+source content, source-derived identifiers, paths, or parser excerpts. Database
+failure remains conservatively `commit_ambiguous`, so the operator may retry the
+exact format and source bytes; integrity failure remains `internal`.
+
+A new exact snapshot returns
 `conversation_import_inserted { imported_conversation_id }`; exact reingestion
-returns `conversation_import_already_imported { imported_conversation_id }`
-naming the existing identity. The terminal prints these as distinct `inserted`
-and `already_imported` outcomes with that identity. Neither outcome creates or
-seeds a session, and changed raw-record content or order continues to create a
-new exact snapshot under the identity model above.
+through either transport returns
+`conversation_import_already_imported { imported_conversation_id }` naming the
+existing identity. The terminal prints these as distinct `inserted` and
+`already_imported` outcomes with that identity. Neither outcome creates or seeds
+a session, and changed raw-record content or order continues to create a new
+exact snapshot under the identity model above.
 
 ## Imported-conversation inspection
 
@@ -690,8 +713,8 @@ so neither private corpus is selected implicitly.
 
 ## Open edges
 
-- Exact mappings for further source formats and the unimplemented file-watching,
-  admission, and raw-access surfaces remain in the
+- Exact mappings for further source formats and the unimplemented file-watching
+  and raw-access surfaces remain in the
   [conversation-import questions](../open-questions.md#conversation-import).
 - Rich model rendering of imported source events, content absence, tools,
   results, thinking, and media remains in the
