@@ -660,7 +660,7 @@ another process running as the same trusted user and would falsely imply a
 remote-ready handshake.
 
 One `RunnerEnrollment` binds the enrollment identity, runner identity, opaque
-authentication-reference identity, and user-allowed capability classes. The
+authentication-reference identity, and daemon-allowed capability classes. The
 authentication reference identifies daemon-resident enrollment policy; it is not
 an authentication secret. Enrollment is either active or revoked. Revocation is
 terminal and makes later registration invalid. Complete reconstitution rejects
