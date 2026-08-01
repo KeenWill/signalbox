@@ -1,4 +1,12 @@
-use std::{collections::BTreeSet, error::Error, fmt, fs::File, io::Read, path::Path};
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    fmt,
+    fs::File,
+    io::Read,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -17,8 +25,8 @@ use signalbox_tool_contract::{
 use crate::process::{BWRAP_PROGRAM, SANDBOX_DISPATCH_MARKER};
 use crate::{
     CaptureCompleteness, ExecArguments, ExecResult, ExecToolConstructionError,
-    ExecutionConfinement, OutputEncoding, ProcessOutcome, ProcessRunner, SandboxedCommandRunner,
-    TokioProcessRunner,
+    ExecutionConfinement, OutputEncoding, ProcessOutcome, ProcessRunner, ProcessSpawnFailure,
+    SandboxedCommandRunner, TokioProcessRunner,
 };
 
 /// Catalog name for structured Cargo diagnostics.
@@ -27,6 +35,8 @@ pub const CARGO_DIAGNOSTICS_NAME: &str = "cargo_diagnostics";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 const MAX_TIMEOUT_SECONDS: u64 = 300;
 const DIAGNOSTICS_CAPTURE_BYTES: usize = 512 * 1024;
+const CARGO_HOST_CAPTURE_BYTES: usize = 16 * 1024;
+const MAX_CARGO_HOST_BYTES: usize = 256;
 const MAX_DIAGNOSTICS: usize = 64;
 const MAX_TESTS: usize = 512;
 const MAX_FILE_BYTES: usize = 4096;
@@ -299,25 +309,110 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
         arguments: CargoDiagnosticsArguments,
     ) -> CargoDiagnosticsResult {
         let command = arguments.command;
-        let preserve_native_test_runner = command == CargoDiagnosticsCommand::Test
-            && workspace_configures_native_runner(self.command_runner.pinned_workspace_root());
+        if command == CargoDiagnosticsCommand::Test {
+            return self.run_test(arguments.timeout_seconds).await;
+        }
+        let exec_arguments = cargo_arguments(command, arguments.timeout_seconds, false, "");
+        let result = self
+            .command_runner
+            .run_with_capture(exec_arguments, DIAGNOSTICS_CAPTURE_BYTES)
+            .await;
+        structured_result_with_test_helper(command, result, false)
+    }
+
+    async fn run_test(&mut self, timeout_seconds: u64) -> CargoDiagnosticsResult {
+        let started = Instant::now();
+        let host_result = self
+            .command_runner
+            .run_with_capture(
+                cargo_host_arguments(timeout_seconds),
+                CARGO_HOST_CAPTURE_BYTES,
+            )
+            .await;
+        let Some(cargo_host) = cargo_host(&host_result).map(String::from) else {
+            return structured_result_with_test_helper(
+                CargoDiagnosticsCommand::Test,
+                cargo_host_failure(host_result),
+                false,
+            );
+        };
+        let Some(remaining_seconds) = Duration::from_secs(timeout_seconds)
+            .checked_sub(started.elapsed())
+            .map(|remaining| remaining.as_secs())
+            .filter(|remaining| *remaining > 0)
+        else {
+            let mut timed_out = host_result;
+            timed_out.outcome = ProcessOutcome::TimedOut;
+            return structured_result_with_test_helper(
+                CargoDiagnosticsCommand::Test,
+                timed_out,
+                false,
+            );
+        };
+        let preserve_native_test_runner = workspace_configures_native_runner(
+            self.command_runner.pinned_workspace_root(),
+            &cargo_host,
+        );
         let exec_arguments = cargo_arguments(
-            command,
-            arguments.timeout_seconds,
+            CargoDiagnosticsCommand::Test,
+            remaining_seconds,
             preserve_native_test_runner,
+            &cargo_host,
         );
         let result = self
             .command_runner
             .run_with_capture(exec_arguments, DIAGNOSTICS_CAPTURE_BYTES)
             .await;
-        structured_result_with_test_helper(command, result, !preserve_native_test_runner)
+        structured_result_with_test_helper(
+            CargoDiagnosticsCommand::Test,
+            result,
+            !preserve_native_test_runner,
+        )
     }
+}
+
+fn cargo_host_arguments(timeout_seconds: u64) -> ExecArguments {
+    ExecArguments {
+        program: String::from("cargo"),
+        arguments: vec![String::from("-vV")],
+        working_directory: String::from("."),
+        timeout_seconds,
+    }
+}
+
+fn cargo_host(result: &ExecResult) -> Option<&str> {
+    if result.confinement != ExecutionConfinement::FilesystemConfined
+        || result.outcome != (ProcessOutcome::Exited { code: Some(0) })
+        || result.stdout.completeness != CaptureCompleteness::Complete
+        || result.stdout.encoding != OutputEncoding::Utf8
+    {
+        return None;
+    }
+    result.stdout.text.lines().find_map(|line| {
+        line.strip_prefix("host: ").filter(|host| {
+            !host.is_empty()
+                && host.len() <= MAX_CARGO_HOST_BYTES
+                && host
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    })
+}
+
+fn cargo_host_failure(mut result: ExecResult) -> ExecResult {
+    if result.outcome == (ProcessOutcome::Exited { code: Some(0) }) {
+        result.outcome = ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::Other,
+        };
+    }
+    result
 }
 
 fn cargo_arguments(
     command: CargoDiagnosticsCommand,
     timeout_seconds: u64,
     preserve_native_test_runner: bool,
+    native_target: &str,
 ) -> ExecArguments {
     let arguments = match command {
         CargoDiagnosticsCommand::Check => [
@@ -341,7 +436,9 @@ fn cargo_arguments(
         ]
         .map(String::from)
         .to_vec(),
-        CargoDiagnosticsCommand::Test => cargo_test_arguments(preserve_native_test_runner),
+        CargoDiagnosticsCommand::Test => {
+            cargo_test_arguments(preserve_native_test_runner, native_target)
+        }
     };
     ExecArguments {
         program: String::from("cargo"),
@@ -351,7 +448,7 @@ fn cargo_arguments(
     }
 }
 
-fn cargo_test_arguments(preserve_native_runner: bool) -> Vec<String> {
+fn cargo_test_arguments(preserve_native_runner: bool, native_target: &str) -> Vec<String> {
     let mut arguments = vec![
         String::from("test"),
         String::from("--config"),
@@ -359,7 +456,7 @@ fn cargo_test_arguments(preserve_native_runner: bool) -> Vec<String> {
     ];
     if !preserve_native_runner {
         arguments.push(String::from("--config"));
-        arguments.push(cargo_test_runner_config());
+        arguments.push(cargo_test_runner_config(native_target));
     }
     arguments.extend(
         [
@@ -374,13 +471,13 @@ fn cargo_test_arguments(preserve_native_runner: bool) -> Vec<String> {
     arguments
 }
 
-fn workspace_configures_native_runner(workspace_root: &Path) -> bool {
-    ["config.toml", "config"]
-        .iter()
-        .any(|name| cargo_config_defines_native_runner(&workspace_root.join(".cargo").join(name)))
+fn workspace_configures_native_runner(workspace_root: &Path, native_target: &str) -> bool {
+    ["config.toml", "config"].iter().any(|name| {
+        cargo_config_defines_native_runner(&workspace_root.join(".cargo").join(name), native_target)
+    })
 }
 
-fn cargo_config_defines_native_runner(path: &Path) -> bool {
+fn cargo_config_defines_native_runner(path: &Path, native_target: &str) -> bool {
     let Ok(metadata) = path.symlink_metadata() else {
         return false;
     };
@@ -399,7 +496,7 @@ fn cargo_config_defines_native_runner(path: &Path) -> bool {
     {
         return true;
     }
-    config_text_defines_native_runner(&contents, env!("SIGNALBOX_EXECUTION_TARGET"))
+    config_text_defines_native_runner(&contents, native_target)
 }
 
 fn config_text_defines_native_runner(contents: &str, native_target: &str) -> bool {
@@ -420,11 +517,8 @@ fn config_text_defines_native_runner(contents: &str, native_target: &str) -> boo
         })
 }
 
-fn cargo_test_runner_config() -> String {
-    format!(
-        "target.'{}'.runner={CARGO_TEST_RUNNER}",
-        env!("SIGNALBOX_EXECUTION_TARGET")
-    )
+fn cargo_test_runner_config(native_target: &str) -> String {
+    format!("target.'{native_target}'.runner={CARGO_TEST_RUNNER}")
 }
 
 /// Structured, bounded result from one Cargo diagnostic pass.
@@ -626,7 +720,7 @@ fn structured_result_with_test_helper(
     test_helper_installed: bool,
 ) -> CargoDiagnosticsResult {
     let source_truncated = result.stdout.completeness == CaptureCompleteness::Truncated;
-    let mut test_source_truncated = source_truncated;
+    let mut test_source_truncated = command == CargoDiagnosticsCommand::Test && source_truncated;
     let mut diagnostics = Vec::new();
     let mut tests = Vec::new();
     let mut diagnostic_limit_reached = false;
@@ -934,6 +1028,7 @@ mod tests {
     const TEST_COUNT: usize = [PASSING_TEST, FAILING_TEST, IGNORED_TEST].len();
     const BOUNDED_TEXT_FIXTURE: &str = "abcé";
     const BOUNDED_TEXT_LIMIT: usize = 4;
+    const TEST_NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
 
     #[derive(Clone, Debug)]
     struct FakeRunner {
@@ -967,11 +1062,20 @@ mod tests {
         }
 
         async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
+            let is_cargo_host_query = request.arguments.contains(&OsString::from("-vV"));
             self.requests
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(request);
-            self.result.clone()
+            if is_cargo_host_query {
+                process_result(
+                    ProcessOutcome::Exited { code: Some(0) },
+                    &format!("cargo 1.0.0\nhost: {TEST_NATIVE_TARGET}\n"),
+                    CaptureCompleteness::Complete,
+                )
+            } else {
+                self.result.clone()
+            }
         }
     }
 
@@ -1262,6 +1366,17 @@ mod tests {
 
         assert_eq!(text, &BOUNDED_TEXT_FIXTURE[..3]);
         assert_eq!(completeness, CaptureCompleteness::Truncated);
+    }
+
+    #[test]
+    fn truncated_check_output_does_not_claim_truncated_test_evidence() {
+        let mut execution = exited_exec_result(compiler_message());
+        execution.stdout.completeness = CaptureCompleteness::Truncated;
+
+        let result = structured_result(CargoDiagnosticsCommand::Check, execution);
+
+        assert!(result.diagnostics.source_truncated);
+        assert!(!result.tests.source_truncated);
     }
 
     #[test]
@@ -1556,8 +1671,13 @@ mod tests {
 
     #[test]
     fn cargo_test_arguments_keep_no_fail_fast_before_workspace_flags() {
-        let arguments = cargo_arguments(CargoDiagnosticsCommand::Test, 300, false);
-        let runner_config = cargo_test_runner_config();
+        let arguments = cargo_arguments(
+            CargoDiagnosticsCommand::Test,
+            300,
+            false,
+            TEST_NATIVE_TARGET,
+        );
+        let runner_config = cargo_test_runner_config(TEST_NATIVE_TARGET);
 
         assert_eq!(
             arguments.arguments,
@@ -1575,14 +1695,15 @@ mod tests {
             ]
             .map(String::from)
         );
-        assert!(runner_config.contains(env!("SIGNALBOX_EXECUTION_TARGET")));
+        assert!(runner_config.contains(TEST_NATIVE_TARGET));
         assert!(!runner_config.contains("cfg(all())"));
         assert_eq!(arguments.working_directory, ".");
     }
 
     #[test]
     fn cargo_test_arguments_preserve_a_configured_native_runner() {
-        let arguments = cargo_arguments(CargoDiagnosticsCommand::Test, 300, true);
+        let arguments =
+            cargo_arguments(CargoDiagnosticsCommand::Test, 300, true, TEST_NATIVE_TARGET);
 
         assert_eq!(
             arguments.arguments,
@@ -1602,7 +1723,7 @@ mod tests {
 
     #[test]
     fn cargo_config_runner_detection_distinguishes_native_foreign_and_cfg_tables() {
-        let native_target = env!("SIGNALBOX_EXECUTION_TARGET");
+        let native_target = TEST_NATIVE_TARGET;
         let native = format!("[target.'{native_target}']\nrunner = 'native-wrapper'\n");
         let quoted_runner = format!("[target.'{native_target}']\n\"runner\" = 'quoted-wrapper'\n");
         let dotted_runner = format!("target.'{native_target}'.\"runner\" = 'dotted-wrapper'\n");
@@ -1620,5 +1741,16 @@ mod tests {
         ));
         assert!(!config_text_defines_native_runner(foreign, native_target));
         assert!(config_text_defines_native_runner(configured, native_target));
+    }
+
+    #[test]
+    fn cargo_host_accepts_the_runtime_cargo_host_triple() {
+        let result = exited_exec_result(format!(
+            "cargo 1.0.0\nrelease: 1.0.0\nhost: {TEST_NATIVE_TARGET}\n"
+        ));
+
+        let host = cargo_host(&result);
+
+        assert_eq!(host, Some(TEST_NATIVE_TARGET));
     }
 }
