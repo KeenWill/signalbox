@@ -742,6 +742,45 @@ next-attempt or atomic result-projection-and-continuation transaction instead of
 failing the turn or waiting for process-local wake state. Restart never requires
 the current continuation attempt to disappear.
 
+## Session-delegation tool family
+
+This section is the foundation proposal at the bottom of the delegation stack.
+The daemon catalog adds three automatic, daemon-local tools. Their invoking
+session, turn, and request always come from trusted dispatch correlation and
+never from model arguments.
+
+- `spawn_session` takes `task` plus a `relationship` object. The relationship is
+  either `background`, or `bound` with separately labeled `on_parent_stopped`
+  and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`). It
+  atomically creates one delegated, no-ancestry child and its initial task work,
+  then returns the child session identity. Equal physical replay of the same
+  logical request returns that child; a second child cannot attach to the
+  request. The thirty-third active direct child is refused.
+- `await_session` takes the related child identity and `foreground` or
+  `background`. Foreground converts the exact logical request into a durable
+  child wait and produces its tool result only when the child's delivered
+  content or typed terminal outcome exists. Background records delivery and
+  immediately returns a registration receipt; completion later wakes the parent.
+  A result already present is delivered immediately in either mode.
+- `send_session_message` takes the related peer identity and bounded nonempty
+  content. It verifies that the invoker is exactly the parent or child, appends
+  the next relationship message, and returns its identity and ordinal. Either
+  side may call it while the other is active, idle, stopped, or cancelled.
+
+`await_session` foreground parking is a logical tool transition, not a physical
+executor kept in flight. It ends any current physical attempt before committing
+`AwaitingChild`; restart therefore resumes from durable wait/result rows and
+cannot duplicate an external effect. The delivered tool result is copied from
+the child's terminal result record. The executor never reads or returns the
+child transcript.
+
+The child's normal terminal completion transaction materializes its definitive
+returned text as `ToolResultContent`; failed, stopped, and cancelled terminal
+paths materialize their closed outcome instead. This copy is part of the child
+transition, not a later transcript projection. Duplicate observation is
+idempotent by spawning request and cannot attach a late result to another parent
+tool call.
+
 ## Provider bridge and daemon catalog
 
 The provider-neutral application operation carries ordered conversation messages

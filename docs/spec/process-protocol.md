@@ -197,7 +197,7 @@ that variant.
 | `attach_goal`                           | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Attach the first immutable commissioned statement and begin pursuing it.                                                                                                                                                                                                                                                                                                        |
 | `read_goal`                             | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read the current goal projection and complete ordered lineage.                                                                                                                                                                                                                                                                                                                  |
 | `resume_goal`                           | `command_id` and `session_id` (canonical UUID strings), `guidance` (string or null)                                                                                                                                                                                      | Resume the blocked current generation, optionally using exact guidance as its next turn input.                                                                                                                                                                                                                                                                                  |
-| `stop_goal`                             | `command_id` and `session_id` (canonical UUID strings)                                                                                                                                                                                                                   | Terminalize the pursuing or blocked current generation by explicit user action.                                                                                                                                                                                                                                                                                                 |
+| `stop_goal`                             | `command_id` and `session_id` (canonical UUID strings), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                                                                                                                                  | Terminalize the pursuing or blocked current generation by explicit user action, with an explicit delegated-child scope.                                                                                                                                                                                                                                                         |
 | `supersede_goal`                        | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Atomically supersede the current generation and begin pursuing a new immutable statement in the same lineage.                                                                                                                                                                                                                                                                   |
 | `submit_input`                          | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string, or null only for steering), and optional `delivery`                                                                                   | Submit exact user text with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                                                                                                                                                           |
 | `read_transcript`                       | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                                                                                                                                                  |
@@ -209,7 +209,7 @@ that variant.
 | `create_session_from_imported_frontier` | `command_id` and `imported_conversation_id` (canonical UUID strings), `through_position` (positive canonical decimal string), `relationship` (`resume` or `fork`), `initial_model_selection` (selection object), `runner_placement` (proposed; placement object or null) | Create an independent live session seeded through the selected inclusive imported position.                                                                                                                                                                                                                                                                                     |
 | `replace_session_defaults`              | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean), `system_prompt` (string or null)                                         | Install one complete immutable defaults epoch as the user actor, conditional on the exact current epoch.                                                                                                                                                                                                                                                                        |
 | `reconcile_turn`                        | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                           | Supply the user reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                                                                                                                                                            |
-| `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                           | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin.                                                                                                                                                                                                                                                         |
+| `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                          | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin and explicitly selecting delegated-child scope.                                                                                                                                                                                                          |
 | `decide_tool_request`                   | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                         | Supply the user decision for one pending tool request through the canonical decision command.                                                                                                                                                                                                                                                                                   |
 | `read_session_defaults`                 | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                              | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                                                                                                                                                          |
 | `list_conversations`                    | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                      | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                                                                                                                                                  |
@@ -1341,6 +1341,52 @@ The wire snapshot is a presentation projection, not a domain `Session`, a
 storage record, or a provider prompt. Unknown stored variants fail closed until
 the process protocol explicitly maps them.
 
+## Session-delegation process surface
+
+This section is the foundation proposal at the bottom of the delegation stack.
+The model-facing tool names and arguments are owned by
+[tool-loop](tool-loop.md#session-delegation-tool-family). The process surface
+admits their exact already-issued work for terminal operation and recovery; it
+does not let a client fabricate model provenance. `spawn_session`,
+`await_session`, and `send_session_message` therefore each carry the invoking
+session, turn, and `tool_request_id`, which must reconstitute one matching
+logical request before any mutation occurs.
+
+`spawn_session` additionally carries bounded `task` and the closed relationship
+object, and returns
+`session_spawned { tool_request_id, child_session_id, relationship }`.
+`await_session` carries the related child and wait mode, and returns either
+`session_await_registered { tool_request_id, child_session_id, mode }` for
+background or the already-delivered child outcome for foreground.
+`send_session_message` carries the related peer and bounded content, and returns
+`session_message_sent { tool_request_id, message_id, direction, ordinal }`.
+Replaying an already-applied logical request returns its recorded receipt.
+
+Session-follow updates add these closed event shapes:
+
+- `child_spawned { spawning_request_id, child_session_id, relationship }`;
+- `child_waiting { await_request_id, spawning_request_id, child_session_id, mode }`;
+- `delegation_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, content }`;
+- `child_result { spawning_request_id, child_session_id, outcome, content, child_turn_id, child_tool_request_id }`,
+  where content is present only for `returned` and the other outcomes are
+  `failed`, `stopped`, or `cancelled`;
+- `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, parent_session_id, parent_turn_id, command_id }`,
+  including `continue_running`; and
+- `delegation_wake { spawning_request_id, subject }`, where subject is the exact
+  result or message identity that made the followed session eligible.
+
+The same durable fact may appear once on the parent and once on the child stream
+when both are affected; each event's own `session_id` identifies its stream.
+Cursor ordering, snapshot-first follow, deduplication, and resync rules are
+unchanged. No event embeds or links the child transcript.
+
+`descendant_scope` is required on both `stop_goal` and `stop_turn`. The terminal
+client spells omission as `parent_alone` and `--descendants` as
+`parent_and_descendants`; it never guesses from the relationship policy. A
+successful cascade receipt includes the selected scope and the exact count of
+recorded descendant dispositions, so a zero-child choice and an unperformed
+cascade cannot be confused.
+
 ## Durable update dispatch
 
 `DATABASE_URL` must name a direct or otherwise session-affine PostgreSQL
@@ -1582,7 +1628,7 @@ below. The client accepts a global `--socket <path>` override or reads
 - `goal attach <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
 - `goal show <session-uuid>`;
 - `goal resume <session-uuid> [--guidance <text> | --guidance-file <path>] [--command-id <uuid>]`;
-- `goal stop <session-uuid> [--command-id <uuid>]`;
+- `goal stop <session-uuid> [--descendants] [--command-id <uuid>]`;
 - `goal supersede <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `send <session-uuid> --queue [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
@@ -1593,7 +1639,10 @@ below. The client accepts a global `--socket <path>` override or reads
 - conversation import operations described by the
   [conversation-import operational surface](conversation-import.md#operational-surface);
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
-- `stop <session-uuid> [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
+- `stop <session-uuid> [--descendants] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
+- `session spawn <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> (--task <text> | --task-file <path>) (--background | --bound --on-parent-stopped <keep-running|stop|cancel> --on-parent-cancelled <keep-running|stop|cancel>)`;
+- `session await <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> <child-session-uuid> --mode <foreground|background>`;
+- `session message <sender-session-uuid> <sender-turn-uuid> <tool-request-uuid> <peer-session-uuid> (--content <text> | --content-file <path>)`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
 - `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
 - `runner status`;
@@ -1602,6 +1651,14 @@ below. The client accepts a global `--socket <path>` override or reads
 - `runner promote --pending-enrollment <request-uuid> [--command-id <uuid>]`;
   and
 - `chat <session-uuid>`.
+
+Delegation mutations print the exact spawning or awaiting request, child or peer
+session, closed mode/policy, and recorded message/result identity. Follow and
+chat render child results as delivered content labeled with the child session;
+they never inline the child transcript. Lifecycle lines always show outcome,
+typed reason, and provenance, including `continue_running`. Background result
+wakes are labeled separately from foreground tool-result continuation so a user
+can see whether an old turn resumed or a new parent turn became eligible.
 
 `chat` is the plain line-oriented interactive surface for one live session. It
 opens one long-lived `follow_session` connection before accepting input and

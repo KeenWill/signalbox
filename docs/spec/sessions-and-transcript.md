@@ -876,6 +876,63 @@ provider-neutral messages and binds the frozen epoch's optional session system
 prompt; multi-source system-prompt composition remains deferred under the open
 edges of [model-call-execution](model-call-execution.md).
 
+## Session delegation
+
+This section is the foundation proposal at the bottom of the session-delegation
+stack and becomes verified only with that stack's scheduling and tool/client
+pull requests. A delegated child is a distinct, independently browsable session.
+Its `SessionCreationCause::Delegated` names the exact spawning `ToolRequestId`;
+its `TranscriptAncestry` is independently `None`. Delegation does not copy,
+reference, merge, or expose the parent transcript, and it does not widen the
+none-or-one ancestry baseline.
+
+Each spawning request creates at most one immutable parent/child relationship.
+The relationship records the exact parent session and turn, child session, and
+one parent-chosen policy:
+
+- `Background` never derives a child stop or cancellation from a parent state;
+- `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
+  each exactly `KeepRunning`, `Stop`, or `Cancel`.
+
+A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
+`ParentAlone` does not evaluate descendants. The descendant form walks the
+durable relationship tree: background edges and bound `KeepRunning` edges
+produce explicit continue-running dispositions, while bound stop/cancel actions
+produce the corresponding typed outcome. Every evaluated relationship records an
+outcome with the parent event, exact spawn request, and user command provenance.
+No path deletes the child or its history, and neither a continued child nor a
+terminated child can become a silent orphan or silent kill.
+
+One parent may have at most 32 active direct children. The fixed bound is part
+of admission, needs no configuration knob, and does not bound completed
+relationships or descendant depth. Exceeding it is a typed spawn refusal and
+creates no child.
+
+Delegation messages are immutable, bounded, nonempty content records with a
+distinct `SessionMessageId`, the spawning relationship, exact sender and
+recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
+child may each send to the other. `DelegationMessage` semantic entries refer to
+those records; they do not reclassify model-authored content as input from the
+user. Undelivered messages remain FIFO. An active recipient consumes them at the
+next model-call safe point in ordinal order. An idle recipient gets one
+delegation-origin queued turn, and further messages coalesce into its starting
+frontier in the same order until activation.
+
+A child result is delivered content, never transcript access. Its immutable
+record targets the exact spawning request and carries either the returned
+`ToolResultContent` or a typed failed, stopped, or cancelled outcome together
+with exact child turn/tool provenance. Delivery appends a `DelegationResult`
+semantic entry only to the target parent and is idempotent by the spawning
+request. A detached child may return after the parent has stopped or cancelled;
+the result remains durable and independently inspectable even when no parent
+turn can consume it.
+
+**Committed unimplemented functionality.** A spawned child defaults into its
+parent's directory. No present delegation or placement surface implements or
+derives this default; its implementation is deferred to the session-placement
+surface. This compatibility constraint does not copy the parent's complete
+placement and this stack implements no placement logic.
+
 ## Open edges
 
 - Native fork creation remains typed but unimplemented: `SingleSource` ancestry
@@ -895,9 +952,9 @@ edges of [model-call-execution](model-call-execution.md).
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant text, tool-use/result references, completed-turn, steering, and
-  cancelled-turn semantic entries are implemented; refusal, reconciliation,
-  approval-event, and delegation entry variants remain open.
+- Assistant text, tool-use/result references, completed-turn, steering,
+  cancelled-turn, delegation-message, and delegation-result semantic entries are
+  implemented; refusal, reconciliation, and approval-event variants remain open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so

@@ -785,6 +785,47 @@ outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so the grace
 window buys only latency. Repositories and services are cheap per-invocation
 clones over the shared pool; no shared locked service instance exists.
 
+## Delegated waits, messages, and wake turns
+
+This section is the session-delegation foundation proposal and becomes verified
+only with its implementing child pull requests.
+`AwaitingChild { request, child }` is an active phase with no current attempt.
+It names the exact foreground `await_session` request and related child, retains
+the parent's sole progressing-turn slot, and survives restart unchanged until
+that relationship has one deliverable terminal result. Result consumption
+atomically appends the parent's delivered-result entry, returns the result as
+that tool request's content, and moves the same turn back to running with a
+fresh continuation attempt. A raw child identity or an unrelated result cannot
+release the wait.
+
+A background await instead commits a delivery registration and returns its
+receipt immediately. It does not create `AwaitingChild` or retain the slot; the
+current turn may continue and end normally. Child result commit appends one
+parent-scoped `DelegationWake` event and makes the parent eligible for a new
+delegation-origin turn. A missing in-process nudge changes only latency: the
+eligibility sweep includes both a foreground wait with a deliverable result and
+an undelivered background result.
+
+Pending inter-session messages use the same safety pattern. An active recipient
+consumes its FIFO inbox at the next model-call safe point. An idle recipient has
+at most one queued delegation-origin wake turn; later messages coalesce into
+that turn's starting frontier until activation. Reconstitution checks message
+ordinal, relationship, sender/recipient, and semantic-entry identity before any
+content becomes model-visible.
+
+Parent termination evaluates descendants only when its explicit scope is
+`ParentAndDescendants`. The transaction locks the relationship frontier before
+applying each edge's background/bound policy and records one typed disposition
+per evaluated edge. `ParentAlone`, background, and bound `KeepRunning` never
+fabricate child stop authority. Stop/cancel outcomes carry their parent event,
+spawn request, and user-command provenance; partial or unrecorded propagation
+does not commit. Detached child work stays independently schedulable after the
+parent's turn or goal has terminalized.
+
+Startup and the periodic sweep recognize child waits, pending delegation inbox
+content, and undelivered results from durable rows. They neither infer a result
+from child transcript state nor depend on process-local wake memory.
+
 ## Open edges
 
 - Direct fatal terminalization has sealed domain derivation values
@@ -808,12 +849,11 @@ clones over the shared pool; no shared locked service instance exists.
   the atomic boundary in [tool-loop](tool-loop.md).
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
-  `awaiting_model_call_recovery`) and tool-loop evidence; delegated-result waits
-  remain deferred with delegation. A user reconciliation decision is the only
-  implemented resolution for that park: no automatic resolution exists, because
-  the terminal disposition it produces is proof-bearing and the durable evidence
-  supplies no authority to construct. Resolving the ambiguity itself from
-  provider evidence remains an
+  `awaiting_model_call_recovery`), tool-loop evidence, and delegated-result
+  waits. A user reconciliation decision is the only implemented resolution for
+  that park: no automatic resolution exists, because the terminal disposition it
+  produces is proof-bearing and the durable evidence supplies no authority to
+  construct. Resolving the ambiguity itself from provider evidence remains an
   [open question](../open-questions.md#turn-lifecycle); the tool-attempt
   ambiguity wait keeps its own operator surface deferred with that question.
 - Per-session scan gating, sweep interval, and fairness tuning remain

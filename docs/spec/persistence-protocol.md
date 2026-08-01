@@ -890,6 +890,58 @@ The model-call repository additionally resolves an ambiguous authorization
 commit by rereading exact durable authority (`reread_ambiguous_authorization`)
 rather than only surfacing the flag.
 
+## Delegation storage and locking
+
+This section is the foundation proposal for migration
+`202608020018_session_delegation.sql` and becomes verified only with the full
+delegation stack. The migration widens `session.creation_cause` with
+`delegated`, adds the spawning request column required only by that cause, and
+keeps `ancestry_kind = none` as an independent required fact. The deferred
+session-creation-family check admits a delegated session only when one complete
+`session_delegation` row names it; user and imported creation families remain
+unchanged.
+
+`session_delegation` is append-only and keyed by the globally unique spawning
+`tool_request_id`. It correlates that request's parent session and turn, one
+unique child session, the closed relationship-policy kind, and the two bound
+actions where required. Composite foreign keys prevent cross-session request
+use. Admission locks the parent relationship inventory, counts only active
+direct children, rejects the thirty-third, and inserts the child session,
+scheduler/default rows, initial task work, relationship, and spawn event in one
+transaction.
+
+`session_delegation_event` is an append-only per-relationship ordinal stream.
+Its closed kind/shape checks require every lifecycle disposition to carry one
+typed reason and complete provenance columns: the spawning request, relevant
+parent session/turn event, and either the sending/declaring tool request or the
+user durable command. Continue-running is a real event kind, not absence of a
+terminal row. Deferred relationship-state checks reject a terminal or continued
+outcome without its event, two terminal outcomes, ordinal gaps, and an event
+whose reason/provenance shape does not match its kind.
+
+`session_delegation_wait` records the exact awaiting tool request, relationship,
+parent turn, and foreground/background mode. A foreground row correlates the
+turn's `awaiting_child` phase; a background row cannot. `session_message` is
+append-only, uniquely orders messages per relationship, and requires exact
+parent/child sender and recipient plus the sending tool request.
+`session_child_result` has at most one row per spawning request and carries
+exactly one returned-text, failed, stopped, or cancelled shape with child
+turn/tool provenance. Delivery satellites bind messages/results to their exact
+semantic entries; no transcript query supplies result content.
+
+Parent-and-descendants termination locks relationship rows in stable spawning
+request order before it writes any disposition. The command and every evaluated
+edge commit together; a crash can leave all prior durable state or the complete
+typed evaluation, never an unrecorded partial cascade. Parent-alone takes no
+descendant authority. Background and bound-keep-running edges still receive a
+continue-running event when evaluated.
+
+The scheduler sweep treats a deliverable foreground result, an undelivered
+background result, and a pending message inbox as durable hints. Result/message
+commit also writes a parent- or recipient-scoped `delegation_wake` outbox event
+in the same transaction. The ordinary nudge remains best effort and the durable
+predicate is authoritative after restart.
+
 ## Transactional outbox
 
 Committed client-observable transitions become update events only through the
