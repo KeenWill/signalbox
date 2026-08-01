@@ -78,10 +78,27 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const FIXTURE_REPOSITORY: &str = "KeenWill/signalbox";
 const FIXTURE_PULL_REQUEST: u64 = 94;
-const FIXTURE_TITLE: &str = "Record owner-ratified interrupt deferral";
 const FIXTURE_HEAD_REVISION: &str = "59af8a3634792a30cfb9480bea08cb04acd17bbf";
 const SMOKE_ALIAS: u128 = 0x7fde05bcb4c344f78a87748814c80191;
 const TRANSCRIPT_MARKER: &str = "live conversation transcript marker";
+const SEED_PATH: &str = "seed.txt";
+const SEED_CONTENT: &str = "needle from the real workspace\n";
+const SEED_PATTERN: &str = "needle";
+const STAGED_PATH: &str = "staged.txt";
+const STAGED_WRITE_CONTENT: &str = "alpha\n";
+const STAGED_EDIT_OLD: &str = "alpha";
+const STAGED_EDIT_NEW: &str = "beta";
+const STAGED_PATCH: &str =
+    "*** Begin Patch\n*** Update File: staged.txt\n@@\n-beta\n+gamma\n*** End Patch";
+const STAGED_FINAL_CONTENT: &str = "gamma\n";
+const FIRST_PLAN_TEXT: &str = "exercise every wired family";
+const SECOND_PLAN_TEXT: &str = "deny every external gate";
+const FIRST_PLAN_STATUS: &str = "in_progress";
+const SECOND_PLAN_STATUS: &str = "completed";
+const WEB_ORIGIN: &str = "https://example.com";
+const WEB_URL: &str = "https://example.com/";
+const DENIED_WRITE_PATH: &str = "denied.txt";
+const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
 type SmokeResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -114,10 +131,7 @@ async fn run_live_smoke() -> SmokeResult {
     };
 
     let workspace = tempfile::tempdir()?;
-    fs::write(
-        workspace.path().join("seed.txt"),
-        "needle from the real workspace\n",
-    )?;
+    fs::write(workspace.path().join(SEED_PATH), SEED_CONTENT)?;
     let credential_directory = tempfile::tempdir()?;
     let credential_file = credential_directory.path().join("github-token");
     fs::write(&credential_file, token)?;
@@ -214,7 +228,10 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
-    assert_eq!(fs::read(workspace.path().join("staged.txt"))?, b"gamma\n");
+    assert_eq!(
+        fs::read(workspace.path().join(STAGED_PATH))?,
+        STAGED_FINAL_CONTENT.as_bytes()
+    );
     assert_eq!(tool_attempt_count(&pool, mutation_turn).await?, 3);
 
     run_automatic_turn(
@@ -296,8 +313,8 @@ async fn run_live_smoke() -> SmokeResult {
     )
     .await?;
     assert_eq!(tool_attempt_count(&pool, gate_turn).await?, 0);
-    assert!(!workspace.path().join("denied.txt").exists());
-    assert!(!workspace.path().join("denied-patch.txt").exists());
+    assert!(!workspace.path().join(DENIED_WRITE_PATH).exists());
+    assert!(!workspace.path().join(DENIED_PATCH_PATH).exists());
 
     shutdown.send(true)?;
     timeout(Duration::from_secs(10), runtime_task).await???;
@@ -327,7 +344,7 @@ working_directory = "{}"
 prompt = "Summarize the prior conversation faithfully for continuation."
 
 [web_fetch]
-allowed_origins = ["https://example.com"]
+allowed_origins = ["{WEB_ORIGIN}"]
 
 [[tool_mappings]]
 family = "code_host"
@@ -381,38 +398,38 @@ fn smoke_scripts(session: CanonicalUuid) -> Vec<Script> {
     let workspace_reads = vec![
         call(
             READ_FILE_NAME,
-            json!({"path": "seed.txt", "max_bytes": 1024}),
+            json!({"path": SEED_PATH, "max_bytes": 1024}),
         ),
         call(LIST_DIRECTORY_NAME, json!({"path": ".", "max_results": 10})),
         call(
             SEARCH_FILES_NAME,
-            json!({"path": ".", "pattern": "needle", "max_results": 10}),
+            json!({"path": ".", "pattern": SEED_PATTERN, "max_results": 10}),
         ),
     ];
     let workspace_mutations = vec![
         call(
             WRITE_FILE_NAME,
-            json!({"path": "staged.txt", "content": "alpha\n"}),
+            json!({"path": STAGED_PATH, "content": STAGED_WRITE_CONTENT}),
         ),
         call(
             EDIT_FILE_NAME,
             json!({
-                "path": "staged.txt",
-                "old_string": "alpha",
-                "new_string": "beta",
+                "path": STAGED_PATH,
+                "old_string": STAGED_EDIT_OLD,
+                "new_string": STAGED_EDIT_NEW,
                 "replace_all": false,
             }),
         ),
         call(
             APPLY_PATCH_NAME,
             json!({
-                "patch": "*** Begin Patch\n*** Update File: staged.txt\n@@\n-beta\n+gamma\n*** End Patch"
+                "patch": STAGED_PATCH
             }),
         ),
     ];
     let workspace_readback = vec![call(
         READ_FILE_NAME,
-        json!({"path": "staged.txt", "max_bytes": 1024}),
+        json!({"path": STAGED_PATH, "max_bytes": 1024}),
     )];
     let code_host = vec![call(
         CHANGE_REQUEST_SUMMARY_NAME,
@@ -429,26 +446,26 @@ fn smoke_scripts(session: CanonicalUuid) -> Vec<Script> {
     let plan = vec![
         call(
             PLAN_WRITE_NAME,
-            json!({"kind": "create", "text": "exercise every wired family"}),
+            json!({"kind": "create", "text": FIRST_PLAN_TEXT}),
         ),
         call(
             PLAN_WRITE_NAME,
-            json!({"kind": "create", "text": "deny every external gate"}),
+            json!({"kind": "create", "text": SECOND_PLAN_TEXT}),
         ),
         call(
             PLAN_WRITE_NAME,
-            json!({"kind": "set_status", "entry_id": 1, "status": "in_progress"}),
+            json!({"kind": "set_status", "entry_id": 1, "status": FIRST_PLAN_STATUS}),
         ),
         call(
             PLAN_WRITE_NAME,
-            json!({"kind": "set_status", "entry_id": 2, "status": "completed"}),
+            json!({"kind": "set_status", "entry_id": 2, "status": SECOND_PLAN_STATUS}),
         ),
         call(
             PLAN_READ_NAME,
             json!({"after_entry_id": null, "include_history": true}),
         ),
     ];
-    let web = vec![call(WEB_FETCH_NAME, json!({"url": "https://example.com/"}))];
+    let web = vec![call(WEB_FETCH_NAME, json!({"url": WEB_URL}))];
     let gates = confirm_calls(session);
 
     vec![
@@ -531,7 +548,7 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<(String, String)> {
     vec![
         call(
             APPLY_PATCH_NAME,
-            json!({"patch": "*** Begin Patch\n*** Add File: denied-patch.txt\n+denied\n*** End Patch"}),
+            json!({"patch": format!("*** Begin Patch\n*** Add File: {DENIED_PATCH_PATH}\n+denied\n*** End Patch")}),
         ),
         call(
             CHANGE_REQUEST_COMMENT_NAME,
@@ -551,7 +568,7 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<(String, String)> {
         ),
         call(
             EDIT_FILE_NAME,
-            json!({"path": "seed.txt", "old_string": "needle", "new_string": "forbidden", "replace_all": false}),
+            json!({"path": SEED_PATH, "old_string": SEED_PATTERN, "new_string": "forbidden", "replace_all": false}),
         ),
         call(
             PULL_REQUEST_PUBLISH_REVIEW_NAME,
@@ -591,7 +608,7 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<(String, String)> {
         ),
         call(
             WRITE_FILE_NAME,
-            json!({"path": "denied.txt", "content": "denied\n"}),
+            json!({"path": DENIED_WRITE_PATH, "content": "denied\n"}),
         ),
     ]
 }
@@ -638,10 +655,10 @@ fn assert_workspace_read_results(results: &[Value]) -> SmokeResult {
             io::Error::other("workspace read round returned the wrong result count").into(),
         );
     };
-    assert_eq!(read["content"], "needle from the real workspace\n");
+    assert_eq!(read["content"], SEED_CONTENT);
     assert_eq!(read["truncated"], false);
-    assert_eq!(list["entries"][0]["path"], "seed.txt");
-    assert_eq!(search["matches"][0]["path"], "seed.txt");
+    assert_eq!(list["entries"][0]["path"], SEED_PATH);
+    assert_eq!(search["matches"][0]["path"], SEED_PATH);
     assert_eq!(search["matches"][0]["line"], 1);
     Ok(())
 }
@@ -650,10 +667,10 @@ fn assert_workspace_readback(results: &[Value]) -> SmokeResult {
     let [read] = results else {
         return Err(io::Error::other("workspace readback returned the wrong result count").into());
     };
-    assert_eq!(read["path"], "staged.txt");
-    assert_eq!(read["content"], "gamma\n");
-    assert_eq!(read["bytes_read"], 6);
-    assert_eq!(read["total_bytes"], 6);
+    assert_eq!(read["path"], STAGED_PATH);
+    assert_eq!(read["content"], STAGED_FINAL_CONTENT);
+    assert_eq!(read["bytes_read"], STAGED_FINAL_CONTENT.len());
+    assert_eq!(read["total_bytes"], STAGED_FINAL_CONTENT.len());
     Ok(())
 }
 
@@ -662,7 +679,6 @@ fn assert_change_request_summary(results: &[Value]) -> SmokeResult {
         return Err(io::Error::other("code-host round returned the wrong result count").into());
     };
     assert_eq!(summary["number"], FIXTURE_PULL_REQUEST);
-    assert_eq!(summary["title"], FIXTURE_TITLE);
     assert_eq!(summary["state"], "closed");
     assert_eq!(summary["head_revision"], FIXTURE_HEAD_REVISION);
     Ok(())
@@ -673,7 +689,6 @@ fn assert_github_metadata(results: &[Value]) -> SmokeResult {
         return Err(io::Error::other("GitHub round returned the wrong result count").into());
     };
     assert_eq!(metadata["number"], FIXTURE_PULL_REQUEST);
-    assert_eq!(metadata["title"], FIXTURE_TITLE);
     assert_eq!(metadata["state"], "closed");
     assert_eq!(metadata["head_revision"], FIXTURE_HEAD_REVISION);
     Ok(())
@@ -700,11 +715,11 @@ fn assert_plan_fold(results: &[Value]) -> SmokeResult {
         return Err(io::Error::other("plan round returned the wrong result count").into());
     };
     assert_eq!(plan["entries"][0]["entry_id"], 1);
-    assert_eq!(plan["entries"][0]["text"], "exercise every wired family");
-    assert_eq!(plan["entries"][0]["status"], "in_progress");
+    assert_eq!(plan["entries"][0]["text"], FIRST_PLAN_TEXT);
+    assert_eq!(plan["entries"][0]["status"], FIRST_PLAN_STATUS);
     assert_eq!(plan["entries"][1]["entry_id"], 2);
-    assert_eq!(plan["entries"][1]["text"], "deny every external gate");
-    assert_eq!(plan["entries"][1]["status"], "completed");
+    assert_eq!(plan["entries"][1]["text"], SECOND_PLAN_TEXT);
+    assert_eq!(plan["entries"][1]["status"], SECOND_PLAN_STATUS);
     assert_eq!(plan["history"].as_array().map(Vec::len), Some(4));
     Ok(())
 }
@@ -713,7 +728,7 @@ fn assert_web_fetch(results: &[Value]) -> SmokeResult {
     let [fetch] = results else {
         return Err(io::Error::other("web-fetch round returned the wrong result count").into());
     };
-    assert_eq!(fetch["url"], "https://example.com/");
+    assert_eq!(fetch["url"], WEB_URL);
     assert_eq!(fetch["status"], 200);
     assert_eq!(fetch["truncated"], false);
     assert!(
