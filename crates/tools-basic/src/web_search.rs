@@ -51,7 +51,6 @@ const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
 const MAX_RESULT_SNIPPET_BYTES: usize = 16 * 1024;
 const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_FORM_DECODE_PASSES: usize = 4;
-const MAX_HTML_DECODE_PASSES: usize = 4;
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
 /// Configured web-search provider.
@@ -929,8 +928,7 @@ fn build_provider_request(
         return Err(WebSearchTransportFailure::InvalidCredential);
     }
     if request.query().contains(credential_text)
-        || form_decoded_contains(request.query(), credential.expose_bytes())
-        || html_decoded_contains(request.query(), credential_text)
+        || encoded_contains_credential(request.query(), credential_text)
         || fixed_request_metadata_contains_credential(endpoint, credential_text)
     {
         return Err(WebSearchTransportFailure::RequestFailed);
@@ -942,7 +940,7 @@ fn build_provider_request(
         .append_pair("result_filter", "web")
         .append_pair("text_decorations", "false");
     if ascii_case_insensitive_contains(url.as_str(), credential_text)
-        || form_decoded_contains(url.as_str(), credential.expose_bytes())
+        || encoded_contains_credential(url.as_str(), credential_text)
     {
         return Err(WebSearchTransportFailure::RequestFailed);
     }
@@ -1618,12 +1616,8 @@ fn known_failure_evidence(
     detail: ToolExecutionErrorDetail,
     scrubber: &CredentialScrubber,
 ) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
-    if scrubber.contains_credential(detail.as_str()) {
-        return Err(WebSearchExecutorError::EvidenceEncoding);
-    }
-    Ok(ToolExecutorEvidence::KnownFailed {
-        detail: Some(detail),
-    })
+    let detail = (!scrubber.contains_credential(detail.as_str())).then_some(detail);
+    Ok(ToolExecutorEvidence::KnownFailed { detail })
 }
 
 fn provider_error_detail(
@@ -1707,24 +1701,22 @@ impl CredentialScrubber {
     fn contains_credential(&self, text: &str) -> bool {
         text.contains(&self.exact)
             || text.contains(&self.json_escaped)
-            || self.contains_form_encoded_credential(text)
-            || html_decoded_contains(text, &self.exact)
-            || html_decoded_contains(text, &self.json_escaped)
+            || self.contains_encoded_credential(text)
     }
 
-    fn contains_form_encoded_credential(&self, text: &str) -> bool {
-        form_decoded_contains(text, self.exact.as_bytes())
-            || form_decoded_contains(text, self.json_escaped.as_bytes())
+    fn contains_encoded_credential(&self, text: &str) -> bool {
+        encoded_contains_credential(text, &self.exact)
+            || encoded_contains_credential(text, &self.json_escaped)
     }
 
     fn url_contains_encoded_credential(&self, text: &str) -> bool {
-        if self.contains_form_encoded_credential(text) {
+        if self.contains_encoded_credential(text) {
             return true;
         }
         let slash_normalized = self.exact.replace('\\', "/");
         if slash_normalized != self.exact
             && (text.contains(&slash_normalized)
-                || form_decoded_contains(text, slash_normalized.as_bytes()))
+                || encoded_contains_credential(text, &slash_normalized))
         {
             return true;
         }
@@ -1780,24 +1772,35 @@ fn ascii_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
             .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-fn html_decoded_contains(text: &str, credential: &str) -> bool {
-    if text.contains(credential) {
-        return true;
-    }
+fn encoded_contains_credential(text: &str, credential: &str) -> bool {
     let mut decoded = String::from(text);
-    for _ in 0..MAX_HTML_DECODE_PASSES {
-        let Some((next, changed)) = decode_html_character_references(&decoded) else {
+    for _ in 0..MAX_FORM_DECODE_PASSES {
+        let form_decoded = form_decode_once(decoded.as_bytes());
+        let Ok(form_decoded) = String::from_utf8(form_decoded) else {
             return true;
         };
-        if next.contains(credential) {
+        let form_changed = form_decoded != decoded;
+        if form_changed && form_decoded.contains(credential) {
             return true;
         }
-        if !changed {
+        let Some((html_decoded, html_changed)) = decode_html_character_references(&form_decoded)
+        else {
+            return true;
+        };
+        if html_changed && html_decoded.contains(credential) {
+            return true;
+        }
+        if !form_changed && !html_changed {
             return false;
         }
-        decoded = next;
+        decoded = html_decoded;
     }
-    decode_html_character_references(&decoded).is_none_or(|(_, changed)| changed)
+    let form_decoded = form_decode_once(decoded.as_bytes());
+    let Ok(form_decoded) = String::from_utf8(form_decoded) else {
+        return true;
+    };
+    form_decoded != decoded
+        || decode_html_character_references(&form_decoded).is_none_or(|(_, changed)| changed)
 }
 
 fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
@@ -1875,24 +1878,6 @@ fn parse_ip_literal(value: &str) -> Option<std::net::IpAddr> {
         .and_then(|host| host.strip_suffix(']'))
         .unwrap_or(value);
     unbracketed.parse().ok()
-}
-
-fn form_decoded_contains(text: &str, credential: &[u8]) -> bool {
-    let mut encoded = text.as_bytes().to_vec();
-    for _ in 0..MAX_FORM_DECODE_PASSES {
-        let decoded = form_decode_once(&encoded);
-        if decoded == encoded {
-            return false;
-        }
-        if decoded
-            .windows(credential.len())
-            .any(|window| window == credential)
-        {
-            return true;
-        }
-        encoded = decoded;
-    }
-    form_decode_once(&encoded) != encoded
 }
 
 fn form_decode_once(encoded: &[u8]) -> Vec<u8> {
@@ -1995,6 +1980,8 @@ mod tests {
     const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
     const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
+    const FORM_HTML_COLLISION_VALUE: &str = "abc%26amp%3Bdef";
+    const REQUEST_DETAIL_COLLISION_KEY: &str = "failed";
     const SHORT_DIAGNOSTIC_COLLISION_KEY: &str = "r";
     const EMPTY_CREDENTIAL_VALUE: &[u8] = b"";
     const NON_UTF8_CREDENTIAL_VALUE: &[u8] = &[0xff];
@@ -2084,6 +2071,21 @@ mod tests {
                 WebSearchTransportFailure::DispatchUnknown,
                 credential,
             )
+        }
+    }
+
+    struct RequestFailedTransport {
+        searches: Arc<AtomicUsize>,
+    }
+
+    impl WebSearchTransport for RequestFailedTransport {
+        async fn search(
+            &mut self,
+            _request: WebSearchRequest,
+            credential: &CredentialValue,
+        ) -> WebSearchTransportOutcome {
+            self.searches.fetch_add(1, Ordering::Relaxed);
+            WebSearchTransportOutcome::failed(WebSearchTransportFailure::RequestFailed, credential)
         }
     }
 
@@ -2354,6 +2356,34 @@ mod tests {
             .execute(batch.session(), batch.turn())
             .await
             .expect("invalid credential commits definitive evidence");
+        (outcome, searches.load(Ordering::Relaxed))
+    }
+
+    async fn execute_request_failure_through_service(
+        value: &'static str,
+    ) -> (ToolExecutionServiceOutcome, usize) {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials { value };
+        let transport = RequestFailedTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("fixture web_search tool compiles")
+            .into_parts();
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("request failure commits definitive evidence");
         (outcome, searches.load(Ordering::Relaxed))
     }
 
@@ -3209,13 +3239,37 @@ mod tests {
         assert!(!content.contains(HTML_NESTED_ENTITY_COLLISION_VALUE));
     }
 
+    /// INV-035: composed form and HTML decoding cannot conceal a credential
+    /// reflected in provider-controlled text.
+    #[test]
+    fn web_search_redacts_form_then_html_encoded_credential_in_result_text() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FORM_HTML_COLLISION_VALUE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("cross-codec fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            HTML_ENTITY_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(HTML_ENTITY_COLLISION_KEY));
+        assert!(!content.contains(FORM_HTML_COLLISION_VALUE));
+    }
+
     /// INV-035: an early HTML reference is still decoded when a later
     /// multibyte scalar crosses the character-reference scan bound.
     #[test]
     fn web_search_html_reference_scan_handles_multibyte_boundaries() {
         let reflection = html_multibyte_boundary_reflection();
 
-        assert!(html_decoded_contains(
+        assert!(encoded_contains_credential(
             &reflection,
             HTML_ENTITY_COLLISION_KEY
         ));
@@ -3422,6 +3476,19 @@ mod tests {
             HTML_ENTITY_COLLISION_KEY,
         )
         .expect_err("nested HTML-encoded credential query is rejected");
+
+        assert_eq!(
+            failure.class(),
+            WebSearchTransportFailureClass::RequestFailed
+        );
+    }
+
+    /// INV-035: composed form and HTML decoding cannot conceal an API key in a
+    /// query before dispatch.
+    #[test]
+    fn brave_request_rejects_form_then_html_encoded_query_credential_collision() {
+        let failure = build_brave_request(FORM_HTML_COLLISION_VALUE, HTML_ENTITY_COLLISION_KEY)
+            .expect_err("cross-codec credential query is rejected");
 
         assert_eq!(
             failure.class(),
@@ -3717,6 +3784,32 @@ mod tests {
         );
 
         assert_eq!(detail, INVALID_RESPONSE_DETAIL);
+    }
+
+    /// INV-035: a definitive failure detail that collides with the credential
+    /// is omitted without converting the failure into an executor error.
+    #[test]
+    fn credential_collision_omits_known_failure_detail() {
+        let credential = CredentialValue::new(REQUEST_DETAIL_COLLISION_KEY.as_bytes().to_vec());
+        let scrubber = CredentialScrubber::try_new(&credential).expect("fixture key is usable");
+        let detail = ToolExecutionErrorDetail::try_new(String::from(REQUEST_FAILED_DETAIL))
+            .expect("fixture failure detail is valid");
+
+        let evidence = known_failure_evidence(detail, &scrubber)
+            .expect("detail collision preserves definitive evidence");
+
+        assert_eq!(known_failure_detail(evidence), None);
+    }
+
+    /// INV-035: a colliding definitive request-failure detail commits through
+    /// the public service path rather than invoking crash classification.
+    #[tokio::test]
+    async fn credential_collision_commits_request_failure_without_crash() {
+        let (outcome, searches) =
+            execute_request_failure_through_service(REQUEST_DETAIL_COLLISION_KEY).await;
+
+        assert!(is_committed_known_failure(&outcome));
+        assert_eq!(searches, 1);
     }
 
     /// INV-035: a post-response sanitization failure is definitive invalid
