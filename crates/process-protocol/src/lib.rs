@@ -2854,14 +2854,31 @@ pub enum RejectionDetail {
 
 impl RejectionDetail {
     const fn is_conversation_import(self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::ConversationImportAlreadyInProgress {}
-                | Self::ConversationImportNotInProgress {}
-                | Self::ConversationImportSourceTooLarge { .. }
-                | Self::ConversationImportSourceSizeMismatch { .. }
-                | Self::ConversationImportConversionFailed { .. }
-        )
+            | Self::ConversationImportNotInProgress {}
+            | Self::ConversationImportSourceTooLarge { .. }
+            | Self::ConversationImportSourceSizeMismatch { .. }
+            | Self::ConversationImportConversionFailed { .. } => true,
+            Self::SessionNotFound { .. }
+            | Self::ActiveTurnPresent { .. }
+            | Self::ActiveTurnMismatch { .. }
+            | Self::NoActiveTurn { .. }
+            | Self::TurnNotAwaitingReconciliation { .. }
+            | Self::InterruptAlreadyApplied { .. }
+            | Self::InterruptUnavailableWhileAwaitingApproval { .. }
+            | Self::SafePointUnavailableWhileStopping { .. }
+            | Self::ToolRequestNotFound { .. }
+            | Self::ToolRequestAlreadyResolved { .. }
+            | Self::ToolRequestNotEarliestUndecided { .. }
+            | Self::ToolRequestNotInSession { .. }
+            | Self::DefaultsVersionMismatch { .. }
+            | Self::UnknownModelAlias { .. }
+            | Self::AcceptancePositionExhausted { .. }
+            | Self::DefaultsVersionExhausted { .. }
+            | Self::ImportedConversationNotFound { .. }
+            | Self::ImportedFrontierPositionOutOfRange { .. } => false,
+        }
     }
 }
 
@@ -4332,6 +4349,11 @@ impl ServerMessage {
                     preview.validate()?;
                 }
             }
+            Self::ConversationImportAppended {
+                assembled_size_bytes,
+            } if assembled_size_bytes.value() == 0 => {
+                return Err(FrameValidationError::ConversationImportShape);
+            }
             _ => {}
         }
         Ok(())
@@ -4489,7 +4511,11 @@ fn validate_conversation_import_detail(
         } => {
             limit_bytes.value() > 0
                 && match actual_size_bytes {
-                    Some(actual) => actual.value() > limit_bytes.value(),
+                    Some(actual) => {
+                        actual.value() > limit_bytes.value()
+                            && (declared_size_bytes.value() <= limit_bytes.value()
+                                || declared_size_bytes == actual)
+                    }
                     None => declared_size_bytes.value() > limit_bytes.value(),
                 }
         }
@@ -6270,6 +6296,16 @@ mod tests {
             ServerMessage::ConversationImportAborted {},
             r#"{"type":"conversation_import_aborted"}"#,
         )?;
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(4)?,
+                ServerMessage::ConversationImportAppended {
+                    assembled_size_bytes: CanonicalU64::new(0),
+                },
+            ),
+            Err(FrameValidationError::ConversationImportShape)
+        );
         Ok(())
     }
 
@@ -6368,6 +6404,25 @@ mod tests {
                 ProtocolVersion::One,
                 request(6)?,
                 invalid_json_without_ordinal,
+            ),
+            Err(FrameValidationError::ConversationImportShape)
+        );
+        let contradictory_observed_bound = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("conversation import was rejected"),
+            detail: ErrorDetail::invalid_request(
+                RejectionDetail::ConversationImportSourceTooLarge {
+                    limit_bytes: CanonicalU64::new(8),
+                    declared_size_bytes: CanonicalU64::new(9),
+                    actual_size_bytes: Some(CanonicalU64::new(10)),
+                },
+            ),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(7)?,
+                contradictory_observed_bound,
             ),
             Err(FrameValidationError::ConversationImportShape)
         );
