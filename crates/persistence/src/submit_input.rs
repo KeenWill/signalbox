@@ -4949,11 +4949,15 @@ pub(crate) async fn load_turn_origin_graph(
         let source_disposition: Option<String> = row.try_get("source_terminal_disposition_kind")?;
         let kind = match &provenance {
             StoredTurnOriginProvenance::Goal { .. } => {
+                let ordinary_priority = match queue_order.priority() {
+                    AcceptedInputQueuePriority::Ordinary => true,
+                    AcceptedInputQueuePriority::InterruptImmediatelyAfter { .. } => false,
+                };
                 if disposition_kind != "origin_of"
                     || delivery_kind.is_some()
                     || predecessor_turn.is_some()
                     || reclassified_source.is_some()
-                    || !matches!(queue_order.priority(), AcceptedInputQueuePriority::Ordinary)
+                    || !ordinary_priority
                 {
                     return Err(
                         SubmitInputCorruption::Inconsistent("goal turn origin shape").into(),
@@ -5133,10 +5137,14 @@ pub(crate) async fn load_turn_origin_graph(
                 source,
                 content,
             } => {
-                if !matches!(
-                    link.kind,
-                    StoredTurnOriginKind::Direct { predecessor: None }
-                ) {
+                let direct_origin = match link.kind {
+                    StoredTurnOriginKind::Direct { predecessor: None } => true,
+                    StoredTurnOriginKind::Direct {
+                        predecessor: Some(_),
+                    }
+                    | StoredTurnOriginKind::Reclassified { .. } => false,
+                };
+                if !direct_origin {
                     return Err(
                         SubmitInputCorruption::Inconsistent("goal origin dependency").into(),
                     );

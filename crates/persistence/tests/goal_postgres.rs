@@ -19,11 +19,11 @@ use signalbox_domain::{
     CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DeliveryRequest,
     DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalCommandRejection,
     GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
-    GoalSchedulerProvenance, GoalStatement, GoalUserAction, GoalUserCommand, GoalUserProvenance,
-    ModelAlias, ModelSelectionRequest, PreparedCreateSession, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionInputPosition, SubmitInput, ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId,
-    UserContent,
+    GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
+    GoalUserProvenance, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput, ToolRequestId,
+    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -866,6 +866,46 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
         .await?;
 
     assert_eq!(activate_goal_turn(&pool, 0xd31).await?, replacement.turn());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: a terminal current goal turn whose goal remains pursuing is a
+/// durable reconciliation hint after process loss.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached = turn_candidates(0xb40);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x940),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("recover terminal goal work")),
+                ),
+                Some(attached),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(activate_goal_turn(&pool, 0xd40).await?, attached.turn());
+    mark_goal_turn_completed(&pool, attached.turn()).await?;
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+
+    assert_eq!(sessions, vec![session(SESSION)]);
+    assert!(!continuation);
 
     pool.close().await;
     drop(container);
@@ -2133,6 +2173,70 @@ async fn inv048_goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dy
             .fetch_one(&pool)
             .await?;
     assert_eq!(turns_after_release, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: an applied stop waits on the scheduler row before recording its
+/// terminal event, so queued activation cannot cross the user receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_stop_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x9a1),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("stop behind the scheduler lock")),
+                ),
+                Some(turn_candidates(0xba1)),
+                |_| None,
+            )
+            .await?,
+    );
+
+    let mut scheduler_blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(SESSION))
+        .execute(&mut *scheduler_blocker)
+        .await?;
+    let stop = tokio::spawn({
+        let repository = GoalRepository::new(pool.clone());
+        async move {
+            repository
+                .handle_user_command(
+                    GoalUserCommand::new(command(0x9a2), session(SESSION), GoalUserAction::Stop),
+                    None,
+                    |_| None,
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "goal stop must wait on the held scheduler row"
+    );
+    let before_release = repository
+        .load_goal(session(SESSION))
+        .await?
+        .expect("the attached goal remains visible");
+    assert_eq!(before_release.current().state(), &GoalState::Pursuing);
+
+    scheduler_blocker.rollback().await?;
+    assert_applied_command(stop.await??);
+    let after_release = repository
+        .load_goal(session(SESSION))
+        .await?
+        .expect("the stopped goal remains visible");
+    assert_eq!(after_release.current().state(), &GoalState::UserStopped);
 
     pool.close().await;
     drop(container);
