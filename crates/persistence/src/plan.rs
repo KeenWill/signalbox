@@ -13,7 +13,7 @@ use signalbox_tools_plan::{
     PlanEventOrdinal, PlanEventProvenance, PlanHistoryPage, PlanReadPage, PlanReadRequest,
     PlanText, SessionPlanPort,
 };
-use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
+use sqlx::{PgPool, Row, postgres::PgRow};
 
 use crate::{commit_failure_is_ambiguous, mapping};
 
@@ -57,8 +57,6 @@ const HISTORY_SQL: &str = "SELECT event_ordinal, event_kind, entry_ordinal,
 /// A durable plan row failed checked reconstruction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionPlanCorruption {
-    /// Trusted invocation provenance named no durable session.
-    MissingSession,
     /// A required durable field was absent.
     Missing(&'static str),
     /// A numeric value was not a positive u64.
@@ -77,7 +75,6 @@ pub enum SessionPlanCorruption {
 impl fmt::Display for SessionPlanCorruption {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingSession => formatter.write_str("session plan lacks its owning session"),
             Self::Missing(field) => write!(formatter, "session plan is missing {field}"),
             Self::InvalidPositiveInteger(field) => {
                 write!(formatter, "session plan has invalid positive {field}")
@@ -172,24 +169,14 @@ impl SessionPlanRepository {
         request: PlanAppendRequest,
     ) -> Result<PlanEvent, SessionPlanRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let locked = sqlx::query_scalar::<_, Uuid>(
-            "SELECT session_id FROM session WHERE session_id = $1 FOR UPDATE",
-        )
-        .bind(request.session().into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if locked.is_none() {
-            transaction.rollback().await?;
-            return Err(SessionPlanCorruption::MissingSession.into());
-        }
-
-        let latest: Option<Decimal> = sqlx::query_scalar(
-            "SELECT max(event_ordinal) FROM session_plan_event WHERE session_id = $1",
-        )
-        .bind(request.session().into_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        let next = next_ordinal(latest)?;
+        let next: Decimal = sqlx::query_scalar("SELECT next_session_plan_event_ordinal($1)")
+            .bind(request.session().into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = PlanEventOrdinal::try_from_u64(positive_u64(next, "next event ordinal")?)
+            .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+                "next event ordinal",
+            ))?;
         let encoded = EncodedDraft::new(next, request.draft());
 
         sqlx::query(
@@ -331,19 +318,6 @@ impl<'a> EncodedDraft<'a> {
             },
         }
     }
-}
-
-fn next_ordinal(latest: Option<Decimal>) -> Result<PlanEventOrdinal, SessionPlanRepositoryError> {
-    let value = match latest {
-        Some(value) => positive_u64(value, "latest event ordinal")?
-            .checked_add(1)
-            .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
-                "next event ordinal",
-            ))?,
-        None => 1,
-    };
-    PlanEventOrdinal::try_from_u64(value)
-        .ok_or(SessionPlanCorruption::InvalidPositiveInteger("next event ordinal").into())
 }
 
 fn event_kind_from_draft(draft: PlanEventDraft) -> PlanEventKind {

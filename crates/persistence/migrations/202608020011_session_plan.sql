@@ -71,6 +71,29 @@ CREATE TABLE session_plan_event (
     )
 );
 
+CREATE FUNCTION next_session_plan_event_ordinal(target_session_id uuid)
+RETURNS numeric(20, 0)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    latest_ordinal numeric(20, 0);
+BEGIN
+    PERFORM 1
+      FROM session
+     WHERE session_id = target_session_id
+       FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'session plan event requires its owning session';
+    END IF;
+
+    SELECT max(event_ordinal)
+      INTO latest_ordinal
+      FROM session_plan_event
+     WHERE session_id = target_session_id;
+    RETURN coalesce(latest_ordinal + 1, 1);
+END;
+$$;
+
 CREATE FUNCTION guard_session_plan_event_append()
 RETURNS trigger
 LANGUAGE plpgsql
