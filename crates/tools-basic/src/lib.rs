@@ -26,9 +26,10 @@ pub use web_fetch::{
 };
 pub use web_search::{
     BRAVE_SEARCH_CREDENTIAL_REFERENCE, ReqwestWebSearchConstructionError,
-    ReqwestWebSearchTransport, WebSearchConfiguration, WebSearchCredentialDiagnostic,
-    WebSearchEgressPolicy, WebSearchExecutorError, WebSearchPageCompleteness, WebSearchProvider,
-    WebSearchProviderError, WebSearchRequest, WebSearchResponse, WebSearchResult,
-    WebSearchResultFields, WebSearchTransport, WebSearchTransportFailure,
+    ReqwestWebSearchTransport, WEB_SEARCH_NAME, WebSearchConfiguration,
+    WebSearchCredentialDiagnostic, WebSearchEgressPolicy, WebSearchExecutor,
+    WebSearchExecutorError, WebSearchPageCompleteness, WebSearchProvider, WebSearchProviderError,
+    WebSearchRequest, WebSearchResponse, WebSearchResult, WebSearchResultFields, WebSearchTool,
+    WebSearchToolConstructionError, WebSearchTransport, WebSearchTransportFailure,
     WebSearchTransportOutcome,
 };
