@@ -78,6 +78,10 @@ const OVERSIZED_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 const IMPORT_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
@@ -1686,6 +1690,10 @@ async fn s28_inv038_inv014_terminal_client_completes_an_offline_imported_continu
         r#"
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
@@ -1909,6 +1917,10 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
     let model_configuration = HubModelConfiguration::parse(&format!(
         r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -2143,6 +2155,10 @@ async fn terminal_client_drives_review_target_to_finding() -> Result<(), Box<dyn
     let model_configuration = HubModelConfiguration::parse(&format!(
         r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -2634,6 +2650,10 @@ async fn terminal_client_approval_from_a_second_client_completes_a_waiting_send(
     let model_configuration = HubModelConfiguration::parse(&format!(
         r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"

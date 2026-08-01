@@ -10,8 +10,8 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
     ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
-    ModelCallId, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolAttemptId,
-    ToolRequestId, TurnAttemptId, TurnId,
+    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryRef, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -439,6 +439,15 @@ pub struct ProcessModelCallTokenUsage {
     cache_read_input_tokens: Option<u64>,
 }
 
+/// Closed provenance of one terminal model call's usage fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessModelCallUsageProvenance {
+    /// Counts reported by the provider or adapter stream.
+    Reported,
+    /// Counts produced by an explicit estimator.
+    Estimated,
+}
+
 impl ProcessModelCallTokenUsage {
     /// Returns the provider-reported input-token count.
     pub const fn input_tokens(self) -> Option<u64> {
@@ -462,22 +471,40 @@ impl ProcessModelCallTokenUsage {
 }
 
 /// One terminal model call's provider-reported token evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessTranscriptModelCallUsage {
     turn: TurnId,
     call: ModelCallId,
+    target: ResolvedProviderTarget,
+    credential_profile: String,
+    provenance: ProcessModelCallUsageProvenance,
     usage: ProcessModelCallTokenUsage,
 }
 
 impl ProcessTranscriptModelCallUsage {
     /// Returns the owning turn.
-    pub const fn turn(self) -> TurnId {
+    pub const fn turn(&self) -> TurnId {
         self.turn
     }
 
     /// Returns the terminal model-call identity.
-    pub const fn call(self) -> ModelCallId {
+    pub const fn call(&self) -> ModelCallId {
         self.call
+    }
+
+    /// Returns the immutable provider target whose configured rates apply.
+    pub const fn target(&self) -> ResolvedProviderTarget {
+        self.target
+    }
+
+    /// Returns the event-sourced credential profile pinned into this call.
+    pub fn credential_profile(&self) -> &str {
+        &self.credential_profile
+    }
+
+    /// Returns the closed provenance of this call's token fields.
+    pub const fn provenance(&self) -> ProcessModelCallUsageProvenance {
+        self.provenance
     }
 
     /// Returns the exact independently optional provider fields.
@@ -1866,6 +1893,9 @@ async fn load_next_model_call_usage(
             turn.acceptance_position,
             call.turn_id,
             call.model_call_id,
+            call.resolved_provider_model_identity_id,
+            call.credential_reference,
+            call.usage_provenance_kind,
             call.usage_input_tokens,
             call.usage_output_tokens,
             call.usage_cache_creation_input_tokens,
@@ -1902,6 +1932,17 @@ fn decode_model_call_usage(
         required(row, "acceptance_position")?,
         "model-call turn acceptance position",
     )?;
+    let provenance = match required::<String>(row, "usage_provenance_kind")?.as_str() {
+        "reported" => ProcessModelCallUsageProvenance::Reported,
+        "estimated" => ProcessModelCallUsageProvenance::Estimated,
+        value => {
+            return Err(ProcessReadCorruption::Unsupported {
+                field: "usage_provenance_kind",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+    };
     let input_tokens = row
         .try_get::<Option<Decimal>, _>("usage_input_tokens")?
         .map(|value| decode_nonnegative(value, "model-call input tokens"))
@@ -1923,6 +1964,12 @@ fn decode_model_call_usage(
         ProcessTranscriptModelCallUsage {
             turn: TurnId::from_uuid(required(row, "turn_id")?),
             call: ModelCallId::from_uuid(required(row, "model_call_id")?),
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(required(
+                row,
+                "resolved_provider_model_identity_id",
+            )?)),
+            credential_profile: required(row, "credential_reference")?,
+            provenance,
             usage: ProcessModelCallTokenUsage {
                 input_tokens,
                 output_tokens,

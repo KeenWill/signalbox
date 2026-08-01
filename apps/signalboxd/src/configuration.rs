@@ -9,6 +9,7 @@ use std::{
     sync::Arc,
 };
 
+use rust_decimal::Decimal;
 use signalbox_domain::{
     DirectModelSelection, FrozenAliasDefinition, ModelAlias, ModelSelectionRequest,
     ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget,
@@ -57,12 +58,66 @@ impl ModelAdapter {
             }),
         }
     }
+}
 
-    fn credential_profile(self) -> &'static str {
-        match self {
-            Self::Anthropic => ANTHROPIC_CREDENTIAL_REFERENCE,
-            Self::CodexCli => CODEX_CLI_CREDENTIAL_REFERENCE,
+/// How one credential profile's authenticated calls are billed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BillingKind {
+    /// Provider API usage is charged directly by metered token counts.
+    ApiMetered,
+    /// Authentication is subscription-backed; token rates are an equivalent.
+    Subscription,
+}
+
+impl BillingKind {
+    fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
+        match value {
+            "api_metered" => Ok(Self::ApiMetered),
+            "subscription" => Ok(Self::Subscription),
+            _ => Err(HubModelConfigurationError::InvalidBillingKind),
         }
+    }
+}
+
+/// One model's versioned USD rates per million reported tokens.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelBillingRates {
+    version: Arc<str>,
+    input: Decimal,
+    output: Decimal,
+    cache_creation_input: Decimal,
+    cache_read_input: Decimal,
+}
+
+impl ModelBillingRates {
+    /// Exact deployment-owned rate version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// One dollar figure derived from configured rates and exactly reported axes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivedModelCallCost {
+    amount_usd: Decimal,
+    rate_version: Arc<str>,
+    billing_kind: BillingKind,
+}
+
+impl DerivedModelCallCost {
+    /// Exact decimal USD amount for the reported axes that were present.
+    pub const fn amount_usd(&self) -> Decimal {
+        self.amount_usd
+    }
+
+    /// Version of the configured rates used for this read-time derivation.
+    pub fn rate_version(&self) -> &str {
+        &self.rate_version
+    }
+
+    /// Billing kind of the credential profile pinned into the call.
+    pub const fn billing_kind(&self) -> BillingKind {
+        self.billing_kind
     }
 }
 
@@ -167,6 +222,8 @@ pub struct HubModelConfiguration {
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
+    billing_kinds: HashMap<Arc<str>, BillingKind>,
+    billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     provider_model_adapters: HashMap<String, ModelAdapter>,
     session_credential_pin: SessionCredentialPin,
     credential_families: ModelCredentialFamilyCatalog,
@@ -191,6 +248,7 @@ impl HubModelConfiguration {
             document.as_table(),
             &[
                 "version",
+                "credential_profiles",
                 "adapter_mappings",
                 "codex_cli",
                 "models",
@@ -243,6 +301,27 @@ impl HubModelConfiguration {
             .transpose()?
             .unwrap_or_default();
         let daemon_tools = parse_tool_mappings(document.get("tool_mappings"))?;
+        let profile_tables = document
+            .get("credential_profiles")
+            .and_then(|item| item.as_array_of_tables())
+            .ok_or(HubModelConfigurationError::MissingCredentialProfiles)?;
+        if profile_tables.is_empty() {
+            return Err(HubModelConfigurationError::MissingCredentialProfiles);
+        }
+        let mut billing_kinds = HashMap::with_capacity(profile_tables.len());
+        for profile in profile_tables {
+            reject_unknown_fields(profile, &["name", "billing_kind"])?;
+            let name = validated_name(required_string(profile, "name")?)?;
+            let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
+            if billing_kinds
+                .insert(Arc::clone(&name), billing_kind)
+                .is_some()
+            {
+                return Err(HubModelConfigurationError::DuplicateCredentialProfile {
+                    credential_profile: name,
+                });
+            }
+        }
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -260,17 +339,30 @@ impl HubModelConfiguration {
         }
         let mut mappings = HashMap::<Arc<str>, AdapterMapping>::new();
         let mut session_credentials = Vec::with_capacity(mapping_tables.len());
+        let mut codex_cli_credential_profile = None;
         for mapping in mapping_tables {
             reject_unknown_fields(mapping, &["model_family", "adapter", "credential_profile"])?;
             let family = validated_name(required_string(mapping, "model_family")?)?;
             let adapter = ModelAdapter::parse(required_string(mapping, "adapter")?)?;
             let credential_profile =
                 validated_name(required_string(mapping, "credential_profile")?)?;
-            if credential_profile.as_ref() != adapter.credential_profile() {
+            if !billing_kinds.contains_key(&credential_profile)
+                || (adapter == ModelAdapter::Anthropic
+                    && credential_profile.as_ref() != ANTHROPIC_CREDENTIAL_REFERENCE)
+            {
                 return Err(HubModelConfigurationError::UnknownCredentialProfile {
                     adapter,
                     credential_profile,
                 });
+            }
+            if adapter == ModelAdapter::CodexCli {
+                if codex_cli_credential_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile != &credential_profile)
+                {
+                    return Err(HubModelConfigurationError::ConflictingCodexCredentialProfiles);
+                }
+                codex_cli_credential_profile = Some(Arc::clone(&credential_profile));
             }
             let entry = AdapterMapping {
                 adapter,
@@ -320,7 +412,11 @@ impl HubModelConfiguration {
             CodexCliRuntime::new(CodexCliConfig::new(
                 configuration.executable.clone(),
                 configuration.working_directory.clone(),
-                CredentialReference::new(CODEX_CLI_CREDENTIAL_REFERENCE),
+                CredentialReference::new(
+                    codex_cli_credential_profile
+                        .as_deref()
+                        .unwrap_or(CODEX_CLI_CREDENTIAL_REFERENCE),
+                ),
             ))
             .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
         }
@@ -329,6 +425,7 @@ impl HubModelConfiguration {
         let mut runtime_definitions = Vec::with_capacity(models.len());
         let mut direct_selections = HashSet::with_capacity(models.len());
         let mut routes = HashMap::with_capacity(models.len());
+        let mut billing_rates = HashMap::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
         for model in models {
             reject_unknown_fields(
@@ -340,6 +437,11 @@ impl HubModelConfiguration {
                     "provider_model",
                     "max_output_tokens",
                     "context_window_tokens",
+                    "rate_version",
+                    "input_usd_per_million_tokens",
+                    "output_usd_per_million_tokens",
+                    "cache_creation_input_usd_per_million_tokens",
+                    "cache_read_input_usd_per_million_tokens",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -359,6 +461,9 @@ impl HubModelConfiguration {
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
+            if let Some(rates) = parse_model_billing_rates(model)? {
+                billing_rates.insert(target, rates);
+            }
             if let Some(previous) =
                 provider_model_adapters.insert(provider_model.to_owned(), mapping.adapter)
                 && previous != mapping.adapter
@@ -434,6 +539,8 @@ impl HubModelConfiguration {
             direct_selections,
             aliases,
             routes,
+            billing_kinds,
+            billing_rates,
             provider_model_adapters,
             session_credential_pin,
             credential_families,
@@ -495,6 +602,35 @@ impl HubModelConfiguration {
         self.credential_families.clone()
     }
 
+    /// Derives a labeled USD figure from exactly the token axes present.
+    ///
+    /// Absence means either this target has no declared rates, the historical
+    /// credential profile has no declared billing kind, no token axis was
+    /// reported, or exact decimal arithmetic could not represent the result.
+    pub fn derive_model_call_cost(
+        &self,
+        target: ResolvedProviderTarget,
+        credential_profile: &str,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
+    ) -> Option<DerivedModelCallCost> {
+        let rates = self.billing_rates.get(&target)?;
+        let billing_kind = *self.billing_kinds.get(credential_profile)?;
+        let amount_usd = fold_reported_cost([
+            (input_tokens, rates.input),
+            (output_tokens, rates.output),
+            (cache_creation_input_tokens, rates.cache_creation_input),
+            (cache_read_input_tokens, rates.cache_read_input),
+        ])?;
+        Some(DerivedModelCallCost {
+            amount_usd,
+            rate_version: Arc::clone(&rates.version),
+            billing_kind,
+        })
+    }
+
     /// Returns validated Codex CLI paths when that adapter is configured.
     pub fn codex_cli(&self) -> Option<&CodexCliConfiguration> {
         self.codex_cli.as_ref()
@@ -506,10 +642,17 @@ impl HubModelConfiguration {
         self.codex_cli
             .as_ref()
             .map(|configuration| {
+                let credential_profile = self
+                    .routes
+                    .values()
+                    .find(|route| route.adapter == ModelAdapter::CodexCli)
+                    .map_or(CODEX_CLI_CREDENTIAL_REFERENCE, |route| {
+                        route.credential_profile()
+                    });
                 CodexCliRuntime::new(CodexCliConfig::new(
                     configuration.executable.clone(),
                     configuration.working_directory.clone(),
-                    CredentialReference::new(CODEX_CLI_CREDENTIAL_REFERENCE),
+                    CredentialReference::new(credential_profile),
                 ))
             })
             .transpose()
@@ -562,6 +705,63 @@ impl HubModelConfiguration {
             .iter()
             .map(|(alias, definition)| (*alias, definition.selected()))
     }
+}
+
+fn parse_model_billing_rates(
+    model: &Table,
+) -> Result<Option<ModelBillingRates>, HubModelConfigurationError> {
+    const RATE_FIELDS: [&str; 5] = [
+        "rate_version",
+        "input_usd_per_million_tokens",
+        "output_usd_per_million_tokens",
+        "cache_creation_input_usd_per_million_tokens",
+        "cache_read_input_usd_per_million_tokens",
+    ];
+    if RATE_FIELDS.iter().all(|field| model.get(field).is_none()) {
+        return Ok(None);
+    }
+    if RATE_FIELDS.iter().any(|field| model.get(field).is_none()) {
+        return Err(HubModelConfigurationError::IncompleteBillingRates);
+    }
+    Ok(Some(ModelBillingRates {
+        version: validated_name(required_string(model, "rate_version")?)?,
+        input: required_billing_rate(model, "input_usd_per_million_tokens")?,
+        output: required_billing_rate(model, "output_usd_per_million_tokens")?,
+        cache_creation_input: required_billing_rate(
+            model,
+            "cache_creation_input_usd_per_million_tokens",
+        )?,
+        cache_read_input: required_billing_rate(model, "cache_read_input_usd_per_million_tokens")?,
+    }))
+}
+
+fn required_billing_rate(
+    model: &Table,
+    field: &str,
+) -> Result<Decimal, HubModelConfigurationError> {
+    let rate = Decimal::from_str(required_string(model, field)?)
+        .map_err(|_| HubModelConfigurationError::InvalidBillingRate)?;
+    if rate.is_sign_negative() || rate > Decimal::from(1_000_000_u64) || rate.scale() > 12 {
+        Err(HubModelConfigurationError::InvalidBillingRate)
+    } else {
+        Ok(rate.normalize())
+    }
+}
+
+fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
+    let mut amount = Decimal::ZERO;
+    let mut reported = false;
+    for (tokens, rate) in axes {
+        let Some(tokens) = tokens else {
+            continue;
+        };
+        reported = true;
+        let axis_cost = rate
+            .checked_mul(Decimal::from(tokens))?
+            .checked_div(Decimal::from(1_000_000_u64))?;
+        amount = amount.checked_add(axis_cost)?;
+    }
+    reported.then(|| amount.normalize())
 }
 
 fn parse_tool_mappings(
@@ -717,6 +917,15 @@ pub enum HubModelConfigurationError {
     MissingModels,
     /// No nonempty static adapter mapping table exists.
     MissingAdapterMappings,
+    /// No nonempty credential-profile billing registry exists.
+    MissingCredentialProfiles,
+    /// One credential profile appeared more than once.
+    DuplicateCredentialProfile {
+        /// Exact repeated profile name.
+        credential_profile: Arc<str>,
+    },
+    /// A credential profile declared no supported billing kind.
+    InvalidBillingKind,
     /// The daemon tool mapping registry was incomplete or malformed.
     InvalidToolMappings,
     /// One daemon tool family appeared more than once.
@@ -753,12 +962,18 @@ pub enum HubModelConfigurationError {
     },
     /// One provider-native model spelling was routed to different adapters.
     ConflictingProviderModelRoute,
+    /// Codex model families selected more than one credential profile.
+    ConflictingCodexCredentialProfiles,
     /// A Codex mapping exists without its required process configuration.
     MissingCodexCliConfiguration,
     /// Codex paths were malformed, relative, or named no existing directory.
     InvalidCodexCliConfiguration,
     /// The provider-native model spelling was empty or padded.
     InvalidProviderModel,
+    /// Only part of a model's five-field versioned rate set was declared.
+    IncompleteBillingRates,
+    /// A billing rate was not a bounded nonnegative decimal string.
+    InvalidBillingRate,
     /// An output or context token limit was zero or outside `u32`.
     InvalidLimit,
     /// The compaction prompt was empty, oversized, or contained NUL.
@@ -787,6 +1002,15 @@ impl fmt::Display for HubModelConfigurationError {
             Self::UnsupportedVersion => "model configuration version is unsupported",
             Self::MissingModels => "model configuration has no model definitions",
             Self::MissingAdapterMappings => "model configuration has no adapter mappings",
+            Self::MissingCredentialProfiles => {
+                "model configuration has no credential profile billing registry"
+            }
+            Self::DuplicateCredentialProfile { .. } => {
+                "model configuration repeats a credential profile"
+            }
+            Self::InvalidBillingKind => {
+                "model configuration contains an invalid credential billing kind"
+            }
             Self::InvalidToolMappings => {
                 "model configuration contains invalid daemon tool mappings"
             }
@@ -808,6 +1032,9 @@ impl fmt::Display for HubModelConfigurationError {
             Self::ConflictingProviderModelRoute => {
                 "model configuration routes one provider model to conflicting adapters"
             }
+            Self::ConflictingCodexCredentialProfiles => {
+                "model configuration routes Codex through conflicting credential profiles"
+            }
             Self::MissingCodexCliConfiguration => {
                 "model configuration maps Codex CLI without Codex CLI settings"
             }
@@ -815,6 +1042,12 @@ impl fmt::Display for HubModelConfigurationError {
                 "model configuration contains invalid Codex CLI settings"
             }
             Self::InvalidProviderModel => "model configuration contains an invalid provider model",
+            Self::IncompleteBillingRates => {
+                "model configuration contains an incomplete model billing rate set"
+            }
+            Self::InvalidBillingRate => {
+                "model configuration contains an invalid model billing rate"
+            }
             Self::InvalidLimit => "model configuration contains an invalid token limit",
             Self::InvalidCompactionPrompt => {
                 "model configuration contains an invalid compaction prompt"
@@ -945,7 +1178,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
+        ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
         MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, UnknownSessionModel, credential_bytes,
         validate_alias_count,
@@ -953,6 +1186,14 @@ mod tests {
 
     const CONFIGURATION: &str = r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+billing_kind = "subscription"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -993,6 +1234,11 @@ model_family = "anthropic"
 provider_model = "claude-example"
 max_output_tokens = 256
 context_window_tokens = 200000
+rate_version = "fixture-rates-v1"
+input_usd_per_million_tokens = "3"
+output_usd_per_million_tokens = "15"
+cache_creation_input_usd_per_million_tokens = "3.75"
+cache_read_input_usd_per_million_tokens = "0.30"
 
 [[aliases]]
 alias_id = "30000000-0000-4000-8000-000000000001"
@@ -1079,6 +1325,81 @@ working_directory = "{}"
             route.migration_credential_family(),
             Some(MIGRATED_ANTHROPIC_MODEL_FAMILY)
         );
+    }
+
+    fn configured_target(
+        configuration: &HubModelConfiguration,
+    ) -> signalbox_domain::ResolvedProviderTarget {
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000001").expect("fixture UUID is valid"),
+        );
+        configuration
+            .resolve_direct_model(selection)
+            .expect("fixture selection has a route")
+            .target()
+    }
+
+    #[test]
+    fn configured_rates_fold_only_reported_axes_with_version_provenance() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let cost = configuration
+            .derive_model_call_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                Some(1_000_000),
+                Some(2),
+                None,
+                Some(10),
+            )
+            .expect("rated reported axes derive a cost");
+
+        assert_eq!(cost.amount_usd().to_string(), "3.000033");
+        assert_eq!(cost.rate_version(), "fixture-rates-v1");
+        assert_eq!(cost.billing_kind(), BillingKind::ApiMetered);
+    }
+
+    #[test]
+    fn an_unrated_model_yields_no_dollar_figure() {
+        let unrated = CONFIGURATION
+            .lines()
+            .filter(|line| {
+                !line.starts_with("rate_version") && !line.contains("usd_per_million_tokens")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let configuration =
+            HubModelConfiguration::parse(&unrated).expect("an unrated model remains valid");
+
+        assert_eq!(
+            configuration.derive_model_call_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(1),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn cost_label_follows_the_credential_profile() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let cost = configuration
+            .derive_model_call_cost(
+                configured_target(&configuration),
+                "codex-subscription-primary",
+                Some(1),
+                None,
+                None,
+                None,
+            )
+            .expect("the historical subscription profile is declared");
+
+        assert_eq!(cost.billing_kind(), BillingKind::Subscription);
     }
 
     #[test]

@@ -97,6 +97,12 @@ pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 /// Maximum entries in one deployment model-alias catalog.
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
+/// Maximum canonical decimal USD amount text.
+pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 64;
+
+/// Maximum UTF-8 bytes in one deployment-owned billing rate version.
+pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
+
 /// Maximum concerns in one frozen review-orchestration attempt.
 pub const MAX_REVIEW_ORCHESTRATION_CONCERNS: usize = 32;
 
@@ -337,7 +343,7 @@ impl InputContent {
 }
 
 /// One closed review target subject at the process boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReviewTargetSubject {
     /// A change request frozen at exact head and base revisions.
@@ -862,6 +868,128 @@ pub struct ModelCallTokenUsage {
     pub cache_read_input_tokens: Option<CanonicalU64>,
 }
 
+/// Closed provenance of one terminal model call's token fields.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageProvenance {
+    /// Counts reported by the provider or adapter stream.
+    Reported,
+    /// Counts produced by an explicit estimator.
+    Estimated,
+}
+
+/// How a derived token-rate dollar figure must be labeled.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCallCostLabel {
+    /// The serving credential profile is directly API-metered.
+    Real,
+    /// The serving credential profile is subscription-backed.
+    MeteredEquivalent,
+}
+
+/// Canonical nonnegative decimal USD text with no exponent or redundant zeroes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CanonicalDollarAmount(String);
+
+impl CanonicalDollarAmount {
+    /// Validates one shortest nonnegative base-ten decimal spelling.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        let (integer, fraction) = value
+            .split_once('.')
+            .map_or((value.as_str(), None), |parts| (parts.0, Some(parts.1)));
+        let integer_is_canonical = integer == "0"
+            || (!integer.starts_with('0')
+                && integer.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                && integer.bytes().all(|byte| byte.is_ascii_digit()));
+        let fraction_is_canonical = fraction.is_none_or(|fraction| {
+            !fraction.is_empty()
+                && fraction.bytes().all(|byte| byte.is_ascii_digit())
+                && !fraction.ends_with('0')
+        });
+        if value.is_empty()
+            || value.len() > MAX_DOLLAR_AMOUNT_BYTES
+            || !integer_is_canonical
+            || !fraction_is_canonical
+        {
+            Err(CanonicalValueError::DollarAmount)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Borrows the canonical decimal spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for CanonicalDollarAmount {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<CanonicalDollarAmount> for String {
+    fn from(value: CanonicalDollarAmount) -> Self {
+        value.0
+    }
+}
+
+/// One bounded deployment-owned rate version carried as cost provenance.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct BillingRateVersion(String);
+
+impl BillingRateVersion {
+    /// Validates a nonempty, unpadded, NUL-free version spelling.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        if value.is_empty()
+            || value.len() > MAX_RATE_VERSION_UTF8_BYTES
+            || value.trim() != value
+            || value.contains('\0')
+        {
+            Err(CanonicalValueError::RateVersion)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Borrows the exact rate version.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for BillingRateVersion {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<BillingRateVersion> for String {
+    fn from(value: BillingRateVersion) -> Self {
+        value.0
+    }
+}
+
+/// One read-time dollar figure derived from usage and named configured rates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCallDollarCost {
+    /// Dollar amount attributable to the token axes that were present.
+    pub amount_usd: CanonicalDollarAmount,
+    /// Exact configured rate version used for derivation.
+    pub rate_version: BillingRateVersion,
+    /// Real or metered-equivalent label from the pinned credential profile.
+    pub label: ModelCallCostLabel,
+}
+
 impl TryFrom<String> for ContentFragment {
     type Error = CanonicalValueError;
 
@@ -1029,6 +1157,10 @@ pub enum CanonicalValueError {
     /// A session system prompt was empty, contained U+0000, or exceeded its
     /// UTF-8 byte bound.
     SystemPrompt,
+    /// Dollar amount was not canonical bounded nonnegative decimal text.
+    DollarAmount,
+    /// Billing rate version was empty, padded, NUL-bearing, or oversized.
+    RateVersion,
 }
 
 impl fmt::Display for CanonicalValueError {
@@ -1042,6 +1174,8 @@ impl fmt::Display for CanonicalValueError {
             Self::Metadata => "session metadata value is invalid",
             Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
             Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
+            Self::DollarAmount => "dollar amount is not canonical nonnegative decimal text",
+            Self::RateVersion => "billing rate version is invalid",
         })
     }
 }
@@ -3930,8 +4064,13 @@ pub enum ServerMessage {
         turn_id: CanonicalUuid,
         /// Immutable model-call identity.
         model_call_id: CanonicalUuid,
+        /// Closed source vocabulary for the independently nullable counts.
+        usage_provenance: UsageProvenance,
         /// Exact independently nullable provider fields.
         usage: ModelCallTokenUsage,
+        /// Read-time configured-rate derivation, required null when unavailable.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        cost: Option<ModelCallDollarCost>,
     },
     /// Completes the model-call evidence section of one transcript snapshot.
     TranscriptModelCallsEnd {
@@ -4809,23 +4948,24 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 #[cfg(test)]
 mod tests {
     use super::{
-        CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
-        ContentFragment, ConversationCursor, ConversationImportFormat, ConversationImportSource,
-        ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
-        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, ImportedContentKind,
-        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        BillingRateVersion, CanonicalDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
+        ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
+        ConversationImportFormat, ConversationImportSource, ConversationOrigin,
+        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
+        ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
+        FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
+        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
-        ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
-        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
-        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
+        ModelCallState, ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
+        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+        ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -4833,7 +4973,8 @@ mod tests {
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
         ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
         ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line,
     };
     use uuid::Uuid;
 
@@ -6037,12 +6178,18 @@ mod tests {
             model_call_index: CanonicalU64::new(0),
             turn_id: uuid(2),
             model_call_id: uuid(3),
+            usage_provenance: UsageProvenance::Reported,
             usage: ModelCallTokenUsage {
                 input_tokens: Some(CanonicalU64::new(10)),
                 output_tokens: Some(CanonicalU64::new(0)),
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(CanonicalU64::new(4)),
             },
+            cost: Some(ModelCallDollarCost {
+                amount_usd: CanonicalDollarAmount::try_new(String::from("0.125"))?,
+                rate_version: BillingRateVersion::try_new(String::from("rates-v7"))?,
+                label: ModelCallCostLabel::MeteredEquivalent,
+            }),
         };
 
         let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request_id, message)?;
@@ -6050,7 +6197,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             format!(
-                "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}}}}}}\n"
+                "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage_provenance\":\"reported\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}},\"cost\":{{\"amount_usd\":\"0.125\",\"rate_version\":\"rates-v7\",\"label\":\"metered_equivalent\"}}}}}}\n"
             )
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
@@ -6060,9 +6207,18 @@ mod tests {
     #[test]
     fn usage_rejects_an_omitted_evidence_field() {
         let error = decode_server_line(&line(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"reported","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null},"cost":null}}"#,
         ))
         .expect_err("required-nullable evidence fields cannot be omitted");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[test]
+    fn usage_provenance_rejects_unknown_values() {
+        let error = decode_server_line(&line(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"inferred","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null,"cache_read_input_tokens":null},"cost":null}}"#,
+        ))
+        .expect_err("the usage provenance vocabulary is closed");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
     }
 

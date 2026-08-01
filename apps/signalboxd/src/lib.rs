@@ -40,8 +40,8 @@ mod telemetry;
 pub mod usage_limits;
 
 pub use configuration::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, DaemonToolConfiguration, FileCredentialAccess,
-    HubModelConfiguration, HubModelConfigurationError,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
+    FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelBillingRates,
 };
 pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
 pub use conversation_introspection::{

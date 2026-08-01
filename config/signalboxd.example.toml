@@ -15,6 +15,14 @@
 # above the model's cap.
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+billing_kind = "subscription"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
@@ -81,6 +89,11 @@ model_family = "anthropic"
 provider_model = "claude-fable-5"
 max_output_tokens = 8192
 context_window_tokens = 200000
+rate_version = "example-2026-08-01"
+input_usd_per_million_tokens = "3"
+output_usd_per_million_tokens = "15"
+cache_creation_input_usd_per_million_tokens = "3.75"
+cache_read_input_usd_per_million_tokens = "0.30"
 
 # Hard cap: 128000.
 [[models]]

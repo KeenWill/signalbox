@@ -1,18 +1,20 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     io::{self, Write},
     path::Path,
+    str::FromStr,
 };
 
+use rust_decimal::Decimal;
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallCause, FailedModelCallDisposition,
     ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ReviewDiffSide,
-    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
+    MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallState,
+    ReviewDiffSide, ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState,
+    TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -83,6 +85,72 @@ impl TokenUsageTotal {
         self.cache_creation_input
             .add(usage.cache_creation_input_tokens)?;
         self.cache_read_input.add(usage.cache_read_input_tokens)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CostAggregateKey {
+    provenance: UsageProvenance,
+    label: ModelCallCostLabel,
+    rate_version: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CostTotal {
+    amount_usd: Decimal,
+    calls: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct UsageAggregate {
+    reported: TokenUsageTotal,
+    estimated: TokenUsageTotal,
+    costs: BTreeMap<CostAggregateKey, CostTotal>,
+}
+
+impl UsageAggregate {
+    fn add(
+        &mut self,
+        evidence: &crate::transcript::SnapshotModelCallUsage,
+    ) -> Result<(), ClientError> {
+        match evidence.usage_provenance {
+            UsageProvenance::Reported => self.reported.add(evidence.usage)?,
+            UsageProvenance::Estimated => self.estimated.add(evidence.usage)?,
+        }
+        let Some(cost) = evidence.cost.as_ref() else {
+            return Ok(());
+        };
+        let amount = Decimal::from_str(cost.amount_usd.as_str())
+            .map_err(|_| ClientError::Protocol("dollar cost was not representable"))?;
+        let key = CostAggregateKey {
+            provenance: evidence.usage_provenance,
+            label: cost.label,
+            rate_version: cost.rate_version.as_str().to_owned(),
+        };
+        let total = self.costs.entry(key).or_default();
+        total.amount_usd = total
+            .amount_usd
+            .checked_add(amount)
+            .ok_or(ClientError::Protocol("dollar cost total overflowed"))?;
+        total.calls = total
+            .calls
+            .checked_add(1)
+            .ok_or(ClientError::Protocol("dollar cost coverage overflowed"))?;
+        Ok(())
+    }
+}
+
+const fn usage_provenance_label(provenance: UsageProvenance) -> &'static str {
+    match provenance {
+        UsageProvenance::Reported => "reported",
+        UsageProvenance::Estimated => "estimated",
+    }
+}
+
+const fn cost_label(label: ModelCallCostLabel) -> &'static str {
+    match label {
+        ModelCallCostLabel::Real => "real",
+        ModelCallCostLabel::MeteredEquivalent => "metered_equivalent",
     }
 }
 
@@ -839,8 +907,8 @@ impl<'a> Output<'a> {
     }
 
     fn render_usage(&mut self, snapshot: &mut TranscriptSnapshot) -> Result<(), ClientError> {
-        let mut current_turn: Option<(CanonicalUuid, TokenUsageTotal)> = None;
-        let mut session_total = TokenUsageTotal::default();
+        let mut current_turn: Option<(CanonicalUuid, UsageAggregate)> = None;
+        let mut session_total = UsageAggregate::default();
         for record in snapshot.replay()? {
             let SnapshotRecord::ModelCallUsage(evidence) = record? else {
                 continue;
@@ -852,23 +920,49 @@ impl<'a> Output<'a> {
                 let (turn, total) = current_turn.take().ok_or(ClientError::Protocol(
                     "token usage turn grouping was invalid",
                 ))?;
-                self.usage_line(Some(turn), total)?;
+                self.usage_lines(Some(turn), &total)?;
             }
             let (_, turn_total) =
-                current_turn.get_or_insert((evidence.turn_id, TokenUsageTotal::default()));
-            turn_total.add(evidence.usage)?;
-            session_total.add(evidence.usage)?;
+                current_turn.get_or_insert_with(|| (evidence.turn_id, UsageAggregate::default()));
+            turn_total.add(&evidence)?;
+            session_total.add(&evidence)?;
         }
         if let Some((turn, total)) = current_turn {
-            self.usage_line(Some(turn), total)?;
+            self.usage_lines(Some(turn), &total)?;
         }
-        self.usage_line(None, session_total)?;
+        self.usage_lines(None, &session_total)?;
+        Ok(())
+    }
+
+    fn usage_lines(
+        &mut self,
+        turn: Option<CanonicalUuid>,
+        total: &UsageAggregate,
+    ) -> io::Result<()> {
+        self.usage_line(turn, UsageProvenance::Reported, total.reported)?;
+        self.usage_line(turn, UsageProvenance::Estimated, total.estimated)?;
+        for (key, cost) in &total.costs {
+            let prefix = turn.map_or_else(
+                || String::from("cost_total scope=session"),
+                |turn| format!("cost turn={turn}"),
+            );
+            writeln!(
+                self.stdout,
+                "{prefix} usage_provenance={} label={} rate_version={} usd={} costed_calls={}",
+                usage_provenance_label(key.provenance),
+                cost_label(key.label),
+                key.rate_version,
+                cost.amount_usd.normalize(),
+                cost.calls,
+            )?;
+        }
         Ok(())
     }
 
     fn usage_line(
         &mut self,
         turn: Option<CanonicalUuid>,
+        provenance: UsageProvenance,
         total: TokenUsageTotal,
     ) -> io::Result<()> {
         let prefix = turn.map_or_else(
@@ -877,11 +971,13 @@ impl<'a> Output<'a> {
         );
         writeln!(
             self.stdout,
-            "{prefix} terminal_calls={} input_tokens={} input_tokens_reported_calls={}/{} \
+            "{prefix} usage_provenance={} terminal_calls={} input_tokens={} \
+             input_tokens_reported_calls={}/{} \
              output_tokens={} output_tokens_reported_calls={}/{} \
              cache_creation_input_tokens={} \
              cache_creation_input_tokens_reported_calls={}/{} cache_read_input_tokens={} \
              cache_read_input_tokens_reported_calls={}/{}",
+            usage_provenance_label(provenance),
             total.terminal_calls,
             total.input.label(),
             total.input.reported_calls,
