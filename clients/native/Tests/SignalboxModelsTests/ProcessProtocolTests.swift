@@ -375,6 +375,26 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(try ProcessProtocolFixture.modelCallCount(in: endFrame.message), 1)
   }
 
+  func testTranscriptModelCallCostWithoutAUsageAxisDegradesWithDiagnostic() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.modelCallCostWithoutUsageAxisFrame(turnID: turnID)
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
+  func testBillingRateVersionAdmitsZeroWidthSpaceOutsideProtocolTrimSet() throws {
+    let spelling = "\u{200B}rates-v7"
+    let encoded = try SignalboxJSONCoding.encoder().encode(spelling)
+
+    let version = try SignalboxJSONCoding.decoder().decode(
+      SignalboxBillingRateVersion.self,
+      from: encoded
+    )
+
+    XCTAssertEqual(version.rawValue, spelling)
+  }
+
   func testFailedTerminalProviderCauseDecodesAsAClosedClassification() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.failedTurnFrame(
@@ -1015,6 +1035,35 @@ private enum ProcessProtocolFixture {
             "amount_usd":"0.125",
             "rate_version":"rates-v7",
             "label":"metered_equivalent"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func modelCallCostWithoutUsageAxisFrame(turnID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(turnID)",
+          "model_call_id":"\(modelCallID)",
+          "usage_provenance":"reported",
+          "usage":{
+            "input_tokens":null,
+            "output_tokens":null,
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":null
+          },
+          "cost":{
+            "amount_usd":"0",
+            "rate_version":"rates-v7",
+            "label":"real"
           }
         }
       }

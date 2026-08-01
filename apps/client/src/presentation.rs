@@ -1066,8 +1066,15 @@ impl<'a> Output<'a> {
         &mut self,
         snapshot: &mut TranscriptSnapshot,
     ) -> Result<(), ClientError> {
-        self.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
-        self.render_usage(snapshot)
+        let mut rendered_snapshot = tempfile::tempfile()?;
+        {
+            let mut staged = Output::new(&mut rendered_snapshot, &mut *self.stderr, self.raw);
+            staged.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
+            staged.render_usage(snapshot)?;
+        }
+        rendered_snapshot.seek(SeekFrom::Start(0))?;
+        io::copy(&mut rendered_snapshot, &mut self.stdout)?;
+        Ok(())
     }
 
     pub(crate) fn followed_snapshot(
@@ -3393,7 +3400,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_usage_is_not_published_when_a_later_total_is_inexact() {
+    fn transcript_is_not_partially_published_when_a_later_total_is_inexact() {
         let large = Decimal::from_str("10000000000000000000000000000")
             .expect("fixture dollar amount is representable");
         let tiny = Decimal::from_str("0.0000000000000000000000000001")
@@ -3409,6 +3416,14 @@ mod tests {
         let mut snapshot = TranscriptSnapshot::from_messages(
             1,
             [
+                ServerMessage::TranscriptTurn {
+                    turn_id: wire_uuid(1),
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::Queued {
+                        accepted_input_id: wire_uuid(10),
+                        content: InputContent::new("transcript content".to_owned()),
+                    },
+                },
                 ServerMessage::TranscriptModelCallUsage {
                     model_call_index: CanonicalU64::new(0),
                     turn_id: wire_uuid(1),

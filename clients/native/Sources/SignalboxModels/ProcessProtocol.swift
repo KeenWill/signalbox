@@ -1359,6 +1359,19 @@ public struct SignalboxTranscriptModelCallUsage: Decodable, Equatable, Sendable 
     usageProvenance = try decoder.decode("usage_provenance")
     usage = try decoder.decode("usage")
     cost = try decoder.decodeIfPresent("cost")
+    guard cost == nil
+      || usage.inputTokens != nil
+      || usage.outputTokens != nil
+      || usage.cacheCreationInputTokens != nil
+      || usage.cacheReadInputTokens != nil
+    else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Model-call cost requires at least one present usage axis."
+        )
+      )
+    }
   }
 }
 
@@ -1411,14 +1424,31 @@ public struct SignalboxBillingRateVersion: Decodable, Equatable, Sendable {
 
   public init(from decoder: Decoder) throws {
     let spelling = try decoder.singleValueContainer().decode(String.self)
+    let beginsWithProtocolTrimWhitespace = spelling.unicodeScalars.first.map {
+      signalboxIsProtocolTrimWhitespace($0)
+    } ?? false
+    let endsWithProtocolTrimWhitespace = spelling.unicodeScalars.last.map {
+      signalboxIsProtocolTrimWhitespace($0)
+    } ?? false
     guard !spelling.isEmpty,
       spelling.utf8.count <= 128,
-      spelling.trimmingCharacters(in: .whitespacesAndNewlines) == spelling,
+      !beginsWithProtocolTrimWhitespace,
+      !endsWithProtocolTrimWhitespace,
       !spelling.contains("\0")
     else {
       throw SignalboxCanonicalValueError.rateVersion
     }
     rawValue = spelling
+  }
+}
+
+private func signalboxIsProtocolTrimWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+  switch scalar.value {
+  case 0x0009...0x000D, 0x0020, 0x0085, 0x00A0, 0x1680,
+    0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+    return true
+  default:
+    return false
   }
 }
 
