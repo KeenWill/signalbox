@@ -477,6 +477,7 @@ impl WebSearchResponse {
 pub struct WebSearchProviderError {
     status: u16,
     body: Vec<u8>,
+    body_failure_class: Option<WebSearchTransportFailureClass>,
 }
 
 impl fmt::Debug for WebSearchProviderError {
@@ -497,8 +498,16 @@ impl WebSearchProviderError {
     /// Retains one complete provider error body within the exchange cap.
     pub fn new(status: u16, body: Vec<u8>) -> Option<Self> {
         let status_code = StatusCode::from_u16(status).ok()?;
-        (!status_code.is_success() && body.len() <= MAX_PROVIDER_RESPONSE_BYTES)
-            .then_some(Self { status, body })
+        (!status_code.is_success() && body.len() <= MAX_PROVIDER_RESPONSE_BYTES).then_some(Self {
+            status,
+            body,
+            body_failure_class: None,
+        })
+    }
+
+    fn with_body_failure_class(mut self, failure_class: WebSearchTransportFailureClass) -> Self {
+        self.body_failure_class = Some(failure_class);
+        self
     }
 }
 
@@ -923,6 +932,9 @@ fn build_provider_request(
     credential: &CredentialValue,
 ) -> Result<reqwest::Request, WebSearchTransportFailure> {
     let endpoint = request.provider.endpoint();
+    if has_http_header_boundary_whitespace(credential.expose_bytes()) {
+        return Err(WebSearchTransportFailure::InvalidCredential);
+    }
     let credential_text = std::str::from_utf8(credential.expose_bytes())
         .map_err(|_| WebSearchTransportFailure::InvalidCredential)?;
     if credential_text.is_empty() {
@@ -1012,9 +1024,16 @@ fn finish_provider_response(
     body: Result<Vec<u8>, WebSearchTransportFailure>,
 ) -> Result<WebSearchResponse, WebSearchTransportFailure> {
     if !status.is_success() {
-        let complete_body = body.unwrap_or_default();
+        let (complete_body, body_failure_class) = match body {
+            Ok(complete_body) => (complete_body, None),
+            Err(failure) => (Vec::new(), Some(failure.class())),
+        };
         let error = WebSearchProviderError::new(status.as_u16(), complete_body)
             .ok_or(WebSearchTransportFailure::ResponseTooLarge)?;
+        let error = match body_failure_class {
+            Some(failure_class) => error.with_body_failure_class(failure_class),
+            None => error,
+        };
         return Err(WebSearchTransportFailure::ProviderRejected(error));
     }
     if status != StatusCode::OK {
@@ -1216,6 +1235,11 @@ where
             .search(request, &credential)
             .await
             .into_result();
+        if let Err(WebSearchTransportFailure::ProviderRejected(error)) = &transport_result
+            && let Some(failure_class) = error.body_failure_class
+        {
+            let _reporting = report_response_body_failure(failure_class, correlation, &credential);
+        }
         if let Err(failure) = &transport_result {
             let _reporting = report_transport_failure(failure, correlation, &credential);
         }
@@ -1363,7 +1387,9 @@ fn bind_request_outcome(
                 "{:?}",
                 Result::<&CorrelatedToolExecutorEvidence, _>::Err(&error)
             );
-            if !credential_text.is_empty() && !rendered_result.contains(credential_text) {
+            if !credential_text.is_empty()
+                && !bound_diagnostic_contains_credential(&rendered_result, credential_text)
+            {
                 return Err(error);
             }
             if executor_error_diagnostic_class(&error)
@@ -1381,7 +1407,9 @@ fn bind_request_outcome(
             let fallback = invocation.bind(ToolExecutorEvidence::KnownFailed { detail: None });
             let rendered_fallback =
                 format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&fallback));
-            if !credential_text.is_empty() && !rendered_fallback.contains(credential_text) {
+            if !credential_text.is_empty()
+                && !bound_diagnostic_contains_credential(&rendered_fallback, credential_text)
+            {
                 return Ok(fallback);
             }
             return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
@@ -1406,7 +1434,9 @@ fn bind_request_outcome(
     };
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let rendered_result = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&bound));
-    if credential_text.is_empty() || rendered_result.contains(credential_text) {
+    if credential_text.is_empty()
+        || bound_diagnostic_contains_credential(&rendered_result, credential_text)
+    {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
                 rendered: safe_collision_diagnostic(credential_text),
@@ -1523,6 +1553,41 @@ fn report_transport_failure(
         session_id = %correlation.session().as_uuid(),
         turn_id = %correlation.turn().as_uuid(),
         "web search transport failed"
+    );
+    Ok(())
+}
+
+fn report_response_body_failure(
+    failure_class: WebSearchTransportFailureClass,
+    correlation: &ToolAttemptDispatchCorrelation,
+    credential: &CredentialValue,
+) -> Result<(), WebSearchExecutorError> {
+    let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    let controlled_event = format!(
+        "WARN signalbox_tools_basic_web_search: web search provider response body failed failure={failure_class:?} session_id={} turn_id={}",
+        correlation.session().as_uuid(),
+        correlation.turn().as_uuid()
+    );
+    if credential_text.is_empty()
+        || compact_formatter_metadata_may_contain(credential_text)
+        || controlled_event.contains(credential_text)
+    {
+        return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
+            WebSearchCredentialDiagnostic {
+                rendered: safe_collision_diagnostic(credential_text),
+                failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                transport_failure_class: Some(failure_class),
+            },
+        ));
+    }
+    tracing::event!(
+        target: "signalbox_tools_basic_web_search",
+        parent: None,
+        tracing::Level::WARN,
+        failure = ?failure_class,
+        session_id = %correlation.session().as_uuid(),
+        turn_id = %correlation.turn().as_uuid(),
+        "web search provider response body failed"
     );
     Ok(())
 }
@@ -1715,6 +1780,9 @@ struct CredentialScrubber {
 
 impl CredentialScrubber {
     fn try_new(credential: &CredentialValue) -> Option<Self> {
+        if has_http_header_boundary_whitespace(credential.expose_bytes()) {
+            return None;
+        }
         let exact = std::str::from_utf8(credential.expose_bytes())
             .ok()?
             .to_owned();
@@ -1808,12 +1876,28 @@ impl CredentialScrubber {
     }
 }
 
+fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {
+    value
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        || value
+            .last()
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+}
+
 fn ascii_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
     !needle.is_empty()
         && haystack
             .as_bytes()
             .windows(needle.len())
             .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn bound_diagnostic_contains_credential(rendered: &str, credential: &str) -> bool {
+    rendered.contains(credential)
+        || rendered
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|token| token.eq_ignore_ascii_case(credential))
 }
 
 fn encoded_contains_credential(text: &str, credential: &str) -> bool {
@@ -2043,16 +2127,20 @@ mod tests {
     const FORM_HTML_COLLISION_VALUE: &str = "abc%26amp%3Bdef";
     const REQUEST_DETAIL_COLLISION_KEY: &str = "failed";
     const SHORT_DIAGNOSTIC_COLLISION_KEY: &str = "r";
+    const LEADING_HEADER_WHITESPACE_KEY: &str = " fixture-search-key";
+    const TRAILING_HEADER_WHITESPACE_KEY: &[u8] = b"fixture-search-key\t";
     const EMPTY_CREDENTIAL_VALUE: &[u8] = b"";
     const NON_UTF8_CREDENTIAL_VALUE: &[u8] = &[0xff];
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
     const TIMESTAMP_COLLISION_KEY: &str = "2026";
     const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
+    const EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY: &str = "completedtext";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const CREDENTIAL_FAILURE_CLASSIFICATION: &str = "failure=Unmapped";
     const CREDENTIAL_VALUE_FAILURE_CLASSIFICATION: &str = "failure=Unusable";
     const TRANSPORT_FAILURE_CLASSIFICATION: &str = "failure=RequestFailed";
+    const RESPONSE_BODY_FAILURE_CLASSIFICATION: &str = "failure=DispatchUnknown";
     const RESPONSE_SANITIZATION_FAILURE_CLASSIFICATION: &str = "failure=EvidenceEncoding";
     const SESSION_IDENTITY: u128 = 1;
     const TURN_IDENTITY: u128 = 2;
@@ -2612,6 +2700,22 @@ mod tests {
         (output.text(), result)
     }
 
+    fn capture_response_body_failure(
+        failure_class: WebSearchTransportFailureClass,
+        correlation: &ToolAttemptDispatchCorrelation,
+        credential: &CredentialValue,
+    ) -> (String, Result<(), WebSearchExecutorError>) {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_writer(output.clone())
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            report_response_body_failure(failure_class, correlation, credential)
+        });
+        (output.text(), result)
+    }
+
     fn capture_response_sanitization_failure(
         correlation: &ToolAttemptDispatchCorrelation,
         credential: &CredentialValue,
@@ -2851,6 +2955,48 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!rendered.contains(EXECUTOR_OUTCOME_COLLISION_KEY));
+    }
+
+    /// INV-035: case normalization of fixed bound-evidence Debug tokens cannot
+    /// reproduce a request credential in the public executor result.
+    #[tokio::test]
+    async fn web_search_bound_executor_result_omits_case_normalized_credential_collision() {
+        let diagnostic = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&diagnostic);
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY,
+        };
+        let transport = CountingTransport { searches };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("static web_search tool compiles")
+            .into_parts();
+        let executor = FormattingExecutor {
+            inner: executor,
+            diagnostic: captured,
+        };
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let rendered = diagnostic
+            .lock()
+            .expect("captured executor diagnostic lock is available")
+            .clone();
+
+        assert!(result.is_err());
+        assert!(!unicode_case_insensitive_contains(
+            &rendered,
+            EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY
+        ));
     }
 
     /// INV-035: a credential that can collide with the fixed outer `Err`
@@ -3773,6 +3919,19 @@ mod tests {
         );
     }
 
+    /// INV-035: optional HTTP field whitespace cannot alter a credential at
+    /// the header boundary before dispatch.
+    #[test]
+    fn brave_request_rejects_leading_header_whitespace_in_credential() {
+        let failure = build_brave_request(FIXTURE_QUERY, LEADING_HEADER_WHITESPACE_KEY)
+            .expect_err("boundary-whitespace credential is rejected");
+
+        assert_eq!(
+            failure.class(),
+            WebSearchTransportFailureClass::InvalidCredential
+        );
+    }
+
     /// INV-035: a provider status equal to the API key is retained for
     /// request-scoped sanitization but omitted from raw public diagnostics.
     #[test]
@@ -4139,6 +4298,17 @@ mod tests {
         assert_eq!(searches, 0);
     }
 
+    /// INV-035: a credential with trailing HTTP field whitespace commits
+    /// definitive pre-dispatch evidence without reaching injected transport.
+    #[tokio::test]
+    async fn trailing_header_whitespace_credential_commits_without_dispatch() {
+        let (outcome, searches) =
+            execute_raw_credential_through_service(TRAILING_HEADER_WHITESPACE_KEY).await;
+
+        assert!(is_committed_known_failure(&outcome));
+        assert_eq!(searches, 0);
+    }
+
     #[test]
     fn transport_failure_diagnostic_preserves_safe_classification() {
         let correlation = dispatch_correlation();
@@ -4151,6 +4321,26 @@ mod tests {
         assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(TRANSPORT_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
+    /// INV-035: an incomplete provider-rejection body emits its retained safe
+    /// failure class before the definitive rejection is coarsened.
+    #[test]
+    fn provider_rejection_body_failure_reports_safe_classification() {
+        let correlation = dispatch_correlation();
+        let credential = CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec());
+
+        let (diagnostic, result) = capture_response_body_failure(
+            WebSearchTransportFailureClass::DispatchUnknown,
+            &correlation,
+            &credential,
+        );
+
+        result.expect("safe provider-response body diagnostic is emitted");
+        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(RESPONSE_BODY_FAILURE_CLASSIFICATION));
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
     }
 
@@ -4252,6 +4442,10 @@ mod tests {
 
         assert_eq!(error.status, PROVIDER_REJECTION_STATUS);
         assert!(error.body.is_empty());
+        assert_eq!(
+            error.body_failure_class,
+            Some(WebSearchTransportFailureClass::DispatchUnknown)
+        );
     }
 
     /// The recorded synthetic Brave envelope decodes only web results and the
