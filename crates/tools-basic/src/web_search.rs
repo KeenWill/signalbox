@@ -1838,12 +1838,29 @@ fn bind_request_outcome(
         } => (evidence, BoundCredentialCheck::BoundedVariants(credential)),
     };
     let bound_diagnostic_check = bound_diagnostic_check(&evidence);
+    let has_dynamic_known_failure_detail = matches!(
+        &evidence,
+        ToolExecutorEvidence::KnownFailed { detail: Some(_) }
+    );
+    let fallback_invocation = has_dynamic_known_failure_detail.then(|| invocation.clone());
     let bound = invocation.bind(evidence);
     let rendered_result = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&bound));
     match credential {
         BoundCredentialCheck::None => Ok(bound),
         BoundCredentialCheck::BoundedVariants(credential) => {
             if credential.collides(&rendered_result, bound_diagnostic_check) {
+                if let Some(fallback_invocation) = fallback_invocation {
+                    let fallback = fallback_invocation
+                        .bind(ToolExecutorEvidence::KnownFailed { detail: None });
+                    let rendered_fallback =
+                        format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&fallback));
+                    if !credential.collides(
+                        &rendered_fallback,
+                        BoundDiagnosticCheck::PreserveDefinitiveFailureWord,
+                    ) {
+                        return Ok(fallback);
+                    }
+                }
                 return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
                     WebSearchCredentialDiagnostic {
                         rendered: String::new(),
@@ -1857,16 +1874,24 @@ fn bind_request_outcome(
         BoundCredentialCheck::Exact(credential) => {
             let credential_text =
                 std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-            let check_rendered_collision = match bound_diagnostic_check {
-                BoundDiagnosticCheck::AllCredentialVariants => true,
-                BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-                    !unicode_case_insensitive_contains("Failed", credential_text)
+            if exact_bound_diagnostic_collides(
+                &rendered_result,
+                credential_text,
+                bound_diagnostic_check,
+            ) {
+                if let Some(fallback_invocation) = fallback_invocation {
+                    let fallback = fallback_invocation
+                        .bind(ToolExecutorEvidence::KnownFailed { detail: None });
+                    let rendered_fallback =
+                        format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&fallback));
+                    if !exact_bound_diagnostic_collides(
+                        &rendered_fallback,
+                        credential_text,
+                        BoundDiagnosticCheck::PreserveDefinitiveFailureWord,
+                    ) {
+                        return Ok(fallback);
+                    }
                 }
-            };
-            if credential_text.is_empty()
-                || (check_rendered_collision
-                    && bound_diagnostic_contains_credential(&rendered_result, credential_text))
-            {
                 return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
                     WebSearchCredentialDiagnostic {
                         rendered: safe_collision_diagnostic(credential_text),
@@ -1895,6 +1920,23 @@ fn bound_diagnostic_check(evidence: &ToolExecutorEvidence) -> BoundDiagnosticChe
 enum BoundDiagnosticCheck {
     AllCredentialVariants,
     PreserveDefinitiveFailureWord,
+}
+
+fn exact_bound_diagnostic_collides(
+    rendered: &str,
+    credential: &str,
+    check: BoundDiagnosticCheck,
+) -> bool {
+    if credential.is_empty() {
+        return true;
+    }
+    let check_credential = match check {
+        BoundDiagnosticCheck::AllCredentialVariants => true,
+        BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
+            !unicode_case_insensitive_contains("Failed", credential)
+        }
+    };
+    check_credential && bound_diagnostic_contains_credential(rendered, credential)
 }
 
 impl<Credentials, Transport> ToolExecutor for WebSearchExecutor<Credentials, Transport>
@@ -3011,6 +3053,11 @@ fn canonicalized_ipv4_fragment(host: &str, positions: std::ops::Range<usize>) ->
 }
 
 fn canonicalized_ipv6_fragments(value: &str) -> Vec<Vec<u16>> {
+    let value = value.strip_prefix('[').unwrap_or(value);
+    let value = value.strip_suffix(']').unwrap_or(value);
+    if value.is_empty() {
+        return Vec::new();
+    }
     let has_compression = value.contains("::");
     let explicit_component_count = value
         .split(':')
@@ -3108,9 +3155,9 @@ fn canonicalized_mixed_ipv6_ipv4_tail_fragments(value: &str) -> (Vec<Vec<u16>>, 
     let Some((ipv6_prefix, ipv4_tail)) = value.rsplit_once(':') else {
         return (Vec::new(), Vec::new());
     };
-    if ipv6_prefix.is_empty()
-        || !ipv4_tail.contains('.')
-        || canonicalized_ipv6_fragments(&format!("{ipv6_prefix}:0")).is_empty()
+    if !ipv4_tail.contains('.')
+        || (!ipv6_prefix.is_empty()
+            && canonicalized_ipv6_fragments(&format!("{ipv6_prefix}:0")).is_empty())
     {
         return (Vec::new(), Vec::new());
     }
@@ -3286,9 +3333,11 @@ mod tests {
     const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
     const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
     const URL_IPV6_MULTI_HEXTET_COLLISION_KEY: &str = "0db8:0000";
+    const URL_IPV6_BRACKET_BOUND_COLLISION_KEY: &str = "[2001:0db8";
     const URL_IPV6_COMPRESSED_FRAGMENT_COLLISION_KEY: &str = "0db8::1";
     const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
     const URL_MIXED_COMPRESSED_IPV6_TAIL_COLLISION_KEY: &str = "::ffff:192.168";
+    const URL_SEPARATOR_ONLY_IPV6_TAIL_COLLISION_KEY: &str = ":192.168";
     const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
     const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
@@ -3350,6 +3399,7 @@ mod tests {
     const EXECUTOR_POPULATED_SUCCESS_WRAPPER_COLLISION_KEY: &str = "CompletedText(\"{";
     const TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY: &str = "requestfailed";
     const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
+    const DYNAMIC_PROVIDER_REJECTION_WRAPPER_COLLISION_KEY: &str = r#"Some(ToolExecutionErrorDetail("web search provider rejected the request with HTTP status 429"#;
     const UNICODE_FULL_FOLD_COLLISION_KEY: &str = "STRASSE";
     const UNICODE_FULL_FOLD_COLLISION_VALUE: &str = "Straße";
     const UNICODE_COMBINING_MARK_COLLISION_KEY: &str = "\u{0301}x";
@@ -3930,15 +3980,19 @@ mod tests {
         (outcome, searches.load(Ordering::Relaxed))
     }
 
-    async fn execute_provider_rejection_through_service() -> (ToolExecutionServiceOutcome, usize) {
+    async fn execute_provider_rejection_through_service<Credentials>(
+        credentials: Credentials,
+    ) -> (ToolExecutionServiceOutcome, usize)
+    where
+        Credentials: CredentialAccess,
+    {
         let searches = Arc::new(AtomicUsize::new(0));
         let transport = ProviderRejectedTransport {
             searches: Arc::clone(&searches),
         };
-        let (catalog, executor) =
-            WebSearchTool::try_new(ProviderStatusCredentials, transport, configuration())
-                .expect("fixture web_search tool compiles")
-                .into_parts();
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("fixture web_search tool compiles")
+            .into_parts();
         let batch = prepared_web_search_batch();
         let mut service = ToolExecutionService::new(
             UuidV7ToolLoopIdGenerator,
@@ -6473,6 +6527,29 @@ mod tests {
         );
     }
 
+    /// INV-035: a bracket adjacent to a partial IPv6 credential fragment is
+    /// treated as host syntax before comparison with a result host.
+    #[test]
+    fn web_search_rejects_canonicalized_bracket_bound_ipv6_fragment() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("bracket-bound IPv6 fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_IPV6_BRACKET_BOUND_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// INV-035: a compressed IPv6 credential fragment is expanded at every
     /// legal length and position before comparison with a result host.
     #[test]
@@ -6535,6 +6612,31 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_MIXED_COMPRESSED_IPV6_TAIL_COLLISION_KEY
+                .as_bytes()
+                .to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: an IPv6/IPv4 separator without an explicit IPv6 prefix still
+    /// canonicalizes its partial dotted tail before result-host comparison.
+    #[test]
+    fn web_search_rejects_canonicalized_separator_only_ipv6_tail_fragment() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_IPV4_TAIL_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("separator-only mixed-tail fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_SEPARATOR_ONLY_IPV6_TAIL_COLLISION_KEY
                 .as_bytes()
                 .to_vec(),
         ))
@@ -7497,7 +7599,22 @@ mod tests {
     /// credential is omitted while the public service commits known failure.
     #[tokio::test]
     async fn credential_collision_commits_provider_rejection_without_crash() {
-        let (outcome, searches) = execute_provider_rejection_through_service().await;
+        let (outcome, searches) =
+            execute_provider_rejection_through_service(ProviderStatusCredentials).await;
+
+        assert!(is_committed_known_failure_without_detail(&outcome));
+        assert_eq!(searches, 1);
+    }
+
+    /// INV-035: a credential spanning the populated-detail wrapper and a
+    /// dynamic provider rejection falls back to definitive detail-free evidence.
+    #[tokio::test]
+    async fn wrapper_spanning_provider_detail_collision_commits_known_failure() {
+        let credentials = StaticCredentials {
+            value: DYNAMIC_PROVIDER_REJECTION_WRAPPER_COLLISION_KEY,
+        };
+
+        let (outcome, searches) = execute_provider_rejection_through_service(credentials).await;
 
         assert!(is_committed_known_failure_without_detail(&outcome));
         assert_eq!(searches, 1);
