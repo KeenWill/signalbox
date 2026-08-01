@@ -738,7 +738,7 @@ fn decode_placement(
         return if path.is_none() && !root_intent {
             Ok(SessionPlacement::Pathless)
         } else {
-            Err(CreateSessionCorruption::Inconsistent("pre-version-five placement").into())
+            Err(CreateSessionCorruption::Inconsistent("pre-version-six placement").into())
         };
     }
     let Some(path) = path else {

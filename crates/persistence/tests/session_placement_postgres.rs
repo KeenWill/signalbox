@@ -18,7 +18,10 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
     session::SessionRepository,
-    session_placement::{SessionPlacementRepository, SessionPlacementRepositoryOutcome},
+    session_placement::{
+        SessionPlacementRepository, SessionPlacementRepositoryError,
+        SessionPlacementRepositoryOutcome,
+    },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -213,6 +216,47 @@ async fn s36_placement_update_appends_history_and_equal_replay_preserves_it()
         history,
         vec![(1, "created".to_owned()), (2, "updated".to_owned())]
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_missing_placement_head_fails_closed_instead_of_rejecting_session_absence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(0x204);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x105),
+            session_id,
+            SessionPlacement::Pathless,
+        ))
+        .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_current_placement DISABLE TRIGGER USER;
+         DELETE FROM session_current_placement;
+         ALTER TABLE session_current_placement ENABLE TRIGGER USER;",
+    )
+    .execute(&pool)
+    .await?;
+    let update = UpdateSessionPlacement::new(
+        command(0x106),
+        session_id,
+        SessionPlacementVersion::INITIAL,
+        SessionPlacement::Pathless,
+    );
+
+    let error = SessionPlacementRepository::new(pool.clone())
+        .handle(update)
+        .await
+        .expect_err("a present session without placement history is corruption");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("missing placement history fails with typed corruption")
+    };
+    assert_eq!(reason, "session placement head missing");
 
     pool.close().await;
     drop(container);

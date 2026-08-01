@@ -236,7 +236,21 @@ async fn load_current_for_update(
         .bind(session_id_to_uuid(session))
         .fetch_optional(&mut *connection)
         .await?;
-    row.map(decode_versioned_placement).transpose()
+    if let Some(row) = row {
+        return decode_versioned_placement(row).map(Some);
+    }
+    let session_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
+            .bind(session_id_to_uuid(session))
+            .fetch_one(&mut *connection)
+            .await?;
+    if session_exists {
+        Err(SessionPlacementRepositoryError::Corruption(
+            "session placement head missing",
+        ))
+    } else {
+        Ok(None)
+    }
 }
 
 async fn insert_event(

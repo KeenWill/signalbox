@@ -518,12 +518,6 @@ because they fire outside the Rust inventory's view.
 
 Locks per transaction, in acquisition order:
 
-- **UpdateSessionPlacement**: after claiming an unseen user-global command, the
-  transaction locks the target `session_placement_current` row `FOR UPDATE`,
-  compares the expected version, appends exactly the next history event, moves
-  the current pointer, and records the terminal typed result. Exact replay and
-  conflicting reuse resolve from the registry without taking that lock.
-
 - **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
   insertion and the command/session uniqueness constraints serialize competing
   command identities. The adapter loads the aggregate named by
