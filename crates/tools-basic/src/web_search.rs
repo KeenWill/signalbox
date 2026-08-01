@@ -2432,6 +2432,14 @@ impl CredentialScrubber {
         }) {
             return true;
         }
+        if self.reversible_variants().any(|variant| {
+            canonicalized_complete_url(variant).is_some_and(|normalized| {
+                unicode_case_insensitive_contains(text, &normalized)
+                    || encoded_contains_credential(text, &normalized)
+            })
+        }) {
+            return true;
+        }
         let Ok(url) = Url::parse(text) else {
             return true;
         };
@@ -3006,6 +3014,11 @@ fn canonicalized_url_host(value: &str) -> Option<String> {
     .then(|| url.host_str().map(str::to_owned))?
 }
 
+fn canonicalized_complete_url(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| String::from(url.as_str()))
+}
+
 fn parse_ip_literal(value: &str) -> Option<std::net::IpAddr> {
     let unbracketed = value
         .strip_prefix('[')
@@ -3348,6 +3361,7 @@ mod tests {
     const URL_PORT_COLLISION_KEY: &str = ":08081";
     const URL_BARE_PORT_COLLISION_KEY: &str = "08081";
     const URL_PORT_COLLISION_VALUE: &str = "http://example.com:8081/";
+    const URL_COMPLETE_DEFAULT_PORT_COLLISION_KEY: &str = "https://example.com:443/";
     const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
     const UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY: &str = "*";
@@ -6779,6 +6793,29 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_BARE_PORT_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: complete URL credential variants are canonicalized before
+    /// comparison with a provider result URL.
+    #[test]
+    fn web_search_rejects_canonicalized_complete_url_credential() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_CANONICAL_ORIGIN_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("canonical complete-URL fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_COMPLETE_DEFAULT_PORT_COLLISION_KEY.as_bytes().to_vec(),
         ))
         .expect("fixture credential is usable");
 
