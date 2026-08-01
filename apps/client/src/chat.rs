@@ -1366,8 +1366,8 @@ mod tests {
     #[test]
     fn chat_parser_keeps_plain_input_exact() {
         assert_eq!(
-            parse_line(String::from("  exact owner text  ")),
-            Ok(ChatInput::Submit(String::from("  exact owner text  ")))
+            parse_line(String::from("  exact user text  ")),
+            Ok(ChatInput::Submit(String::from("  exact user text  ")))
         );
     }
 
@@ -1451,7 +1451,7 @@ mod tests {
         const ACCEPTED_INPUT_IDENTITY: u128 = 12;
         const ATTEMPT_IDENTITY: u128 = 13;
         const FIRST_ACCEPTANCE_POSITION: u64 = 1;
-        const QUEUED_OWNER_INPUT: &str = "queued owner input";
+        const QUEUED_USER_INPUT: &str = "queued user input";
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(TURN_IDENTITY));
         let mut turns = ChatTurns::default();
 
@@ -1464,7 +1464,7 @@ mod tests {
                     )),
                     turn_id,
                     acceptance_position: CanonicalU64::new(FIRST_ACCEPTANCE_POSITION),
-                    content: InputContent::new(String::from(QUEUED_OWNER_INPUT)),
+                    content: InputContent::new(String::from(QUEUED_USER_INPUT)),
                 }
             ),
             TurnEventEffect::None

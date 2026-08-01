@@ -118,7 +118,7 @@ fn current_session() -> Result<Session, FixtureError> {
         session,
         session,
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         session,

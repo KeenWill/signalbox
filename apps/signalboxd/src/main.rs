@@ -1053,7 +1053,7 @@ async fn run_hub(
                 tracing::warn!(
                     phase = ?RuntimePhase::StartupScan,
                     session = %session.into_uuid(),
-                    "session holds its slot awaiting an owner reconciliation decision"
+                    "session holds its slot awaiting a user reconciliation decision"
                 );
             }
             Ok(())

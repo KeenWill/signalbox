@@ -45,16 +45,16 @@ specified in [persistence-protocol](spec/persistence-protocol.md).
 
 ## Responsibilities
 
-| Component                   | Owns                                                                                                                                                                                                                                                                                                    | Does not own                                                                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Clients                     | User interaction, presentation, explicit input-delivery intent, replaceable transient views                                                                                                                                                                                                             | Canonical transcripts, scheduling, provider credentials, or approval truth                                                                   |
-| Central daemon              | Durable session semantics, accepted-input dispositions, logical turns, effective configuration, model resolution, provider calls, tool policy, approvals, scheduling, reconstruction, recovery decisions, per-dispatch effective runner properties, and enforcement of the single-owner access boundary | Machine-local capabilities it cannot truthfully provide or an authentication, enrollment, or attestation mechanism selected by this document |
-| Postgres                    | Canonical durable records and transactional constraints                                                                                                                                                                                                                                                 | Domain policy, live provider streams, or runner execution                                                                                    |
-| Provider adapters           | Translation between daemon model-call intent and provider APIs; observed provider response metadata                                                                                                                                                                                                     | Session lifecycle, fallback policy, or historical alias meaning                                                                              |
-| Central scheduler           | Choosing eligible runners, durable dispatch coordination, fencing, and at-most-one progressing turn policy                                                                                                                                                                                              | Tool implementation or an assumed distributed broker                                                                                         |
-| Outbound runners            | Declaring capabilities and execution-boundary properties, and executing under one deployment identity                                                                                                                                                                                                   | Proof of their own claims, conversation truth, provider credentials, or final policy decisions                                               |
-| Daemon-local tool executors | Centrally placed integrations and centrally credentialed actions                                                                                                                                                                                                                                        | Workstation-local state or automatic privilege on runners                                                                                    |
-| Runner-local tool executors | Shell, filesystem, Git, applications, local MCP, hardware, or workspace-specific effects                                                                                                                                                                                                                | Approval authority or durable conversation updates                                                                                           |
+| Component                   | Owns                                                                                                                                                                                                                                                                                                   | Does not own                                                                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Clients                     | User interaction, presentation, explicit input-delivery intent, replaceable transient views                                                                                                                                                                                                            | Canonical transcripts, scheduling, provider credentials, or approval truth                                                                   |
+| Central daemon              | Durable session semantics, accepted-input dispositions, logical turns, effective configuration, model resolution, provider calls, tool policy, approvals, scheduling, reconstruction, recovery decisions, per-dispatch effective runner properties, and enforcement of the single-user access boundary | Machine-local capabilities it cannot truthfully provide or an authentication, enrollment, or attestation mechanism selected by this document |
+| Postgres                    | Canonical durable records and transactional constraints                                                                                                                                                                                                                                                | Domain policy, live provider streams, or runner execution                                                                                    |
+| Provider adapters           | Translation between daemon model-call intent and provider APIs; observed provider response metadata                                                                                                                                                                                                    | Session lifecycle, fallback policy, or historical alias meaning                                                                              |
+| Central scheduler           | Choosing eligible runners, durable dispatch coordination, fencing, and at-most-one progressing turn policy                                                                                                                                                                                             | Tool implementation or an assumed distributed broker                                                                                         |
+| Outbound runners            | Declaring capabilities and execution-boundary properties, and executing under one deployment identity                                                                                                                                                                                                  | Proof of their own claims, conversation truth, provider credentials, or final policy decisions                                               |
+| Daemon-local tool executors | Centrally placed integrations and centrally credentialed actions                                                                                                                                                                                                                                       | Workstation-local state or automatic privilege on runners                                                                                    |
+| Runner-local tool executors | Shell, filesystem, Git, applications, local MCP, hardware, or workspace-specific effects                                                                                                                                                                                                               | Approval authority or durable conversation updates                                                                                           |
 
 The daemon may initially be one deployable modular monolith. Rows in this table
 are ownership modules, not a requirement for network services.
@@ -112,7 +112,7 @@ semantics. In outline:
 2. A client submits content with an explicit delivery treatment: start when no
    turn is active or, against an expected active turn, interrupt, next safe
    point, or after current turn.
-3. Owner-global durable-command deduplication precedes current-state validation.
+3. User-global durable-command deduplication precedes current-state validation.
    The first committed handling records the canonical typed payload and its
    applied-or-rejected result; acknowledgement follows the transaction that
    makes the accepted input, its treatment, ordering, initial disposition, and
@@ -167,7 +167,7 @@ regardless of placement.
 
 Session creation cause and transcript ancestry are independent immutable facts.
 [sessions-and-transcript](spec/sessions-and-transcript.md) limits the first
-implementable cause to owner initiation and represents ancestry as none or one
+implementable cause to user initiation and represents ancestry as none or one
 exact source frontier. Session configuration defaults are a separate versioned
 value: creation establishes the first version, while later updates affect only
 future input acceptance. The open
@@ -175,7 +175,7 @@ future input acceptance. The open
 variant with an exact parent-work identity before delegation creates related
 sessions; its parent-side wait, result, and cancellation transitions likewise
 remain reserved and are not variants in the first implementable turn state
-machine. Forking initializes an owner-created session from a selected transcript
+machine. Forking initializes a user-created session from a selected transcript
 frontier without claiming that the new session was delegated. Future merging
 remains open.
 
@@ -221,7 +221,7 @@ model-call-execution. Ambiguous external effects are preserved as ambiguous
 rather than coerced to failure. Separate resolving evidence may clear a blocking
 ambiguity without rewriting the physical record, after which unfinished work
 continues without repeating it; continuing past a still-unresolved ambiguity
-requires an explicit owner decision that records accepted duplicate risk.
+requires an explicit user decision that records accepted duplicate risk.
 
 At most one logical turn actively progresses per session initially; every
 implemented active phase, including approval and recovery waits, retains the
@@ -254,7 +254,7 @@ in the same page; their listed operational refinements remain open.
   automatic behavior.
 - Tool safety: risk taxonomy, confirmation thresholds, judge role, sandbox
   minimums, and retry rules.
-- Identity and access: owner/client authentication, runner enrollment and
+- Identity and access: user/client authentication, runner enrollment and
   authentication, and session revocation (provider/integration credential
   lifecycle is specified in
   [configuration-and-credentials](spec/configuration-and-credentials.md)).

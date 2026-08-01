@@ -83,7 +83,7 @@ pub enum StartupScanSessionOutcome {
     },
     /// A prior process already ended this turn's tenure and parked it on an
     /// exact ambiguity set. The scan has nothing left to classify; only an
-    /// owner reconciliation decision can release the slot.
+    /// user reconciliation decision can release the slot.
     AwaitingRecoveryDecision {
         /// The active turn holding the slot until reconciliation.
         turn: TurnId,
@@ -126,7 +126,7 @@ impl StartupScanOutcome {
     }
 
     /// Returns every session whose active turn holds the slot awaiting an
-    /// owner reconciliation decision.
+    /// user reconciliation decision.
     ///
     /// The scan cannot resolve these turns: their physical tenure has ended
     /// and the exact ambiguity set is durable, whether this scan classified
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(outcome.recovered_turn_count(), 0);
     }
 
-    /// INV-034: a turn parked on an owner reconciliation decision is neither
+    /// INV-034: a turn parked on a user reconciliation decision is neither
     /// counted as recovered nor hidden — it is reported and startup proceeds.
     #[test]
     fn inv034_reports_awaiting_recovery_decision_without_blocking_startup() {
