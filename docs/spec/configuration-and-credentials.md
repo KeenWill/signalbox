@@ -422,7 +422,9 @@ four implemented tool families in the same closed-table style as
 `[[adapter_mappings]]`:
 
 - `code_host` selects adapter `github`, credential profile `github-primary`, and
-  egress policy `github_api_only`;
+  egress policy `github_api_only` for authenticated GitHub API requests; the
+  credential-free job-log redirect remains the bounded public-HTTPS exception
+  owned by [tool-loop](tool-loop.md);
 - `github` selects the same adapter, profile, and policy;
 - `workspace` selects adapter `local` and supplies one absolute
   `workspace_root`; and
@@ -439,8 +441,11 @@ or a dependency field on the wrong family is a sanitized configuration failure.
 The root is opened once during tool construction and its pinned authority is
 cloned into both workspace suites, so a nonexistent, non-directory, or
 final-symlink root also fails startup. The GitHub policy admits exactly
-`https://api.github.com:443`; neither GitHub-backed suite can widen it from a
-model argument.
+`https://api.github.com:443` for authenticated requests. The code-host
+`change_request_ci_job_log` operation retains the tool-loop-owned exception for
+one credential-free download from its validated, pinned, bounded public HTTPS
+redirect destination; the pull-request suite has no such exception. Model
+arguments cannot widen either admission rule.
 
 Composition preserves each compiled declaration's permission default and feeds
 it unchanged into the existing durable approval flow. Exact-revision code-host
@@ -458,12 +463,13 @@ composition layer changes a declaration from `Confirm` to `Auto`.
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and
 immutable imported conversations. It exposes only persisted visible semantic
-content: source-attested imported text remains text, while unattested, non-text,
-thinking, redacted-thinking, document, and absent-content entries are
-content-silent typed markers. It never reads raw imported records. Native reads
-stream from the repeatable-read projection; imported reads currently load the
-complete immutable aggregate before enforcing the tool page's entry and byte
-bounds.
+content in tool results: source-attested imported text remains text, while
+unattested, non-text, thinking, redacted-thinking, document, and absent-content
+entries are content-silent typed markers. Native reads stream from the
+repeatable-read projection. Imported reads currently materialize the complete
+immutable aggregate, including its persisted raw source records, before the
+adapter projects normalized visible entries and enforces the tool page's entry
+and byte bounds; raw source records are never returned in the tool result.
 
 Each `[[models]]` entry defines one direct selection:
 
