@@ -267,9 +267,10 @@ the sweep (INV-007).
   new), `SubmitInputService` hands the session to the in-process nudge port. The
   buffer is bounded (1024); a full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
-- **Sweep (backstop).** `PostgresEligibilitySweep` finds sessions with either a
-  queued turn and no active turn — the storage shape of the activation
-  precondition — or an active tool round in the running phase. The
+- **Sweep (backstop).** `PostgresEligibilitySweep` finds three durable shapes: a
+  queued turn with no active turn (the activation precondition), an active tool
+  round in the running phase, or a current pursuing goal turn that is terminal
+  and therefore still owed its durable continuation-or-blocking disposition. The
   `turn_lifecycle_queued_by_session` partial index is created for the queued
   query shape, though planner adoption is not pinned by any test. Results are
   paged 16 sessions per query with a fixed per-cycle bound; continuation pages
@@ -283,13 +284,15 @@ the sweep (INV-007).
   nothing is lost because the rows are the queue.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
-scheduler after startup recovery. Each authoritative pass first asks its
-execution composition to reconcile any active running tool round for the hinted
-session, then runs ordinary queued-turn activation. Failure of the read-only
-active-round lookup is an ordinary failed pass for later scheduler retry; only a
-failure after active-turn execution begins trips fatal recovery supervision. A
-parked approval returns from the pass immediately and therefore retains no
-scheduler worker capacity. Activation returns the activated turn
+scheduler after startup recovery. This recovers a goal disposition when the
+process ended after turn terminalization but before scheduler reconciliation.
+Each authoritative pass first asks its execution composition to reconcile any
+active running tool round for the hinted session, then runs ordinary queued-turn
+activation. Failure of the read-only active-round lookup is an ordinary failed
+pass for later scheduler retry; only a failure after active-turn execution
+begins trips fatal recovery supervision. A parked approval returns from the pass
+immediately and therefore retains no scheduler worker capacity. Activation
+returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
 signalboxd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass

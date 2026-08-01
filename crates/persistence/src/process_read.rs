@@ -1894,11 +1894,14 @@ async fn load_transcript_turn_count(
     transaction: &mut Transaction<'static, Postgres>,
     session: SessionId,
 ) -> Result<u64, ProcessReadError> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM turn_lifecycle WHERE session_id = $1")
-            .bind(session_id_to_uuid(session))
-            .fetch_one(&mut **transaction)
-            .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_lifecycle AS turn
+          WHERE turn.session_id = $1
+            AND goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_one(&mut **transaction)
+    .await?;
     u64::try_from(count)
         .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript turn count").into())
 }
@@ -2084,6 +2087,7 @@ async fn load_next_transcript_turn(
             AND active_tool_round.turn_id = turn.turn_id
             AND active_tool_round.session_id = turn.session_id
           WHERE turn.session_id = $1
+            AND goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)
             AND ($2::numeric IS NULL OR turn.acceptance_position > $2)
           ORDER BY turn.acceptance_position
           LIMIT 1",

@@ -29,6 +29,7 @@ mod context_guard;
 mod conversation_introspection;
 mod daemon_tools;
 mod fenced_database;
+mod goal_mode;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
@@ -52,6 +53,7 @@ pub use daemon_tools::{
     DaemonToolsConstructionError, PinnedWorkspaceFileSystem,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
+pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
 pub use session_template_configuration::{

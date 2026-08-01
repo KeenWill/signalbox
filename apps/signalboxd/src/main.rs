@@ -20,10 +20,10 @@ use std::{
 };
 
 use signalbox_application::{
-    ClassifyOperatorFailure, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    InProcessToolDispatchGate, ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop,
-    SchedulerLoopExit, StartEligibleTurnService, StartupScanService,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
+    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -49,11 +49,11 @@ use signalboxd::{
     DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
     FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
     HubModelConfigurationError, LocalProcessListener, LocalSocketError, OtlpRuntime,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
-    usage_limits::UsageLimitedModelCallProvider,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -1125,7 +1125,7 @@ async fn run_hub(
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
-        eligibility_nudge,
+        eligibility_nudge.clone(),
         tool_dispatch_gate.clone(),
         model_configuration.clone(),
         template_configuration,
@@ -1155,12 +1155,20 @@ async fn run_hub(
     // fatal recovery signal through this handle rather than ending an
     // undecidable durable outcome at the client response.
     let process_runtime = process_runtime.with_recovery_reporter(execution.recovery_reporter());
-    let pass = ActivatedTurnPass::new(
+    let activated_pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,
-            StartEligibleTurnRepository::new(scheduler_pool),
+            StartEligibleTurnRepository::new(scheduler_pool.clone()),
         ),
         execution,
+    );
+    let pass = GoalAwareEligibilityPass::new(
+        activated_pass,
+        PostgresGoalPassDisposition::new(
+            scheduler_pool,
+            model_configuration.clone(),
+            eligibility_nudge,
+        ),
     );
     let mut scheduler = SchedulerLoop::new(work_source, pass);
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();

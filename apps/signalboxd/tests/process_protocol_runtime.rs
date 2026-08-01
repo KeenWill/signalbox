@@ -65,19 +65,19 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
     ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-    ConversationSummary, CurrentModelCallState, ErrorCode, ImportedContentKind,
-    ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-    InputContent, InputDelivery, MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail,
-    RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind,
-    ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
-    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
-    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
-    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
-    ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
-    encode_client_line,
+    ConversationSummary, CurrentModelCallState, ErrorCode, GoalHistoryEvent, GoalLifecycleState,
+    ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker,
+    ImportedTextPreview, InputContent, InputDelivery, MetadataActor, ModelSelection,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
+    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
+    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
+    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
+    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
+    SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+    decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
@@ -616,6 +616,142 @@ async fn create_alias_session(
         ))
         .into()),
     }
+}
+
+async fn read_goal_messages(
+    connection: &mut Connection,
+    request_id: u64,
+    session_id: CanonicalUuid,
+) -> Result<Vec<ServerMessage>, Box<dyn Error>> {
+    connection
+        .request(request_id, ClientRequest::ReadGoal { session_id })
+        .await?;
+    let mut messages = Vec::new();
+    loop {
+        let message = response_within(connection).await?.message().clone();
+        let ended = matches!(message, ServerMessage::GoalHistoryEnd { .. });
+        messages.push(message);
+        if ended {
+            return Ok(messages);
+        }
+    }
+}
+
+/// INV-048: process goal commands preserve immutable supersession lineage and
+/// show returns the complete ordered event stream with its current projection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s_goal_inv048_process_protocol_supersession_history_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let attach_command = command()?;
+    let supersede_command = command()?;
+    let stop_command = command()?;
+    let first_statement = String::from("finish the commissioned task");
+    let replacement_statement = String::from("finish the clarified task");
+
+    connection
+        .request(
+            2,
+            ClientRequest::AttachGoal {
+                command_id: attach_command,
+                session_id,
+                statement: first_statement.clone(),
+            },
+        )
+        .await?;
+    let attached = response_within(&mut connection).await?.message().clone();
+    connection
+        .request(
+            3,
+            ClientRequest::SupersedeGoal {
+                command_id: supersede_command,
+                session_id,
+                statement: replacement_statement.clone(),
+            },
+        )
+        .await?;
+    let superseded = response_within(&mut connection).await?.message().clone();
+    connection
+        .request(
+            4,
+            ClientRequest::StopGoal {
+                command_id: stop_command,
+                session_id,
+            },
+        )
+        .await?;
+    let stopped = response_within(&mut connection).await?.message().clone();
+    let history = read_goal_messages(&mut connection, 5, session_id).await?;
+
+    assert_eq!(
+        attached,
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal: CanonicalU64::new(1),
+            generation: CanonicalU64::new(1),
+        }
+    );
+    assert_eq!(
+        superseded,
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal: CanonicalU64::new(2),
+            generation: CanonicalU64::new(1),
+        }
+    );
+    assert_eq!(
+        stopped,
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal: CanonicalU64::new(3),
+            generation: CanonicalU64::new(2),
+        }
+    );
+    assert_eq!(
+        history,
+        vec![
+            ServerMessage::GoalHistoryStart {
+                session_id,
+                current_generation: CanonicalU64::new(2),
+                current_statement: replacement_statement.clone(),
+            },
+            ServerMessage::GoalHistoryState {
+                current_state: GoalLifecycleState::UserStopped {},
+            },
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(1),
+                generation: CanonicalU64::new(1),
+                event: GoalHistoryEvent::Commissioned {
+                    statement: first_statement,
+                    command_id: attach_command,
+                },
+            },
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(2),
+                generation: CanonicalU64::new(1),
+                event: GoalHistoryEvent::Superseded {
+                    replacement_statement,
+                    command_id: supersede_command,
+                },
+            },
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(3),
+                generation: CanonicalU64::new(2),
+                event: GoalHistoryEvent::UserStopped {
+                    command_id: stop_command,
+                },
+            },
+            ServerMessage::GoalHistoryEnd {
+                event_count: CanonicalU64::new(3),
+            },
+        ]
+    );
+
+    drop(connection);
+    runtime.stop().await
 }
 
 #[tokio::test]
