@@ -24,7 +24,11 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
     {
         return Ok(());
     }
-    let root = std::env::current_dir()?;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or("tools-exec manifest is not nested under the workspace root")?
+        .canonicalize()?;
     let process_runner =
         TokioProcessRunner::try_new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))?;
     let mut runner = SandboxedCommandRunner::try_new(process_runner, root)?;
