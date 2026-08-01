@@ -7,6 +7,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
+    ToolResultText, ToolResultTextFailure,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -256,8 +257,7 @@ impl<Runner: ProcessRunner> ToolExecutor for CargoDiagnosticsExecutor<Runner> {
         let arguments = decode_arguments(invocation.request().arguments())
             .map_err(|_| CargoDiagnosticsExecutorError::ArgumentValidationDrift)?;
         let result = self.runner.run_validated(arguments).await;
-        let encoded = serde_json::to_string(&result)
-            .map_err(|_| CargoDiagnosticsExecutorError::ResultEncoding)?;
+        let encoded = encode_tool_result(result)?;
         Ok(invocation.bind(ToolExecutorEvidence::CompletedText(encoded)))
     }
 }
@@ -328,8 +328,6 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
             "--all-targets",
             "--all-features",
             "--message-format=json",
-            "--",
-            "--format=pretty",
         ],
     }
     .into_iter()
@@ -496,14 +494,6 @@ fn structured_result(
         &mut tests,
         &mut test_limit_reached,
     );
-    parse_stream(
-        &result.stderr.text,
-        command,
-        &mut diagnostics,
-        &mut diagnostic_limit_reached,
-        &mut tests,
-        &mut test_limit_reached,
-    );
     CargoDiagnosticsResult {
         command,
         execution: CargoDiagnosticsExecution {
@@ -528,6 +518,31 @@ fn structured_result(
             limit_reached: test_limit_reached,
             source_truncated,
         },
+    }
+}
+
+fn encode_tool_result(
+    mut result: CargoDiagnosticsResult,
+) -> Result<String, CargoDiagnosticsExecutorError> {
+    loop {
+        let encoded = serde_json::to_string(&result)
+            .map_err(|_| CargoDiagnosticsExecutorError::ResultEncoding)?;
+        match ToolResultText::try_new(encoded) {
+            Ok(admitted) => return Ok(admitted.into_string()),
+            Err(error) => match error.failure() {
+                ToolResultTextFailure::TooLarge { .. } if result.tests.values.pop().is_some() => {
+                    result.tests.limit_reached = true;
+                }
+                ToolResultTextFailure::TooLarge { .. }
+                    if result.diagnostics.values.pop().is_some() =>
+                {
+                    result.diagnostics.limit_reached = true;
+                }
+                ToolResultTextFailure::TooLarge { .. } | ToolResultTextFailure::ContainsNull => {
+                    return Err(CargoDiagnosticsExecutorError::ResultEncoding);
+                }
+            },
+        }
     }
 }
 
@@ -610,6 +625,7 @@ fn parse_test(line: &str) -> Option<CargoTestResult> {
         "ok" => CargoTestOutcome::Passed,
         "FAILED" => CargoTestOutcome::Failed,
         "ignored" => CargoTestOutcome::Ignored,
+        value if value.starts_with("ignored, ") => CargoTestOutcome::Ignored,
         _ => return None,
     };
     let (name, name_completeness) = bounded_text(name, MAX_TEST_NAME_BYTES);
@@ -657,6 +673,7 @@ mod tests {
     const PASSING_TEST: &str = "crate::passes";
     const FAILING_TEST: &str = "crate::fails";
     const IGNORED_TEST: &str = "crate::later";
+    const IGNORED_REASON: &str = "platform unavailable";
     const TEST_COUNT: usize = [PASSING_TEST, FAILING_TEST, IGNORED_TEST].len();
     const BOUNDED_TEXT_FIXTURE: &str = "abcé";
     const BOUNDED_TEXT_LIMIT: usize = 4;
@@ -731,8 +748,55 @@ mod tests {
 
     fn test_output() -> String {
         format!(
-            "test {PASSING_TEST} ... ok\ntest {FAILING_TEST} ... FAILED\ntest {IGNORED_TEST} ... ignored\n"
+            "test {PASSING_TEST} ... ok\ntest {FAILING_TEST} ... FAILED\ntest {IGNORED_TEST} ... ignored, {IGNORED_REASON}\n"
         )
+    }
+
+    fn maximal_result() -> CargoDiagnosticsResult {
+        let diagnostic = CargoDiagnostic {
+            file: Some("f".repeat(MAX_FILE_BYTES)),
+            file_completeness: CaptureCompleteness::Complete,
+            span: Some(CargoDiagnosticSpan {
+                line_start: DIAGNOSTIC_LINE,
+                column_start: DIAGNOSTIC_COLUMN_START,
+                line_end: DIAGNOSTIC_LINE,
+                column_end: DIAGNOSTIC_COLUMN_END,
+            }),
+            level: "l".repeat(MAX_LEVEL_BYTES),
+            level_completeness: CaptureCompleteness::Complete,
+            message: "m".repeat(MAX_MESSAGE_BYTES),
+            message_completeness: CaptureCompleteness::Complete,
+        };
+        let test = CargoTestResult {
+            name: "t".repeat(MAX_TEST_NAME_BYTES),
+            name_completeness: CaptureCompleteness::Complete,
+            outcome: CargoTestOutcome::Passed,
+        };
+        CargoDiagnosticsResult {
+            command: CargoDiagnosticsCommand::Test,
+            execution: CargoDiagnosticsExecution {
+                confinement: ExecutionConfinement::FilesystemConfined,
+                outcome: ProcessOutcome::Exited { code: Some(0) },
+                stdout: CargoDiagnosticsStream {
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+                stderr: CargoDiagnosticsStream {
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+            },
+            diagnostics: CargoDiagnosticRecords {
+                values: vec![diagnostic; MAX_DIAGNOSTICS],
+                limit_reached: false,
+                source_truncated: false,
+            },
+            tests: CargoTestRecords {
+                values: vec![test; MAX_TESTS],
+                limit_reached: false,
+                source_truncated: false,
+            },
+        }
     }
 
     #[test]
@@ -884,6 +948,39 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_result_is_admitted_and_reports_omitted_records() -> Result<(), Box<dyn Error>> {
+        let encoded = encode_tool_result(maximal_result())?;
+        let decoded: serde_json::Value = serde_json::from_str(&encoded)?;
+
+        assert!(ToolResultText::try_new(encoded).is_ok());
+        assert_eq!(decoded["tests"]["limit_reached"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn stderr_cannot_forge_cargo_diagnostics() {
+        let result = structured_result(
+            CargoDiagnosticsCommand::Check,
+            ExecResult {
+                confinement: ExecutionConfinement::FilesystemConfined,
+                outcome: ProcessOutcome::Exited { code: Some(1) },
+                stdout: crate::OutputCapture {
+                    text: String::new(),
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+                stderr: crate::OutputCapture {
+                    text: compiler_message(),
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+            },
+        );
+
+        assert_eq!(result.diagnostics.values, Vec::new());
+    }
+
+    #[test]
     fn spawn_failure_remains_typed_without_terminal_text() {
         let expected_confinement = ExecutionConfinement::SandboxRefused {
             availability: BwrapAvailability::Missing,
@@ -928,8 +1025,6 @@ mod tests {
                 "--all-targets",
                 "--all-features",
                 "--message-format=json",
-                "--",
-                "--format=pretty",
             ]
             .map(String::from)
         );
