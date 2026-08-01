@@ -346,6 +346,69 @@ public struct SignalboxMessage: Codable, Equatable, Sendable {
     }
 }
 
+public struct SignalboxFunctionCallContent: Codable, Equatable, Sendable {
+    public let kind: String
+    public let name: String
+    public let arguments: String
+    public let callID: SignalboxToolCallID
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case name
+        case arguments
+        case callID = "call_id"
+    }
+}
+
+public struct SignalboxFunctionResponseContent: Codable, Equatable, Sendable {
+    public let kind: String
+    public let callID: SignalboxToolCallID
+    public let output: String
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case callID = "call_id"
+        case output
+    }
+}
+
+/// Correlated tool invocation state projected from conversation events.
+public struct SignalboxToolInvocationEvent: Codable, Equatable, Sendable {
+    public let kind: String
+    public let invocationID: SignalboxToolInvocationID
+    public let toolName: String
+    public let toolCallID: SignalboxToolCallID?
+    public let functionCallEventID: SignalboxEventID
+    public let functionResponseEventID: SignalboxEventID?
+    public let result: SignalboxToolResult?
+    public let statusUpdates: [String]
+    public let pendingConfirmation: Bool
+    public let decision: SignalboxToolDecision?
+    public let decisionAt: Date?
+    public let decisionReason: String?
+    public let isCollapsedByOwner: Bool
+    public let childSessionID: SignalboxSessionID?
+    public let lastModifiedAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case invocationID = "invocation_id"
+        case toolName = "tool_name"
+        case toolCallID = "tool_call_id"
+        case functionCallEventID = "function_call_event_id"
+        case functionResponseEventID = "function_response_event_id"
+        case result
+        case statusUpdates = "status_updates"
+        case pendingConfirmation = "pending_confirmation"
+        case decision
+        case decisionAt = "decision_at"
+        case decisionReason = "decision_reason"
+        case isCollapsedByOwner = "is_collapsed_by_owner"
+        case childSessionID = "child_session_id"
+        case lastModifiedAt = "last_modified_at"
+    }
+}
+
 public enum SignalboxMessageRole: String, Codable, Equatable, Sendable {
     case system
     case user
@@ -415,68 +478,6 @@ public struct SignalboxThinkingContent: Codable, Equatable, Sendable {
     public let kind: String
     public let text: String
     public let signature: String?
-}
-
-public struct SignalboxFunctionCallContent: Codable, Equatable, Sendable {
-    public let kind: String
-    public let name: String
-    public let arguments: String
-    public let callID: SignalboxToolCallID
-
-    private enum CodingKeys: String, CodingKey {
-        case kind
-        case name
-        case arguments
-        case callID = "call_id"
-    }
-}
-
-public struct SignalboxFunctionResponseContent: Codable, Equatable, Sendable {
-    public let kind: String
-    public let callID: SignalboxToolCallID
-    public let output: String
-
-    private enum CodingKeys: String, CodingKey {
-        case kind
-        case callID = "call_id"
-        case output
-    }
-}
-
-public struct SignalboxToolInvocationEvent: Codable, Equatable, Sendable {
-    public let kind: String
-    public let invocationID: SignalboxToolInvocationID
-    public let toolName: String
-    public let toolCallID: SignalboxToolCallID?
-    public let functionCallEventID: SignalboxEventID
-    public let functionResponseEventID: SignalboxEventID?
-    public let result: SignalboxToolResult?
-    public let statusUpdates: [String]
-    public let pendingConfirmation: Bool
-    public let decision: SignalboxToolDecision?
-    public let decisionAt: Date?
-    public let decisionReason: String?
-    public let isCollapsedByOwner: Bool
-    public let childSessionID: SignalboxSessionID?
-    public let lastModifiedAt: Date
-
-    private enum CodingKeys: String, CodingKey {
-        case kind
-        case invocationID = "invocation_id"
-        case toolName = "tool_name"
-        case toolCallID = "tool_call_id"
-        case functionCallEventID = "function_call_event_id"
-        case functionResponseEventID = "function_response_event_id"
-        case result
-        case statusUpdates = "status_updates"
-        case pendingConfirmation = "pending_confirmation"
-        case decision
-        case decisionAt = "decision_at"
-        case decisionReason = "decision_reason"
-        case isCollapsedByOwner = "is_collapsed_by_owner"
-        case childSessionID = "child_session_id"
-        case lastModifiedAt = "last_modified_at"
-    }
 }
 
 public enum SignalboxToolResult: Codable, Equatable, Sendable {
