@@ -2848,7 +2848,10 @@ fn status<FileSystem: WorkspaceFileSystem>(
                 }
             }
             Err(WorkspaceResolveError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
             {
                 deleted.push((path.clone(), *oid));
                 set_worktree_status(&mut raw, path, "deleted");
@@ -2989,6 +2992,21 @@ fn index_files(index: &Index) -> BTreeMap<PathBuf, (git2::Oid, u32)> {
         .collect()
 }
 
+fn skip_worktree_files(index: &Index) -> BTreeMap<PathBuf, (git2::Oid, u32)> {
+    index
+        .iter()
+        .filter(|entry| {
+            entry.flags & 0x3000 == 0 && entry.flags_extended & INDEX_SKIP_WORKTREE != 0
+        })
+        .map(|entry| {
+            (
+                PathBuf::from(std::ffi::OsString::from_vec(entry.path)),
+                (entry.id, entry.mode),
+            )
+        })
+        .collect()
+}
+
 fn tracked_directories(index: &Index) -> BTreeSet<PathBuf> {
     let mut directories = BTreeSet::new();
     for path in index
@@ -3064,14 +3082,11 @@ fn worktree_diff<FileSystem: WorkspaceFileSystem>(
         None => BTreeMap::new(),
     };
     let index = repository.index().map_err(|_| LocalGitFailure::Operation)?;
+    validate_index_objects(repository, &index)?;
     let index_files = index_files(&index);
-    let skip_worktree_paths = index
-        .iter()
-        .filter(|entry| {
-            entry.flags & 0x3000 == 0 && entry.flags_extended & INDEX_SKIP_WORKTREE != 0
-        })
-        .map(|entry| PathBuf::from(OsString::from_vec(entry.path)))
-        .collect::<BTreeSet<_>>();
+    let skip_worktree_files = skip_worktree_files(&index);
+    let mut diff_index_files = index_files.clone();
+    diff_index_files.extend(skip_worktree_files.clone());
     let untracked_files = untracked
         .into_iter()
         .filter(|path| {
@@ -3086,7 +3101,7 @@ fn worktree_diff<FileSystem: WorkspaceFileSystem>(
         head_tree.as_ref(),
         &index,
         &head_files,
-        &index_files,
+        &diff_index_files,
     )?;
     let mut bytes = gitlink_diff.patch.into_bytes();
     let mut truncated = gitlink_diff.truncated;
@@ -3097,18 +3112,15 @@ fn worktree_diff<FileSystem: WorkspaceFileSystem>(
     }
     let paths = head_files
         .keys()
-        .chain(index_files.keys())
+        .chain(diff_index_files.keys())
         .chain(untracked_files.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
     for path in paths {
-        if skip_worktree_paths.contains(&path) {
-            continue;
-        }
         if head_files
             .get(&path)
             .is_some_and(|(_, mode)| *mode == GITLINK_MODE)
-            || index_files
+            || diff_index_files
                 .get(&path)
                 .is_some_and(|(_, mode)| *mode == GITLINK_MODE)
         {
@@ -3122,7 +3134,12 @@ fn worktree_diff<FileSystem: WorkspaceFileSystem>(
             ),
             None => None,
         };
-        let new_buffer = if index_files.contains_key(&path) || untracked_files.contains(&path) {
+        let new_buffer = if let Some((oid, mode)) = skip_worktree_files.get(&path) {
+            let blob = repository
+                .find_blob(*oid)
+                .map_err(|_| LocalGitFailure::Operation)?;
+            Some((blob.content().to_vec(), *mode))
+        } else if index_files.contains_key(&path) || untracked_files.contains(&path) {
             match filesystem.entry_kind(root, &path) {
                 Ok(WorkspaceEntryKind::Directory) => None,
                 Ok(WorkspaceEntryKind::Symlink | WorkspaceEntryKind::Other) => {
@@ -3188,10 +3205,9 @@ fn worktree_diff<FileSystem: WorkspaceFileSystem>(
             (None, None) => continue,
         }
         .map_err(|_| LocalGitFailure::Operation)?;
-        let mode_change = head_files.get(&path).zip(new_buffer.as_ref()).and_then(
-            |((_, old_mode), (_, new_mode))| (old_mode != new_mode).then_some((old_mode, new_mode)),
-        );
-        append_bounded(&mut bytes, patch, &path, mode_change, &mut truncated)?;
+        let old_mode = head_files.get(&path).map(|(_, mode)| *mode);
+        let new_mode = new_buffer.as_ref().map(|(_, mode)| *mode);
+        append_bounded(&mut bytes, patch, &path, old_mode, new_mode, &mut truncated)?;
         if truncated {
             break;
         }
@@ -3240,14 +3256,12 @@ fn append_bounded(
     bytes: &mut Vec<u8>,
     mut patch: Patch<'_>,
     path: &Path,
-    mode_change: Option<(&u32, &u32)>,
+    old_mode: Option<u32>,
+    new_mode: Option<u32>,
     truncated: &mut bool,
 ) -> Result<(), LocalGitFailure> {
     let patch = patch.to_buf().map_err(|_| LocalGitFailure::Operation)?;
-    let patch = match mode_change {
-        Some((old_mode, new_mode)) => patch_with_mode_change(path, &patch, *old_mode, *new_mode)?,
-        None => patch.to_vec(),
-    };
+    let patch = patch_with_modes(path, &patch, old_mode, new_mode)?;
     let remaining = MAX_DIFF_BYTES.saturating_sub(bytes.len());
     if patch.len() <= remaining {
         bytes.extend_from_slice(&patch);
@@ -3258,13 +3272,20 @@ fn append_bounded(
     Ok(())
 }
 
-fn patch_with_mode_change(
+fn patch_with_modes(
     path: &Path,
     patch: &[u8],
-    old_mode: u32,
-    new_mode: u32,
+    old_mode: Option<u32>,
+    new_mode: Option<u32>,
 ) -> Result<Vec<u8>, LocalGitFailure> {
-    let mode = format!("old mode {old_mode:06o}\nnew mode {new_mode:06o}\n");
+    let mode = match (old_mode, new_mode) {
+        (Some(old_mode), Some(new_mode)) if old_mode != new_mode => {
+            format!("old mode {old_mode:06o}\nnew mode {new_mode:06o}\n")
+        }
+        (None, Some(new_mode)) => format!("new file mode {new_mode:06o}\n"),
+        (Some(old_mode), None) => format!("deleted file mode {old_mode:06o}\n"),
+        _ => return Ok(patch.to_vec()),
+    };
     if patch.is_empty() {
         let old_path = quoted_diff_path(b"a/", path);
         let new_path = quoted_diff_path(b"b/", path);
@@ -3282,10 +3303,19 @@ fn patch_with_mode_change(
         .position(|byte| *byte == b'\n')
         .map(|position| position + 1)
         .ok_or(LocalGitFailure::Operation)?;
+    let existing_mode_end = patch[first_line..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|position| first_line + position + 1)
+        .filter(|end| {
+            patch[first_line..*end].starts_with(b"new file mode ")
+                || patch[first_line..*end].starts_with(b"deleted file mode ")
+        })
+        .unwrap_or(first_line);
     let mut rendered = Vec::with_capacity(patch.len().saturating_add(mode.len()));
     rendered.extend_from_slice(&patch[..first_line]);
     rendered.extend_from_slice(mode.as_bytes());
-    rendered.extend_from_slice(&patch[first_line..]);
+    rendered.extend_from_slice(&patch[existing_mode_end..]);
     Ok(rendered)
 }
 
@@ -5155,6 +5185,28 @@ mod tests {
             .expect("skip-worktree fixture file removes");
     }
 
+    fn install_staged_missing_skip_worktree_entry(fixture: &Fixture) {
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let changed_blob = repository
+            .blob(CHANGED_CONTENT.as_bytes())
+            .expect("changed fixture blob writes");
+        let mut index = repository.index().expect("fixture index opens");
+        let mut entry = clone_index_entry(
+            &index
+                .get_path(Path::new(TRACKED_PATH), 0)
+                .expect("fixture tracked entry exists"),
+        );
+        entry.id = changed_blob;
+        entry.file_size = CHANGED_CONTENT.len() as u32;
+        entry.flags_extended |= INDEX_SKIP_WORKTREE;
+        index
+            .add(&entry)
+            .expect("staged skip-worktree entry installs");
+        index.write().expect("staged skip-worktree index writes");
+        fs::remove_file(fixture.root().join(TRACKED_PATH))
+            .expect("staged skip-worktree fixture file removes");
+    }
+
     fn invalid_utf8_commit(repository: &Repository, parent: Oid) -> Oid {
         let tree = repository
             .find_commit(parent)
@@ -5695,6 +5747,32 @@ mod tests {
     }
 
     #[test]
+    fn status_treats_a_tracked_child_as_deleted_when_its_parent_becomes_a_file() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.root().join(NESTED_TRACKED_DIRECTORY))
+            .expect("nested fixture directory constructs");
+        fs::write(fixture.root().join(NESTED_TRACKED_PATH), INITIAL_CONTENT)
+            .expect("nested tracked file writes");
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        commit_all(&repository, INITIAL_MESSAGE);
+        fs::remove_dir_all(fixture.root().join(NESTED_TRACKED_DIRECTORY))
+            .expect("tracked parent directory removes");
+        fs::write(
+            fixture.root().join(NESTED_TRACKED_DIRECTORY),
+            CHANGED_CONTENT,
+        )
+        .expect("replacement parent file writes");
+        let executor = fixture.executor();
+
+        let status = execute(&executor, LocalOperation::Status);
+
+        assert_eq!(status["entries"][0]["path"], NESTED_TRACKED_DIRECTORY);
+        assert_eq!(status["entries"][0]["worktree"], "untracked");
+        assert_eq!(status["entries"][1]["path"], NESTED_TRACKED_PATH);
+        assert_eq!(status["entries"][1]["worktree"], "deleted");
+    }
+
+    #[test]
     fn status_rejects_worktree_over_discovery_budget() {
         let fixture = Fixture::new();
         plant_over_budget_worktree(fixture.root());
@@ -6026,6 +6104,19 @@ mod tests {
     }
 
     #[test]
+    fn worktree_diff_includes_a_staged_missing_skip_worktree_entry() {
+        let fixture = Fixture::new();
+        install_staged_missing_skip_worktree_entry(&fixture);
+        let executor = fixture.executor();
+
+        let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+        let patch = diff["patch"].as_str().expect("patch is text");
+
+        assert!(patch.contains(&format!("-{}", INITIAL_CONTENT.trim_end())));
+        assert!(patch.contains(&format!("+{}", CHANGED_CONTENT.trim_end())));
+    }
+
+    #[test]
     fn worktree_diff_includes_an_untracked_file() {
         let fixture = Fixture::new();
         fs::write(fixture.root().join(UNTRACKED_PATH), UNTRACKED_CONTENT)
@@ -6046,6 +6137,50 @@ mod tests {
                 .expect("patch is text")
                 .contains(&format!("+{}", UNTRACKED_CONTENT.trim_end()))
         );
+    }
+
+    #[test]
+    fn worktree_diff_emits_the_executable_mode_for_an_untracked_file() {
+        let fixture = Fixture::new();
+        let path = fixture.root().join(UNTRACKED_PATH);
+        fs::write(&path, UNTRACKED_CONTENT).expect("untracked fixture writes");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("untracked executable mode sets");
+        let expected_mode = 0o100000
+            | (fs::metadata(&path)
+                .expect("untracked fixture metadata reads")
+                .permissions()
+                .mode()
+                & 0o777);
+        let executor = fixture.executor();
+
+        let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+        let patch = diff["patch"].as_str().expect("patch is text");
+
+        assert!(patch.contains(&format!("new file mode {expected_mode:06o}")));
+    }
+
+    #[test]
+    fn worktree_diff_emits_the_executable_mode_for_a_deleted_file() {
+        let fixture = Fixture::new();
+        let path = fixture.root().join(TRACKED_PATH);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("tracked executable mode sets");
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        commit_all(&repository, "make tracked fixture executable");
+        let expected_mode = repository
+            .index()
+            .expect("fixture index opens")
+            .get_path(Path::new(TRACKED_PATH), 0)
+            .expect("tracked fixture exists")
+            .mode;
+        fs::remove_file(&path).expect("tracked executable fixture removes");
+        let executor = fixture.executor();
+
+        let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+        let patch = diff["patch"].as_str().expect("patch is text");
+
+        assert!(patch.contains(&format!("deleted file mode {expected_mode:06o}")));
     }
 
     #[test]
