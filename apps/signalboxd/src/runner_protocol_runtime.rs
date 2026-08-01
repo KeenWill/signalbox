@@ -1825,7 +1825,7 @@ fn heartbeat_ack_correlation(acknowledgement: &HeartbeatAck) -> AvailableCorrela
         acknowledgement.lease_phase.as_ref(),
         acknowledgement.workspace_phase.as_ref(),
     ) {
-        (Some(lease), None) => AvailableCorrelation::Lease(lease.correlation.clone()),
+        (Some(lease), None | Some(_)) => AvailableCorrelation::Lease(lease.correlation.clone()),
         (None, Some(HeartbeatWorkspacePhase::Provisioning { correlation }))
         | (None, Some(HeartbeatWorkspacePhase::ReadyUnrecorded { correlation })) => {
             AvailableCorrelation::Provision(correlation.clone())
@@ -1846,7 +1846,7 @@ fn heartbeat_ack_correlation(acknowledgement: &HeartbeatAck) -> AvailableCorrela
                 correlation: WorkspaceFailureCorrelation::Release(correlation),
             }),
         ) => AvailableCorrelation::Release(correlation.clone()),
-        (None, None) | (Some(_), Some(_)) => AvailableCorrelation::None,
+        (None, None) => AvailableCorrelation::None,
     }
 }
 
@@ -2030,6 +2030,37 @@ mod tests {
 
     fn identity(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(uuid::Uuid::from_u128(value))
+    }
+
+    fn canonical_lease_correlation() -> signalbox_runner_wire::LeaseCorrelation {
+        let arbitrary_identity = identity(1);
+        let first = PositiveU64::try_new(1).expect("the first fixture generation is positive");
+        signalbox_runner_wire::LeaseCorrelation {
+            registration_revision: first,
+            lease_id: arbitrary_identity,
+            lease_generation: first,
+            runner_id: arbitrary_identity,
+            tool_name: signalbox_runner_wire::WireToolName::try_new("git_fetch".to_owned())
+                .expect("the fixture tool name is valid"),
+            session_id: arbitrary_identity,
+            turn_id: arbitrary_identity,
+            tool_request_id: arbitrary_identity,
+            tool_attempt_id: arbitrary_identity,
+            issuing_turn_attempt_id: arbitrary_identity,
+            tool_dispatch_generation: first,
+        }
+    }
+
+    #[track_caller]
+    fn expect_applied_transition(
+        effect: RunnerConnectionTransitionEffect,
+    ) -> AppliedRunnerConnectionTransition {
+        match effect {
+            RunnerConnectionTransitionEffect::Applied(applied) => applied,
+            RunnerConnectionTransitionEffect::Unchanged(outcome) => {
+                panic!("expected an applied connection transition, observed {outcome:?}")
+            }
+        }
     }
 
     fn challenge_tick(state: &mut HeartbeatState) -> Heartbeat {
@@ -2988,9 +3019,7 @@ mod tests {
             )
             .await
             .expect("the repeated loss observes terminal state");
-        let RunnerConnectionTransitionEffect::Applied(applied) = first else {
-            panic!("the first transport loss reports its appended event");
-        };
+        let applied = expect_applied_transition(first);
 
         assert_eq!(applied.enrollment(), enrollment);
         assert_eq!(applied.snapshot(), observed);
@@ -3745,6 +3774,40 @@ mod tests {
         assert_eq!(first_miss, HeartbeatTick::Missed(1));
         assert_eq!(second_miss, HeartbeatTick::Missed(2));
         assert_eq!(third_miss, HeartbeatTick::Missed(3));
+    }
+
+    #[test]
+    fn dual_phase_heartbeat_ack_preserves_a_complete_lease_correlation() {
+        let correlation = canonical_lease_correlation();
+        let arbitrary_workspace_identity = identity(2);
+        let first = PositiveU64::try_new(1).expect("the first fixture revision is positive");
+        let acknowledgement = HeartbeatAck {
+            challenge_sequence: PositiveU64::try_new(1)
+                .expect("the first challenge sequence is positive"),
+            runner_sequence: PositiveU64::try_new(1)
+                .expect("the first runner sequence is positive"),
+            lease_phase: Some(signalbox_runner_wire::LeasePhase {
+                correlation: correlation.clone(),
+                phase: signalbox_runner_wire::LeasePhaseKind::WaitingDispatch,
+            }),
+            workspace_phase: Some(HeartbeatWorkspacePhase::Provisioning {
+                correlation: signalbox_runner_wire::ProvisionCorrelation {
+                    authorization_id: arbitrary_workspace_identity,
+                    session_id: arbitrary_workspace_identity,
+                    placement_revision: first,
+                    runner_id: arbitrary_workspace_identity,
+                    registration_revision: first,
+                    repository: None,
+                    sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
+                    credential_profile: None,
+                },
+            }),
+        };
+
+        assert_eq!(
+            heartbeat_ack_correlation(&acknowledgement),
+            AvailableCorrelation::Lease(correlation)
+        );
     }
 
     #[test]

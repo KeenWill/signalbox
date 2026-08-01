@@ -156,7 +156,7 @@ fn report_established(connection: &RunnerConnection<tokio::net::UnixStream>) {
         }
         outcome @ EnrollmentOutcome::Resumed => {
             eprintln!(
-                "signalbox-runner: info: runner re-enrolled enrollment_id={} runner_id={} registration_revision={} connection_epoch={} enrollment_outcome={outcome:?}",
+                "signalbox-runner: info: runner resumed enrollment_id={} runner_id={} registration_revision={} connection_epoch={} enrollment_outcome={outcome:?}",
                 receipt.enrollment_id(),
                 receipt.runner_id(),
                 receipt.registration_revision().get(),
