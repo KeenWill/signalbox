@@ -1054,20 +1054,58 @@ fn fixed_result_debug_contains_credential(credential: &str) -> bool {
     text_contains_credential_variant(&format!("{result:?}"), credential)
 }
 
-fn dynamic_success_field_boundary_may_collide(scrubber: &CredentialScrubber) -> bool {
-    const PRECEDING_FIELD_BOUNDARIES: [&str; 3] =
-        [r#""title":""#, r#"","url":""#, r#"","snippet":""#];
-    const FOLLOWING_FIELD_BOUNDARIES: [&str; 3] = [r#"","url":""#, r#"","snippet":""#, r#""}"#];
-    scrubber.output_collision_variants().any(|credential| {
-        credential.char_indices().skip(1).any(|(split, _)| {
-            let credential_prefix = &credential[..split];
-            let credential_suffix = &credential[split..];
-            PRECEDING_FIELD_BOUNDARIES
-                .iter()
-                .any(|boundary| unicode_case_insensitive_ends_with(boundary, credential_prefix))
-                || FOLLOWING_FIELD_BOUNDARIES.iter().any(|boundary| {
-                    unicode_case_insensitive_starts_with(boundary, credential_suffix)
-                })
+const DYNAMIC_SUCCESS_VALUE_MARKERS: [&str; 3] = [
+    "SIGNALBOX_DYNAMIC_TITLE_MARKER",
+    "SIGNALBOX_DYNAMIC_URL_MARKER",
+    "SIGNALBOX_DYNAMIC_SNIPPET_MARKER",
+];
+
+fn dynamic_success_field_boundary_may_collide(
+    scrubber: &CredentialScrubber,
+    correlation: &ToolAttemptDispatchCorrelation,
+) -> bool {
+    let Some(payload) = dynamic_success_payload_probe() else {
+        return true;
+    };
+    let evidence = ToolExecutorEvidence::CompletedText(payload.clone());
+    let bound = CorrelatedToolExecutorEvidenceDebugProbe {
+        correlation,
+        evidence: &evidence,
+    };
+    let rendered_bound = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&bound));
+    [payload.as_str(), rendered_bound.as_str()]
+        .into_iter()
+        .any(|rendered| dynamic_success_value_boundary_may_collide(rendered, scrubber))
+}
+
+fn dynamic_success_payload_probe() -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        "results": [RenderedSearchResult {
+            title: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[0]),
+            url: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[1]),
+            snippet: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[2]),
+        }],
+        "truncated": false,
+    }))
+    .ok()
+}
+
+fn dynamic_success_value_boundary_may_collide(
+    rendered: &str,
+    scrubber: &CredentialScrubber,
+) -> bool {
+    DYNAMIC_SUCCESS_VALUE_MARKERS.iter().any(|marker| {
+        let Some((prefix, suffix)) = rendered.split_once(marker) else {
+            return true;
+        };
+        if suffix.contains(marker) {
+            return true;
+        }
+        scrubber.output_collision_variants().any(|credential| {
+            credential.char_indices().skip(1).any(|(split, _)| {
+                unicode_case_insensitive_ends_with(prefix, &credential[..split])
+                    || unicode_case_insensitive_starts_with(suffix, &credential[split..])
+            })
         })
     })
 }
@@ -1445,7 +1483,7 @@ where
         }
         if query_contains_credential(request.query(), credential_text)
             || fixed_request_metadata_contains_credential(&request, credential_text)
-            || dynamic_success_field_boundary_may_collide(&scrubber)
+            || dynamic_success_field_boundary_may_collide(&scrubber, correlation)
             || serialized_request_url_contains_credential(&request, credential_text)
             || credential_debug_contains_credential(&credential, credential_text)
             || request_credential_debug_contains_credential(&request, &credential, credential_text)
@@ -1733,7 +1771,9 @@ fn bind_request_outcome(
             let fallback = invocation.bind(ToolExecutorEvidence::KnownFailed { detail: None });
             let rendered_fallback =
                 format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&fallback));
-            if !credential_text.is_empty() && !rendered_fallback.contains(credential_text) {
+            if !credential_text.is_empty()
+                && !text_contains_credential_variant(&rendered_fallback, credential_text)
+            {
                 return Ok(fallback);
             }
             return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
@@ -2571,7 +2611,8 @@ fn decode_json_string_escapes(text: &str) -> (String, bool) {
             Some(b'n') => Some(('\n', 2)),
             Some(b'r') => Some(('\r', 2)),
             Some(b't') => Some(('\t', 2)),
-            Some(b'u') => decode_json_unicode_escape(escape),
+            Some(b'u') => decode_json_unicode_escape(escape)
+                .or_else(|| decode_rust_debug_unicode_escape(escape)),
             _ => None,
         };
         let Some((character, consumed)) = decoded_escape else {
@@ -2608,6 +2649,21 @@ fn decode_json_unicode_escape(escape: &str) -> Option<(char, usize)> {
 fn decode_json_code_unit(escape: &str) -> Option<u16> {
     let digits = escape.strip_prefix("\\u")?.get(..4)?;
     u16::from_str_radix(digits, 16).ok()
+}
+
+fn decode_rust_debug_unicode_escape(escape: &str) -> Option<(char, usize)> {
+    const MAX_SCALAR_HEX_DIGITS: usize = 6;
+    let digits_and_suffix = escape.strip_prefix("\\u{")?;
+    let closing_brace = digits_and_suffix.find('}')?;
+    let digits = digits_and_suffix.get(..closing_brace)?;
+    if digits.is_empty()
+        || digits.len() > MAX_SCALAR_HEX_DIGITS
+        || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let scalar = u32::from_str_radix(digits, 16).ok()?;
+    char::from_u32(scalar).map(|character| (character, 3 + digits.len() + 1))
 }
 
 fn decode_html_character_reference(entity: &str) -> Option<String> {
@@ -2918,6 +2974,11 @@ mod tests {
     const SUCCESS_FIELD_BOUNDARY_COLLISION_VALUE: &str = "Synthetic boundary result";
     const SUCCESS_FIELD_TRAILING_BOUNDARY_COLLISION_KEY: &str = r#"Synthetic","url"#;
     const SUCCESS_FIELD_TRAILING_BOUNDARY_COLLISION_VALUE: &str = "Boundary Synthetic";
+    const SUCCESS_SNIPPET_TITLE_BOUNDARY_COLLISION_KEY: &str = r#"Synthetic","title"#;
+    const SUCCESS_SNIPPET_TITLE_BOUNDARY_COLLISION_VALUE: &str = "Boundary Synthetic";
+    const BOUND_WRAPPER_DYNAMIC_PREFIX_COLLISION_KEY: &str =
+        r#"CompletedText("{\"results\":[{\"snippet\":\"Synthetic"#;
+    const BOUND_WRAPPER_DYNAMIC_PREFIX_COLLISION_VALUE: &str = "Synthetic boundary snippet";
     const RESULT_DEBUG_COLLISION_KEY: &str = "[provider-controlled]";
     const ACCEPT_HEADER_CASE_COLLISION_KEY: &str = "APPLICATION/JSON";
     const PROVIDER_HOST_CASE_COLLISION_KEY: &str = "API.SEARCH.BRAVE.COM";
@@ -2953,6 +3014,8 @@ mod tests {
     const SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE: &str = "&#62";
     const SEMICOLONLESS_NAMED_HTML_COLLISION_KEY: &str = "<";
     const SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE: &str = "&lt";
+    const RUST_DEBUG_UNICODE_COLLISION_KEY: &str = r"\u{85}";
+    const RUST_DEBUG_UNICODE_COLLISION_VALUE: &str = "\u{85}";
     const OVER_WINDOW_NUMERIC_HTML_COLLISION_KEY: &str = "ZXQ";
     const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
     const FORM_HTML_COLLISION_VALUE: &str = "abc%26amp%3Bdef";
@@ -3045,6 +3108,7 @@ mod tests {
     struct SuccessFieldBoundaryTransport {
         searches: Arc<AtomicUsize>,
         title: &'static str,
+        snippet: &'static str,
     }
 
     impl WebSearchTransport for SuccessFieldBoundaryTransport {
@@ -3054,12 +3118,15 @@ mod tests {
             credential: &CredentialValue,
         ) -> WebSearchTransportOutcome {
             self.searches.fetch_add(1, Ordering::Relaxed);
+            let reflected = WebSearchResult::try_new(WebSearchResultFields {
+                title: String::from(self.title),
+                url: String::from(FIXTURE_RESULT_URL),
+                snippet: String::from(self.snippet),
+            })
+            .expect("boundary-collision fixture result is admitted");
             WebSearchTransportOutcome::completed(
-                WebSearchResponse::new(
-                    vec![result(self.title)],
-                    WebSearchPageCompleteness::Complete,
-                )
-                .expect("boundary-collision fixture response is admitted"),
+                WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+                    .expect("boundary-collision fixture response is admitted"),
                 credential,
             )
         }
@@ -3729,7 +3796,7 @@ mod tests {
         WebSearchResult::try_new(WebSearchResultFields {
             title: title.into(),
             url: String::from(FIXTURE_RESULT_URL),
-            snippet: String::from("synthetic recorded snippet"),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
         })
         .expect("fixture result is admitted")
     }
@@ -4348,6 +4415,7 @@ mod tests {
         let transport = SuccessFieldBoundaryTransport {
             searches: Arc::clone(&searches),
             title: SUCCESS_FIELD_BOUNDARY_COLLISION_VALUE,
+            snippet: FIXTURE_RESULT_SNIPPET,
         };
         let (_catalog, mut executor) =
             WebSearchTool::try_new(credentials, transport, configuration())
@@ -4376,6 +4444,7 @@ mod tests {
         let transport = SuccessFieldBoundaryTransport {
             searches: Arc::clone(&searches),
             title: SUCCESS_FIELD_TRAILING_BOUNDARY_COLLISION_VALUE,
+            snippet: FIXTURE_RESULT_SNIPPET,
         };
         let (_catalog, mut executor) =
             WebSearchTool::try_new(credentials, transport, configuration())
@@ -4388,6 +4457,64 @@ mod tests {
             .await
             .into_result()
             .expect("trailing success-field boundary collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: the actual serialized snippet-to-title boundary is checked
+    /// against every possible provider-controlled snippet suffix before dispatch.
+    #[tokio::test]
+    async fn web_search_rejects_serialized_snippet_title_boundary_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: SUCCESS_SNIPPET_TITLE_BOUNDARY_COLLISION_KEY,
+        };
+        let transport = SuccessFieldBoundaryTransport {
+            searches: Arc::clone(&searches),
+            title: FIXTURE_RESULT_TITLE,
+            snippet: SUCCESS_SNIPPET_TITLE_BOUNDARY_COLLISION_VALUE,
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("snippet-to-title boundary collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: fixed bound-wrapper and payload prefixes are checked together
+    /// with every possible provider-controlled value prefix before dispatch.
+    #[tokio::test]
+    async fn web_search_rejects_bound_wrapper_dynamic_prefix_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: BOUND_WRAPPER_DYNAMIC_PREFIX_COLLISION_KEY,
+        };
+        let transport = SuccessFieldBoundaryTransport {
+            searches: Arc::clone(&searches),
+            title: FIXTURE_RESULT_TITLE,
+            snippet: BOUND_WRAPPER_DYNAMIC_PREFIX_COLLISION_VALUE,
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("bound-wrapper prefix collision is definitive evidence");
 
         assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
         assert_eq!(searches.load(Ordering::Relaxed), 0);
@@ -5322,6 +5449,32 @@ mod tests {
         assert!(!content.contains(JSON_SOLIDUS_COLLISION_VALUE));
     }
 
+    /// INV-035: a brace-delimited Rust Debug Unicode escape in the credential
+    /// is decoded before provider text or completed-evidence Debug can reflect it.
+    #[test]
+    fn web_search_success_evidence_redacts_rust_debug_unicode_credential() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(RUST_DEBUG_UNICODE_COLLISION_VALUE),
+        })
+        .expect("Rust Debug Unicode fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            RUST_DEBUG_UNICODE_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+        let rendered = format!("{evidence:?}");
+        let content = completed_text(evidence);
+
+        assert!(!rendered.contains(RUST_DEBUG_UNICODE_COLLISION_KEY));
+        assert!(!content.contains(RUST_DEBUG_UNICODE_COLLISION_KEY));
+        assert!(!content.contains(RUST_DEBUG_UNICODE_COLLISION_VALUE));
+    }
+
     /// INV-035: multi-character full Unicode folding applies to provider text
     /// before completed evidence is formed.
     #[test]
@@ -6058,6 +6211,8 @@ mod tests {
         assert_eq!(decode_html_character_references(&source), None);
     }
 
+    /// INV-035: reversible decoding beyond the inspection bound fails closed
+    /// before deeply encoded result text can enter completed evidence.
     #[test]
     fn web_search_rejects_result_url_encoding_beyond_the_decode_bound() {
         let reflected = WebSearchResult::try_new(WebSearchResultFields {
@@ -6572,6 +6727,8 @@ mod tests {
         );
     }
 
+    /// INV-035: credential collisions preserve definitive invalid-credential
+    /// evidence without retaining the colliding diagnostic detail.
     #[test]
     fn credential_collision_retains_invalid_credential_evidence() {
         let detail = colliding_failure_detail(
@@ -6582,6 +6739,8 @@ mod tests {
         assert_eq!(detail, CREDENTIAL_UNAVAILABLE_DETAIL);
     }
 
+    /// INV-035: credential collisions preserve definitive request-failure
+    /// evidence without retaining the colliding diagnostic detail.
     #[test]
     fn credential_collision_retains_request_failure_evidence() {
         let detail = colliding_failure_detail(
@@ -6592,6 +6751,8 @@ mod tests {
         assert_eq!(detail, REQUEST_FAILED_DETAIL);
     }
 
+    /// INV-035: credential collisions preserve definitive provider-rejection
+    /// evidence without retaining the colliding diagnostic detail.
     #[test]
     fn credential_collision_retains_provider_rejection_evidence() {
         let detail = colliding_failure_detail(
@@ -6602,6 +6763,8 @@ mod tests {
         assert_eq!(detail, PROVIDER_REJECTED_DETAIL);
     }
 
+    /// INV-035: credential collisions preserve definitive invalid-response
+    /// evidence without retaining the colliding diagnostic detail.
     #[test]
     fn credential_collision_retains_invalid_response_evidence() {
         let detail = colliding_failure_detail(
@@ -6612,6 +6775,8 @@ mod tests {
         assert_eq!(detail, INVALID_RESPONSE_DETAIL);
     }
 
+    /// INV-035: credential collisions preserve definitive response-overflow
+    /// evidence without retaining the colliding diagnostic detail.
     #[test]
     fn credential_collision_retains_response_overflow_evidence() {
         let detail = colliding_failure_detail(
@@ -7126,8 +7291,10 @@ mod tests {
 
         let response = decode_provider_response(WebSearchProvider::Brave, &body)
             .expect("recorded provider response decodes");
-        assert_eq!(response.results().len(), 1);
-        let decoded = &response.results()[0];
+        let decoded = response
+            .results()
+            .first()
+            .expect("recorded response contains its result fixture");
 
         assert_eq!(decoded.title(), FIXTURE_RESULT_TITLE);
         assert_eq!(decoded.url(), FIXTURE_RESULT_URL);
