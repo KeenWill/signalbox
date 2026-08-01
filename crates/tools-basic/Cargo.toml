@@ -34,7 +34,6 @@ signalbox-persistence = { path = "../persistence" }
 signalbox-tool-contract = { path = "../tool-contract" }
 signalbox-tool-schema-derive = { path = "../tool-schema-derive" }
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres"] }
-tracing = { version = "0.1.41", default-features = false }
 tokio = { version = "1.53.0", default-features = false, features = [
     "io-util",
     "macros",
@@ -47,7 +46,6 @@ uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 expect-test = "1.5.1"
-tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt"] }
 
 [lints]
 workspace = true

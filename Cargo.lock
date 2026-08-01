@@ -3151,8 +3151,6 @@ dependencies = [
  "signalbox-tool-schema-derive",
  "sqlx",
  "tokio",
- "tracing",
- "tracing-subscriber",
  "unicode-normalization",
  "uuid",
 ]

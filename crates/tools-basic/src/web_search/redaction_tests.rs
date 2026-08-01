@@ -1,0 +1,484 @@
+use signalbox_model_runtime::CredentialValue;
+
+use super::{
+    diagnostic::*, evidence::*, redaction::*, result::*, test_support::*, text_decoding::*,
+};
+
+/// INV-035: provider-controlled successful fields are credential-scrubbed
+/// before entering completed tool evidence.
+#[test]
+fn web_search_success_evidence_redacts_reflected_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: format!("reflected {SYNTHETIC_KEY}"),
+        url: format!("{FIXTURE_RESULT_URL}?token={SYNTHETIC_KEY}"),
+        snippet: format!("snippet {SYNTHETIC_KEY}"),
+    })
+    .expect("reflected fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let evidence = success_evidence(response, &scrubber()).expect("response encodes");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(SYNTHETIC_KEY));
+}
+
+/// INV-035: JSON Unicode escapes in provider text are decoded within the
+/// bounded scrubber before completed evidence is formed.
+#[test]
+fn web_search_success_evidence_redacts_json_unicode_escaped_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: format!("Synthetic {JSON_UNICODE_COLLISION_VALUE} result"),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("JSON-escaped fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        JSON_UNICODE_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(JSON_UNICODE_COLLISION_VALUE));
+    assert!(!unicode_case_insensitive_contains(
+        &content,
+        JSON_UNICODE_COLLISION_KEY,
+    ));
+}
+
+/// INV-035: reversible short JSON escapes in the credential itself apply
+/// before provider-controlled fields enter completed evidence.
+#[test]
+fn web_search_success_evidence_redacts_json_solidus_decoded_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(JSON_SOLIDUS_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("JSON solidus fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        JSON_SOLIDUS_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(JSON_SOLIDUS_COLLISION_KEY));
+    assert!(!content.contains(JSON_SOLIDUS_COLLISION_VALUE));
+}
+
+/// INV-035: a brace-delimited Rust Debug Unicode escape in the credential
+/// is decoded before provider text or completed-evidence Debug can reflect it.
+#[test]
+fn web_search_success_evidence_redacts_rust_debug_unicode_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(RUST_DEBUG_UNICODE_COLLISION_VALUE),
+    })
+    .expect("Rust Debug Unicode fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        RUST_DEBUG_UNICODE_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let rendered = format!("{evidence:?}");
+    let content = completed_text(evidence);
+
+    assert!(!rendered.contains(RUST_DEBUG_UNICODE_COLLISION_KEY));
+    assert!(!content.contains(RUST_DEBUG_UNICODE_COLLISION_KEY));
+    assert!(!content.contains(RUST_DEBUG_UNICODE_COLLISION_VALUE));
+}
+
+/// INV-035: multi-character full Unicode folding applies to provider text
+/// before completed evidence is formed.
+#[test]
+fn web_search_success_evidence_redacts_full_case_folded_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: format!("Synthetic {UNICODE_FULL_FOLD_COLLISION_VALUE} result"),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("full-fold fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        UNICODE_FULL_FOLD_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    assert!(!unicode_case_insensitive_contains(
+        &content,
+        UNICODE_FULL_FOLD_COLLISION_KEY,
+    ));
+}
+
+/// INV-035: reversible decoding of the credential itself applies before
+/// provider-controlled fields enter completed evidence.
+#[test]
+fn web_search_success_evidence_redacts_text_matching_decoded_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(REVERSE_ENCODED_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("decoded credential fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        REVERSE_ENCODED_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(REVERSE_ENCODED_COLLISION_KEY));
+    assert!(!content.contains(REVERSE_ENCODED_COLLISION_VALUE));
+}
+
+/// INV-035: an unimplemented standard named HTML reference fails closed
+/// before provider-controlled text enters completed evidence.
+#[test]
+fn web_search_redacts_unsupported_named_html_reference_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("unsupported named-entity fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY));
+    assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE));
+}
+
+/// INV-035: semicolonless numeric HTML-reference syntax fails closed
+/// before provider-controlled text enters completed evidence.
+#[test]
+fn web_search_redacts_semicolonless_numeric_reference_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("semicolonless numeric-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        SEMICOLONLESS_NUMERIC_HTML_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(SEMICOLONLESS_NUMERIC_HTML_COLLISION_KEY));
+    assert!(!content.contains(SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE));
+}
+
+/// INV-035: legacy named HTML-reference syntax that accepts no semicolon
+/// fails closed before provider-controlled text enters completed evidence.
+#[test]
+fn web_search_redacts_semicolonless_named_reference_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("semicolonless named-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        SEMICOLONLESS_NAMED_HTML_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(SEMICOLONLESS_NAMED_HTML_COLLISION_KEY));
+    assert!(!content.contains(SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE));
+}
+
+/// INV-035: credential scrubbing cannot turn a checked result title into
+/// an empty title in completed evidence.
+#[test]
+fn web_search_rejects_result_with_title_invalidated_by_credential_scrubbing() {
+    const TITLE_COLLISION_KEY: &str = "synthetic-title-key";
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(TITLE_COLLISION_KEY),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("reflected fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        TITLE_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: credential scrubbing cannot turn a checked result URL into an
+/// invalid URL in completed evidence.
+#[test]
+fn web_search_rejects_result_with_url_invalidated_by_credential_scrubbing() {
+    let response = WebSearchResponse::new(
+        vec![result(FIXTURE_RESULT_TITLE)],
+        WebSearchPageCompleteness::Complete,
+    )
+    .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_SCHEME_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a standard HTML character reference cannot conceal a
+/// credential reflected in provider-controlled text.
+#[test]
+fn web_search_redacts_html_encoded_credential_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(HTML_ENTITY_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("HTML entity fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        HTML_ENTITY_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(HTML_ENTITY_COLLISION_KEY));
+    assert!(!content.contains(HTML_ENTITY_COLLISION_VALUE));
+}
+
+/// INV-035: an over-window numeric HTML reference fails closed before
+/// provider-controlled evidence is retained.
+#[test]
+fn web_search_rejects_over_window_numeric_reference_in_result_text() {
+    let reflection = over_window_numeric_html_reflection();
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: reflection.clone(),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("over-window numeric-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        OVER_WINDOW_NUMERIC_HTML_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber)
+        .expect("over-window numeric reference is fail-closed redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(OVER_WINDOW_NUMERIC_HTML_COLLISION_KEY));
+    assert!(!content.contains(&reflection));
+}
+
+/// INV-035: an HTML C1 numeric reference is decoded through its standard
+/// replacement mapping before provider evidence is retained.
+#[test]
+fn web_search_redacts_c1_numeric_reference_credential_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(HTML_NUMERIC_C1_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("HTML numeric-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        HTML_NUMERIC_C1_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(HTML_NUMERIC_C1_COLLISION_KEY));
+    assert!(!content.contains(HTML_NUMERIC_C1_COLLISION_VALUE));
+}
+
+/// INV-035: canonical Unicode normalization cannot conceal a credential
+/// reflected in an ordinary provider title.
+#[test]
+fn web_search_redacts_unicode_normalized_credential_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(URL_UNICODE_HOST_COLLISION_KEY),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("Unicode text fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY));
+    assert!(!content.contains(URL_UNICODE_HOST_COLLISION_KEY));
+}
+
+/// INV-035: decomposition-preserving normalization detects a credential
+/// substring whose first scalar is a combining mark.
+#[test]
+fn web_search_redacts_unicode_combining_mark_boundary_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(UNICODE_COMBINING_MARK_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("combining-mark fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        UNICODE_COMBINING_MARK_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(UNICODE_COMBINING_MARK_COLLISION_KEY));
+    assert!(!content.contains(UNICODE_COMBINING_MARK_COLLISION_VALUE));
+}
+
+/// INV-035: repeated HTML character-reference decoding cannot conceal a
+/// credential reflected in provider-controlled text.
+#[test]
+fn web_search_redacts_nested_html_encoded_credential_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(HTML_NESTED_ENTITY_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("nested HTML entity fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        HTML_ENTITY_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(HTML_ENTITY_COLLISION_KEY));
+    assert!(!content.contains(HTML_NESTED_ENTITY_COLLISION_VALUE));
+}
+
+/// INV-035: composed form and HTML decoding cannot conceal a credential
+/// reflected in provider-controlled text.
+#[test]
+fn web_search_redacts_form_then_html_encoded_credential_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FORM_HTML_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("cross-codec fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        HTML_ENTITY_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(HTML_ENTITY_COLLISION_KEY));
+    assert!(!content.contains(FORM_HTML_COLLISION_VALUE));
+}
+
+/// INV-035: an early HTML reference is still decoded when a later
+/// multibyte scalar crosses the character-reference scan bound.
+#[test]
+fn web_search_html_reference_scan_handles_multibyte_boundaries() {
+    let reflection = html_multibyte_boundary_reflection();
+
+    assert!(encoded_contains_credential(
+        &reflection,
+        HTML_ENTITY_COLLISION_KEY
+    ));
+}
+
+/// INV-035: character-reference terminator search is bounded and fails
+/// closed at every ampersand in a maximum-size provider body.
+#[test]
+fn web_search_html_reference_scan_bounds_and_rejects_distant_terminator() {
+    let source = distant_html_reference_terminator();
+
+    assert_eq!(decode_html_character_references(&source), None);
+}
+
+/// INV-035: credential removal cannot reproduce a key that overlaps the
+/// ordinary redaction sentinel.
+#[test]
+fn web_search_redaction_sentinel_cannot_reproduce_credential() {
+    const SENTINEL_OVERLAPPING_KEY: &str = "red";
+    const SHAPED_SECRET: &str = "SYNTHETIC-SHAPED-SECRET";
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: format!("x{SENTINEL_OVERLAPPING_KEY}x"),
+        url: format!("{FIXTURE_RESULT_URL}?q={SENTINEL_OVERLAPPING_KEY}"),
+        snippet: format!("y{SENTINEL_OVERLAPPING_KEY}y api_key={SHAPED_SECRET}"),
+    })
+    .expect("reflected fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        SENTINEL_OVERLAPPING_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+    let evidence = success_evidence(response, &scrubber).expect("response encodes");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(SENTINEL_OVERLAPPING_KEY));
+    assert!(!content.contains(SHAPED_SECRET));
+}
