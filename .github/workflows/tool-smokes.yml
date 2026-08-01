@@ -3,7 +3,15 @@ name: Tool live smokes
 on:
   pull_request:
     paths:
+      - "crates/persistence/**"
+      - "crates/tools-basic/**"
+      - "crates/tools-code-host/**"
+      - "crates/tools-conversations/**"
       - "crates/tools-github/**"
+      - "crates/tools-plan/**"
+      - "crates/tools-workspace/**"
+      - "apps/signalboxd/**"
+      - "Cargo.lock"
       - ".github/workflows/tool-smokes.yml"
   push:
     branches: [main]
@@ -13,14 +21,13 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Report-only home for tool-crate live smokes: fixture drift stays visible but
-  # never merge-gates. Future web-search and exec/bwrap smokes extend this job
-  # instead of inventing another CI pattern.
+  # Report-only home for live tool smokes: fixture drift stays visible but never
+  # merge-gates. The whole-daemon exercise extends the existing CI pattern.
   live-smokes:
     name: Tool live smokes (report only)
     continue-on-error: true
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,8 +39,15 @@ jobs:
           cache-on-failure: true
           key: tool-live-smokes
       - name: Run GitHub read smokes
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           cargo test --no-fail-fast -p signalbox-tools-github
           --test live_smoke -- --ignored
+      - name: Run whole-daemon tool exercise
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          cargo test --no-fail-fast -p signalboxd
+          --test live_tool_exercise -- --ignored
