@@ -679,6 +679,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 #[cfg(not(target_os = "linux"))]
                 bind_source: &self.workspace_root,
                 launcher: &self.sandbox_launcher,
+                working_directory_fd: None,
             },
             &probe_program,
             &[String::from("-c"), String::from("exit 0")],
@@ -700,6 +701,22 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         stderr: OutputCapture::empty(),
                     };
                 }
+                #[cfg(target_os = "linux")]
+                let working_directory_identity = match self
+                    .workspace_identity
+                    .pin_relative_directory(&arguments.working_directory)
+                    .and_then(WorkspaceDirectoryIdentity::inherit)
+                {
+                    Ok(directory) => directory,
+                    Err(reason) => {
+                        return ExecResult {
+                            confinement: ExecutionConfinement::SandboxSetupFailed,
+                            outcome: ProcessOutcome::SpawnFailed { reason },
+                            stdout: OutputCapture::empty(),
+                            stderr: OutputCapture::empty(),
+                        };
+                    }
+                };
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     return ExecResult {
@@ -717,6 +734,10 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         #[cfg(not(target_os = "linux"))]
                         bind_source: &self.workspace_root,
                         launcher: &self.sandbox_launcher,
+                        #[cfg(target_os = "linux")]
+                        working_directory_fd: Some(working_directory_identity.raw_fd()),
+                        #[cfg(not(target_os = "linux"))]
+                        working_directory_fd: None,
                     },
                     &arguments.program,
                     &arguments.arguments,
@@ -856,6 +877,23 @@ struct WorkspaceDirectoryIdentity {
 }
 
 #[cfg(target_os = "linux")]
+impl WorkspaceDirectoryIdentity {
+    fn inherit(mut self) -> Result<Self, ProcessSpawnFailure> {
+        self._directory = inherited_descriptor_above_standard_streams(self._directory)
+            .map_err(|_| ProcessSpawnFailure::Other)?;
+        self.bind_source = PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            rustix::fd::AsRawFd::as_raw_fd(&self._directory)
+        ));
+        Ok(self)
+    }
+
+    fn raw_fd(&self) -> i32 {
+        rustix::fd::AsRawFd::as_raw_fd(&self._directory)
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn workspace_directory_failure(error: rustix::io::Errno) -> ProcessSpawnFailure {
     match error {
         rustix::io::Errno::NOENT => ProcessSpawnFailure::NotFound,
@@ -975,6 +1013,7 @@ struct SandboxLaunchContext<'a> {
     workspace_root: &'a Path,
     bind_source: &'a Path,
     launcher: &'a Path,
+    working_directory_fd: Option<i32>,
 }
 
 fn bwrap_request(
@@ -1043,6 +1082,13 @@ fn bwrap_request(
     .collect::<Vec<_>>();
     bwrap_arguments.push(context.bind_source.as_os_str().to_owned());
     bwrap_arguments.push(OsString::from(SANDBOX_WORKSPACE));
+    if let Some(working_directory_fd) = context.working_directory_fd {
+        bwrap_arguments.extend([
+            OsString::from("--bind-fd"),
+            OsString::from(working_directory_fd.to_string()),
+            OsString::from(&sandbox_directory),
+        ]);
+    }
     bwrap_arguments.extend([
         OsString::from("--ro-bind"),
         context.launcher.as_os_str().to_owned(),
@@ -2571,7 +2617,9 @@ mod tests {
     #[tokio::test]
     async fn sandboxed_request_uses_bwrap_profile_and_workspace_mount() -> Result<(), Box<dyn Error>>
     {
-        let root = std::env::current_dir()?;
+        let workspace = ReplacementWorkspace::new()?;
+        std::fs::create_dir(workspace.path.join(SANDBOXED_WORKING_DIRECTORY))?;
+        let root = workspace.path.clone();
         let runner = FakeRunner::returning(
             BwrapAvailability::Available,
             successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
@@ -2604,6 +2652,8 @@ mod tests {
             OsString::from("--chdir"),
             OsString::from(format!("{SANDBOX_WORKSPACE}/{SANDBOXED_WORKING_DIRECTORY}")),
         ];
+        let bind_fd_destination =
+            OsString::from(format!("{SANDBOX_WORKSPACE}/{SANDBOXED_WORKING_DIRECTORY}"));
         let launcher_arguments = [
             OsString::from("--ro-bind"),
             OsString::from(TEST_SANDBOX_LAUNCHER),
@@ -2645,6 +2695,8 @@ mod tests {
                 .windows(chdir_arguments.len())
                 .any(|arguments| arguments == chdir_arguments)
         );
+        assert!(request.arguments.contains(&OsString::from("--bind-fd")));
+        assert!(request.arguments.contains(&bind_fd_destination));
         assert!(
             request
                 .arguments
@@ -2653,6 +2705,39 @@ mod tests {
         );
         assert!(request.arguments.ends_with(&dispatch_arguments));
         assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_runner_rejects_a_symlinked_working_directory_before_dispatch()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let outside = ReplacementWorkspace::new()?;
+        symlink(&outside.path, workspace.path.join("escape"))?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_process(b"must remain unused"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, &workspace.path)?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("escape"),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::Other,
+            }
+        );
+        assert_eq!(observation.recorded_requests(), Vec::new());
         Ok(())
     }
 

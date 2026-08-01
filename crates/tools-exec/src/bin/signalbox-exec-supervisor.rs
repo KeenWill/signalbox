@@ -162,6 +162,13 @@ mod linux {
             }
             std::thread::sleep(MINIMUM_POLL_INTERVAL);
         }
+        if cancelled.load(Ordering::Acquire)
+            || started.elapsed() >= Duration::from_millis(timeout_milliseconds)
+        {
+            drop(control);
+            let _ = tree.finish(&mut child);
+            return Err(());
+        }
         control.write_all(&[1]).map_err(|_| ())?;
         let mut child_success = None;
         let mut child_wait_failed = false;

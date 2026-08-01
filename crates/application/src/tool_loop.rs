@@ -1563,7 +1563,7 @@ pub(crate) fn initial_tool_approval(
     if definition.is_some_and(|definition| {
         definition.permission_default() == ToolPermissionDefault::AlwaysConfirm
     }) {
-        return InitialToolApproval::Confirm;
+        return InitialToolApproval::AlwaysConfirm;
     }
     match posture {
         DangerousToolAutoApproval::ApproveAll => InitialToolApproval::SessionBlanket,
@@ -2055,11 +2055,11 @@ mod tests {
 
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&explicit)),
-            InitialToolApproval::Confirm
+            InitialToolApproval::AlwaysConfirm
         );
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&explicit)),
-            InitialToolApproval::Confirm
+            InitialToolApproval::AlwaysConfirm
         );
     }
 
