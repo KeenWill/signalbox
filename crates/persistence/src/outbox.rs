@@ -532,7 +532,7 @@ async fn load_event(
                     AND accepted.session_id = event.session_id
                     AND accepted.acceptance_position = event.acceptance_position
                     AND accepted.origin_turn_id = event.turn_id
-                   JOIN submit_input_command AS command
+                   LEFT JOIN submit_input_command AS command
                      ON command.command_id = accepted.accepting_command_id
                     AND command.session_id = event.session_id
                     AND command.result_session_id = event.session_id
@@ -540,6 +540,10 @@ async fn load_event(
                     AND command.result_accepted_input_id = event.accepted_input_id
                     AND command.content_kind = 'text'
                     AND command.content_text = accepted.content_text
+                   LEFT JOIN goal_turn AS goal
+                     ON goal.session_id = event.session_id
+                    AND goal.accepted_input_id = event.accepted_input_id
+                    AND goal.turn_id = event.turn_id
                    JOIN queued_input_origin AS queued
                      ON queued.accepted_input_id = event.accepted_input_id
                     AND queued.turn_id = event.turn_id
@@ -557,15 +561,27 @@ async fn load_event(
                     AND event.session_id = $2
                     AND (
                         (
-                            accepted.disposition_kind = 'origin_of'
-                            AND command.result_turn_id = event.turn_id
+                            accepted.accepting_command_id IS NOT NULL
+                            AND goal.turn_id IS NULL
+                            AND (
+                                (
+                                    accepted.disposition_kind = 'origin_of'
+                                    AND command.result_turn_id = event.turn_id
+                                )
+                                OR (
+                                    accepted.disposition_kind =
+                                        'reclassified_as_turn_origin'
+                                    AND command.result_turn_id IS NULL
+                                    AND accepted.expected_active_turn_id IS NOT NULL
+                                    AND source.state_kind = 'terminal'
+                                )
+                            )
                         )
                         OR (
-                            accepted.disposition_kind =
-                                'reclassified_as_turn_origin'
-                            AND command.result_turn_id IS NULL
-                            AND accepted.expected_active_turn_id IS NOT NULL
-                            AND source.state_kind = 'terminal'
+                            accepted.accepting_command_id IS NULL
+                            AND command.command_id IS NULL
+                            AND accepted.disposition_kind = 'origin_of'
+                            AND goal.turn_id = event.turn_id
                         )
                     )",
             )

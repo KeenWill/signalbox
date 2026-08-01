@@ -25,15 +25,16 @@ storage version four were verified through PR #311
 lock inventory were verified against PR #314
 (`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
 was verified against this PR (`agent/domain-cleanup`). The goal event
-transaction and trigger lock were verified through PR #383 (`agent/goal-mode`).
-This page covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+transaction, trigger lock, and goal-turn outbox provenance were verified through
+PR #383 (`agent/goal-mode`). This page covers the Postgres representation in
+`crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -907,12 +908,14 @@ successor turn and appends that correlated `input_accepted`; an applied
 `StartEligibleTurn` appends `turn_activated`. Startup recovery appends
 `turn_failed` for a failed lost turn and `turn_reconciliation_required` when
 stopped issued work becomes ambiguous; terminal reclassification of pending
-steering appends its correlated `input_accepted`. Model-call state transitions
-append `model_call_transition`, tool-round creation appends
-`tool_batch_transition { proposed }`, all-resolved result projection appends
-`tool_batch_transition { results_projected }`, and an external-effect ambiguity
-appends `tool_batch_transition { recovery_required }`. Completion closure
-appends `turn_completed`, refusal closure appends `turn_refused`, and
+steering appends its correlated `input_accepted`. Goal-owned turn creation
+appends the same correlated `input_accepted`; dispatch authenticates its exact
+`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command.
+Model-call state transitions append `model_call_transition`, tool-round creation
+appends `tool_batch_transition { proposed }`, all-resolved result projection
+appends `tool_batch_transition { results_projected }`, and an external-effect
+ambiguity appends `tool_batch_transition { recovery_required }`. Completion
+closure appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
 appends `turn_cancelled`, and live stopped ambiguity appends
 `turn_reconciliation_required`; completion of a context compaction appends
