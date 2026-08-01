@@ -663,13 +663,50 @@ fn current_tool_results(model: &ScriptedModel<ModelCallId>) -> SmokeResult<Vec<V
         .last()
         .ok_or_else(|| io::Error::other("the continuation model operation was not received"))?;
     let previous_results = operation_tool_results(before)?;
-    let mut continuation_results = operation_tool_results(continuation)?;
+    let continuation_results = operation_tool_results(continuation)?;
+    current_tool_result_delta(previous_results, continuation_results)
+}
+
+fn current_tool_result_delta(
+    previous_results: Vec<Value>,
+    mut continuation_results: Vec<Value>,
+) -> SmokeResult<Vec<Value>> {
     if !continuation_results.starts_with(&previous_results) {
         return Err(
             io::Error::other("the continuation did not preserve prior tool results").into(),
         );
     }
     Ok(continuation_results.split_off(previous_results.len()))
+}
+
+#[test]
+fn current_tool_result_delta_extracts_only_the_current_round() -> SmokeResult {
+    let previous = json!({"round": "previous"});
+    let current_first = json!({"round": "current", "ordinal": 1});
+    let current_second = json!({"round": "current", "ordinal": 2});
+
+    let extracted = current_tool_result_delta(
+        vec![previous.clone()],
+        vec![previous, current_first.clone(), current_second.clone()],
+    )?;
+
+    assert_eq!(extracted, vec![current_first, current_second]);
+    Ok(())
+}
+
+#[test]
+fn current_tool_result_delta_rejects_changed_prior_evidence() {
+    let previous = json!({"round": "previous"});
+    let changed_previous = json!({"round": "changed"});
+    let current = json!({"round": "current"});
+
+    let error = current_tool_result_delta(vec![previous], vec![changed_previous, current])
+        .expect_err("changed prior evidence must be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "the continuation did not preserve prior tool results"
+    );
 }
 
 fn operation_tool_results(
