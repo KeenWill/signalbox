@@ -249,9 +249,11 @@ impl GoalRepository {
         } else {
             apply_user_command(&mut transaction, &command).await?
         };
-        let turn_admission = if let GoalCommandResult::Applied(event) = &result
-            && event_starts_pursuit(event)
-        {
+        let starts_pursuit = match &result {
+            GoalCommandResult::Applied(event) => event_starts_pursuit(event),
+            GoalCommandResult::Rejected(_) => false,
+        };
+        let turn_admission = if starts_pursuit {
             match current_origin_configuration(
                 &mut transaction,
                 command.session(),
@@ -283,29 +285,32 @@ impl GoalRepository {
             None
         };
         insert_command(&mut transaction, &command, &result).await?;
-        if let GoalCommandResult::Applied(event) = &result {
-            insert_event(&mut transaction, command.session(), event).await?;
-            if event_starts_pursuit(event) {
-                let candidates = candidates.ok_or(GoalCorruption::Missing(
-                    "turn candidates for pursuing command",
-                ))?;
-                let (configuration, position) = turn_admission.ok_or(GoalCorruption::Missing(
-                    "turn admission for pursuing command",
-                ))?;
-                let goal = load_goal_from_connection(&mut transaction, command.session())
-                    .await?
-                    .ok_or(GoalCorruption::Missing("scheduled command goal"))?;
-                insert_goal_turn(
-                    &mut transaction,
-                    command.session(),
-                    goal.current().generation(),
-                    GoalTurnSource::UserEvent(event.ordinal()),
-                    pursuit_input(&goal, event)?,
-                    &configuration,
-                    GoalTurnInsertion::new(position, candidates),
-                )
-                .await?;
+        match &result {
+            GoalCommandResult::Applied(event) => {
+                insert_event(&mut transaction, command.session(), event).await?;
+                if event_starts_pursuit(event) {
+                    let candidates = candidates.ok_or(GoalCorruption::Missing(
+                        "turn candidates for pursuing command",
+                    ))?;
+                    let (configuration, position) = turn_admission.ok_or(
+                        GoalCorruption::Missing("turn admission for pursuing command"),
+                    )?;
+                    let goal = load_goal_from_connection(&mut transaction, command.session())
+                        .await?
+                        .ok_or(GoalCorruption::Missing("scheduled command goal"))?;
+                    insert_goal_turn(
+                        &mut transaction,
+                        command.session(),
+                        goal.current().generation(),
+                        GoalTurnSource::UserEvent(event.ordinal()),
+                        pursuit_input(&goal, event)?,
+                        &configuration,
+                        GoalTurnInsertion::new(position, candidates),
+                    )
+                    .await?;
+                }
             }
+            GoalCommandResult::Rejected(_) => {}
         }
         commit(transaction).await?;
         Ok(GoalCommandHandlingOutcome::Recorded(result))
@@ -376,16 +381,16 @@ impl GoalRepository {
                 return Ok(GoalTurnContinuationOutcome::NotTerminal);
             }
             GoalTurnTerminalState::Unsuccessful => {
-                let transitioned = goal
-                    .block_execution_failure(
-                        failure_need,
-                        GoalSchedulerProvenance::new(predecessor),
-                    )
-                    .map_err(|_| {
-                        GoalCorruption::Inconsistent(
-                            "pursuing goal rejected scheduler failure blocking",
-                        )
-                    })?;
+                let transitioned = match goal.block_execution_failure(
+                    failure_need,
+                    GoalSchedulerProvenance::new(predecessor),
+                ) {
+                    Ok(goal) => goal,
+                    Err(error) => {
+                        transaction.rollback().await?;
+                        return scheduler_failure_rejection(error.failure()).map_err(Into::into);
+                    }
+                };
                 let event = latest_event(&transitioned)?;
                 insert_event(&mut transaction, session, &event).await?;
                 commit(transaction).await?;
@@ -566,6 +571,23 @@ fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
         | GoalEventKind::UserStopped { .. }
         | GoalEventKind::Superseded { .. } => false,
     })
+}
+
+fn scheduler_failure_rejection(
+    failure: GoalTransitionFailure,
+) -> Result<GoalTurnContinuationOutcome, GoalCorruption> {
+    match failure {
+        GoalTransitionFailure::EventOrdinalExhausted => {
+            Ok(GoalTurnContinuationOutcome::EventOrdinalExhausted)
+        }
+        GoalTransitionFailure::RequiresPursuing
+        | GoalTransitionFailure::RequiresBlocked
+        | GoalTransitionFailure::RequiresPursuingOrBlocked
+        | GoalTransitionFailure::RequiresNoActiveGoal
+        | GoalTransitionFailure::GenerationExhausted => Err(GoalCorruption::Inconsistent(
+            "pursuing goal rejected scheduler failure blocking",
+        )),
+    }
 }
 
 fn event_starts_pursuit(event: &GoalEvent) -> bool {
@@ -1249,6 +1271,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inv048_scheduler_event_ordinal_exhaustion_is_a_typed_continuation_outcome() {
+        let outcome = scheduler_failure_rejection(GoalTransitionFailure::EventOrdinalExhausted)
+            .expect("event ordinal exhaustion is typed, not corruption");
+
+        assert_eq!(outcome, GoalTurnContinuationOutcome::EventOrdinalExhausted);
+    }
 
     #[test]
     fn successful_continuation_reuses_frozen_alias_when_catalog_entry_is_absent() {

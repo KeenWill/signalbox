@@ -91,6 +91,9 @@ impl PostgresEligibilitySweep {
                 SELECT queued.session_id
                   FROM turn_lifecycle AS queued
                  WHERE queued.state_kind = 'queued'
+                   AND goal_turn_is_runtime_relevant(
+                       queued.session_id, queued.turn_id
+                   )
                    AND NOT EXISTS (
                        SELECT 1
                          FROM turn_lifecycle AS active

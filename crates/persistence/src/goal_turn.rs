@@ -94,6 +94,8 @@ pub enum GoalTurnContinuationOutcome {
         /// The unavailable alias selected by the current defaults epoch.
         alias: ModelAlias,
     },
+    /// The goal event ordinal cannot advance beyond `u64::MAX`.
+    EventOrdinalExhausted,
     /// The session's accepted-input position cannot advance beyond `u64::MAX`.
     AcceptancePositionExhausted {
         /// The maximum durable position already occupied by the session.

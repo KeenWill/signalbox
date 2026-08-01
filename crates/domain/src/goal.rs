@@ -933,6 +933,27 @@ mod tests {
     }
 
     #[test]
+    fn inv048_scheduler_block_reports_event_ordinal_exhaustion() {
+        let mut goal = Goal::commission(
+            session(),
+            statement("exhaust the event ordinal"),
+            user(FIRST_COMMAND),
+        );
+        goal.events[0].ordinal = GoalEventOrdinal::new(NonZeroU64::MAX);
+        let error = goal
+            .block_execution_failure(
+                need("repair execution"),
+                GoalSchedulerProvenance::new(TurnId::from_uuid(Uuid::from_u128(INVOKING_TURN))),
+            )
+            .expect_err("the maximum event ordinal has no successor");
+
+        assert_eq!(
+            error.failure(),
+            GoalTransitionFailure::EventOrdinalExhausted
+        );
+    }
+
+    #[test]
     fn goal_text_rejects_postgresqls_unrepresentable_null_scalar() {
         assert_eq!(
             GoalStatement::try_new(String::from("scope\0change")),

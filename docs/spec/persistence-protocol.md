@@ -473,7 +473,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Five explicit lock statements live
+`crates/persistence/src/lock_inventory.rs`. Seven explicit lock statements live
 in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
@@ -486,11 +486,17 @@ in the schema instead:
   `FOR NO KEY UPDATE` on the plan's session before reading its certified head;
 - the session-plan append trigger in that migration reacquires the session
   `FOR NO KEY UPDATE`, then takes `FOR SHARE` on the exact active `plan_write`
-  attempt while authenticating its request payload; and
-- the goal-event continuity trigger (migration `202608020013`) takes
-  `FOR NO KEY UPDATE` on the event's session row before reading the preceding
-  event, serializing ordinal and generation assignment even when the Rust
-  transaction reached that row first with `FOR NO KEY UPDATE`.
+  attempt while authenticating its request payload;
+- the goal-event current-turn helper (migration `202608020013`) takes
+  `FOR NO KEY UPDATE` on the event's session row before reading the latest goal
+  turn;
+- the scheduler-failure correlation trigger in that migration takes `FOR SHARE`
+  on the named `turn_lifecycle` row while checking its unsuccessful terminal
+  disposition; and
+- the goal-event continuity trigger in that migration takes `FOR NO KEY UPDATE`
+  on the event's session row before reading the preceding event, serializing
+  ordinal and generation assignment even when the Rust transaction reached that
+  row first with `FOR NO KEY UPDATE`.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -531,11 +537,14 @@ Locks per transaction, in acquisition order:
 - **Goal commands and transitions**: an unseen user command first claims the
   user-global registry, then every user, model, scheduler, and continuation
   transaction locks the session row `FOR NO KEY UPDATE` before reading the event
-  stream. Applied transitions insert the event, whose continuity trigger
-  reacquires that session-row lock in `FOR NO KEY UPDATE` mode before it
-  validates the predecessor. Pursuing user transitions then read current
-  defaults and insert their queued goal turn; rejected commands commit without
-  firing the trigger, and exact user-command replay takes no row lock.
+  stream. Applied transitions insert the event; deferred provenance correlation
+  first reacquires the session-row lock before checking the current goal turn
+  and, for scheduler failure, holds the named lifecycle row `FOR SHARE` while
+  checking its unsuccessful terminal disposition. The continuity trigger
+  reacquires the session-row lock before validating the predecessor. Pursuing
+  user transitions then read current defaults and insert their queued goal turn;
+  rejected commands commit without firing the trigger, and exact user-command
+  replay takes no row lock.
 - **StartEligibleTurn**, **startup recovery**, and the **model-call execution
   transactions** (prepare, authorize, observation commit, restart recovery — all
   in `model_execution.rs`, reusing the same inventory statement): the
