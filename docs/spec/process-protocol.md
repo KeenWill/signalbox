@@ -688,17 +688,21 @@ that variant. Every accepted non-review mutation request — `create_session`,
 
 **Implemented behavior.** An accepted goal mutation returns
 `goal_transition_applied { session_id, event_ordinal, generation }`. A
-successful `read_goal` returns `goal_history_start` with the current generation,
-immutable statement, and state; one or more contiguous `goal_history_item`
-messages with event ordinal, generation, event, and provenance; then
-`goal_history_end { event_count }`. Because every attached lineage has its
-commissioning event, `event_count` is the exact number of preceding items. The
-client validates the complete sequence and count before presenting any line.
-Goal text uses the ordinary bounded text grammar; the closed lifecycle, event,
-reason, and provenance correlations are owned by [goal mode](goal-mode.md). The
-daemon completes an owner-private temporary-file spool, then releases both the
-decoded goal aggregate and snapshot-reader permit before writing the first
-history frame to the connection.
+successful `read_goal` returns `goal_history_start` with the current generation
+and immutable statement; `goal_history_state` with the current state; one or
+more contiguous `goal_history_item` messages with event ordinal, generation,
+event, and provenance; then `goal_history_end { event_count }`. Each of the two
+projection frames carries at most one bounded goal text, so even maximally
+JSON-escaped text remains below the frame cap. Because every attached lineage
+has its commissioning event, `event_count` is the exact number of preceding
+items. Before presenting any line, the client validates the complete sequence
+and count, replays every event through the admitted lifecycle transitions, and
+checks that the replay derives the declared current projection. Goal text uses
+the ordinary bounded text grammar; the closed lifecycle, event, reason, and
+provenance correlations are owned by [goal mode](goal-mode.md). The daemon
+completes an owner-private temporary-file spool, then releases both the decoded
+goal aggregate and snapshot-reader permit before writing the first history frame
+to the connection.
 
 Review mutations return exactly one stable acknowledgement:
 

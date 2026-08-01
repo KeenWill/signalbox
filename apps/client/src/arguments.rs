@@ -124,10 +124,16 @@ pub(crate) enum Command {
 }
 
 #[derive(Debug)]
+pub(crate) enum GoalTextArgument {
+    Inline(String),
+    File(PathBuf),
+}
+
+#[derive(Debug)]
 pub(crate) enum GoalCommand {
     Attach {
         session_id: CanonicalUuid,
-        statement: String,
+        statement: GoalTextArgument,
         command_id: Option<CommandId>,
     },
     Show {
@@ -135,7 +141,7 @@ pub(crate) enum GoalCommand {
     },
     Resume {
         session_id: CanonicalUuid,
-        guidance: Option<String>,
+        guidance: Option<GoalTextArgument>,
         command_id: Option<CommandId>,
     },
     Stop {
@@ -144,7 +150,7 @@ pub(crate) enum GoalCommand {
     },
     Supersede {
         session_id: CanonicalUuid,
-        statement: String,
+        statement: GoalTextArgument,
         command_id: Option<CommandId>,
     },
 }
@@ -404,19 +410,34 @@ enum GoalSubcommand {
 }
 
 #[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("goal_statement_source")
+        .required(true)
+        .multiple(false)
+        .args(["statement", "statement_file"])
+))]
 struct GoalStatementArguments {
     /// Session whose goal lineage is changed.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
     session_id: CanonicalUuid,
     /// Exact immutable commissioned statement.
     #[arg(long, value_name = "TEXT")]
-    statement: String,
+    statement: Option<String>,
+    /// Read the exact immutable commissioned statement from one file.
+    #[arg(long, value_name = "FILE")]
+    statement_file: Option<PathBuf>,
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("goal_guidance_source")
+        .required(false)
+        .multiple(false)
+        .args(["guidance", "guidance_file"])
+))]
 struct GoalResumeArguments {
     /// Session whose blocked goal resumes.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
@@ -424,6 +445,9 @@ struct GoalResumeArguments {
     /// Exact guidance delivered as the next goal turn's input.
     #[arg(long, value_name = "TEXT")]
     guidance: Option<String>,
+    /// Read the exact next-turn guidance from one file.
+    #[arg(long, value_name = "FILE")]
+    guidance_file: Option<PathBuf>,
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
@@ -1258,6 +1282,35 @@ pub(crate) enum SystemPromptArgument {
     Clear,
 }
 
+fn goal_statement_argument(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<GoalTextArgument, UsageError> {
+    match (inline, file) {
+        (Some(value), None) => Ok(GoalTextArgument::Inline(value)),
+        (None, Some(path)) => Ok(GoalTextArgument::File(path)),
+        (Some(_), Some(_)) | (None, None) => Err(UsageError(Cli::command().error(
+            ErrorKind::ArgumentConflict,
+            "goal attach and supersede require exactly one of --statement or --statement-file",
+        ))),
+    }
+}
+
+fn goal_guidance_argument(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<Option<GoalTextArgument>, UsageError> {
+    match (inline, file) {
+        (Some(value), None) => Ok(Some(GoalTextArgument::Inline(value))),
+        (None, Some(path)) => Ok(Some(GoalTextArgument::File(path))),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Err(UsageError(Cli::command().error(
+            ErrorKind::ArgumentConflict,
+            "goal resume accepts at most one of --guidance or --guidance-file",
+        ))),
+    }
+}
+
 pub(crate) fn parse(
     values: impl IntoIterator<Item = OsString>,
 ) -> Result<ParseOutcome, UsageError> {
@@ -1316,7 +1369,7 @@ pub(crate) fn parse(
         CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
             GoalSubcommand::Attach(arguments) => GoalCommand::Attach {
                 session_id: arguments.session_id,
-                statement: arguments.statement,
+                statement: goal_statement_argument(arguments.statement, arguments.statement_file)?,
                 command_id: arguments.command_id,
             },
             GoalSubcommand::Show(arguments) => GoalCommand::Show {
@@ -1324,7 +1377,7 @@ pub(crate) fn parse(
             },
             GoalSubcommand::Resume(arguments) => GoalCommand::Resume {
                 session_id: arguments.session_id,
-                guidance: arguments.guidance,
+                guidance: goal_guidance_argument(arguments.guidance, arguments.guidance_file)?,
                 command_id: arguments.command_id,
             },
             GoalSubcommand::Stop(arguments) => GoalCommand::Stop {
@@ -1333,7 +1386,7 @@ pub(crate) fn parse(
             },
             GoalSubcommand::Supersede(arguments) => GoalCommand::Supersede {
                 session_id: arguments.session_id,
-                statement: arguments.statement,
+                statement: goal_statement_argument(arguments.statement, arguments.statement_file)?,
                 command_id: arguments.command_id,
             },
         }),
@@ -2056,7 +2109,7 @@ mod tests {
 
     use super::{
         Arguments, Command, ConversationsPageRequest, DangerousToolAutoApprovalArgument,
-        GoalCommand, ImportSourceArgument, ParseOutcome, SendDeliveryArgument,
+        GoalCommand, GoalTextArgument, ImportSourceArgument, ParseOutcome, SendDeliveryArgument,
         SessionMetadataPageRequest, ThroughPositionArgument, UsageError, parse,
     };
 
@@ -3462,6 +3515,62 @@ mod tests {
     }
 
     #[test]
+    fn goal_attach_parses_a_statement_file() {
+        const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(
+            [
+                "goal",
+                "attach",
+                SESSION_ID,
+                "--statement-file",
+                "commission.txt",
+            ]
+            .map(Into::into),
+        )
+        .expect("the goal statement file parses");
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the goal statement file runs the client");
+        };
+        let Command::Goal(GoalCommand::Attach {
+            statement: GoalTextArgument::File(path),
+            ..
+        }) = arguments.command
+        else {
+            panic!("the goal statement file selects attach");
+        };
+
+        assert_eq!(path, Path::new("commission.txt"));
+    }
+
+    #[test]
+    fn goal_resume_parses_a_guidance_file() {
+        const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(
+            [
+                "goal",
+                "resume",
+                SESSION_ID,
+                "--guidance-file",
+                "guidance.txt",
+            ]
+            .map(Into::into),
+        )
+        .expect("the goal guidance file parses");
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the goal guidance file runs the client");
+        };
+        let Command::Goal(GoalCommand::Resume {
+            guidance: Some(GoalTextArgument::File(path)),
+            ..
+        }) = arguments.command
+        else {
+            panic!("the goal guidance file selects resume");
+        };
+
+        assert_eq!(path, Path::new("guidance.txt"));
+    }
+
+    #[test]
     fn goal_resume_preserves_absent_guidance() {
         const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
 
@@ -3482,7 +3591,7 @@ mod tests {
         };
         let Command::Goal(GoalCommand::Supersede {
             session_id,
-            statement,
+            statement: GoalTextArgument::Inline(statement),
             command_id: Some(command_id),
         }) = arguments.command
         else {

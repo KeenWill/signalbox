@@ -713,6 +713,8 @@ async fn s_goal_inv048_process_protocol_supersession_history_round_trips()
                 session_id,
                 current_generation: CanonicalU64::new(2),
                 current_statement: replacement_statement.clone(),
+            },
+            ServerMessage::GoalHistoryState {
                 current_state: GoalLifecycleState::UserStopped {},
             },
             ServerMessage::GoalHistoryItem {

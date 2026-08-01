@@ -9572,6 +9572,14 @@ async fn spool_goal_snapshot(
             session_id,
             current_generation: CanonicalU64::new(goal.current().generation().get()),
             current_statement: goal.current().statement().as_str().to_owned(),
+        },
+    )
+    .await?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::GoalHistoryState {
             current_state: wire_goal_state(goal.current().state()),
         },
     )
@@ -11696,9 +11704,14 @@ context_window_tokens = 200000
                 session_id,
                 current_generation: CanonicalU64::new(goal.current().generation().get()),
                 current_statement: statement.as_str().to_owned(),
-                current_state: GoalLifecycleState::Pursuing {},
             },
         )?)?;
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryState {
+                current_state: GoalLifecycleState::Pursuing {},
+            },
+        )?)?);
         expected.extend(encode_server_line(&ServerFrame::try_new(
             request_id,
             ServerMessage::GoalHistoryItem {

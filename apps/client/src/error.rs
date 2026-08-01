@@ -10,6 +10,7 @@ pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
     SystemPromptFile(io::Error),
+    GoalTextFile(io::Error),
     ReviewInputFile(io::Error),
     ReviewInputJson(serde_json::Error),
     ReviewInputExceedsFrame,
@@ -52,6 +53,10 @@ impl ClientError {
         Self::SystemPromptFile(error)
     }
 
+    pub(crate) fn goal_text_file(error: io::Error) -> Self {
+        Self::GoalTextFile(error)
+    }
+
     pub(crate) fn review_input_file(error: io::Error) -> Self {
         Self::ReviewInputFile(error)
     }
@@ -73,6 +78,7 @@ impl ClientError {
             Self::Remote { .. }
             | Self::SourceFile(_)
             | Self::SystemPromptFile(_)
+            | Self::GoalTextFile(_)
             | Self::ReviewInputFile(_)
             | Self::ReviewInputJson(_)
             | Self::ReviewInputExceedsFrame
@@ -108,6 +114,7 @@ impl fmt::Display for ClientError {
             Self::SystemPromptFile(_) => {
                 formatter.write_str("the system prompt file could not be read")
             }
+            Self::GoalTextFile(_) => formatter.write_str("the goal text file could not be read"),
             Self::ReviewInputFile(_) => {
                 formatter.write_str("the review JSON input file could not be read")
             }
@@ -173,6 +180,7 @@ impl Error for ClientError {
             Self::Io(error)
             | Self::SourceFile(error)
             | Self::SystemPromptFile(error)
+            | Self::GoalTextFile(error)
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
             Self::ReviewInputJson(error) => Some(error),

@@ -64,7 +64,9 @@ invoking session, turn, and tool-request identity, and persistence requires that
 exact triple to name the request. The request must name `goal_declare`, carry
 canonical JSON, and its exact transition, reason, need, or report values must
 match the event it causes. A request from another tool or with different
-arguments cannot commit. A tool-request identity can cause at most one goal
+arguments cannot commit. The invoking turn must also be the latest goal turn for
+the current generation, so a delayed declaration from an older turn cannot
+transition resumed pursuit. A tool-request identity can cause at most one goal
 declaration event. An achieved event stores the exact final report and derives
 its transcript reference from that same invocation.
 
@@ -122,10 +124,10 @@ superseded remains immutable history but is ineligible for activation and is
 excluded from queue predecessor selection. When such a retired origin falls
 inside an active turn's accepted-input tail, the runtime projection retains its
 immutable acceptance position with an explicit retired-goal-origin marker while
-omitting it from the runnable turn inventory; tail completeness and the session
-acceptance high-water mark therefore remain exact. Durable event and input
-correlation makes retrying command delivery idempotent rather than duplicating
-continuation work.
+omitting it from the process transcript's turn inventory; tail completeness and
+the session acceptance high-water mark therefore remain exact. Durable event and
+input correlation makes retrying command delivery idempotent rather than
+duplicating continuation work.
 
 ## Persistence and process surfaces
 
@@ -149,8 +151,11 @@ aggregate rather than reading a mutable current-state projection (INV-048).
 **Implemented behavior.** The process protocol exposes attach, show, resume,
 stop, and supersede requests. Show returns the current generation and complete
 ordered event history. The terminal client provides exactly the corresponding
-verbs; session creation may compose an explicit attach immediately after
-creation, while the two durable commands retain separate replay identities.
+verbs. Attach and supersede statements, and optional resume guidance, accept
+either inline text or one bounded UTF-8 file so the 1 MiB goal-text contract is
+not constrained by operating-system argument limits. Session creation may
+compose an explicit attach immediately after creation, while the two durable
+commands retain separate replay identities.
 
 ## Compatibility constraints
 

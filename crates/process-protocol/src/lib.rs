@@ -3975,6 +3975,9 @@ pub enum ServerMessage {
         current_generation: CanonicalU64,
         /// Current immutable statement.
         current_statement: String,
+    },
+    /// Carries the current lifecycle state in a frame bounded independently from text.
+    GoalHistoryState {
         /// Current derived lifecycle state.
         current_state: GoalLifecycleState,
     },
@@ -4421,15 +4424,14 @@ impl ServerMessage {
             Self::GoalHistoryStart {
                 current_generation,
                 current_statement,
-                current_state,
                 ..
             } => {
                 if current_generation.value() == 0 {
                     return Err(FrameValidationError::GoalShape);
                 }
                 validate_goal_text(current_statement)?;
-                validate_goal_state(current_state)?;
             }
+            Self::GoalHistoryState { current_state } => validate_goal_state(current_state)?,
             Self::GoalHistoryItem { event, .. } => validate_goal_event(event)?,
             Self::GoalHistoryEnd { event_count } if event_count.value() == 0 => {
                 return Err(FrameValidationError::GoalShape);
@@ -5364,9 +5366,15 @@ mod tests {
                 session_id: uuid(3),
                 current_generation: CanonicalU64::new(2),
                 current_statement: String::from("ship clarified goal mode"),
+            },
+            r#"{"type":"goal_history_start","session_id":"00000000-0000-0000-0000-000000000003","current_generation":"2","current_statement":"ship clarified goal mode"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(8)?,
+            ServerMessage::GoalHistoryState {
                 current_state: GoalLifecycleState::Pursuing {},
             },
-            r#"{"type":"goal_history_start","session_id":"00000000-0000-0000-0000-000000000003","current_generation":"2","current_statement":"ship clarified goal mode","current_state":{"type":"pursuing"}}"#,
+            r#"{"type":"goal_history_state","current_state":{"type":"pursuing"}}"#,
         )?;
         assert_server_message_round_trip(
             request(9)?,
@@ -5424,6 +5432,37 @@ mod tests {
             },
             r#"{"type":"error","code":"rejected","message":"goal command rejected","detail":{"type":"goal_command_rejected","session_id":"00000000-0000-0000-0000-000000000003","reason":"acceptance_position_exhausted"}}"#,
         )
+    }
+
+    #[test]
+    fn inv033_split_goal_projection_fits_maximally_escaped_text_frames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let text = "\u{1}".repeat(MAX_CONTENT_FRAGMENT_BYTES);
+        let start = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::GoalHistoryStart {
+                session_id: uuid(2),
+                current_generation: CanonicalU64::new(1),
+                current_statement: text.clone(),
+            },
+        )?;
+        let state = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::GoalHistoryState {
+                current_state: GoalLifecycleState::Blocked {
+                    reason: GoalBlockedReason::ExternalChangeRequired,
+                    need: text,
+                },
+            },
+        )?;
+        let start_encoded = encode_server_line(&start)?;
+        let state_encoded = encode_server_line(&state)?;
+
+        assert!(start_encoded.len() < super::MAX_FRAME_BYTES);
+        assert!(state_encoded.len() < super::MAX_FRAME_BYTES);
+        assert_eq!(decode_server_line(&start_encoded)?, start);
+        assert_eq!(decode_server_line(&state_encoded)?, state);
+        Ok(())
     }
 
     #[test]
