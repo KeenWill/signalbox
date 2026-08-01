@@ -5,7 +5,11 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::error::Error;
+
+use support::blocked_backends_reached;
 
 use signalbox_application::{
     StartEligibleTurnOutcome, StartupScanIdGenerator, StartupScanSessionOutcome,
@@ -1821,6 +1825,63 @@ async fn inv048_goal_command_rejection_matches_its_operation() -> Result<(), Box
         Some("goal_command_rejection_operation")
     );
     drop(transaction);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: goal-owned turn admission takes the scheduler row lock before it
+/// inserts any accepted-input or turn-lifecycle fact.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+
+    let mut scheduler_blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(SESSION))
+        .execute(&mut *scheduler_blocker)
+        .await?;
+
+    let attach = tokio::spawn({
+        let repository = GoalRepository::new(pool.clone());
+        async move {
+            repository
+                .handle_user_command(
+                    GoalUserCommand::new(
+                        command(0x9a0),
+                        session(SESSION),
+                        GoalUserAction::Attach(statement("wait behind the scheduler lock")),
+                    ),
+                    Some(turn_candidates(0xba0)),
+                    |_| None,
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "goal turn admission must wait on the held scheduler row"
+    );
+    let turns_while_blocked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turn_lifecycle WHERE session_id = $1")
+            .bind(Uuid::from_u128(SESSION))
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(turns_while_blocked, 0);
+
+    scheduler_blocker.rollback().await?;
+    assert_applied_command(attach.await??);
+    let turns_after_release: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turn_lifecycle WHERE session_id = $1")
+            .bind(Uuid::from_u128(SESSION))
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(turns_after_release, 1);
 
     pool.close().await;
     drop(container);
