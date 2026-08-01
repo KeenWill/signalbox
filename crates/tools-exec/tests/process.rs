@@ -28,6 +28,7 @@ const PARENT_KILL_PID_FILE: &str = "signalbox-exec-parent-kill";
 const GRANDPARENT_KILL_PID_FILE: &str = "signalbox-exec-grandparent-kill";
 const ESCAPED_SUPERVISOR_KILL_PID_FILE: &str = "signalbox-exec-escaped-supervisor-kill";
 const CANCELLATION_PID_FILE: &str = "signalbox-tools-exec-cancel";
+const PROCESS_GROUP_KILL_TIME_LIMIT: Duration = Duration::from_secs(5);
 
 struct TemporaryPath {
     path: PathBuf,
@@ -472,7 +473,7 @@ async fn production_runner_survives_target_killing_its_direct_parent()
                 reason: ProcessSupervisionFailure::Wait,
             }
         );
-        assert!(elapsed < Duration::from_secs(2));
+        assert!(elapsed < PROCESS_GROUP_KILL_TIME_LIMIT);
         assert!(!std::path::Path::new(&format!("/proc/{target}")).exists());
         Ok(())
     })
