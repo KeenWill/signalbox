@@ -19081,6 +19081,11 @@ async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> 
         .await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE input_accepted_outbox_event CASCADE")
         .await?;
+    assert_outbox_truncate_rejected(
+        &pool,
+        "TRUNCATE TABLE goal_turn_retired_outbox_event CASCADE",
+    )
+    .await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_activated_outbox_event CASCADE")
         .await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_failed_outbox_event CASCADE")
