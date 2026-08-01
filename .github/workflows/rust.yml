@@ -5,6 +5,16 @@ on:
   push:
     branches: [main]
 
+# Superseded pull-request runs release their slots against the public
+# concurrency cap. Every other event takes a group of its own: sharing one
+# group would let a third run cancel a second still pending behind the first,
+# which `cancel-in-progress: false` does not prevent.
+concurrency:
+  group: >-
+    rust-${{ github.event_name == 'pull_request'
+    && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -12,7 +22,7 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  validate:
+  validate-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -87,14 +97,51 @@ jobs:
         run: cargo check --workspace --all-targets --all-features
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Build documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+
+  # The workspace test binaries build and run here rather than at the end of
+  # `validate-checks`, so the two compilations overlap instead of queueing. The
+  # duplicated dependency build is the accepted cost; separate jobs cannot
+  # share a target directory, so this job carries its own rust-cache entry.
+  workspace-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: workspace-tests
       - name: Run tests
         run: cargo test --no-fail-fast --workspace --all-targets --all-features
       # `--all-targets` excludes doctests, so the domain's compile_fail
       # sealing proofs need this separate run.
       - name: Run doctests
         run: cargo test --no-fail-fast --workspace --all-features --doc
-      - name: Build documentation
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+
+  # Preserve the existing required-check name while the checks and the
+  # workspace tests run as separate jobs. A status check is identified by its
+  # job name alone, so splitting the work without this job would leave
+  # `validate` naming only half of what it named before.
+  validate:
+    name: validate
+    if: ${{ always() }}
+    needs: [validate-checks, workspace-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Confirm the checks and the workspace tests passed
+        env:
+          CHECKS_RESULT: ${{ needs.validate-checks.result }}
+          TESTS_RESULT: ${{ needs.workspace-tests.result }}
+        run: |
+          test "$CHECKS_RESULT" = success
+          test "$TESTS_RESULT" = success
 
   # Report-only by owner decision: this job publishes deterministic counts
   # for human comparison but can never fail the workflow or gate a merge.
