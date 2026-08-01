@@ -8,10 +8,12 @@ use signalbox_domain::{
     RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerId,
 };
 use signalbox_persistence::runner_protocol::{
-    IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
-    RunnerConnectionEpoch, RunnerConnectionTransition, RunnerConnectionTransitionOutcome,
-    RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure, RunnerEnrollmentRequestId,
-    RunnerProtocolStore, RunnerProtocolStoreError, RunnerRegistrationRevision,
+    AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
+    PristineRunnerEnrollmentRequest, RunnerConnectionCause, RunnerConnectionEpoch,
+    RunnerConnectionTransition, RunnerConnectionTransitionEffect,
+    RunnerConnectionTransitionOutcome, RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure,
+    RunnerEnrollmentRequestId, RunnerProtocolStore, RunnerProtocolStoreError,
+    RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
@@ -98,8 +100,32 @@ impl PostgresRunnerRegistrationService {
     }
 
     /// Classifies prior-process nonterminal connections as lost before admission.
-    pub async fn mark_orphaned_connections_lost(&self) -> Result<u64, RunnerProtocolStoreError> {
-        self.store.mark_orphaned_connections_lost().await
+    pub async fn mark_orphaned_connections_lost(
+        &self,
+    ) -> Result<Vec<AppliedRunnerConnectionTransition>, RunnerProtocolStoreError> {
+        let connections = self.store.load_nonterminal_connection_heads().await?;
+        let mut transitions = Vec::new();
+        for connection in connections {
+            let effect = self
+                .store
+                .transition_connection_with_effect(
+                    connection.enrollment(),
+                    connection.epoch(),
+                    RunnerConnectionTransition::TransportClosed,
+                )
+                .await?;
+            match effect {
+                RunnerConnectionTransitionEffect::Applied(applied) => {
+                    log_connection_transition(applied, RunnerConnectionTransition::TransportClosed);
+                    transitions.push(applied);
+                }
+                RunnerConnectionTransitionEffect::Unchanged(
+                    RunnerConnectionTransitionOutcome::Current(_)
+                    | RunnerConnectionTransitionOutcome::Stale { .. },
+                ) => {}
+            }
+        }
+        Ok(transitions)
     }
 
     async fn enroll_durably(&self, request: Enroll) -> Result<Enrolled, RunnerRegistrationFailure> {
@@ -412,9 +438,9 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::CorrelationMismatch,
             )
         })?;
-        let outcome = self
+        let effect = self
             .store
-            .transition_connection(
+            .transition_connection_with_effect(
                 RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
                 epoch,
                 transition,
@@ -427,25 +453,29 @@ impl PostgresRunnerRegistrationService {
                     error,
                 )
             })?;
-        log_connection_transition(enrollment, transition, outcome);
-        Ok(outcome)
+        match effect {
+            RunnerConnectionTransitionEffect::Applied(applied) => {
+                log_connection_transition(applied, transition);
+                Ok(RunnerConnectionTransitionOutcome::Current(
+                    applied.snapshot(),
+                ))
+            }
+            RunnerConnectionTransitionEffect::Unchanged(outcome) => Ok(outcome),
+        }
     }
 }
 
 fn log_connection_transition(
-    enrollment: CanonicalUuid,
+    applied: AppliedRunnerConnectionTransition,
     transition: RunnerConnectionTransition,
-    outcome: RunnerConnectionTransitionOutcome,
 ) {
-    let snapshot = match outcome {
-        RunnerConnectionTransitionOutcome::Current(snapshot) => snapshot,
-        RunnerConnectionTransitionOutcome::Stale { .. } => return,
-    };
+    let enrollment = applied.enrollment();
+    let snapshot = applied.snapshot();
     match (transition, snapshot.cause()) {
         (RunnerConnectionTransition::DaemonShutdown, RunnerConnectionCause::DaemonShutdown)
         | (RunnerConnectionTransition::RunnerShutdown, RunnerConnectionCause::RunnerShutdown) => {
             tracing::info!(
-                enrollment_id = %enrollment,
+                enrollment_id = %enrollment.into_uuid(),
                 connection_epoch = snapshot.epoch().get(),
                 shutdown_cause = ?snapshot.cause(),
                 "runner shutdown recorded"
@@ -453,7 +483,7 @@ fn log_connection_transition(
         }
         (RunnerConnectionTransition::TransportClosed, RunnerConnectionCause::TransportClosed) => {
             tracing::info!(
-                enrollment_id = %enrollment,
+                enrollment_id = %enrollment.into_uuid(),
                 connection_epoch = snapshot.epoch().get(),
                 loss_cause = ?snapshot.cause(),
                 "runner transport loss recorded"
@@ -1637,7 +1667,7 @@ impl HeartbeatState {
         if acknowledgement.lease_phase.is_some() || acknowledgement.workspace_phase.is_some() {
             return Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::HeartbeatAck,
-                AvailableCorrelation::None,
+                heartbeat_ack_correlation(acknowledgement),
                 RejectionCode::Unavailable,
             ));
         }
@@ -2922,6 +2952,58 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn duplicate_transport_loss_reports_only_first_transition_as_applied() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let enrolled = service
+            .enroll(Enroll {
+                request_id: identity(1),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("the real registration service enrolls the runner");
+        let enrollment = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+        let epoch = RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
+            .expect("the enrolled connection epoch is positive");
+
+        let first = store
+            .transition_connection_with_effect(
+                enrollment,
+                epoch,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the first transport loss commits");
+        let observed = store
+            .load_connection(enrollment)
+            .await
+            .expect("the loss state loads")
+            .expect("the connection lifecycle exists");
+        let replayed = store
+            .transition_connection_with_effect(
+                enrollment,
+                epoch,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the repeated loss observes terminal state");
+        let RunnerConnectionTransitionEffect::Applied(applied) = first else {
+            panic!("the first transport loss reports its appended event");
+        };
+
+        assert_eq!(applied.enrollment(), enrollment);
+        assert_eq!(applied.snapshot(), observed);
+        assert_eq!(
+            replayed,
+            RunnerConnectionTransitionEffect::Unchanged(
+                RunnerConnectionTransitionOutcome::Current(observed)
+            )
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn enrollment_ack_write_failure_cannot_leave_the_runner_healthy() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store, []);
@@ -2977,10 +3059,13 @@ mod tests {
             .await
             .expect("the prior process enrolls the runner");
 
-        let transitioned = service
+        let transitions = service
             .mark_orphaned_connections_lost()
             .await
             .expect("startup classifies prior-process connection heads");
+        let applied = transitions
+            .first()
+            .expect("the prior-process connection produces one applied loss");
         let observed = store
             .load_connection(RunnerEnrollmentId::from_uuid(
                 enrolled.enrollment_id.into_uuid(),
@@ -2989,7 +3074,12 @@ mod tests {
             .expect("the startup loss state loads")
             .expect("the connection lifecycle exists");
 
-        assert_eq!(transitioned, 1);
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(
+            applied.enrollment().into_uuid(),
+            enrolled.enrollment_id.into_uuid()
+        );
+        assert_eq!(applied.snapshot(), observed);
         assert_eq!(observed.state(), RunnerConnectionState::Lost);
         assert_eq!(observed.cause(), RunnerConnectionCause::TransportClosed);
     }
@@ -3488,8 +3578,8 @@ mod tests {
             .await
             .expect("the terminal connection loads")
             .expect("the connection lifecycle exists");
-        let startup_transitions = store
-            .mark_orphaned_connections_lost()
+        let startup_candidates = store
+            .load_nonterminal_connection_heads()
             .await
             .expect("startup reconciliation ignores the terminal connection");
         let expected = Message::Rejected(
@@ -3506,7 +3596,7 @@ mod tests {
         assert_eq!(rejected, expected);
         assert_eq!(connection.state(), RunnerConnectionState::Lost);
         assert_eq!(connection.cause(), RunnerConnectionCause::EnrollmentRevoked);
-        assert_eq!(startup_transitions, 0);
+        assert!(startup_candidates.is_empty());
     }
 
     #[tokio::test]
@@ -3661,6 +3751,18 @@ mod tests {
     fn heartbeat_operation_phase_is_unavailable_in_registration_only_runtime() {
         let mut state = HeartbeatState::new();
         let challenge = challenge_tick(&mut state);
+        let correlation = signalbox_runner_wire::ProvisionCorrelation {
+            authorization_id: identity(10),
+            session_id: identity(11),
+            placement_revision: PositiveU64::try_new(1)
+                .expect("the first placement revision is positive"),
+            runner_id: identity(12),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the first registration revision is positive"),
+            repository: None,
+            sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
+            credential_profile: None,
+        };
         let acknowledgement = HeartbeatAck {
             challenge_sequence: challenge.sequence,
             runner_sequence: PositiveU64::try_new(1)
@@ -3668,18 +3770,7 @@ mod tests {
             lease_phase: None,
             workspace_phase: Some(
                 signalbox_runner_wire::HeartbeatWorkspacePhase::Provisioning {
-                    correlation: signalbox_runner_wire::ProvisionCorrelation {
-                        authorization_id: identity(10),
-                        session_id: identity(11),
-                        placement_revision: PositiveU64::try_new(1)
-                            .expect("the first placement revision is positive"),
-                        runner_id: identity(12),
-                        registration_revision: PositiveU64::try_new(1)
-                            .expect("the first registration revision is positive"),
-                        repository: None,
-                        sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
-                        credential_profile: None,
-                    },
+                    correlation: correlation.clone(),
                 },
             ),
         };
@@ -3689,5 +3780,9 @@ mod tests {
             .expect_err("operation state is unavailable in this runtime");
 
         assert_eq!(failure.code, RejectionCode::Unavailable);
+        assert_eq!(
+            failure.available_correlation.as_ref(),
+            &AvailableCorrelation::Provision(correlation)
+        );
     }
 }

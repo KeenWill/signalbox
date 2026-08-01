@@ -136,9 +136,18 @@ async fn shutdown_with_timeout(
 fn report_established(connection: &RunnerConnection<tokio::net::UnixStream>) {
     let receipt = connection.receipt();
     match connection.outcome() {
-        outcome @ (EnrollmentOutcome::Enrolled | EnrollmentOutcome::ReplacementPending) => {
+        outcome @ EnrollmentOutcome::Enrolled => {
             eprintln!(
                 "signalbox-runner: info: runner enrolled enrollment_id={} runner_id={} registration_revision={} connection_epoch={} enrollment_outcome={outcome:?}",
+                receipt.enrollment_id(),
+                receipt.runner_id(),
+                receipt.registration_revision().get(),
+                connection.connection_epoch().get(),
+            );
+        }
+        outcome @ EnrollmentOutcome::ReplacementPending => {
+            eprintln!(
+                "signalbox-runner: info: runner replacement pending enrollment_id={} runner_id={} registration_revision={} connection_epoch={} enrollment_outcome={outcome:?}",
                 receipt.enrollment_id(),
                 receipt.runner_id(),
                 receipt.registration_revision().get(),
