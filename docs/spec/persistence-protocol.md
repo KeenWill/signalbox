@@ -24,12 +24,13 @@ storage version four were verified through PR #311
 (`agent/session-templates-spec`); and the context-compaction transaction and
 lock inventory were verified against PR #314
 (`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
-was verified against this PR (`agent/domain-cleanup`). This page covers the
-Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
+was verified against this PR (`agent/domain-cleanup`). The goal event
+transaction and trigger lock were verified through PR #383 (`agent/goal-mode`).
+This page covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -456,15 +457,19 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Two explicit lock sites live in the
-schema instead:
+`crates/persistence/src/lock_inventory.rs`. Three explicit lock sites live in
+the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
   `accepted_input` insert reaches commit; and
 - the metadata receipt-satellite insert trigger (migration `202607260101`) takes
   `FOR UPDATE` on the already-claimed `durable_command` row before it checks
-  whether the typed receipt parent has sealed the command.
+  whether the typed receipt parent has sealed the command; and
+- the goal-event continuity trigger (migration `202608020013`) takes
+  `FOR UPDATE` on the event's session row before reading the preceding event,
+  serializing ordinal and generation assignment even when the Rust transaction
+  reached that row first with `FOR NO KEY UPDATE`.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -502,6 +507,14 @@ Locks per transaction, in acquisition order:
   pending-steering acceptance additionally locks the named active
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
+- **Goal commands and transitions**: an unseen user command first claims the
+  user-global registry, then every user, model, scheduler, and continuation
+  transaction locks the session row `FOR NO KEY UPDATE` before reading the event
+  stream. Applied transitions insert the event, whose continuity trigger
+  upgrades that same session-row lock to `FOR UPDATE` before it validates the
+  predecessor. Pursuing user transitions then read current defaults and insert
+  their queued goal turn; rejected commands commit without the trigger upgrade,
+  and exact user-command replay takes no row lock.
 - **StartEligibleTurn**, **startup recovery**, and the **model-call execution
   transactions** (prepare, authorize, observation commit, restart recovery — all
   in `model_execution.rs`, reusing the same inventory statement): the

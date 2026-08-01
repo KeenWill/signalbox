@@ -5,7 +5,7 @@ use signalbox_domain::{
     AcceptedInputId, FrozenModelSelection, GoalGeneration, GoalTurnSource, ModelSelectionRequest,
     OriginConfiguration, SessionId, SessionInputPosition, TurnId,
 };
-use sqlx::{PgConnection, types::Uuid};
+use sqlx::{FromRow, PgConnection, types::Uuid};
 
 use crate::{
     goal::{GoalCorruption, GoalRepositoryError},
@@ -28,6 +28,12 @@ pub(crate) enum GoalTurnTerminalState {
     NotTerminal,
     Completed,
     Unsuccessful,
+}
+
+#[derive(FromRow)]
+struct StoredGoalTurnTerminalState {
+    state_kind: String,
+    terminal_disposition_kind: Option<String>,
 }
 
 /// Result of reconciling one goal turn after a daemon execution pass.
@@ -251,7 +257,7 @@ pub(crate) async fn goal_turn_terminal_state(
     session: SessionId,
     turn: TurnId,
 ) -> Result<GoalTurnTerminalState, GoalRepositoryError> {
-    let stored = sqlx::query_as::<_, (String, Option<String>)>(
+    let stored = sqlx::query_as::<_, StoredGoalTurnTerminalState>(
         "SELECT lifecycle.state_kind, lifecycle.terminal_disposition_kind
            FROM goal_turn AS goal
            JOIN turn_lifecycle AS lifecycle
@@ -264,7 +270,10 @@ pub(crate) async fn goal_turn_terminal_state(
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(GoalCorruption::Missing("goal turn lifecycle"))?;
-    match (stored.0.as_str(), stored.1.as_deref()) {
+    match (
+        stored.state_kind.as_str(),
+        stored.terminal_disposition_kind.as_deref(),
+    ) {
         ("queued" | "active", None) => Ok(GoalTurnTerminalState::NotTerminal),
         ("terminal", Some("completed")) => Ok(GoalTurnTerminalState::Completed),
         ("terminal", Some("refused" | "failed" | "cancelled" | "reconciliation_required")) => {
@@ -275,7 +284,7 @@ pub(crate) async fn goal_turn_terminal_state(
         }
         _ => Err(GoalCorruption::Unsupported {
             field: "goal turn lifecycle state",
-            value: stored.0,
+            value: stored.state_kind,
         }
         .into()),
     }

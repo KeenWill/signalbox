@@ -62,7 +62,7 @@ CREATE TABLE goal_command (
     rejection_kind text CHECK (
         rejection_kind IS NULL OR rejection_kind IN (
             'session_not_found', 'goal_already_attached', 'goal_not_attached',
-            'requires_blocked', 'requires_pursuing_or_blocked',
+            'unknown_model_alias', 'requires_blocked', 'requires_pursuing_or_blocked',
             'generation_exhausted', 'event_ordinal_exhausted'
         )
     ),
@@ -123,6 +123,9 @@ CREATE TABLE goal_event (
     scheduler_turn_id uuid,
     PRIMARY KEY (session_id, event_ordinal),
     UNIQUE (user_command_id),
+    UNIQUE (model_tool_request_id),
+    CONSTRAINT goal_event_user_command_result_key
+        UNIQUE (user_command_id, session_id, event_ordinal),
     CONSTRAINT goal_event_shape CHECK (
         (event_kind = 'commissioned'
             AND statement IS NOT NULL AND blocked_reason IS NULL AND need IS NULL
@@ -174,7 +177,7 @@ CREATE TABLE goal_event (
 
 -- Goal turns reuse the accepted-input turn engine without inventing user
 -- commands. A null accepting command is admitted only when this migration's
--- deferred correlation proves an exact goal_turn owner.
+-- deferred correlation proves an exact goal_turn source.
 ALTER TABLE accepted_input
     ALTER COLUMN accepting_command_id DROP NOT NULL;
 
@@ -228,7 +231,220 @@ ALTER TABLE goal_event
     ADD CONSTRAINT goal_event_scheduler_goal_turn_fk
         FOREIGN KEY (session_id, scheduler_turn_id, generation)
         REFERENCES goal_turn(session_id, turn_id, goal_generation)
+
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+-- Queued goal turns remain immutable history after their generation ends, but
+-- only the queued turn of the current pursuing generation participates in
+-- runtime scheduling or queue predecessor selection.
+CREATE FUNCTION goal_turn_is_runtime_relevant(
+    checked_session uuid,
+    checked_turn uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE((
+        SELECT lifecycle.state_kind <> 'queued'
+            OR goal.turn_id IS NULL
+            OR (
+                SELECT (
+                    event.event_kind IN ('commissioned', 'resumed')
+                    AND event.generation = goal.goal_generation
+                ) OR (
+                    event.event_kind = 'superseded'
+                    AND event.generation < 18446744073709551615
+                    AND event.generation + 1 = goal.goal_generation
+                )
+                  FROM goal_event AS event
+                 WHERE event.session_id = checked_session
+                 ORDER BY event.event_ordinal DESC
+                 LIMIT 1
+            )
+          FROM turn_lifecycle AS lifecycle
+          LEFT JOIN goal_turn AS goal
+            ON goal.session_id = lifecycle.session_id
+           AND goal.turn_id = lifecycle.turn_id
+         WHERE lifecycle.session_id = checked_session
+           AND lifecycle.turn_id = checked_turn
+    ), true);
+$$;
+
+CREATE OR REPLACE FUNCTION accepted_input_turn_queue_predecessor(
+    checked_session uuid,
+    checked_turn uuid
+)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE derived_order (
+        turn_id,
+        root_position,
+        interrupt_depth
+    ) AS (
+        SELECT
+            lifecycle.turn_id,
+            lifecycle.acceptance_position,
+            0::bigint
+          FROM turn_lifecycle AS lifecycle
+          JOIN queued_input_origin AS origin
+            ON origin.turn_id = lifecycle.turn_id
+           AND origin.session_id = lifecycle.session_id
+         WHERE lifecycle.session_id = checked_session
+           AND origin.priority_kind = 'ordinary'
+           AND goal_turn_is_runtime_relevant(
+                lifecycle.session_id,
+                lifecycle.turn_id
+           )
+        UNION ALL
+        SELECT
+            successor.turn_id,
+            predecessor.root_position,
+            predecessor.interrupt_depth + 1
+          FROM derived_order AS predecessor
+          JOIN queued_input_origin AS successor
+            ON successor.session_id = checked_session
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id = predecessor.turn_id
+          JOIN turn_lifecycle AS successor_lifecycle
+            ON successor_lifecycle.turn_id = successor.turn_id
+           AND successor_lifecycle.session_id = successor.session_id
+         WHERE goal_turn_is_runtime_relevant(
+            successor_lifecycle.session_id,
+            successor_lifecycle.turn_id
+         )
+    ),
+    ranked AS (
+        SELECT
+            turn_id,
+            lag(turn_id) OVER (
+                ORDER BY root_position, interrupt_depth
+            ) AS predecessor_turn
+          FROM derived_order
+    )
+    SELECT predecessor_turn
+      FROM ranked
+     WHERE turn_id = checked_turn;
+$$;
+
+CREATE OR REPLACE FUNCTION accepted_input_turn_is_first_nonterminal(
+    checked_session uuid,
+    checked_turn uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE derived_order (
+        turn_id,
+        root_position,
+        interrupt_depth
+    ) AS (
+        SELECT
+            lifecycle.turn_id,
+            lifecycle.acceptance_position,
+            0::bigint
+          FROM turn_lifecycle AS lifecycle
+          JOIN queued_input_origin AS origin
+            ON origin.turn_id = lifecycle.turn_id
+           AND origin.session_id = lifecycle.session_id
+         WHERE lifecycle.session_id = checked_session
+           AND origin.priority_kind = 'ordinary'
+           AND goal_turn_is_runtime_relevant(
+                lifecycle.session_id,
+                lifecycle.turn_id
+           )
+        UNION ALL
+        SELECT
+            successor.turn_id,
+            predecessor.root_position,
+            predecessor.interrupt_depth + 1
+          FROM derived_order AS predecessor
+          JOIN queued_input_origin AS successor
+            ON successor.session_id = checked_session
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id = predecessor.turn_id
+          JOIN turn_lifecycle AS successor_lifecycle
+            ON successor_lifecycle.turn_id = successor.turn_id
+           AND successor_lifecycle.session_id = successor.session_id
+         WHERE goal_turn_is_runtime_relevant(
+            successor_lifecycle.session_id,
+            successor_lifecycle.turn_id
+         )
+    ),
+    ranked AS (
+        SELECT
+            turn_id,
+            row_number() OVER (
+                ORDER BY root_position, interrupt_depth
+            ) AS queue_rank
+          FROM derived_order
+    ),
+    candidate AS (
+        SELECT queue_rank
+          FROM ranked
+         WHERE turn_id = checked_turn
+    )
+    SELECT EXISTS (SELECT 1 FROM candidate)
+       AND NOT EXISTS (
+            SELECT 1
+              FROM ranked AS earlier
+              JOIN turn_lifecycle AS lifecycle
+                ON lifecycle.turn_id = earlier.turn_id
+               AND lifecycle.session_id = checked_session
+              JOIN candidate
+                ON earlier.queue_rank < candidate.queue_rank
+             WHERE lifecycle.state_kind <> 'terminal'
+       );
+$$;
+
+-- The lifecycle assertion predates goal generations and otherwise counts a
+-- queued turn whose goal is no longer pursuing as earlier accepted work. Keep
+-- that history immutable while excluding it from the runtime lineage proof.
+DO $migration$
+DECLARE
+    lifecycle_definition text;
+    updated_definition text;
+    accepted_predecessor_selection CONSTANT text := $old$
+           OR EXISTS (
+            SELECT 1
+              FROM turn_lifecycle AS earlier
+             WHERE earlier.session_id = checked_session_id
+               AND earlier.turn_id <> checked_turn_id
+               AND earlier.acceptance_position < checked_position
+        ) THEN
+$old$;
+    runtime_predecessor_selection CONSTANT text := $new$
+           OR EXISTS (
+            SELECT 1
+              FROM turn_lifecycle AS earlier
+             WHERE earlier.session_id = checked_session_id
+               AND earlier.turn_id <> checked_turn_id
+               AND earlier.acceptance_position < checked_position
+               AND goal_turn_is_runtime_relevant(
+                    earlier.session_id,
+                    earlier.turn_id
+               )
+        ) THEN
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_turn_lifecycle_final_state_without_steering(uuid)'::regprocedure
+    )
+      INTO lifecycle_definition;
+    updated_definition := replace(
+        lifecycle_definition,
+        accepted_predecessor_selection,
+        runtime_predecessor_selection
+    );
+    IF updated_definition = lifecycle_definition THEN
+        RAISE EXCEPTION
+            'goal mode could not update lifecycle first-lineage assertion';
+    END IF;
+    EXECUTE updated_definition;
+END;
+$migration$;
 
 CREATE FUNCTION require_goal_turn_shape()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -355,30 +571,30 @@ CREATE CONSTRAINT TRIGGER goal_turn_shape
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION require_goal_turn_shape();
 
-CREATE FUNCTION require_accepted_input_owner()
+CREATE FUNCTION require_accepted_input_source()
 RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE goal_owners bigint;
+DECLARE goal_sources bigint;
 BEGIN
-    SELECT count(*) INTO goal_owners FROM goal_turn
+    SELECT count(*) INTO goal_sources FROM goal_turn
      WHERE accepted_input_id = NEW.accepted_input_id;
-    IF (NEW.accepting_command_id IS NULL AND goal_owners <> 1)
-        OR (NEW.accepting_command_id IS NOT NULL AND goal_owners <> 0) THEN
-        RAISE EXCEPTION 'accepted input requires exactly one command or goal owner'
-            USING ERRCODE = '23514', CONSTRAINT = 'accepted_input_owner_closed';
+    IF (NEW.accepting_command_id IS NULL AND goal_sources <> 1)
+        OR (NEW.accepting_command_id IS NOT NULL AND goal_sources <> 0) THEN
+        RAISE EXCEPTION 'accepted input requires exactly one command or goal source'
+            USING ERRCODE = '23514', CONSTRAINT = 'accepted_input_source_closed';
     END IF;
     RETURN NULL;
 END;
 $$;
 
-CREATE CONSTRAINT TRIGGER accepted_input_owner_closed
+CREATE CONSTRAINT TRIGGER accepted_input_source_closed
     AFTER INSERT OR UPDATE ON accepted_input
     DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION require_accepted_input_owner();
+    FOR EACH ROW EXECUTE FUNCTION require_accepted_input_source();
 
 ALTER TABLE goal_command
     ADD CONSTRAINT goal_command_applied_event_fk
-    FOREIGN KEY (session_id, result_event_ordinal)
-        REFERENCES goal_event(session_id, event_ordinal)
+    FOREIGN KEY (command_id, session_id, result_event_ordinal)
+        REFERENCES goal_event(user_command_id, session_id, event_ordinal)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
 CREATE FUNCTION require_goal_event_continuity()

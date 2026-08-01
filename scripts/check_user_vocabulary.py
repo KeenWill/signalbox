@@ -12,6 +12,8 @@ from pathlib import Path
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
+    r"\b(?![A-Za-z0-9]*(?:ownership|OWNERSHIP|Ownership)[A-Za-z0-9]*\b)"
+    r"[A-Za-z0-9]*(?:owner|OWNER|Owner)[A-Za-z0-9]*\b|"
     r"(?i:\bowners?\d*(?:\b|[_-])|owners?[_-]|(?<=[_-])owners?\d*(?:\b|[_-]))|"
     r"\b[Oo]wners?\d+[A-Z][A-Za-z0-9_]*|"
     r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
@@ -53,7 +55,9 @@ ALLOWLIST = (
             r"\.owner\(\)|let owner = .*owner_end|\bowner_end\b|"
             r"let \(owner, name\) = repository|"
             r"Exact owner/repository|canonical `owner/repository`|"
-            r"owner, member, or collaborator|OWNER.*MEMBER.*COLLABORATOR|"
+            r"`@codex review` request by an owner, member, or collaborator|"
+            r"association is `OWNER`, `MEMBER`, or `COLLABORATOR`|"
+            r"matches!\(association, \"OWNER\" \| \"MEMBER\" \| \"COLLABORATOR\"\)|"
             r"author_association.*OWNER|author:.*[\"']owner[\"']|"
             r"valid_repository_segment\(owner\)|fn owner\(&self\)|"
             r"Merge pull request.*owner/",
@@ -100,7 +104,29 @@ ALLOWLIST = (
     ),
     Allowance(
         "immutable applied migration vocabulary",
-        re.compile(r"^crates/persistence/migrations/"),
+        re.compile(
+            r"^crates/persistence/migrations/(?:"
+            r"202607180001_create_session|"
+            r"202607180002_replace_session_defaults|"
+            r"202607180003_submit_input|"
+            r"202607180004_turn_lifecycle_storage|"
+            r"202607200001_bounded_user_content|"
+            r"202607220001_model_call_execution|"
+            r"202607220005_stop_requests|"
+            r"202607240001_conversation_import|"
+            r"202607240002_imported_session_seed|"
+            r"202607250001_tool_loop|"
+            r"202607260101_session_metadata|"
+            r"202607280002_review_workflow|"
+            r"202607280202_metadata_command_issuer|"
+            r"202607280302_review_workflow_commands|"
+            r"202607280303_session_system_prompt|"
+            r"202607280401_runner_protocol|"
+            r"202608020001_review_orchestration|"
+            r"202608020002_review_orchestration_command_recovery|"
+            r"202608020003_runner_wire_contract"
+            r")[.]sql$"
+        ),
         re.compile(r"[A-Za-z0-9_]*owner[A-Za-z0-9_]*", re.IGNORECASE),
     ),
     Allowance(
@@ -121,7 +147,7 @@ ALLOWLIST = (
         "context-frontier fixture owner identifiers",
         re.compile(r"^crates/domain/src/context_frontier[.]rs$"),
         re.compile(
-            r"same owner|"
+            r"candidate with the same owner and an identity different from|"
             r"^\s*let owner = session_id\(\d+\);\s*$|"
             r"snapshot\(owner,|"
             r"owning_session\(\), owner|"
@@ -132,7 +158,13 @@ ALLOWLIST = (
         "native model-call usage ownership",
         re.compile(r"^clients/native/(?:Sources/SignalboxClient/SessionSynchronization|Tests/SignalboxClientTests/SessionSynchronizationTests)[.]swift$"),
         re.compile(
-            r"[A-Za-z0-9_]*Owner[A-Za-z0-9_]*|terminal owner|case owner|[.]owner"
+            r"test(?:AwaitingToolApproval|AwaitingToolRecovery|ToolReconciliation)"
+            r"RequiresTerminalUsageOwner|"
+            r"SignalboxSnapshot(?:Required)?ModelCallOwnership|"
+            r"(?:unmatchedTerminal|forbidden)ModelCallOwners|"
+            r"unmatchedTerminalModelCallOwnerIDs|"
+            r"terminal owner, merely permit historical calls|"
+            r"case owner\b|[.]required\([.]owner\)"
         ),
     ),
     Allowance(
@@ -159,8 +191,22 @@ ALLOWLIST = (
         ),
         re.compile(
             r"[\"']owner_initiated[\"']|[\"']owner_command(?:_id)?[\"']|"
-            r"[\"']owner[\"']|`owner`|legacy owner|owner/tool|"
             r"\bowner_command_id\b"
+        ),
+    ),
+    Allowance(
+        "legacy PostgreSQL actor encodings",
+        re.compile(
+            r"^(?:crates/persistence/src/(?:session_metadata|submit_input)[.]rs|"
+            r"crates/persistence/tests/(?:postgres_integration|"
+            r"session_metadata_postgres)[.]rs|"
+            r"docs/spec/identity-and-commands[.]md)$"
+        ),
+        re.compile(
+            r"\(\"owner\", (?:None|Some\(_\))(?:, None)?\)|"
+            r"\"owner\" \| \"model\"|kind:\s*\"owner\"|"
+            r"String::from\(\"owner\"\)|expected_issuer\s*=\s*\(\"owner\"|"
+            r"'owner'|\(`owner`/(?:`model`|`tool`)"
         ),
     ),
     Allowance(
@@ -181,27 +227,59 @@ ALLOWLIST = (
         ),
         re.compile(
             r"[A-Za-z0-9_]*Ownership[A-Za-z0-9_]*|ownership|\bowned\b|\bowning\b|"
-            r"active slot owner|active-slot owner|slot owner|lease owner|"
+            r"acceptance positions, typed priority relations, and active-slot owner are|"
+            r"active slot owner[.]$|sole active slot owner, when present|"
+            r"exact active slot owner[.]$|records the active slot owner, stale|"
+            r"has no active slot owner[.]$|start binding, slot owner, or attempt after rollback|"
+            r"runner recorded as the lease owner|"
             r"current-defaults pointer owner|selected defaults-row owner|stored defaults-row owner|"
-            r"cross-wired defaults owner|event owner must match|observation owner must match|"
-            r"attachment owner must match|terminal-record owner|owner projection|"
-            r"owner replacement|owner facts|operation-owner facts|"
-            r"owner cross-wired|OwnerMismatch|OwnerIDs?|"
+            r"a cross-wired defaults owner must fail|"
+            r"event owner must match the aggregate finding|"
+            r"observation owner must match the aggregate link|"
+            r"attachment owner must match the aggregate link|terminal-record owner,|"
+            r"loss before and after pin, owner replacement|complete owner facts|"
+            r"operation-owner facts|"
+            r"(?:defaults|pending steering|snapshot) owner cross-wired|"
+            r"OwnerMismatch|OwnerIDs?|"
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
-            r"cross_wired_[A-Za-z0-9_]+_owner|"
-            r"foreign(?:_[A-Za-z0-9_]+)?_owner|different_owner|returned_owner|"
-            r"one owner for bounds|current owner prevents|one owner:|owner must equal|owner, defaults owner|"
-            r"cross-wired owner|foreign-owner|foreign owner|member.s owner|"
-            r"let owner = stored[.]owning_session|owner != session|owner, non-successor|"
-            r"already-claimed owner|process-lifetime root owner|extension owners|"
-            r"named as owner|validated owner|checked owner placement|file-owner",
+            r"cross_wired_attempt_owner|cross_wired_defaults_owner|"
+            r"foreign_attachment_owner|foreign_event_owner|foreign_observation_owner|"
+            r"foreign_owner|different_owner|returned_owner|"
+            r"against the current owner prevents evidence-free phase reconstruction|"
+            r"exactly one owner: activation=|durable boundary must have one owner:|"
+            r"event owner must equal the loaded finding|"
+            r"attachment owner must equal the loaded external link|"
+            r"observation owner must equal the loaded external link|"
+            r"owner, defaults owner, or selected-version mismatch|"
+            r"a cross-wired owner, non-successor|foreign-owner rejection|"
+            r"foreign owner, run-workflow or policy mismatch|"
+            r"agreement between every member.s owner and header|"
+            r"let owner = stored[.]owning_session|owner != session|"
+            r"second process-lifetime root owner must fail closed|extension owners in|"
+            r"turn named as owner by the active-phase record|"
+            r"complete owner projection derives the (?:prepared|running) attempt|"
+            r"validated owner projection|inside the validated owner$|"
+            r"the checked owner placement|application-level file-owner proof",
             re.IGNORECASE,
         ),
     ),
     Allowance(
         "GitHub process-governance test fixtures",
         re.compile(r"^crates/(?:tools-github/tests/live_smoke|tools-code-host/src/code_host/review_slog/inventory)[.]rs$"),
-        re.compile(r"owner gate|owner[- ]ratif|owner judgment|owner answered", re.IGNORECASE),
+        re.compile(
+            r"The owner answered the pending question|"
+            r"owner-ratified interrupt deferral|"
+            r"matching-Interrupt milestone choice was an owner gate|"
+            r"Owner-ratified matching-interrupt milestone deferral|"
+            r"owner judgment because the current slices|"
+            r"an owner gate and should have blocked and been reported|"
+            r"owner ratifies the current nonclaiming|"
+            r"equivalent owner gate instead of deciding it|"
+            r"Restrict the owner gate to the affected track|"
+            r"owner gate should have blocked the entire autonomous run|"
+            r"owner gate blocks and is reported on the affected matching-interrupt track",
+            re.IGNORECASE,
+        ),
     ),
 )
 

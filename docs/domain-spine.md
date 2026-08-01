@@ -7062,6 +7062,7 @@ pub enum GoalCommandRejection {
     SessionNotFound,
     GoalAlreadyAttached,
     GoalNotAttached,
+    UnknownModelAlias,
     RequiresBlocked,
     RequiresPursuingOrBlocked,
     GenerationExhausted,

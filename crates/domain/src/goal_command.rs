@@ -62,6 +62,8 @@ pub enum GoalCommandRejection {
     GoalAlreadyAttached,
     /// The session has no goal lineage.
     GoalNotAttached,
+    /// The session's selected model alias was unknown at turn acceptance.
+    UnknownModelAlias,
     /// Resume requires the current generation to be blocked.
     RequiresBlocked,
     /// Stop and supersede require a pursuing or blocked generation.
