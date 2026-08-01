@@ -76,10 +76,10 @@ zero through 10,000. Both thresholds apply only to a finding's confidence that
 the issue is real. Version one's exact thresholds and ordering are fixed by this
 contract; construction and reconstitution admit only version one and enforce its
 exact thresholds and ordering. An unknown version fails closed until a later
-owner-accepted contract revision adds its exact tuple; support for that later
-version changes only later runs. Why: stored exact policy data makes the reason
-for unattended judgment and publication reconstructible without depending on the
-executing binary's defaults.
+maintainer-accepted contract revision adds its exact tuple; support for that
+later version changes only later runs. Why: stored exact policy data makes the
+reason for unattended judgment and publication reconstructible without depending
+on the executing binary's defaults.
 
 Runs use the closed state machine
 `Queued → Running → {Succeeded, Failed, Blocked, Cancelled}`, with
@@ -376,7 +376,7 @@ change request, changing policy, editing the concern set, or changing any
 resolved prompt template requires a new attempt; an orchestrator never mixes
 those inputs while resuming an old attempt.
 
-The application accepts one owner-supplied immutable attempt with an exact
+The application accepts one user-supplied immutable attempt with an exact
 target, policy, concern-set version, non-concern stage digests, and ordered
 concern specifications. It rejects an empty inventory or a repeated concern key.
 Recording the attempt before any pass starts makes an equal retry resume those
@@ -711,19 +711,19 @@ current stage only from those durable records; missing ancestry, an unknown
 closed value, a noncanonical count, or contradictory evidence is corruption
 rather than an inferred partial result.
 
-Each orchestration mutation also uses an owner-global durable command receipt
-that binds command identity to the semantic request digest, closed operation
-kind, and attempt. After the aggregate effect commits, the adapter appends a
-recovery result containing the operation-derived stage and progress before it
-attempts the owner-global receipt. Serial review-mutation admission prevents a
-later stage from beginning before that recovery result exists. The receipt and
-recovery record have database constraints relating operation kind, stage, and
-constituent progress; a contradictory record is refused. Equal replay returns
-the recorded result, distinct reuse conflicts, and a retry whose receipt was
-lost materializes that receipt from the recovery result rather than deriving an
+Each orchestration mutation also uses a user-global durable command receipt that
+binds command identity to the semantic request digest, closed operation kind,
+and attempt. After the aggregate effect commits, the adapter appends a recovery
+result containing the operation-derived stage and progress before it attempts
+the user-global receipt. Serial review-mutation admission prevents a later stage
+from beginning before that recovery result exists. The receipt and recovery
+record have database constraints relating operation kind, stage, and constituent
+progress; a contradictory record is refused. Equal replay returns the recorded
+result, distinct reuse conflicts, and a retry whose receipt was lost
+materializes that receipt from the recovery result rather than deriving an
 answer from later aggregate state. A recovery-only interrupted-judgment result
 participates in current-stage and coherent-snapshot reconstruction, and reserves
-its identity against every owner-global command family while awaiting receipt
+its identity against every user-global command family while awaiting receipt
 materialization.
 
 The review-workflow store creates and loads complete aggregates, idempotently
@@ -765,7 +765,7 @@ appends or attaches the effect. Thus every committed intermediate point remains
 a domain-reconstitutable aggregate; a process crash cannot expose a state that
 the store's own loaders classify as corruption.
 
-Every review mutation carries an owner-global command identity. Before its
+Every review mutation carries a user-global command identity. Before its
 aggregate effect, the adapter commits a typed intent binding that identity to
 the validated semantic request. The primary aggregate effect commits atomically
 with an append-only marker of the exact command. A concern marker also binds the

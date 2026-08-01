@@ -136,7 +136,7 @@ parseable, but the test skips with the recorded transport gate.
 `signalboxd` currently exposes only a local Unix socket. A Tart guest cannot
 reach the host socket through the retired URL-based shard, and the process
 protocol defines no API credential. Do not configure the legacy real-smoke
-variables. Real remote/mobile validation resumes only after an owner-approved
+variables. Real remote/mobile validation resumes only after a user-approved
 transport, identity, authentication, authorization, and revocation design.
 
 ## Custom Images And Existing VMs

@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Prove the user-vocabulary checker rejects role-sense ``owner`` prose."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+CHECKER = Path(__file__).resolve().parent / "check_user_vocabulary.py"
+
+def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(CHECKER), "--root", str(root)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+def git(root: Path, *arguments: str) -> None:
+    subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="signalbox-user-vocabulary-") as directory:
+        root = Path(directory)
+        allowed = root / "crates" / "example" / "src" / "lib.rs"
+        violation = root / "docs" / "spec" / "example.md"
+        allowed.parent.mkdir(parents=True)
+        violation.parent.mkdir(parents=True)
+        allowed.write_text(
+            'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
+        )
+        violation.write_text("The owner approves this tool.\n", encoding="utf-8")
+        git(root, "init", "--quiet")
+        git(root, "add", "crates/example/src/lib.rs", "docs/spec/example.md")
+        rejected = run_checker(root)
+        if rejected.returncode != 1:
+            raise AssertionError(f"violation unexpectedly passed:\n{rejected.stdout}{rejected.stderr}")
+        expected = "docs/spec/example.md:1: The owner approves this tool."
+        if expected not in rejected.stdout:
+            raise AssertionError(f"violation was not named:\n{rejected.stdout}")
+        violation.write_text("The user approves this tool.\n", encoding="utf-8")
+        accepted = run_checker(root)
+        if accepted.returncode != 0:
+            raise AssertionError(f"allowed vocabulary failed:\n{accepted.stdout}{accepted.stderr}")
+    print("user-vocabulary checker self-test passed")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())

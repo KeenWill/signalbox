@@ -517,7 +517,7 @@ pub enum DangerousToolAutoApproval {
 pub enum ToolPermissionDefault {
     /// Policy automatically approves the request.
     Auto,
-    /// An owner decision is required.
+    /// A user decision is required.
     Confirm,
 }
 
@@ -533,8 +533,8 @@ pub enum ToolEffectClass {
 /// Closed additive provenance for one approval decision.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ToolDecisionSource {
-    /// An applied owner-global durable command.
-    OwnerCommand,
+    /// An applied user-global durable command.
+    UserCommand,
     /// Registry policy selected automatic approval.
     PolicyAuto,
     /// The frozen dangerous session blanket selected automatic approval.
@@ -639,7 +639,7 @@ pub enum ToolApprovalDecision {
     Approve,
     /// Execution is permanently prohibited for this request.
     Deny {
-        /// Optional bounded owner explanation rendered to the model.
+        /// Optional bounded user explanation rendered to the model.
         reason: Option<ToolDenialReason>,
     },
 }
@@ -669,11 +669,11 @@ impl ToolApprovalResolution {
         }
     }
 
-    const fn owner(request: ToolRequestId, decision: ToolApprovalDecision) -> Self {
+    const fn user(request: ToolRequestId, decision: ToolApprovalDecision) -> Self {
         Self {
             request,
             decision,
-            source: ToolDecisionSource::OwnerCommand,
+            source: ToolDecisionSource::UserCommand,
         }
     }
 
@@ -707,7 +707,7 @@ pub struct ToolApprovalResolutionReconstitutionInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum StoredToolApprovalEvidence {
-    OwnerCommand(PreparedDecideToolRequest),
+    UserCommand(PreparedDecideToolRequest),
     PolicyAuto(ToolRequestId),
     SessionBlanket {
         request: ToolRequestId,
@@ -716,10 +716,10 @@ enum StoredToolApprovalEvidence {
 }
 
 impl ToolApprovalResolutionReconstitutionInput {
-    /// Supplies the exact applied owner command that owns one stored decision.
-    pub const fn owner_command(command: PreparedDecideToolRequest) -> Self {
+    /// Supplies the exact applied user command that owns one stored decision.
+    pub const fn user_command(command: PreparedDecideToolRequest) -> Self {
         Self {
-            evidence: StoredToolApprovalEvidence::OwnerCommand(command),
+            evidence: StoredToolApprovalEvidence::UserCommand(command),
         }
     }
 
@@ -745,17 +745,17 @@ impl ToolApprovalResolutionReconstitutionInput {
     }
 
     #[cfg(test)]
-    pub(crate) fn owner_fixture(request: ToolRequestId, decision: ToolApprovalDecision) -> Self {
+    pub(crate) fn user_fixture(request: ToolRequestId, decision: ToolApprovalDecision) -> Self {
         let command = DecideToolRequest::try_new(
             DurableCommandId::from_uuid(uuid::Uuid::from_u128(1)),
             request,
             decision.clone(),
         )
         .expect("the fixture command identity is admitted");
-        Self::owner_command(PreparedDecideToolRequest {
+        Self::user_command(PreparedDecideToolRequest {
             command,
             result: DecideToolRequestResult::Applied(DecideToolRequestAppliedResult {
-                resolution: ToolApprovalResolution::owner(request, decision),
+                resolution: ToolApprovalResolution::user(request, decision),
             }),
         })
     }
@@ -765,10 +765,10 @@ impl ToolApprovalResolutionReconstitutionInput {
         self,
     ) -> Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError> {
         let resolution = match &self.evidence {
-            StoredToolApprovalEvidence::OwnerCommand(command) => match command.result() {
+            StoredToolApprovalEvidence::UserCommand(command) => match command.result() {
                 DecideToolRequestResult::Applied(applied)
                     if command.command().request() == applied.resolution().request()
-                        && applied.resolution().source() == ToolDecisionSource::OwnerCommand =>
+                        && applied.resolution().source() == ToolDecisionSource::UserCommand =>
                 {
                     Some(applied.resolution().clone())
                 }
@@ -832,7 +832,7 @@ impl InitialToolApproval {
     }
 }
 
-/// The canonical owner command for one pending tool request.
+/// The canonical user command for one pending tool request.
 #[derive(Clone, Debug)]
 pub struct DecideToolRequest {
     command_id: DurableCommandId,
@@ -842,7 +842,7 @@ pub struct DecideToolRequest {
 
 impl DecideToolRequest {
     /// Constructs the complete canonical caller payload after rejecting the
-    /// owner-global nil and max command sentinels.
+    /// user-global nil and max command sentinels.
     pub fn try_new(
         command_id: DurableCommandId,
         request: ToolRequestId,
@@ -868,7 +868,7 @@ impl DecideToolRequest {
             .expect("the fixture command identity is admitted")
     }
 
-    /// Returns the owner-global command identity.
+    /// Returns the user-global command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -883,7 +883,7 @@ impl DecideToolRequest {
         &self.decision
     }
 
-    /// Prepares owner-sourced resolution against the exact request record.
+    /// Prepares user-sourced resolution against the exact request record.
     pub fn prepare_applied(
         self,
         request: &ToolRequest,
@@ -894,7 +894,7 @@ impl DecideToolRequest {
                 provided_request: request.id,
             });
         }
-        let resolution = ToolApprovalResolution::owner(self.request, self.decision.clone());
+        let resolution = ToolApprovalResolution::user(self.request, self.decision.clone());
         Ok(PreparedDecideToolRequest {
             command: self,
             result: DecideToolRequestResult::Applied(DecideToolRequestAppliedResult { resolution }),
@@ -935,7 +935,7 @@ impl DecideToolRequest {
     }
 }
 
-/// A tool-decision command used a reserved owner-global identity.
+/// A tool-decision command used a reserved user-global identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecideToolRequestConstructionError {
     command_id: DurableCommandId,
@@ -966,20 +966,20 @@ impl std::hash::Hash for DecideToolRequest {
 /// Terminal typed result for one tool-decision command.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum DecideToolRequestResult {
-    /// The owner decision was recorded.
+    /// The user decision was recorded.
     Applied(DecideToolRequestAppliedResult),
     /// Authoritative current state rejected the command.
     Rejected(DecideToolRequestRejectedResult),
 }
 
-/// The applied owner decision and its non-forgeable source tag.
+/// The applied user decision and its non-forgeable source tag.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DecideToolRequestAppliedResult {
     resolution: ToolApprovalResolution,
 }
 
 impl DecideToolRequestAppliedResult {
-    /// Borrows the exact owner-sourced resolution.
+    /// Borrows the exact user-sourced resolution.
     pub const fn resolution(&self) -> &ToolApprovalResolution {
         &self.resolution
     }
@@ -1337,10 +1337,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-020: only the owner-command preparation path can construct
-    /// owner-sourced approval.
+    /// S10 / INV-020: only the user-command preparation path can construct
+    /// user-sourced approval.
     #[test]
-    fn s10_inv020_owner_command_preparation_preserves_agency() {
+    fn s10_inv020_user_command_preparation_preserves_agency() {
         let request = request(4);
         let command =
             DecideToolRequest::new(command_id(5), request.id(), ToolApprovalDecision::Approve);
@@ -1354,7 +1354,7 @@ mod tests {
         assert_eq!(applied.resolution().request(), request.id());
         assert_eq!(
             applied.resolution().source(),
-            ToolDecisionSource::OwnerCommand
+            ToolDecisionSource::UserCommand
         );
         assert!(applied.resolution().is_approved());
     }
@@ -1372,7 +1372,7 @@ mod tests {
         assert_eq!(rejected.into_parts().len(), 33);
     }
 
-    /// INV-012: owner-global command sentinels never enter the canonical
+    /// INV-012: user-global command sentinels never enter the canonical
     /// tool-decision command space.
     #[test]
     fn inv012_tool_decision_rejects_reserved_command_identities() {
@@ -1389,17 +1389,17 @@ mod tests {
         }
     }
 
-    /// S10 / INV-020: only an applied owner command can restore
-    /// owner-command approval authority.
+    /// S10 / INV-020: only an applied user command can restore
+    /// user-command approval authority.
     #[test]
-    fn s10_inv020_rejected_owner_command_cannot_restore_approval() {
+    fn s10_inv020_rejected_user_command_cannot_restore_approval() {
         let command = DecideToolRequest::new(
             command_id(5),
             tool_request_id(4),
             ToolApprovalDecision::Approve,
         )
         .prepare_request_not_found();
-        let input = ToolApprovalResolutionReconstitutionInput::owner_command(command);
+        let input = ToolApprovalResolutionReconstitutionInput::user_command(command);
 
         assert!(
             input

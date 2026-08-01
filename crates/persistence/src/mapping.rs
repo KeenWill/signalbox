@@ -10,7 +10,7 @@ use signalbox_domain::{
 };
 use sqlx::types::Uuid;
 
-/// Closed durable-command kinds stored by the owner-global registry.
+/// Closed durable-command kinds stored by the user-global registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DurableCommandKind {
     /// Session creation.

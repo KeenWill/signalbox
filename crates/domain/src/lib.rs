@@ -324,7 +324,7 @@ macro_rules! define_identity {
 pub(crate) use define_identity;
 
 define_identity!(
-    /// Identifies one owner-global, durably handled command submission.
+    /// Identifies one user-global, durably handled command submission.
     ///
     /// This identity does not prove that the command was applied.
     DurableCommandId

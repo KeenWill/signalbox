@@ -1,4 +1,4 @@
-//! Owner-initiated, no-ancestry session-creation orchestration.
+//! User-initiated, no-ancestry session-creation orchestration.
 //!
 //! docs/spec/identity-and-commands.md owns identity supply and
 //! durable-command replay, and docs/spec/sessions-and-transcript.md keeps
@@ -39,10 +39,10 @@ impl fmt::Display for InvalidDurableCommandId {
 
 impl Error for InvalidDurableCommandId {}
 
-/// The complete admitted application request for owner-initiated creation.
+/// The complete admitted application request for user-initiated creation.
 ///
 /// The request deliberately has no cause or ancestry input: this slice fixes
-/// them to `OwnerInitiated` and `None`. Its private fields ensure sentinel
+/// them to `UserInitiated` and `None`. Its private fields ensure sentinel
 /// command identities cannot reach the use case through this boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateSessionRequest {
@@ -92,7 +92,7 @@ impl CreateSessionRequest {
         })
     }
 
-    /// Returns the caller-supplied owner-global command identity.
+    /// Returns the caller-supplied user-global command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -139,7 +139,7 @@ pub enum CreateSessionOutcome {
     Applied(CreateSessionAppliedResult),
     /// The command identity is already claimed by a different typed payload.
     ConflictingReuse {
-        /// The owner-global identity whose existing meaning remains intact.
+        /// The user-global identity whose existing meaning remains intact.
         command_id: DurableCommandId,
     },
 }
@@ -154,7 +154,7 @@ pub trait CreateSessionTransaction {
     /// Adapter-specific infrastructure or integrity failure.
     type Error;
 
-    /// Handles one sealed candidate through the owner-global command boundary.
+    /// Handles one sealed candidate through the user-global command boundary.
     fn handle(
         &mut self,
         prepared: PreparedCreateSession,
@@ -196,7 +196,7 @@ impl<TransactionError> Error for CreateSessionError<TransactionError> where
 {
 }
 
-/// Coordinates the admitted owner-initiated session-creation use case.
+/// Coordinates the admitted user-initiated session-creation use case.
 #[derive(Debug)]
 pub struct CreateSessionService<Generator, Transaction> {
     session_ids: Generator,
@@ -223,7 +223,7 @@ where
     Generator: SessionIdGenerator,
     Transaction: CreateSessionTransaction,
 {
-    /// Handles one owner-initiated, no-ancestry creation request.
+    /// Handles one user-initiated, no-ancestry creation request.
     ///
     /// Each invocation generates a fresh candidate, including a retransmission
     /// after a lost acknowledgement. The atomic port remains authoritative:
@@ -239,7 +239,7 @@ where
             template_provenance,
         } = request;
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         );
         let command = match template_provenance {
@@ -317,7 +317,7 @@ mod tests {
         DomainCreateSession::new(
             request.command_id(),
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             request.initial_configuration_defaults().clone(),
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(prepared.command().command_id(), request.command_id());
         assert_eq!(
             prepared.command().provenance().cause(),
-            SessionCreationCause::OwnerInitiated
+            SessionCreationCause::UserInitiated
         );
         assert_eq!(
             prepared.command().provenance().ancestry(),

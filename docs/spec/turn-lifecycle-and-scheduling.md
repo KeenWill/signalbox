@@ -27,7 +27,7 @@ final-state gate was verified through PR #314
 composition-root name and that `apps/signalboxd` code home were verified through
 PR #258 (`agent/signalboxd-rename`); the additional daemon-held code-host
 credential path is verified through PR #270 (`agent/tool-batch-tier1`); and the
-owner reconciliation decision that releases an ambiguity wait, together with the
+user reconciliation decision that releases an ambiguity wait, together with the
 startup scan's separate report of sessions holding their slot for that decision,
 were verified through PR #281 (`agent/turn-reconciliation-recovery`). The finite
 startup scan and removal of the superseded steering blocker were verified
@@ -259,7 +259,7 @@ acting on a false hint changes zero rows, and a lost true hint is recovered by
 the sweep (INV-007).
 
 - **Nudge (primary).** After a submit-input pass whose recorded result is a turn
-  origin (`Recorded(Applied(TurnOrigin))` — including owner-global replay of an
+  origin (`Recorded(Applied(TurnOrigin))` — including user-global replay of an
   already-recorded command, whose transaction rolls back and commits nothing
   new), `SubmitInputService` hands the session to the in-process nudge port. The
   buffer is bounded (1024); a full buffer or closed source drops only the hint,
@@ -420,7 +420,7 @@ concurrently.
 
 ## Occupied-slot input handling
 
-Command construction, owner-global deduplication, and acceptance atomicity are
+Command construction, user-global deduplication, and acceptance atomicity are
 [identity-and-commands](identity-and-commands.md) scope. The process protocol
 exposes the existing delivery algebra as the closed `start_when_idle`, `steer`,
 and `queue` intents, mapped respectively to `StartWhenNoActiveTurn`,
@@ -507,7 +507,7 @@ unpinned capability-class request names no selected runner and is unaffected
 until a live registration can satisfy it. Locking, page bounds, and crash
 recovery are owned by [persistence-protocol](persistence-protocol.md).
 
-Only two owner commands consume that state. `ReplaceLostRunner` requires the
+Only two user commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
 the one pending replacement enrollment it atomically activates, or — for a
 registration-triggered loss alone — a checked re-enrollment of the same runner
@@ -543,7 +543,7 @@ boundary, workspace, grant, or lease. Workspace provisioning and the first pin
 remain part of the eventual initial dispatch. `AbandonLostRunner` requires the
 same exact lost revision and no active turn, then installs terminal
 `RunnerAbandoned` placement state. If a turn is active it records
-`ActiveTurnRequiresExistingControl`; the owner first uses the existing
+`ActiveTurnRequiresExistingControl`; the user first uses the existing
 `stop_turn`, approval-decision, or reconciliation flow until the slot is empty,
 so abandonment never mints cancellation authority. With no active turn,
 including an idle session with queued turns, no turn or frontier is fabricated;
@@ -649,10 +649,10 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   instead of accepting an evidence-free failure record, and the deferred
   `assert_failed_terminal_execution_final_state` assertion re-closes the shape
   at every commit. When the failure closed a tool round, the same input names
-  the complete owner-sourced denial resolutions backing every `ToolDenied`
-  result entry in the terminal suffix; a `ToolDenied` entry whose request lacks
-  an exact `Deny` resolution — including a missing or approving decision — fails
-  reconstitution rather than fabricating an owner denial. A failed turn may
+  the complete user-sourced denial resolutions backing every `ToolDenied` result
+  entry in the terminal suffix; a `ToolDenied` entry whose request lacks an
+  exact `Deny` resolution — including a missing or approving decision — fails
+  reconstitution rather than fabricating a user denial. A failed turn may
   instead name the round's own continuation call — created at the continuation
   boundary and later lost or known-failed. Reconstitution accepts that call
   exactly when its whole frontier is the completed round's batch-correlated
@@ -670,7 +670,7 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   terminal frontier extends that call's yielded frontier by exactly one
   batch-correlated result entry per request in proposal order before the
   correlated `TurnCancelled` marker. Each `ToolDenied` entry in that suffix is
-  batch-correlated only against a named owner-sourced `Deny` resolution for its
+  batch-correlated only against a named user-sourced `Deny` resolution for its
   exact request; a missing or approving decision fails reconstitution. A
   cancelled continuation call — prepared at the continuation boundary and
   interrupted before or during send — is admitted on the same terms as the
@@ -786,8 +786,8 @@ clones over the shared pool; no shared locked service instance exists.
 - Dispatch fencing covers model calls, daemon tools, and local runner leases;
   remote runner transport and result envelopes remain deferred.
 - Loss replacement is the only version-one producer of a placement change.
-  Owner-directed relocation of a healthy session, and a working-directory move
-  on the same runner, are committed functionality with no command here yet; the
+  User-directed relocation of a healthy session, and a working-directory move on
+  the same runner, are committed functionality with no command here yet; the
   placement-revision, transcript-boundary, and runner-event mechanisms this page
   drives must stay compatible with a relocation that no loss caused
   ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
@@ -803,7 +803,7 @@ clones over the shared pool; no shared locked service instance exists.
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`) and tool-loop evidence; delegated-result waits
-  remain deferred with delegation. An owner reconciliation decision is the only
+  remain deferred with delegation. A user reconciliation decision is the only
   implemented resolution for that park: no automatic resolution exists, because
   the terminal disposition it produces is proof-bearing and the durable evidence
   supplies no authority to construct. Resolving the ambiguity itself from

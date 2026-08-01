@@ -128,6 +128,13 @@ The core principles imply the following narrower rules where representations,
 errors, or durable data cross a boundary. These rules are normative for new and
 modified code in their stated scope.
 
+### Distinguish the user from the wire role
+
+The human principal is the **user**. Prose never says bare “user message,”
+because a wire-role `user` message may come from a parent agent, an imported
+transcript, or another non-human source. Say **user-role message** for the wire
+role, or **a message from the user** for the human principal.
+
 ### One owner for bounds and durable spellings
 
 A validation guard or numeric bound used by more than one constructor has one

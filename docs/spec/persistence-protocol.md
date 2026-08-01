@@ -220,7 +220,7 @@ Representation rules, all enforced in the schema:
   session seed projections, metadata replacement receipts, and every existing
   historical fact. Metadata receipt satellites must be inserted before their
   deferrable parent record; their `BEFORE INSERT` triggers lock the existing
-  owner-global command claim, require that claim, and reject insertion once the
+  user-global command claim, require that claim, and reject insertion once the
   parent seals the receipt. The parent and both receipt satellites also reject
   `TRUNCATE`, which does not invoke row-level delete triggers. Mutable lifecycle
   tables carry guard triggers instead: `turn_lifecycle` rows must be inserted
@@ -387,7 +387,7 @@ The claim protocol, structural replay equality, and conflicting-reuse semantics
 are owned by [identity-and-commands](identity-and-commands.md); this section
 states only their storage representation and adapter mechanics.
 
-One append-only, owner-global `durable_command` registry claims every command
+One append-only, user-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
@@ -440,12 +440,12 @@ locked current state inside the claim transaction, while `CreateSession` — whi
 has no current session state to lock — arrives as an already-prepared
 `PreparedCreateSession` value and is inserted after the claim
 (`create_session.rs`). Authoritative rejections claim the identifier and commit
-their typed record exactly as applied results do. Owner-specified pre-claim
+their typed record exactly as applied results do. User-specified pre-claim
 admission errors are different: after registry inspection, a missing
 conversation named by the selected imported frontier or a boundary absent from
 that conversation returns without inserting a claim or typed record. Replay
 resolution — reconstruct the recorded command, compare structurally, return the
-recorded result or `ConflictingReuse` — follows the owner page's contract.
+recorded result or `ConflictingReuse` — follows the owning page.s contract.
 
 `load` operations return `None` only for an unseen identifier; a claimed row
 that cannot be reconstructed is corruption, never an unclaimed identifier.
@@ -476,7 +476,7 @@ Locks per transaction, in acquisition order:
   append-only, so complete loading and boundary resolution need no mutable-state
   lock. Semantic-entry candidates are requested only after the resulting checked
   prefix fixes their cardinality.
-- **ContextCompaction**: after claiming an unseen owner-global command,
+- **ContextCompaction**: after claiming an unseen user-global command,
   preparation locks the target `session_scheduler` row `FOR UPDATE` and then the
   current-defaults pointer `FOR UPDATE` before reading defaults, turn, frontier,
   and existing compaction state. Holding the scheduler lock through boundary
@@ -506,11 +506,11 @@ Locks per transaction, in acquisition order:
   existence is checked with a bare `EXISTS`). The session row is locked only
   `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
   `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
-- **Tool-loop transactions** (owner decision, attempt prepare, attempt
+- **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
   the `session_scheduler` row `FOR UPDATE` is the first and only explicit lock.
-  An unseen decision command first claims the owner-global registry; after
+  An unseen decision command first claims the user-global registry; after
   resolving the request's owning session it takes that scheduler lock before
   reading or mutating the active tool batch. A replay resolves entirely from the
   command registry and receipt and takes no lifecycle lock. Guarded
@@ -540,12 +540,12 @@ Locks per transaction, in acquisition order:
   connection/loss heads in runner-identity order; current registration head;
   placement; current credential grant; lease; operation-failure evidence after
   its correlated operation; and only then semantic-frontier and turn rows. A
-  durable owner-command claim precedes this subsequence.
+  durable user-command claim precedes this subsequence.
 - **Runner enrollment and registration**: the current enrollment or pending
   replacement-request head is locked first, followed by the relevant runner
   heads in runner-identity order and then the current registration head.
   Activating a pending replacement retires the old enrollment, persists the
-  issued successor identities and registration, and installs the owner-command
+  issued successor identities and registration, and installs the user-command
   effect in one transaction. Deployment-scoped promotion
   (`promote_pending_runner`) uses that same subsequence, takes no
   `session_scheduler`, placement, grant, or lease lock because it changes none

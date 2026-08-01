@@ -500,7 +500,7 @@ fn application_user_message(message: &ModelConversationMessage) -> (AcceptedInpu
             content,
             ..
         } => (*accepted_input, content.text().as_str()),
-        _ => panic!("fixture message must be an application user message"),
+        _ => panic!("fixture message must be an application user-role message"),
     }
 }
 
@@ -1031,13 +1031,13 @@ fn prepared(
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(selection),
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
-    .expect("owner-initiated creation without ancestry is preparable")
+    .expect("user-initiated creation without ancestry is preparable")
 }
 
 async fn append_session_created_test_event(
@@ -2098,11 +2098,11 @@ async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result
     Ok(())
 }
 
-/// S10: owner-decision receipts for one batch reconstitute from one identity-set
+/// S10: user-decision receipts for one batch reconstitute from one identity-set
 /// load instead of one query per approval row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_owner_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error>> {
+async fn s10_user_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x73a0;
     let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
@@ -2115,37 +2115,56 @@ async fn s10_owner_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn 
     )
     .await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
-    for (index, request) in requests.iter().enumerate() {
-        let offset = u128::try_from(index)?;
-        repository
-            .decide(
-                decide_tool_request(
-                    DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0 + offset)),
-                    *request,
-                    ToolApprovalDecision::Deny { reason: None },
-                ),
-                || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0 + offset)),
-            )
-            .await?;
-    }
+    let [first_request, second_request] = requests.as_slice() else {
+        panic!("the fixture proposes exactly two dangerous tools");
+    };
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                *first_request,
+                ToolApprovalDecision::Deny { reason: None },
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+        )
+        .await?;
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+                *second_request,
+                ToolApprovalDecision::Deny { reason: None },
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
 
     let reconstituted = repository
         .load_active_batch(fixture.session, fixture.turn)
         .await?
         .expect("the fully denied batch remains available for result projection");
-    for request in requests {
-        let approval = reconstituted
-            .approval(request)
-            .expect("each owner decision reconstitutes");
-        assert!(matches!(
-            approval.decision(),
-            ToolApprovalDecision::Deny { .. }
-        ));
-        assert_eq!(
-            approval.source(),
-            signalbox_domain::ToolDecisionSource::OwnerCommand
-        );
-    }
+    let first_approval = reconstituted
+        .approval(*first_request)
+        .expect("the first user decision reconstitutes");
+    assert!(matches!(
+        first_approval.decision(),
+        ToolApprovalDecision::Deny { .. }
+    ));
+    assert_eq!(
+        first_approval.source(),
+        signalbox_domain::ToolDecisionSource::UserCommand
+    );
+    let second_approval = reconstituted
+        .approval(*second_request)
+        .expect("the second user decision reconstitutes");
+    assert!(matches!(
+        second_approval.decision(),
+        ToolApprovalDecision::Deny { .. }
+    ));
+    assert_eq!(
+        second_approval.source(),
+        signalbox_domain::ToolDecisionSource::UserCommand
+    );
     assert!(
         ProcessReadRepository::new(pool.clone())
             .session_has_tool_history(fixture.session)
@@ -2595,7 +2614,7 @@ async fn s31_inv004_inv043_batch_reload_restores_retired_attempt_identities()
 }
 
 /// S02 / S10 / S11 / INV-005 / INV-006 / INV-019 / INV-027 / INV-036: one confirmed
-/// proposal survives a repository restart, records a replay-safe owner
+/// proposal survives a repository restart, records a replay-safe user
 /// decision, executes through an exact durable fence, and projects one
 /// reference-only result atomically with the same-turn continuation call.
 #[tokio::test(flavor = "multi_thread")]
@@ -3594,7 +3613,7 @@ async fn s02_s10_inv006_refused_continuation_call_reloads_and_scans() -> Result<
 
 /// S04 / INV-006 / INV-025: a daemon restart with the continuation model call
 /// of a completed tool round in flight classifies the call as ambiguous and
-/// parks the turn awaiting an owner recovery decision — the committed
+/// parks the turn awaiting a user recovery decision — the committed
 /// recovery wait reloads through the scheduling projection, the reconcile
 /// verb's precondition still names the parked turn, and the reconciling
 /// interrupt terminalizes the turn naming that call.
@@ -3623,7 +3642,7 @@ async fn s04_inv006_inv025_in_flight_continuation_call_restart_parks_recovery()
     };
     assert!(
         matches!(*recovered, ModelCallTerminalOutcome::AwaitingRecovery(_)),
-        "the lost in-flight continuation call parks awaiting an owner decision"
+        "the lost in-flight continuation call parks awaiting a user decision"
     );
 
     let mut second_scan_ids = FixedStartupScanIds::new([], []);
@@ -4984,7 +5003,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     Ok(())
 }
 
-/// INV-012: concurrent owner-global command claims serialize before either
+/// INV-012: concurrent user-global command claims serialize before either
 /// request-local decision can commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -5013,7 +5032,7 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
             (Ok(_), Err(ToolLoopRepositoryError::ConflictingCommandReuse))
                 | (Err(ToolLoopRepositoryError::ConflictingCommandReuse), Ok(_))
         ),
-        "exactly one request-local decision wins the owner-global identity"
+        "exactly one request-local decision wins the user-global identity"
     );
     let winner_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -5036,7 +5055,7 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
 
 /// INV-006 / INV-012: an applied interrupt racing a tool-using response closes
 /// every request in proposal order, binds those facts into the terminal
-/// frontier, and makes a later owner decision canonically AlreadyResolved.
+/// frontier, and makes a later user decision canonically AlreadyResolved.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
@@ -8030,7 +8049,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 /// S03 / S04 / S07 / INV-006 / INV-016 / INV-029 / INV-034: a restart-parked
 /// ambiguous model call wedges the session — the scan classifies nothing, the
 /// wait stays visible across a second restart, and ordinary input is refused —
-/// and the owner reconciliation decision then terminalizes the exact ambiguity
+/// and the user reconciliation decision then terminalizes the exact ambiguity
 /// without inventing an outcome, releases the slot, and lets the session
 /// activate the accepted successor.
 ///
@@ -8042,7 +8061,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 /// guarantee broke rather than only that the timeline broke.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambiguous_turn()
+async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguous_turn()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let parked = checkpoint_restart_model_call(&pool, 0xB100, true).await?;
@@ -8138,7 +8157,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
                 active_turn: parked.turn,
             }
         )),
-        "the slot is never released without an owner decision"
+        "the slot is never released without a user decision"
     );
 
     let second_restart = scan.execute().await?;
@@ -8159,7 +8178,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
             input_with_delivery(
                 0xB220,
                 0xB101,
-                "continue after the owner reconciliation decision",
+                "continue after the user reconciliation decision",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: parked.turn,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
@@ -8176,7 +8195,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
                 SubmitInputAppliedResult::TurnOrigin(_)
             ))
         ),
-        "the owner decision is accepted as the successor origin"
+        "the user decision is accepted as the successor origin"
     );
 
     let reconciled_shape: (String, String, Uuid, Uuid, i64) = sqlx::query_as(
@@ -8243,17 +8262,22 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
         .read_transcript(parked.session)
         .await?
         .expect("the reconciled session remains process-readable");
-    assert!(
-        matches!(
-            snapshot.turns()[0].state(),
-            ProcessTurnState::ReconciliationRequired {
-                terminal_attempt,
-                operation,
-                ..
-            } if *terminal_attempt == parked.attempt
-                && *operation == ProcessReconciliationOperation::ModelCall(parked.call)
-        ),
-        "the reconciled turn stays readable and still names its exact ambiguity"
+    let ProcessTurnState::ReconciliationRequired {
+        terminal_attempt,
+        operation,
+        ..
+    } = snapshot.turns()[0].state()
+    else {
+        panic!("the reconciled turn stays readable as reconciliation-required");
+    };
+    assert_eq!(
+        *terminal_attempt, parked.attempt,
+        "the readable turn retains its exact terminal attempt"
+    );
+    assert_eq!(
+        *operation,
+        ProcessReconciliationOperation::ModelCall(parked.call),
+        "the readable turn retains its exact ambiguous call"
     );
 
     let activated = activate_earliest_queued_turn(
@@ -9742,7 +9766,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
     )
     .execute(&pool)
     .await
-    .expect_err("the owner-global command ID must be unique");
+    .expect_err("the user-global command ID must be unique");
     assert_eq!(
         duplicate_command_id
             .as_database_error()
@@ -10134,7 +10158,7 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
     Ok(())
 }
 
-/// S01 / INV-012: the owner-global primary key is the concurrency boundary.
+/// S01 / INV-012: the user-global primary key is the concurrency boundary.
 /// Equal duplicates return one winner; unequal duplicates retain that winner
 /// and report one typed conflict.
 #[tokio::test(flavor = "multi_thread")]
@@ -10248,7 +10272,7 @@ async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<
     Ok(())
 }
 
-/// INV-012: an observed owner-global claim is never treated as unseen merely
+/// INV-012: an observed user-global claim is never treated as unseen merely
 /// because its typed record is missing or its storage version is unknown.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -10404,7 +10428,7 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
 }
 
 /// INV-002 / INV-008 / INV-012: the second admitted command kind retains a
-/// complete typed record, while the owner-global registry and append-only
+/// complete typed record, while the user-global registry and append-only
 /// constraints reject torn, malformed, or mutable receipts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -10826,7 +10850,7 @@ async fn s33_inv008_inv015_inv046_mid_session_model_switch_is_forward_only()
         application_user_message(
             first_messages
                 .first()
-                .expect("the first call carries its owner input")
+                .expect("the first call carries its user input")
         ),
         (first_input, first_content)
     );
@@ -11035,7 +11059,7 @@ async fn compact_session_command_id_reuse_is_a_client_conflict() -> Result<(), B
     Ok(())
 }
 
-/// INV-012: registry dispatch remains owner-global across command kinds while
+/// INV-012: registry dispatch remains user-global across command kinds while
 /// purpose-specific loads distinguish a valid other-kind claim from absence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -14328,7 +14352,7 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
         )?)
         .await?
     else {
-        panic!("owner-initiated composed creation must apply");
+        panic!("user-initiated composed creation must apply");
     };
     assert_eq!(created.session(), session);
 
@@ -14461,17 +14485,23 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
             blocked_start.delivery(),
         )?)
         .await?;
-    assert!(
-        matches!(
-            blocked,
-            SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::ActiveTurnPresent {
-                    session: rejected_session,
-                    active_turn,
-                }
-            )) if rejected_session == session && active_turn == activated.turn()
-        ),
-        "a start against the service-activated slot must name it: {blocked:?}"
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::ActiveTurnPresent {
+            session: rejected_session,
+            active_turn,
+        },
+    )) = blocked
+    else {
+        panic!("a start against the service-activated slot must be rejected");
+    };
+    assert_eq!(
+        rejected_session, session,
+        "the occupied-slot rejection names the session"
+    );
+    assert_eq!(
+        active_turn,
+        activated.turn(),
+        "the occupied-slot rejection names the active turn"
     );
 
     let effect_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
@@ -14534,7 +14564,7 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
         )?)
         .await?
     else {
-        panic!("owner-initiated composed creation must apply");
+        panic!("user-initiated composed creation must apply");
     };
     assert_eq!(created.session(), session);
 
@@ -14763,17 +14793,23 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
             blocked_start.delivery(),
         )?)
         .await?;
-    assert!(
-        matches!(
-            blocked,
-            SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::ActiveTurnPresent {
-                    session: rejected_session,
-                    active_turn,
-                }
-            )) if rejected_session == session && active_turn == second_activated.turn()
-        ),
-        "a start against the After-lineage slot must name it: {blocked:?}"
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::ActiveTurnPresent {
+            session: rejected_session,
+            active_turn,
+        },
+    )) = blocked
+    else {
+        panic!("a start against the After-lineage slot must be rejected");
+    };
+    assert_eq!(
+        rejected_session, session,
+        "the successor rejection names the session"
+    );
+    assert_eq!(
+        active_turn,
+        second_activated.turn(),
+        "the successor rejection names the active turn"
     );
 
     let successor_shape: (i64, String, Uuid, i64) = sqlx::query_as(
@@ -17829,12 +17865,12 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
     .bind(Uuid::from_u128(0x332))
     .execute(&pool)
     .await?;
-    let non_owner = repository
+    let non_user = repository
         .load(first.command_id())
         .await
-        .expect_err("domain reconstitution rejects a stored non-owner actor");
+        .expect_err("domain reconstitution rejects a stored non-user actor");
     assert!(matches!(
-        non_owner,
+        non_user,
         SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Domain(
             SubmitInputReconstitutionFailure::StoredActorMismatch
         ))
@@ -17916,18 +17952,23 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
         1,
         ModelSelectionOverride::UseSessionDefault,
     );
-    assert!(matches!(
-        repository
-            .handle(
-                exhausted,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x933)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa33))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::AcceptancePositionExhausted { last, .. }
-        )) if last.as_u64() == u64::MAX
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AcceptancePositionExhausted { last, .. },
+    )) = repository
+        .handle(
+            exhausted,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x933)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa33))),
+        )
+        .await?
+    else {
+        panic!("the maximum stored position rejects the next input");
+    };
+    assert_eq!(
+        last.as_u64(),
+        u64::MAX,
+        "the exhaustion receipt retains the maximum position"
+    );
 
     sqlx::query(
         "UPDATE accepted_input
@@ -19920,13 +19961,13 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     let creation = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xa47)),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         prompted_defaults.clone(),
     )
     .prepare(session)
-    .expect("owner-initiated creation without ancestry is preparable");
+    .expect("user-initiated creation without ancestry is preparable");
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation.clone()).await?;
@@ -19938,13 +19979,13 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     let promptless_reuse = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xa47)),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(0xa60)))
-    .expect("owner-initiated creation without ancestry is preparable");
+    .expect("user-initiated creation without ancestry is preparable");
     assert_eq!(
         create_repository.handle(promptless_reuse).await?,
         CreateSessionHandlingOutcome::ConflictingReuse {

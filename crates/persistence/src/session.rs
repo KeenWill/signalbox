@@ -21,7 +21,7 @@ use crate::mapping::{
     defaults_version_from_numeric, session_id_from_uuid, session_id_to_uuid,
 };
 
-const OWNER_INITIATED: &str = "owner_initiated";
+const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 
 /// A durable shape that cannot reconstruct one complete current session.
@@ -371,7 +371,7 @@ fn decode_provenance(
     // adapter-level representation check does not narrow the domain seam:
     // `SessionReconstitutionInput` continues to accept any future provenance
     // variant once its owning migration supplies a checked mapping.
-    if cause != OWNER_INITIATED {
+    if cause != USER_INITIATED {
         return Err(SessionCorruption::Unsupported {
             field: "creation cause",
             value: cause,
@@ -386,7 +386,7 @@ fn decode_provenance(
         .into());
     }
     Ok(SessionCreationProvenance::new(
-        SessionCreationCause::OwnerInitiated,
+        SessionCreationCause::UserInitiated,
         TranscriptAncestry::None,
     ))
 }

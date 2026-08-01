@@ -214,7 +214,7 @@ The initial registry contains exactly three metric names:
 - `signalbox_turns_terminalized_total{outcome}`, whose only label values are
   `completed`, `failed`, `refused`, `cancelled`, and `reconciliation_required`,
   counts durable terminal turn outcomes. It earns its place as the user-visible
-  success, failure, refusal, cancellation, and owner-intervention rate.
+  success, failure, refusal, cancellation, and user-intervention rate.
 - `signalbox_model_calls_terminalized_total{disposition}`, whose only label
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
@@ -252,7 +252,7 @@ The complete OTLP record inventory is:
   not added.
 - Event name `turn activated`, with `session_id` and `turn_id`;
   `turn terminalized`, with those ids and the closed `terminal_outcome`;
-  `turn parked awaiting owner reconciliation`, with those ids;
+  `turn parked awaiting user reconciliation`, with those ids;
   `model call dispatched`, with `session_id`, `turn_id`, `model_call_id`, and
   `turn_attempt_id`; and the event names
   `model runtime reported a trustworthy capability-preparation failure`,
@@ -564,7 +564,7 @@ digest does not replace the ordinary content digest: template provenance uses
 the complete assembled prompt digest above, while the immutable orchestration
 attempt uses the header/body/key-aware digest.
 
-Creation by template name first consults the owner-global durable-command
+Creation by template name first consults the user-global durable-command
 registry by command identity. An existing create-session claim is reconstituted
 and compared using the caller-supplied creation mode and template name before
 the current catalog is consulted; an equal replay returns its stored session,
@@ -860,10 +860,10 @@ are outside this cluster-delivery policy:
   defect because the next sync overwrites it. This split governs exactly the
   provider and integration runtime credentials plus the bootstrap and deployment
   material the channels themselves depend on, not every cluster-delivered
-  secret: owner-client authentication, runner enrollment, and the database
+  secret: user-client authentication, runner enrollment, and the database
   credential are separate open decisions outside it (see Open edges).
-- **Acyclic bootstrap chain.** The owner-held age identity (custodied outside
-  git and outside operator sync) decrypts the sops channel; the sops channel
+- **Acyclic bootstrap chain.** The user-held age identity (custodied outside git
+  and outside operator sync) decrypts the sops channel; the sops channel
   delivers the operator's credential; the operator syncs the 1Password channel;
   the daemon consumes mounted artifacts. No cluster workload may reach the age
   identity through the 1Password channel.

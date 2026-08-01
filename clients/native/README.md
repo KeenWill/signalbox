@@ -1,6 +1,6 @@
 # Signalbox Native
 
-> Snapshot import (2026-07-23) from the owner's private monorepo, without
+> Snapshot import (2026-07-23) from the maintainer.s private monorepo, without
 > history.
 
 Native SwiftUI client for the Signalbox process protocol.
@@ -51,9 +51,9 @@ present. Override it with an absolute socket path in Settings or launch with:
 export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
 ```
 
-There is no owner-approved network transport reachable by a remote or mobile
+There is no user-approved network transport reachable by a remote or mobile
 client. iPhone and iPad builds run against the in-memory process-protocol
-harness; real remote/mobile connectivity remains an owner design gate recorded
+harness; real remote/mobile connectivity remains a maintainer design gate recorded
 in
 [Protocols and persistence](../../docs/open-questions.md#protocols-and-persistence);
 the non-authoritative backlog tracks Tailscale as near-local direction and
@@ -129,11 +129,11 @@ failures; and no credential crosses a plaintext URL.
 The following work remains:
 
 - Remote/mobile transport, authentication, authorization, and revocation await
-  an owner-approved server design.
+  a user-approved server design.
 - Runners, templates, monitor summaries, and artifacts await real
   process-protocol operations.
 - Compact-width navigation omits Templates until its information architecture is
-  owner-approved; regular-width and macOS navigation retain the explicit
+  user-approved; regular-width and macOS navigation retain the explicit
   capability gate.
 - The app, client, and model test directories are separate targets in the shared
   scheme. Retired REST/WebSocket implementations now compile only as test-bundle

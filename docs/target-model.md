@@ -1,7 +1,7 @@
 # Target model
 
-This document records the owner's directional product and domain target: the
-destination Signalbox is being steered toward, written down so milestone
+This document records the maintainer.s directional product and domain target:
+the destination Signalbox is being steered toward, written down so milestone
 selection aims at a destination instead of drifting.
 
 ## Purpose and authority
@@ -27,7 +27,7 @@ Milestone selection rules for autonomous runs live in
 ## Product vision
 
 Signalbox's standing purpose, deployment shape, and first-version non-goals are
-owned by the [vision](vision.md): a personal, single-owner, always-on platform
+owned by the [vision](vision.md): a personal, single-user, always-on platform
 for durable LLM-assisted work — one central daemon with Postgres as the
 canonical store, outbound-connected runners for tool execution, and terminal,
 web, macOS, and iOS clients.
@@ -54,8 +54,8 @@ describes appear here only as destination responsibilities; concepts marked
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Session**                                   | One durable, independently browsable conversation ([glossary](glossary.md#session)); the minimal long-lived aggregate boundary.                                                                                                                    |
 | **SessionCreationCause / TranscriptAncestry** | Two independent immutable creation facts — why the session exists and where its initial semantic context came from.                                                                                                                                |
-| **AcceptedInput**                             | One admitted submission made durable with its explicit delivery treatment and recoverable disposition; the implemented baseline admits only owner-submitted user content ([glossary](glossary.md#accepted-input)).                                 |
-| **DurableCommandId**                          | The owner-global idempotency identity for durably handled caller commands ([glossary](glossary.md#durable-command-identity)).                                                                                                                      |
+| **AcceptedInput**                             | One admitted submission made durable with its explicit delivery treatment and recoverable disposition; the implemented baseline admits only user-submitted user content ([glossary](glossary.md#accepted-input)).                                  |
+| **DurableCommandId**                          | The user-global idempotency identity for durably handled caller commands ([glossary](glossary.md#durable-command-identity)).                                                                                                                       |
 | **SemanticTranscriptEntry**                   | One immutable identified semantic-history fact, distinct from operational, streaming, and presentation state; target entry types below.                                                                                                            |
 | **Turn**                                      | One durable logical request for a conversational outcome under one frozen effective configuration ([glossary](glossary.md#turn)).                                                                                                                  |
 | **TurnAttempt**                               | One exclusive physical orchestration tenure advancing an active turn ([glossary](glossary.md#turn-attempt)).                                                                                                                                       |
@@ -127,7 +127,7 @@ preserves them.
 
 ```text
 Proposed
-  -> RejectedByPolicy                       (terminal: policy refuses without consulting the owner)
+  -> RejectedByPolicy                       (terminal: policy refuses without consulting the user)
   -> AwaitingApproval                       (policy requires a human decision)
   -> Ready                                  (policy allows, or a matching approval is consumed)
 AwaitingApproval -> Ready | Denied
@@ -166,7 +166,7 @@ proves repetition safe.
 
 An `ApprovalDecision` is an immutable fact, not mutable request state: it
 records approve or deny for one exact `ToolRequestId`, the normalized arguments
-presented to the owner (a digest may index them, but structural equality remains
+presented to the user (a digest may index them, but structural equality remains
 the authority), the pinned tool revision, and the material execution constraints
 — the accepted binding rule (INV-019; [glossary](glossary.md#approval)).
 Consumption is transactional: `AwaitingApproval` plus a matching unexpired
@@ -217,17 +217,17 @@ classification by [model-call-execution](spec/model-call-execution.md). Two
 consequences worth repeating only as orientation: retry intent is always
 expressed as a new `TurnAttempt` — a terminal state never reopens (INV-006) —
 and unresolved ambiguity holds the turn in its recovery-decision wait until
-evidence or an explicit owner decision resolves it, rather than being coerced
+evidence or an explicit user decision resolves it, rather than being coerced
 into failure or silently retried.
 
 ## Execution isolation target
 
-Tool execution should not inherit the owner's ambient authority. The target
+Tool execution should not inherit the user's ambient authority. The target
 restricted-executor profile, for both daemon-local executors and restricted
 runners:
 
-- a dedicated restricted execution identity, never the owner's account;
-- no ambient owner credentials — no SSH agent, browser profile, credential-store
+- a dedicated restricted execution identity, never the user's account;
+- no ambient user credentials — no SSH agent, browser profile, credential-store
   socket, cloud metadata, or provider key is inherited; any credential a tool
   needs is injected per attempt under the daemon-controlled boundary (INV-035;
   [configuration-and-credentials](spec/configuration-and-credentials.md));
@@ -262,7 +262,7 @@ transports remain future work.
 
 ## Destination features
 
-The owner's feature arc beyond the landed model-call substrate. Everything here
+The user's feature arc beyond the landed model-call substrate. Everything here
 is directional under [Purpose and authority](#purpose-and-authority): each
 feature reaches code only through its own future owning decisions, none is
 authorized by appearing here, and the [priority order](#priority-order) still
@@ -273,7 +273,7 @@ durable-session substrate should let Signalbox go further than they do.
 ### Context management and compaction (target)
 
 Compaction as a first-class product surface, not a hidden token-budget
-mitigation: owner-supplied compaction prompts, multiple named compaction
+mitigation: user-supplied compaction prompts, multiple named compaction
 strategies — long-running work warrants a different treatment than a short
 exchange — and whole compaction workflows that select, apply, and review a
 strategy. The owning seats are identified: the deferred
@@ -288,14 +288,14 @@ policy.
 ### Inter-session messaging (target)
 
 Sessions send messages to sessions: an accepted input whose actor is another
-session's agency rather than the owner. This requires a foundation extension to
+session's agency rather than the user. This requires a foundation extension to
 the closed actor algebra, an explicit decision admitting that actor for
 `SubmitInput`, and the still-open authentication and authorization decisions.
 Delivery and queueing reuse the implemented treatments
 ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)): a
 session-sent message arrives under the same explicit delivery requests and
-durable queue order as owner input, never through a parallel channel. The
-baseline `Interrupt` treatment remains owner-only (INV-029); session-issued
+durable queue order as user input, never through a parallel channel. The
+baseline `Interrupt` treatment remains user-only (INV-029); session-issued
 interruption requires a foundation decision extending that cancellation
 authority. The client-facing surface is a planned
 [session-management tool family](#the-tool-system-as-the-load-bearing-layer):
@@ -322,10 +322,10 @@ future runner-protocol decision.
 Which sessions may create sub-sessions, which may link other sessions without an
 approval pause, and which may see other sessions at all is per-session
 configurable authority. An attended watch mode can set less restrictive
-authority for subsequently accepted origin turns while the owner is watching,
-and background work can set stricter authority for later turns; an accepted
-turn's frozen effective configuration does not change. Affecting an in-flight
-tool request would instead require an explicit policy-reevaluation and
+authority for subsequently accepted origin turns while the user is watching, and
+background work can set stricter authority for later turns; an accepted turn's
+frozen effective configuration does not change. Affecting an in-flight tool
+request would instead require an explicit policy-reevaluation and
 approval-invalidation decision. No configuration grants unlimited permission.
 Visibility and approval authority is owned by the future tool-policy and
 approval decisions, constrained by the accepted binding and honesty rules
@@ -370,8 +370,8 @@ In addition, the following are absent from the target itself — agents should n
 select milestones toward them, and a future change of direction would revise
 this document first:
 
-- **Multi-user ACLs, teams, and shared quotas.** Single-owner scope is fixed; a
-  future multi-owner model is a foundation decision.
+- **Multi-user ACLs, teams, and shared quotas.** Single-user scope is fixed; a
+  future multi-user model is a foundation decision.
 - **Distributed schedulers and cross-host workers.** The single-daemon,
   Postgres-coordinated baseline
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md))
@@ -399,7 +399,7 @@ shape; their implemented behavior is owned by the [living spec](spec/README.md).
    ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
 3. **A model call against a scripted provider** — landed
    ([model-call-execution](spec/model-call-execution.md)).
-4. **A smoke against a real provider** — landed for the owner-run smoke
+4. **A smoke against a real provider** — landed for the user-run smoke
    ([model-call-execution](spec/model-call-execution.md),
    [runtime-substrate](spec/runtime-substrate.md)), including the production
    security posture for outbound provider calls. This was the gate before
@@ -422,5 +422,4 @@ shape; their implemented behavior is owned by the [living spec](spec/README.md).
    [destination-feature arc](#destination-features) through its owning
    decisions: context management and compaction; inter-session messaging;
    orchestrator sessions, linking, and visibility authority; and persistent goal
-   mode. Their order within this step remains owner-directed milestone
-   selection.
+   mode. Their order within this step remains user-directed milestone selection.

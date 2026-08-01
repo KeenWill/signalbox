@@ -53,7 +53,7 @@ pub struct ResolvedSessionTemplate {
 }
 
 impl ResolvedSessionTemplate {
-    /// Returns the owner-assigned bundle version.
+    /// Returns the user-assigned bundle version.
     pub const fn version(&self) -> SessionTemplateVersion {
         self.version
     }

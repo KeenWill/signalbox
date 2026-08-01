@@ -144,9 +144,9 @@ pub enum ModelToolResultContent {
     Success(ToolResultContent),
     /// Exact terminal executor error evidence.
     ExecutionError(ToolExecutionError),
-    /// Exact durable owner denial.
+    /// Exact durable user denial.
     Denied {
-        /// Optional bounded sanitized owner explanation.
+        /// Optional bounded sanitized user explanation.
         reason: Option<ToolDenialReason>,
     },
     /// The turn ended before this request received a decision.
@@ -1879,7 +1879,7 @@ fn report_model_call_terminalization(outcome: &ModelCallTerminalOutcome) {
     report_turn_terminalization(session, turn, terminal_outcome);
 }
 
-/// Emits one content-free record for a turn parked on owner reconciliation.
+/// Emits one content-free record for a turn parked on user reconciliation.
 ///
 /// Session and turn are daemon-minted identities, while the event name is a
 /// closed lifecycle state. Ambiguity details and model content remain absent.
@@ -1887,7 +1887,7 @@ fn report_turn_parked_for_reconciliation(session: SessionId, turn: TurnId) {
     tracing::warn!(
         session_id = %session.into_uuid(),
         turn_id = %turn.into_uuid(),
-        "turn parked awaiting owner reconciliation"
+        "turn parked awaiting user reconciliation"
     );
 }
 
@@ -2279,7 +2279,7 @@ mod tests {
             session_id,
             session_id,
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             session_id,
@@ -2307,7 +2307,7 @@ mod tests {
         let receipt = SubmitInputReconstitutionInput::applied_turn_origin(
             SubmitInputAppliedTurnOriginReconstitutionInput {
                 command,
-                stored_actor: Actor::Owner,
+                stored_actor: Actor::User,
                 result_session: session_id,
                 result_accepted_input: accepted_input,
                 result_turn: turn_id,
@@ -2896,7 +2896,7 @@ mod tests {
             .collect()
     }
 
-    /// The owner-selected rendering decision: origin input becomes a user
+    /// The user-selected rendering decision: origin input becomes a user
     /// message carrying the semantic entry's source, in frontier order.
     #[test]
     fn s02_inv015_frontier_rendering_preserves_user_role_order_and_source() {
@@ -3615,7 +3615,7 @@ mod tests {
         else {
             panic!("terminal fixture reconstitutes as ended")
         };
-        let denial_reason = ToolDenialReason::try_new(String::from("owner declined"))
+        let denial_reason = ToolDenialReason::try_new(String::from("user declined"))
             .expect("fixture denial reason is valid");
         let denial_command = DecideToolRequest::try_new(
             identity(118, DurableCommandId::from_uuid),
@@ -3627,9 +3627,9 @@ mod tests {
         .expect("the fixture command identity is admitted")
         .prepare_applied(&denied_request)
         .expect("the command names the exact request");
-        let denial = ToolApprovalResolutionReconstitutionInput::owner_command(denial_command)
+        let denial = ToolApprovalResolutionReconstitutionInput::user_command(denial_command)
             .reconstitute()
-            .expect("owner denial provenance is implemented");
+            .expect("user denial provenance is implemented");
         let entries = [
             (
                 completed_use_source,

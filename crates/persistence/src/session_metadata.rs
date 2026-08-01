@@ -46,9 +46,9 @@ const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE R
 pub enum ReplaceSessionMetadataHandlingOutcome {
     /// First handling or equal replay returns the recorded result.
     Recorded(ReplaceSessionMetadataResult),
-    /// The identifier already has a structurally different owner-global use.
+    /// The identifier already has a structurally different user-global use.
     ConflictingReuse {
-        /// The owner-global identifier whose existing meaning is retained.
+        /// The user-global identifier whose existing meaning is retained.
         command_id: DurableCommandId,
     },
 }
@@ -120,7 +120,7 @@ pub enum SessionMetadataRepositoryError {
     CommitAmbiguous(sqlx::Error),
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
-        /// The owner-global identifier that names another kind.
+        /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
     /// Durable rows cannot reconstruct the requested domain value.
@@ -184,7 +184,7 @@ impl SessionMetadataRepository {
 
     /// Claims and handles an unseen command, or resolves its recorded meaning.
     ///
-    /// Owner-global registry inspection is the first durable read. An unseen
+    /// User-global registry inspection is the first durable read. An unseen
     /// command serializes with other metadata writers by locking the session
     /// row before a separate statement samples its timestamp and replaces
     /// satellites.
@@ -910,7 +910,7 @@ fn decode_command(
         "command actor",
     )?;
     match command_actor {
-        Actor::Owner | Actor::Tool { .. } => {}
+        Actor::User | Actor::Tool { .. } => {}
         Actor::Model { .. } | Actor::Recovery => {
             return Err(SessionMetadataCorruption::Unsupported {
                 field: "command actor",
@@ -1159,7 +1159,7 @@ struct EncodedActor {
 
 fn encode_actor(actor: Actor) -> EncodedActor {
     match actor {
-        Actor::Owner => EncodedActor {
+        Actor::User => EncodedActor {
             kind: "owner",
             turn: None,
             tool_request: None,
@@ -1189,7 +1189,7 @@ fn decode_actor(
     relationship: &'static str,
 ) -> Result<Actor, SessionMetadataRepositoryError> {
     match (kind.as_str(), turn, tool_request) {
-        ("owner", None, None) => Ok(Actor::Owner),
+        ("owner", None, None) => Ok(Actor::User),
         ("model", Some(turn), None) => Ok(Actor::Model {
             turn: TurnId::from_uuid(turn),
         }),
@@ -1316,7 +1316,7 @@ mod tests {
 
     #[test]
     fn actor_storage_round_trips_every_variant() {
-        assert_actor_storage_round_trip(Actor::Owner);
+        assert_actor_storage_round_trip(Actor::User);
         assert_actor_storage_round_trip(Actor::Model {
             turn: TurnId::from_uuid(Uuid::from_u128(1)),
         });
@@ -1334,7 +1334,7 @@ mod tests {
             None,
             "fixture actor",
         )
-        .expect_err("owner cannot carry a turn");
+        .expect_err("legacy user encoding cannot carry a turn");
 
         assert!(matches!(
             error,

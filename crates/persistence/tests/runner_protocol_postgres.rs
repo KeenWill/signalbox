@@ -234,12 +234,12 @@ fn confirmed_approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolReques
     .expect("the fixture command identity is valid");
     let prepared = command
         .prepare_applied(&request)
-        .expect("the fixture request and owner decision correlate");
+        .expect("the fixture request and user decision correlate");
     let signalbox_domain::DecideToolRequestResult::Applied(applied) = prepared.result() else {
-        panic!("the approving fixture owner decision applies")
+        panic!("the approving fixture user decision applies")
     };
     ApprovedToolRequest::try_from_resolution(request, applied.resolution().clone())
-        .expect("the fixture owner approval matches its request")
+        .expect("the fixture user approval matches its request")
 }
 
 fn authorization_from_approved(
@@ -846,7 +846,7 @@ async fn insert_physical_attempt(
     Ok(())
 }
 
-async fn replace_approval_with_owner_command(
+async fn replace_approval_with_user_command(
     pool: &PgPool,
     facts: PhysicalAttemptFacts,
 ) -> Result<(), sqlx::Error> {
@@ -2786,7 +2786,7 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
         .store_pin(&pin, &registration)
         .await
         .expect_err("a session blanket cannot authorize runner dispatch");
-    replace_approval_with_owner_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    replace_approval_with_user_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     store.store_pin(&pin, &registration).await?;
     let admitted: Decimal = sqlx::query_scalar(
         "SELECT generation
@@ -2879,7 +2879,7 @@ async fn s31_inv035_inv045_profileless_confirm_lease_requires_confirmed_provenan
         .store_pin(&pin, &registration)
         .await
         .expect_err("a session blanket cannot authorize runner dispatch");
-    replace_approval_with_owner_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    replace_approval_with_user_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     store.store_pin(&pin, &registration).await?;
     let admitted: Decimal = sqlx::query_scalar(
         "SELECT generation

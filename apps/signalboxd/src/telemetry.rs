@@ -851,7 +851,7 @@ fn admitted_event_values(metadata: &Metadata<'_>, values: &RecordedValues) -> bo
                 && values.uuid("turn_id")
                 && values.closed("terminal_outcome", TURN_OUTCOMES)
         }
-        ("signalbox_application::model_execution", "turn parked awaiting owner reconciliation") => {
+        ("signalbox_application::model_execution", "turn parked awaiting user reconciliation") => {
             values.has_exact(&["message", "session_id", "turn_id"])
                 && values.uuid("session_id")
                 && values.uuid("turn_id")

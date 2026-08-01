@@ -2,25 +2,25 @@
 
 ## Purpose
 
-Signalbox is a personal, single-owner platform for LLM-assisted work that
-remains durable, inspectable, and resumable across clients and execution
-environments. The product should let its owner begin a conversation on one
-device, continue elsewhere, choose where tools execute, approve risky actions,
-delegate related work, and reconstruct the observable provenance and outcomes of
-model and tool interactions.
+Signalbox is a personal, single-user platform for LLM-assisted work that remains
+durable, inspectable, and resumable across clients and execution environments.
+The product should let its user begin a conversation on one device, continue
+elsewhere, choose where tools execute, approve risky actions, delegate related
+work, and reconstruct the observable provenance and outcomes of model and tool
+interactions.
 
-“Single-owner” describes the account and product scope. It does not grant every
-process the owner's full operating-system authority, collapse all execution onto
+“Single-user” describes the account and product scope. It does not grant every
+process the user's full operating-system authority, collapse all execution onto
 one machine, or remove the need for authentication, provenance, audit, and
 resource controls.
 
 ## Target user and deployment
 
-The target user is one technically capable owner operating an always-on daemon
-in Kubernetes with Postgres as the canonical store. Terminal, web, macOS, and
-iOS clients connect remotely. Runners may live on workstations, personal
-servers, restricted accounts, containers, or remote sandboxes. Development and
-test environments use the same Postgres semantics, normally through ephemeral
+The target user is one technically capable user operating an always-on daemon in
+Kubernetes with Postgres as the canonical store. Terminal, web, macOS, and iOS
+clients connect remotely. Runners may live on workstations, personal servers,
+restricted accounts, containers, or remote sandboxes. Development and test
+environments use the same Postgres semantics, normally through ephemeral
 containerized instances.
 
 Multi-user tenancy, organization administration, and collaborative authorization
@@ -37,7 +37,7 @@ durably even when a client disconnects.
 
 The initial daemon may be a modular monolith. This boundary does not require
 microservices and does not prevent provider execution from moving behind a
-dedicated service after an owner-accepted pull request changes the owning
+dedicated service after a maintainer-accepted pull request changes the owning
 cross-component contract.
 
 ## Why runners are separate
@@ -88,7 +88,7 @@ coherent behavior without pre-building speculative package structures.
 
 ## First-version non-goals
 
-- Multi-owner tenancy, teams, or role-based organization administration.
+- Multi-user tenancy, teams, or role-based organization administration.
 - A general arbitrary session graph, transcript merging, or collaborative
   editing.
 - Exactly-once arbitrary shell commands or external writes.

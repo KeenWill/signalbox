@@ -9,8 +9,8 @@ use crate::{ToolRequestId, TurnId};
 /// The initiating agency of a durable command or attributed transition.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Actor {
-    /// The single owner's authority, however connected.
-    Owner,
+    /// The single user.s authority, however connected.
+    User,
     /// Agency exercised by model output from one exact turn.
     Model {
         /// The turn whose model output acted.
@@ -34,8 +34,8 @@ mod tests {
     /// different actor variants interchangeable.
     #[test]
     fn inv001_actor_equality_is_structural() {
-        assert_eq!(Actor::Owner, Actor::Owner);
-        assert_ne!(Actor::Owner, Actor::Recovery);
+        assert_eq!(Actor::User, Actor::User);
+        assert_ne!(Actor::User, Actor::Recovery);
         assert_ne!(
             Actor::Model { turn: turn_id(1) },
             Actor::Model { turn: turn_id(2) }
@@ -49,9 +49,9 @@ mod tests {
     }
 
     /// INV-020: model agency remains a distinct typed value and cannot equal
-    /// owner agency.
+    /// user agency.
     #[test]
-    fn inv020_model_agency_cannot_masquerade_as_owner() {
-        assert_ne!(Actor::Model { turn: turn_id(1) }, Actor::Owner);
+    fn inv020_model_agency_cannot_masquerade_as_user() {
+        assert_ne!(Actor::Model { turn: turn_id(1) }, Actor::User);
     }
 }

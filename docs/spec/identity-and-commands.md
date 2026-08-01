@@ -7,7 +7,7 @@ as verified against the implementing stack through PR #224
 (`agent/session-metadata-domain`). The behavior lives in `crates/domain`
 (identity newtypes, command payloads, actor attribution, replay equality),
 `crates/application` (identity generation, command boundaries),
-`crates/persistence` (the owner-global command registry and typed record
+`crates/persistence` (the user-global command registry and typed record
 families), and `apps/signalboxd` (telemetry wiring); those `apps/signalboxd`
 code homes were verified through PR #258 (`agent/signalboxd-rename`). Storage
 transaction mechanics, locking, and the reconstitution seam are owned by
@@ -49,7 +49,7 @@ Identities fall into three supply classes:
   application request constructor accepts the caller-supplied value, and the
   daemon accepts any non-sentinel RFC 9562 UUID — the nil and max sentinels are
   rejected (see below) — without checking its version bits. Why: idempotency
-  correctness comes from the owner-global durable claim plus canonical payload
+  correctness comes from the user-global durable claim plus canonical payload
   comparison, never from trusting a caller's clock or version bits (INV-012).
 - **Daemon-minted durable-fact identity** — `SessionId`,
   `ImportedConversationId`, `ImportedTranscriptEntryId`, `AcceptedInputId`,
@@ -61,7 +61,7 @@ Identities fall into three supply classes:
   Postgres B-tree keys without changing the 128-bit storage shape; no
   index-level artifact measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
-  Callers supply them inside command payloads to name owner-configured model
+  Callers supply them inside command payloads to name user-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
   `model_alias_id`), and alias meaning resolves through a definition lookup at
   domain preparation, so an unknown alias becomes a recorded rejection, not an
@@ -70,7 +70,7 @@ Identities fall into three supply classes:
 `ProviderModelIdentity` names the daemon's normalized provider/model value
 space. It is persisted (`turn_lifecycle.pinned_provider_model_identity_id`,
 `model_call.resolved_provider_model_identity_id`) and supplied as an
-owner-configured key from signalboxd's model-configuration file; how
+user-configured key from signalboxd's model-configuration file; how
 provider-reported data normalizes into it remains open (see Open edges).
 
 UUID contents are never semantic. No code derives acceptance order, queue order,
@@ -87,7 +87,7 @@ boundaries: checked command/request construction (`try_new` on
 `crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
 command can reach a transaction and claims no identifier. Why: sentinel-like
 values are common accidental defaults and would otherwise become permanent
-owner-global claims.
+user-global claims.
 
 ## Generation and minting boundary
 
@@ -174,7 +174,7 @@ open.
 
 ## Durable command records
 
-All claimed command identifiers live in one owner-global, append-only
+All claimed command identifiers live in one user-global, append-only
 `durable_command` registry (migration `202607180001` and successors): primary
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
@@ -221,8 +221,8 @@ start another workspace nor acquire another meaning. Startup resumes an
 unterminated request before client admission. `abandon_lost_runner` remains one
 ordinary atomic claim-and-terminal-result transaction.
 
-`promote_pending_runner` is the one owner command in this set whose payload
-names no session. It carries only the command identity and the pending
+`promote_pending_runner` is the one user command in this set whose payload names
+no session. It carries only the command identity and the pending
 enrollment-request identity it promotes, and it is a single atomic
 claim-and-terminal-result transaction: the deployment-scoped fact it acts on is
 that this daemon's active runner is durably gone, so no session placement is a
@@ -318,7 +318,7 @@ validation (INV-012):
 Before complete payload construction, template creation may perform only the
 caller-intent registry preflight above. After the repository inspects the
 registry for a constructed command and before claiming an unseen identifier, a
-command may perform an owner-specified pre-claim admission read.
+command may perform a user-specified pre-claim admission read.
 `CreateSessionFromImportedFrontier` uses that phase to load the conversation
 named by `frontier.conversation()` and resolve the frontier's inclusive
 boundary; a missing target returns the corresponding admission error without
@@ -359,7 +359,7 @@ rejection must use a new identifier.
 ## Actor attribution
 
 `Actor` (`crates/domain/src/actor.rs`) is the closed typed provenance of a
-durable command's initiating agency: `Owner`, `Model { turn: TurnId }`,
+durable command's initiating agency: `User`, `Model { turn: TurnId }`,
 `Recovery`, or `Tool { request: ToolRequestId }`. Equality is structural; a
 carried identity is a validated reference, not minting authority, and
 attribution confers no lifecycle, authorization, or approval authority (INV-001,
@@ -367,10 +367,10 @@ INV-020).
 
 `SubmitInput` and `ReplaceSessionMetadata` are the command kinds whose durable
 payloads carry an `actor` field. The `SubmitInput` application constructor fixes
-`Actor::Owner`. Metadata replacement has two purpose-specific constructors: the
-process-facing form fixes `Actor::Owner`, while the tool-facing form requires
-one exact `ToolRequestId` and fixes `Actor::Tool { request }`. Neither accepts
-an arbitrary actor, and model/recovery issuers remain unconstructible.
+`Actor::User`. Metadata replacement has two purpose-specific constructors: the
+process-facing form fixes `Actor::User`, while the tool-facing form requires one
+exact `ToolRequestId` and fixes `Actor::Tool { request }`. Neither accepts an
+arbitrary actor, and model/recovery issuers remain unconstructible.
 `SubmitInput` and `ReplaceSessionMetadata` both include actor agency in replay
 equality and hashing: replaying a claimed identifier under a different actor is
 conflicting reuse (INV-012). Checked metadata reconstitution independently
@@ -385,7 +385,7 @@ Storage follows the closed-discriminator convention: `actor_kind`
 in `submit_input_command` and `replace_session_metadata_command`. Metadata
 receipts additionally carry constructor-selected `issuer_kind` (`owner`/`tool`)
 and `issuer_tool_request_id` columns, sealed separately from the actor
-projection. The issuer migration fixes every pre-issuer receipt to the owner
+projection. The issuer migration fixes every pre-issuer receipt to the user
 agency that its legacy constructor required, rather than trusting the actor
 projection being checked. Unknown or malformed stored spellings fail decoding as
 corruption. A well-formed `model` or `recovery` actor on a metadata command
@@ -393,7 +393,7 @@ fails earlier as unsupported metadata-writer corruption. Metadata loading
 constructs the canonical command from the independent issuer proof, then domain
 reconstitution compares the separately decoded supported actor against that
 command (`CommandActorMismatch`) for both applied and rejected receipts, so a
-cross-wired owner/tool actor fails closed.
+cross-wired user/tool actor fails closed.
 
 `CreateSession` and `ReplaceSessionDefaults` v1 carry no actor field in payload
 or storage, and no recorded-transition family (including startup-scan
@@ -435,9 +435,9 @@ edges.
   ([telemetry correlation](../open-questions.md#telemetry-correlation)).
 - `ReplaceSessionDefaults` v1/v2 payloads and storage carry no `actor` field
   despite the accepted adoption path expecting one from the kind's first
-  accepted version; the truthful `Owner` backfill via another kind-scoped
-  storage version remains available but unexercised.
-- `CreateSession` actor adoption remains an explicit owner choice; v1/v2 leave
+  accepted version; the truthful `User` backfill via another kind-scoped storage
+  version remains available but unexercised.
+- `CreateSession` actor adoption remains an explicit user choice; v1/v2 leave
   its attribution implicit.
 - No recorded-transition record family has adopted actor attribution;
   startup-scan terminalizations do not yet record a `Recovery` actor.
@@ -450,7 +450,7 @@ edges.
   configuration-supplied; provider-identity normalization remains open
   ([model fallback and provenance](../open-questions.md#model-fallback-and-provenance)).
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before
-  identities are exposed outside the single-owner boundary or treated as
+  identities are exposed outside the single-user boundary or treated as
   capabilities.
-- Which command kinds may admit non-owner actors, and under what verification,
+- Which command kinds may admit non-user actors, and under what verification,
   remains with reserved delegation and authorization decisions.

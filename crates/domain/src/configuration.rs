@@ -30,7 +30,7 @@ crate::define_identity!(
 );
 
 crate::define_identity!(
-    /// Names one owner-configured model alias whose definition can change
+    /// Names one user-configured model alias whose definition can change
     /// over time.
     ///
     /// Selecting an alias freezes its current definition at acceptance; the

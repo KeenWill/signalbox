@@ -333,7 +333,7 @@ impl ToolLoopFixture {
             .await?;
         assert!(
             matches!(prepared.result(), DecideToolRequestResult::Applied(_)),
-            "the earliest undecided request must accept its owner decision"
+            "the earliest undecided request must accept its user decision"
         );
         Ok(())
     }
@@ -1478,7 +1478,7 @@ impl ToolExecutor for SerialProbeExecutor {
 }
 
 /// S10 / INV-004 / INV-005 / INV-019 / INV-021 / INV-024:
-/// one offline scripted turn parks for an owner decision, executes exactly
+/// one offline scripted turn parks for a user decision, executes exactly
 /// once after approval with normalized arguments, commits a reference-only
 /// result at the continuation boundary, and completes only after the second
 /// model round.
@@ -1983,7 +1983,7 @@ async fn tier_one_change_request_checks_status_completes_offline_tool_loop()
     .await
 }
 
-/// Tier 1 top-level comment creation remains parked until owner approval and
+/// Tier 1 top-level comment creation remains parked until user approval and
 /// then crosses only the typed mocked transport.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2044,7 +2044,7 @@ async fn tier_one_change_request_review_threads_completes_offline_tool_loop()
     .await
 }
 
-/// Tier 1 thread replies remain parked until owner approval and preserve the
+/// Tier 1 thread replies remain parked until user approval and preserve the
 /// exact opaque thread identity offline.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2064,7 +2064,7 @@ async fn tier_one_change_request_thread_reply_completes_offline_tool_loop()
     .await
 }
 
-/// Tier 1 thread resolution remains parked until owner approval and preserves
+/// Tier 1 thread resolution remains parked until user approval and preserves
 /// the exact opaque thread identity offline.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2102,7 +2102,7 @@ async fn tier_one_change_request_ci_job_log_completes_offline_tool_loop()
     .await
 }
 
-/// Tier 1 failed-job reruns remain parked until owner approval and preserve
+/// Tier 1 failed-job reruns remain parked until user approval and preserve
 /// the exact workflow-run identity offline.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2283,7 +2283,7 @@ async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), 
     .await
 }
 
-/// S10 / S11 / INV-019 / INV-020 / INV-027: owner denial creates no physical
+/// S10 / S11 / INV-019 / INV-020 / INV-027: user denial creates no physical
 /// attempt, projects one error result to the continuation call, and allows the
 /// same turn to complete from the model's response.
 #[tokio::test(flavor = "multi_thread")]
@@ -2554,7 +2554,7 @@ async fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejecte
 }
 
 /// S02 / S10 / INV-005 / INV-006 / INV-019: a restart scan preserves an
-/// approval wait exactly; after the owner decision, the durable sweep and a
+/// approval wait exactly; after the user decision, the durable sweep and a
 /// fresh composition resume the same logical turn without replaying activation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -2785,7 +2785,7 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
 
 /// S10 / INV-020 / INV-021: the explicitly dangerous frozen blanket posture
 /// approves a confirm-default tool under `session_blanket` provenance and the
-/// turn runs unattended without fabricating owner agency.
+/// turn runs unattended without fabricating user agency.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
@@ -3428,7 +3428,7 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_both_safe_points_reloads
 /// S06 / INV-005 / INV-024 / INV-025 / INV-026 / INV-034: losing a dispatched
 /// external-effect attempt never retries it; startup idempotently classifies
 /// exact ambiguity without projecting a result or close, and parks the turn for
-/// owner recovery.
+/// user recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s06_inv005_inv024_inv025_inv026_inv034_external_crash_parks_without_retry()
@@ -3511,7 +3511,7 @@ async fn s06_inv005_inv024_inv025_inv026_inv034_external_crash_parks_without_ret
     );
     assert!(
         post_startup_runtime.received_operations().is_empty(),
-        "owner recovery must remain the only way beyond the ambiguous attempt"
+        "user recovery must remain the only way beyond the ambiguous attempt"
     );
     let classified: (String, String, Option<Uuid>, String) = sqlx::query_as(
         "SELECT attempt.terminal_disposition_kind,

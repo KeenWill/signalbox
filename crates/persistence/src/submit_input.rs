@@ -224,7 +224,7 @@ pub enum SubmitInputHandlingOutcome {
     Recorded(SubmitInputResult),
     /// The identifier already names another kind or structural payload.
     ConflictingReuse {
-        /// The owner-global identifier whose earlier meaning is retained.
+        /// The user-global identifier whose earlier meaning is retained.
         command_id: DurableCommandId,
     },
 }
@@ -311,7 +311,7 @@ pub enum SubmitInputRepositoryError {
     CommitAmbiguous(sqlx::Error),
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
-        /// The owner-global identifier that names another kind.
+        /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
     /// A generated accepted-input candidate reused the active turn's origin.
@@ -3913,7 +3913,7 @@ struct EncodedActor {
 
 fn encode_actor(actor: Actor) -> EncodedActor {
     match actor {
-        Actor::Owner => EncodedActor {
+        Actor::User => EncodedActor {
             kind: "owner",
             turn: None,
             tool_request: None,
@@ -5842,7 +5842,7 @@ fn decode_actor(
     tool_request: Option<Uuid>,
 ) -> Result<Actor, SubmitInputRepositoryError> {
     match (kind.as_str(), turn, tool_request) {
-        ("owner", None, None) => Ok(Actor::Owner),
+        ("owner", None, None) => Ok(Actor::User),
         ("model", Some(turn), None) => Ok(Actor::Model {
             turn: TurnId::from_uuid(turn),
         }),

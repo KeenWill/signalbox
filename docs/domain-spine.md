@@ -1,6 +1,6 @@
 # Domain spine
 
-This file is the owner's primary API-review surface. The crates are
+This file is the maintainer.s primary API-review surface. The crates are
 authoritative: this is a hand-maintained mirror of their public API, updated
 from source and never edited in source's place. The source files in
 `crates/domain/src/` and `crates/application/src/` are intentionally dense with
@@ -90,7 +90,7 @@ listed there: `DirectModelSelection`, `ModelAlias` (configuration),
 
 ```rust
 pub enum Actor {
-    Owner,
+    User,
     Model { turn: TurnId },
     Recovery,
     Tool { request: ToolRequestId },
@@ -577,7 +577,7 @@ impl SessionTemplateProvenance {
 
 ```rust
 pub enum SessionCreationCause {
-    OwnerInitiated,
+    UserInitiated,
 }
 
 pub struct TranscriptFrontier { /* private */ }
@@ -1746,7 +1746,7 @@ impl AppliedStopForReconciliationProof {
 }
 
 pub enum ReconciliationReason {
-    OwnerChoseReconciliation { decision: AppliedStopForReconciliationProof },
+    UserChoseReconciliation { decision: AppliedStopForReconciliationProof },
     InterruptRequiresReconciliation { interrupt: AppliedInterruptProof },
     FatalMismatchRequiresReconciliation { causes: FatalMismatchStopCauses },
 }
@@ -3298,7 +3298,7 @@ pub enum ToolEffectClass {
     ExternalEffect,
 }
 pub enum ToolDecisionSource {
-    OwnerCommand,
+    UserCommand,
     PolicyAuto,
     SessionBlanket,
     SessionOverride,
@@ -3325,13 +3325,13 @@ pub enum ToolApprovalDecision {
     Deny { reason: Option<ToolDenialReason> },
 }
 pub struct ToolApprovalResolution { /* private */ }
-// sealed live producers: owner command, registry auto, or frozen session blanket
+// sealed live producers: user command, registry auto, or frozen session blanket
 impl ToolApprovalResolution {
     // accessors: request(), decision(), source(), is_approved()
 }
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
-    pub const fn owner_command(command: PreparedDecideToolRequest) -> Self;
+    pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
     pub const fn session_blanket(
         request: ToolRequestId,
@@ -3636,7 +3636,7 @@ impl ToolBatch {
     ) -> impl Iterator<Item = ToolAttemptId> + '_;
     pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery>;
-    pub fn prepare_owner_decision(
+    pub fn prepare_user_decision(
         self,
         command: DecideToolRequest,
         continuation_attempt: Option<TurnAttemptId>,
