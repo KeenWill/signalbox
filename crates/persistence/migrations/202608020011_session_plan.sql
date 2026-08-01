@@ -98,6 +98,7 @@ CREATE TABLE session_plan_event (
         (
             event_kind = 'depends_on'
             AND entry_ordinal < event_ordinal
+            AND dependency_ordinal IS NOT NULL
             AND dependency_ordinal < event_ordinal
             AND dependency_ordinal <> entry_ordinal
             AND entry_text IS NULL
@@ -403,6 +404,7 @@ BEGIN
              WHERE edge.session_id = NEW.session_id
                AND edge.event_kind = 'depends_on'
                AND edge.entry_ordinal = NEW.entry_ordinal;
+            -- Mirrors MAX_PLAN_DEPENDENCIES_PER_ENTRY in tools-plan.
             IF dependency_count >= 32 THEN
                 RAISE EXCEPTION
                     'session plan entry dependency limit reached'

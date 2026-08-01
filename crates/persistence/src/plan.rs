@@ -103,14 +103,38 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
  WHERE edge.dependency_position <= $3
  ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
 
-const DEPENDENCY_OUTGOING_SQL: &str = "SELECT edge.dependency_ordinal
-  FROM session_plan_event AS edge
- WHERE edge.session_id = $1
-   AND edge.event_kind = 'depends_on'
-   AND edge.entry_ordinal = $2
- GROUP BY edge.dependency_ordinal
- ORDER BY min(edge.event_ordinal)
- LIMIT $3";
+const RELEVANT_DEPENDENCY_GRAPH_SQL: &str = "WITH RECURSIVE ranked_edge AS (
+    SELECT candidate.entry_ordinal, candidate.dependency_ordinal,
+           min(candidate.event_ordinal) AS first_event_ordinal,
+           row_number() OVER (
+               PARTITION BY candidate.entry_ordinal
+               ORDER BY min(candidate.event_ordinal)
+           ) AS dependency_position
+      FROM session_plan_event AS candidate
+     WHERE candidate.session_id = $1
+       AND candidate.event_kind = 'depends_on'
+     GROUP BY candidate.entry_ordinal, candidate.dependency_ordinal
+),
+edge AS (
+    SELECT entry_ordinal, dependency_ordinal,
+           first_event_ordinal, dependency_position
+      FROM ranked_edge
+     WHERE dependency_position <= $3
+),
+reachable_node(node) AS (
+    SELECT unnest($2::numeric[])
+    UNION
+    SELECT edge.dependency_ordinal
+      FROM reachable_node
+      JOIN edge
+        ON edge.entry_ordinal = reachable_node.node
+)
+SELECT edge.entry_ordinal, edge.dependency_ordinal,
+       edge.first_event_ordinal, edge.dependency_position
+  FROM edge
+  JOIN reachable_node
+    ON reachable_node.node = edge.entry_ordinal
+ ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
 
 const DEPENDENCY_LIMIT_REACHED_SQL: &str = "SELECT
     NOT EXISTS (
@@ -132,53 +156,6 @@ const DEPENDENCY_LIMIT_REACHED_SQL: &str = "SELECT
                GROUP BY edge.dependency_ordinal
           ) AS current_dependency
     ) >= $4";
-
-const INVALID_DEPENDENCY_GRAPH_SQL: &str = "WITH RECURSIVE ranked_edge AS (
-    SELECT candidate.entry_ordinal, candidate.dependency_ordinal,
-           row_number() OVER (
-               PARTITION BY candidate.entry_ordinal
-               ORDER BY min(candidate.event_ordinal)
-           ) AS dependency_position
-      FROM session_plan_event AS candidate
-     WHERE candidate.session_id = $1
-       AND candidate.event_kind = 'depends_on'
-     GROUP BY candidate.entry_ordinal, candidate.dependency_ordinal
-),
-edge AS (
-    SELECT entry_ordinal, dependency_ordinal
-      FROM ranked_edge
-     WHERE dependency_position <= $3
-),
-dependency_closure(origin, node) AS (
-    SELECT entry_ordinal, dependency_ordinal
-      FROM edge
-    UNION
-    SELECT dependency_closure.origin, edge.dependency_ordinal
-      FROM dependency_closure
-      JOIN edge
-        ON edge.entry_ordinal = dependency_closure.node
-),
-relevant_node(node) AS (
-    SELECT unnest($2::numeric[])
-    UNION
-    SELECT dependency_closure.node
-      FROM dependency_closure
-     WHERE dependency_closure.origin = ANY($2::numeric[])
-)
-SELECT EXISTS (
-           SELECT 1
-             FROM dependency_closure
-             JOIN relevant_node
-               ON relevant_node.node = dependency_closure.origin
-            WHERE dependency_closure.origin = dependency_closure.node
-       )
-       OR EXISTS (
-           SELECT 1
-             FROM ranked_edge
-             JOIN relevant_node
-               ON relevant_node.node = ranked_edge.entry_ordinal
-            WHERE ranked_edge.dependency_position = $3
-       )";
 
 const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
   FROM session_plan_event
@@ -624,13 +601,13 @@ impl SessionPlanRepository {
         let dependency_rows = if entry_ordinals.is_empty() {
             Vec::new()
         } else {
-            let invalid_dependency_graph: bool = sqlx::query_scalar(INVALID_DEPENDENCY_GRAPH_SQL)
-                .bind(request.session().into_uuid())
-                .bind(&entry_ordinals)
-                .bind(dependency_query_limit)
-                .fetch_one(&mut *transaction)
-                .await?;
-            if invalid_dependency_graph {
+            let graph = load_relevant_dependency_graph(
+                &mut transaction,
+                request.session(),
+                &entries.iter().map(PlanEntry::id).collect::<Vec<_>>(),
+            )
+            .await?;
+            if dependency_graph_has_cycle(&graph) {
                 return Err(SessionPlanCorruption::InvalidEventSequence.into());
             }
             sqlx::query(CURRENT_DEPENDENCIES_SQL)
@@ -781,7 +758,7 @@ async fn find_dependency_cycle(
     entry: PlanEntryId,
     dependency: PlanEntryId,
 ) -> Result<Option<PlanDependencyCycle>, SessionPlanRepositoryError> {
-    let query_limit = dependency_query_limit()?;
+    let graph = load_relevant_dependency_graph(transaction, session, &[dependency]).await?;
     let mut queued = VecDeque::from([dependency]);
     let mut visited = HashSet::from([dependency]);
     let mut parents = HashMap::<PlanEntryId, PlanEntryId>::new();
@@ -802,17 +779,7 @@ async fn find_dependency_cycle(
                 .ok_or(SessionPlanCorruption::InvalidEventSequence)?;
             return Ok(Some(cycle));
         }
-        let outgoing: Vec<Decimal> = sqlx::query_scalar(DEPENDENCY_OUTGOING_SQL)
-            .bind(session.into_uuid())
-            .bind(Decimal::from(current.as_u64()))
-            .bind(query_limit)
-            .fetch_all(&mut **transaction)
-            .await?;
-        if outgoing.len() > MAX_PLAN_DEPENDENCIES_PER_ENTRY {
-            return Err(SessionPlanCorruption::InvalidEventSequence.into());
-        }
-        for value in outgoing {
-            let next = dependency_path_entry(value)?;
+        for next in graph.get(&current).into_iter().flatten().copied() {
             if visited.insert(next) {
                 parents.insert(next, current);
                 queued.push_back(next);
@@ -820,6 +787,66 @@ async fn find_dependency_cycle(
         }
     }
     Ok(None)
+}
+
+async fn load_relevant_dependency_graph(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+    roots: &[PlanEntryId],
+) -> Result<HashMap<PlanEntryId, Vec<PlanEntryId>>, SessionPlanRepositoryError> {
+    let root_ordinals = roots
+        .iter()
+        .map(|root| Decimal::from(root.as_u64()))
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(RELEVANT_DEPENDENCY_GRAPH_SQL)
+        .bind(session.into_uuid())
+        .bind(&root_ordinals)
+        .bind(dependency_query_limit()?)
+        .fetch_all(&mut **transaction)
+        .await?;
+    let capacity = dependency_capacity()?;
+    let mut graph = HashMap::<PlanEntryId, Vec<PlanEntryId>>::new();
+    for row in &rows {
+        let position: i64 = required(row, "dependency_position")?;
+        if position > capacity {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
+        let entry = dependency_path_entry(required(row, "entry_ordinal")?)?;
+        let dependency = dependency_path_entry(required(row, "dependency_ordinal")?)?;
+        graph.entry(entry).or_default().push(dependency);
+    }
+    Ok(graph)
+}
+
+fn dependency_graph_has_cycle(graph: &HashMap<PlanEntryId, Vec<PlanEntryId>>) -> bool {
+    let mut completed = HashSet::<PlanEntryId>::new();
+    for root in graph.keys().copied() {
+        if completed.contains(&root) {
+            continue;
+        }
+        let mut active = HashSet::from([root]);
+        let mut stack = vec![(root, 0_usize)];
+        while let Some((node, next_index)) = stack.last_mut() {
+            let dependencies = graph.get(node).map(Vec::as_slice).unwrap_or_default();
+            if *next_index == dependencies.len() {
+                let finished = *node;
+                stack.pop();
+                active.remove(&finished);
+                completed.insert(finished);
+                continue;
+            }
+            let dependency = dependencies[*next_index];
+            *next_index += 1;
+            if active.contains(&dependency) {
+                return true;
+            }
+            if !completed.contains(&dependency) {
+                active.insert(dependency);
+                stack.push((dependency, 0));
+            }
+        }
+    }
+    false
 }
 
 fn dependency_path_entry(value: Decimal) -> Result<PlanEntryId, SessionPlanRepositoryError> {

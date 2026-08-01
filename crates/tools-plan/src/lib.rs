@@ -1343,7 +1343,10 @@ fn event_matches_draft(event: &PlanEvent, draft: &PlanEventDraft) -> bool {
                 && event.ordinal() > stored_entry.creation_ordinal()
                 && event.ordinal() > stored_dependency.creation_ordinal()
         }
-        _ => false,
+        (PlanEventKind::Created { .. }, _)
+        | (PlanEventKind::TextRevised { .. }, _)
+        | (PlanEventKind::StatusChanged { .. }, _)
+        | (PlanEventKind::DependsOn { .. }, _) => false,
     }
 }
 

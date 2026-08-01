@@ -21124,6 +21124,38 @@ async fn insert_direct_dependency_event(
     .map(|_| ())
 }
 
+async fn insert_dependency_without_target(
+    pool: &PgPool,
+    fixture: &DependencyPlanFixture,
+    authorized: &AuthorizedToolAttempt,
+) -> Result<(), sqlx::Error> {
+    const PRIOR_EVENT_ORDINAL: u64 = 3;
+    const EVENT_ORDINAL: u64 = 4;
+    let correlation = authorized.correlation();
+    sqlx::query(
+        "INSERT INTO session_plan_event
+            (session_id, event_ordinal, prior_event_ordinal,
+             event_kind, entry_ordinal, dependency_ordinal,
+             entry_text, entry_status, provenance_turn_id,
+             provenance_issuing_turn_attempt_id, provenance_request_id,
+             provenance_attempt_id, provenance_dispatch_generation)
+         VALUES ($1, $2, $3, 'depends_on', $4, NULL, NULL, NULL,
+                 $5, $6, $7, $8, $9)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(EVENT_ORDINAL))
+    .bind(Decimal::from(PRIOR_EVENT_ORDINAL))
+    .bind(Decimal::from(fixture.prerequisite.as_u64()))
+    .bind(correlation.turn().into_uuid())
+    .bind(correlation.issuing_attempt().into_uuid())
+    .bind(correlation.request().into_uuid())
+    .bind(correlation.attempt().into_uuid())
+    .bind(Decimal::from(correlation.generation().as_u64()))
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
 fn dependency_edge(event: &PlanEvent) -> (PlanEntryId, PlanEntryId) {
     match event.kind() {
         PlanEventKind::DependsOn { entry, dependency } => (*entry, *dependency),
@@ -21252,6 +21284,48 @@ async fn session_plan_schema_trigger_rejects_a_dependency_cycle() -> Result<(), 
             .as_database_error()
             .and_then(|database| database.constraint()),
         Some("session_plan_dependency_cycle")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The declarative event-shape constraint rejects a dependency without its
+/// target even when the append trigger is disabled.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_shape_rejects_a_dependency_without_a_target() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![depends_plan_arguments(prerequisite, dependent)])
+            .await?;
+    let attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let error = insert_dependency_without_target(&pool, &fixture, &attempt)
+        .await
+        .expect_err("the event-shape constraint rejects the missing dependency");
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_event_shape")
     );
 
     pool.close().await;
