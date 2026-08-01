@@ -255,6 +255,12 @@ impl GoalRepository {
             GoalCommandResult::Applied(event) => event_starts_pursuit(event),
             GoalCommandResult::Rejected(_) => false,
         };
+        match &result {
+            GoalCommandResult::Applied(_) => {
+                lock_scheduler(&mut transaction, command.session()).await?;
+            }
+            GoalCommandResult::Rejected(_) => {}
+        }
         let turn_admission = if starts_pursuit {
             match current_origin_configuration(
                 &mut transaction,
@@ -864,6 +870,22 @@ async fn lock_session(
             .await?
             .is_some(),
     )
+}
+
+async fn lock_scheduler(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), GoalRepositoryError> {
+    let scheduler_exists =
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some();
+    if !scheduler_exists {
+        return Err(GoalCorruption::Missing("session scheduler row").into());
+    }
+    Ok(())
 }
 
 async fn commit(

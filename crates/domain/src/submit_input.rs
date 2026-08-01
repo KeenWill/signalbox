@@ -2776,32 +2776,34 @@ fn validate_turn_origin_reconstitution_input(
     let mut turns = HashSet::with_capacity(input.chain.len());
 
     for facts in &input.chain {
-        let TurnOriginProvenance::Submit(receipt) = &facts.provenance else {
-            let TurnOriginProvenance::Goal(goal) = &facts.provenance else {
-                return None;
-            };
-            if validated.is_some()
-                || facts.source_terminal.is_some()
-                || !accepted_inputs.insert(goal.accepted_input)
-                || !turns.insert(goal.turn)
-                || facts.lifecycle.id() != goal.accepted_input
-                || facts.lifecycle.disposition() != &AcceptedInputDisposition::OriginOf(goal.turn)
-                || facts.queue_accepted_input != goal.accepted_input
-                || facts.queue_session != goal.session
-                || facts.queue_turn != goal.turn
-                || facts.queue_order != AcceptedInputQueueOrder::ordinary(goal.acceptance_position)
-                || goal_turn_source_references_turn(goal.source, goal.turn)
-            {
-                return None;
+        let receipt = match &facts.provenance {
+            TurnOriginProvenance::Submit(receipt) => receipt,
+            TurnOriginProvenance::Goal(goal) => {
+                if validated.is_some()
+                    || facts.source_terminal.is_some()
+                    || !accepted_inputs.insert(goal.accepted_input)
+                    || !turns.insert(goal.turn)
+                    || facts.lifecycle.id() != goal.accepted_input
+                    || facts.lifecycle.disposition()
+                        != &AcceptedInputDisposition::OriginOf(goal.turn)
+                    || facts.queue_accepted_input != goal.accepted_input
+                    || facts.queue_session != goal.session
+                    || facts.queue_turn != goal.turn
+                    || facts.queue_order
+                        != AcceptedInputQueueOrder::ordinary(goal.acceptance_position)
+                    || goal_turn_source_references_turn(goal.source, goal.turn)
+                {
+                    return None;
+                }
+                validated = Some(ValidatedOriginPosition {
+                    session: goal.session,
+                    turn: goal.turn,
+                    acceptance_position: goal.acceptance_position,
+                    accepted_input: goal.accepted_input,
+                    content: goal.content.clone(),
+                });
+                continue;
             }
-            validated = Some(ValidatedOriginPosition {
-                session: goal.session,
-                turn: goal.turn,
-                acceptance_position: goal.acceptance_position,
-                accepted_input: goal.accepted_input,
-                content: goal.content.clone(),
-            });
-            continue;
         };
         let SubmitInputResult::Applied(applied) = receipt.result() else {
             return None;

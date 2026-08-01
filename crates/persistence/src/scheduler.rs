@@ -103,6 +103,35 @@ impl PostgresEligibilitySweep {
                  )
                  GROUP BY queued.session_id
                 UNION
+                SELECT terminal.session_id
+                  FROM turn_lifecycle AS terminal
+                  JOIN goal_turn AS terminal_goal
+                    ON terminal_goal.session_id = terminal.session_id
+                   AND terminal_goal.turn_id = terminal.turn_id
+                  JOIN goal_event AS current_event
+                    ON current_event.session_id = terminal.session_id
+                 WHERE terminal.state_kind = 'terminal'
+                   AND current_event.event_kind IN (
+                       'commissioned', 'resumed', 'superseded'
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM goal_event AS later_event
+                        WHERE later_event.session_id = current_event.session_id
+                          AND later_event.event_ordinal > current_event.event_ordinal
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM goal_turn AS later_goal
+                         JOIN turn_lifecycle AS later_lifecycle
+                           ON later_lifecycle.session_id = later_goal.session_id
+                          AND later_lifecycle.turn_id = later_goal.turn_id
+                        WHERE later_goal.session_id = terminal_goal.session_id
+                          AND later_lifecycle.acceptance_position
+                              > terminal.acceptance_position
+                   )
+                 GROUP BY terminal.session_id
+                UNION
                 SELECT active.session_id
                   FROM turn_lifecycle AS active
                  WHERE active.state_kind = 'active'
