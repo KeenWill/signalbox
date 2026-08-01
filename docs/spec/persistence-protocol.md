@@ -27,9 +27,9 @@ lock inventory were verified against PR #314
 was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified against this PR (`agent/plan-tool`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #383 (`agent/goal-mode`); and the session-placement event, current head, and
-update lock were verified through this PR (`agent/scoped-visibility`). This page
-covers the Postgres representation in `crates/persistence` (source and
+PR #384 (`agent/goal-mode-runtime`); and the session-placement event, current
+head, and update lock were verified through this PR (`agent/scoped-visibility`).
+This page covers the Postgres representation in `crates/persistence` (source and
 migrations), migration discipline, durable command storage and replay equality,
 the fail-closed reconstitution boundary, the lock protocol, pending-steering
 durable state, the corruption taxonomy, commit-ambiguity handling, and the
@@ -135,9 +135,10 @@ statement of record and current state is not rebuilt by replaying events
 has a session-local append-only event sequence as its durable statement of
 record, and its current state is the checked fold of that complete history. The
 plan exception was verified against this PR (`agent/plan-tool`), and the goal
-exception through PR #383 (`agent/goal-mode`). Why: database-level invariants
-(INV-009, INV-012) stay declarative over current-state rows, while plan and goal
-history is retained product evidence rather than an implementation log.
+exception through PR #384 (`agent/goal-mode-runtime`). Why: database-level
+invariants (INV-009, INV-012) stay declarative over current-state rows, while
+plan and goal history is retained product evidence rather than an implementation
+log.
 
 Implemented table families (across the forward-only migrations):
 
