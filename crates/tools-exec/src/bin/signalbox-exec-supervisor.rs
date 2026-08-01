@@ -647,9 +647,11 @@ mod linux {
         loop {
             let children = process_children(supervisor).unwrap_or_default();
             for raw_pid in children {
-                kill_process_group(raw_pid);
-                if let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) {
-                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                if let Ok(Some(process)) = pin_child_process(supervisor, raw_pid) {
+                    let _ = rustix::process::pidfd_send_signal(
+                        &process.pidfd,
+                        rustix::process::Signal::KILL,
+                    );
                 }
             }
             reap_available_children();
@@ -890,12 +892,6 @@ mod linux {
         }
     }
 
-    fn kill_process_group(raw_pid: u32) {
-        if let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-    }
-
     fn observe_descendants(
         root: u32,
         supervisor: u32,
@@ -960,7 +956,7 @@ mod linux {
                     if raw_pid == root || known.contains(&raw_pid) {
                         continue;
                     }
-                    if let Some(process) = pin_process(raw_pid)? {
+                    if let Some(process) = pin_child_process(parent, raw_pid)? {
                         tracked.insert(raw_pid, process);
                         known.insert(raw_pid);
                         changed = true;
@@ -1022,6 +1018,17 @@ mod linux {
         Ok(Some(TrackedProcess { pidfd, start_time }))
     }
 
+    fn pin_child_process(parent: u32, raw_pid: u32) -> Result<Option<TrackedProcess>, ()> {
+        let Some(process) = pin_process(raw_pid)? else {
+            return Ok(None);
+        };
+        let expected = ProcessIdentity {
+            parent,
+            start_time: process.start_time,
+        };
+        Ok((process_identity(raw_pid)? == Some(expected)).then_some(process))
+    }
+
     fn pidfd_has_exited(pidfd: &rustix::fd::OwnedFd) -> Result<bool, ()> {
         let mut descriptors = [rustix::event::PollFd::new(
             pidfd,
@@ -1039,19 +1046,31 @@ mod linux {
     }
 
     fn process_start_time(pid: u32) -> Result<Option<u64>, ()> {
+        Ok(process_identity(pid)?.map(|identity| identity.start_time))
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ProcessIdentity {
+        parent: u32,
+        start_time: u64,
+    }
+
+    fn process_identity(pid: u32) -> Result<Option<ProcessIdentity>, ()> {
         let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
             Err(error) if process_gone(&error) => return Ok(None),
             Err(_) => return Err(()),
         };
         let command_end = stat.rfind(')').ok_or(())?;
-        let start_time = stat[command_end + 1..]
-            .split_whitespace()
-            .nth(19)
+        let mut fields = stat[command_end + 1..].split_whitespace();
+        let parent = fields
+            .clone()
+            .nth(1)
             .ok_or(())?
-            .parse::<u64>()
+            .parse::<u32>()
             .map_err(|_| ())?;
-        Ok(Some(start_time))
+        let start_time = fields.nth(19).ok_or(())?.parse::<u64>().map_err(|_| ())?;
+        Ok(Some(ProcessIdentity { parent, start_time }))
     }
 
     fn process_gone(error: &std::io::Error) -> bool {
@@ -1156,6 +1175,24 @@ mod linux {
                 outer_startup_state(Ok(Some(exited)), Ok(false)),
                 OuterStartupState::Failed
             );
+        }
+
+        #[test]
+        fn pinned_child_must_still_name_its_observed_parent()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let raw_pid = std::process::id();
+            let identity = process_identity(raw_pid)
+                .map_err(|()| std::io::Error::other("read current process identity"))?
+                .ok_or_else(|| std::io::Error::other("current process disappeared"))?;
+
+            let accepted = pin_child_process(identity.parent, raw_pid)
+                .map_err(|()| std::io::Error::other("pin current process as child"))?;
+            let rejected = pin_child_process(raw_pid, raw_pid)
+                .map_err(|()| std::io::Error::other("reject wrong process parent"))?;
+
+            assert!(accepted.is_some());
+            assert!(rejected.is_none());
+            Ok(())
         }
 
         #[test]
