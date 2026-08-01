@@ -603,13 +603,13 @@ async fn lock_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, sqlx::Error> {
-    Ok(sqlx::query_scalar::<_, Uuid>(
-        "SELECT session_id FROM session WHERE session_id = $1 FOR UPDATE",
+    Ok(
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some(),
     )
-    .bind(session_id_to_uuid(session))
-    .fetch_optional(&mut *connection)
-    .await?
-    .is_some())
 }
 
 async fn commit(
