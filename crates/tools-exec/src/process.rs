@@ -676,7 +676,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 #[cfg(not(target_os = "linux"))]
                 bind_source: &self.workspace_root,
                 launcher: &self.sandbox_launcher,
-                working_directory_fd: None,
+                working_directory_bind_source: None,
             },
             &probe_program,
             &[String::from("-c"), String::from("exit 0")],
@@ -732,9 +732,11 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         bind_source: &self.workspace_root,
                         launcher: &self.sandbox_launcher,
                         #[cfg(target_os = "linux")]
-                        working_directory_fd: Some(working_directory_identity.raw_fd()),
+                        working_directory_bind_source: Some(
+                            &working_directory_identity.bind_source,
+                        ),
                         #[cfg(not(target_os = "linux"))]
-                        working_directory_fd: None,
+                        working_directory_bind_source: None,
                     },
                     &arguments.program,
                     &arguments.arguments,
@@ -884,10 +886,6 @@ impl WorkspaceDirectoryIdentity {
         ));
         Ok(self)
     }
-
-    fn raw_fd(&self) -> i32 {
-        rustix::fd::AsRawFd::as_raw_fd(&self._directory)
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1011,7 +1009,7 @@ struct SandboxLaunchContext<'a> {
     workspace_root: &'a Path,
     bind_source: &'a Path,
     launcher: &'a Path,
-    working_directory_fd: Option<i32>,
+    working_directory_bind_source: Option<&'a Path>,
 }
 
 fn bwrap_request(
@@ -1080,10 +1078,10 @@ fn bwrap_request(
     .collect::<Vec<_>>();
     bwrap_arguments.push(context.bind_source.as_os_str().to_owned());
     bwrap_arguments.push(OsString::from(SANDBOX_WORKSPACE));
-    if let Some(working_directory_fd) = context.working_directory_fd {
+    if let Some(working_directory_bind_source) = context.working_directory_bind_source {
         bwrap_arguments.extend([
-            OsString::from("--bind-fd"),
-            OsString::from(working_directory_fd.to_string()),
+            OsString::from("--bind"),
+            working_directory_bind_source.as_os_str().to_owned(),
             OsString::from(&sandbox_directory),
         ]);
     }
@@ -2689,7 +2687,7 @@ mod tests {
             OsString::from("--chdir"),
             OsString::from(format!("{SANDBOX_WORKSPACE}/{SANDBOXED_WORKING_DIRECTORY}")),
         ];
-        let bind_fd_destination =
+        let working_directory_bind_destination =
             OsString::from(format!("{SANDBOX_WORKSPACE}/{SANDBOXED_WORKING_DIRECTORY}"));
         let launcher_arguments = [
             OsString::from("--ro-bind"),
@@ -2732,8 +2730,14 @@ mod tests {
                 .windows(chdir_arguments.len())
                 .any(|arguments| arguments == chdir_arguments)
         );
-        assert!(request.arguments.contains(&OsString::from("--bind-fd")));
-        assert!(request.arguments.contains(&bind_fd_destination));
+        let working_directory_bind = request
+            .arguments
+            .windows(3)
+            .find(|arguments| {
+                arguments[0] == "--bind" && arguments[2] == working_directory_bind_destination
+            })
+            .ok_or("nested working directory bind")?;
+        assert!(Path::new(&working_directory_bind[1]).starts_with("/proc/self/fd/"));
         assert!(
             request
                 .arguments
