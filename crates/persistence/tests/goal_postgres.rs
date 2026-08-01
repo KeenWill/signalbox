@@ -17,8 +17,8 @@ use signalbox_domain::{
     GoalGuidance, GoalNeed, GoalSchedulerProvenance, GoalStatement, GoalUserAction,
     GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId,
-    UserContent,
+    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput, TranscriptAncestry,
+    TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -26,6 +26,9 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
+    outbox::{
+        DispatchedOutboxEventKind, OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
+    },
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
@@ -242,8 +245,8 @@ fn assert_applied_command(outcome: GoalCommandHandlingOutcome) {
     };
 }
 
-/// INV-048: a goal-owned accepted input activates without a synthetic user
-/// command and remains a canonical active origin for the unchanged steer verb.
+/// INV-048: a goal-owned accepted input dispatches and activates without a
+/// synthetic user command, then remains a canonical active origin for steer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
@@ -253,12 +256,13 @@ async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
         .handle(creation())
         .await?;
     let candidates = turn_candidates(0xb01);
+    let goal_content = String::from("finish the commissioned task");
     GoalRepository::new(pool.clone())
         .handle_user_command(
             GoalUserCommand::new(
                 command(ATTACH_COMMAND),
                 session(SESSION),
-                GoalUserAction::Attach(statement("finish the commissioned task")),
+                GoalUserAction::Attach(statement(&goal_content)),
             ),
             Some(candidates),
             |_| None,
@@ -278,6 +282,46 @@ async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
     .fetch_one(&pool)
     .await?;
     assert_eq!(accepted_events, 1);
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut created = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                created = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    let created = created.expect("the session creation event was offered");
+    assert_eq!(created.session(), session(SESSION));
+    assert!(matches!(
+        created.kind(),
+        DispatchedOutboxEventKind::SessionCreated
+    ));
+
+    let mut accepted = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                accepted = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+    let accepted = accepted.expect("the goal input acceptance event was offered");
+    assert_eq!(accepted.session(), session(SESSION));
+    assert_eq!(
+        accepted.kind(),
+        &DispatchedOutboxEventKind::InputAccepted {
+            accepted_input: candidates.accepted_input(),
+            turn: candidates.turn(),
+            acceptance_position: SessionInputPosition::first(),
+            content: goal_content,
+        }
+    );
 
     let activation = StartEligibleTurnRepository::new(pool.clone())
         .handle(
