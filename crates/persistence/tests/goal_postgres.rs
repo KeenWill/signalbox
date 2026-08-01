@@ -162,9 +162,8 @@ async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
 
     assert_eq!(
         GoalRepository::new(pool.clone())
-            .reconcile_after_execution(
+            .reconcile_current_after_execution(
                 session(SESSION),
-                candidates.turn(),
                 turn_candidates(0xc01),
                 GoalNeed::try_new(String::from("repair execution"))
                     .expect("fixture need is admitted"),

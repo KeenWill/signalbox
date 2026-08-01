@@ -22,7 +22,8 @@ use crate::{
     commit_failure_is_ambiguous,
     goal_turn::{
         GoalTurnCandidates, GoalTurnContinuationOutcome, GoalTurnTerminalState,
-        continuation_exists, goal_turn_generation, goal_turn_terminal_state, insert_goal_turn,
+        continuation_exists, current_goal_turn, goal_turn_generation, goal_turn_terminal_state,
+        insert_goal_turn,
     },
     mapping::{
         DurableCommandIdMappingError, PositiveOrdinalMappingError, durable_command_id_from_uuid,
@@ -284,10 +285,9 @@ impl GoalRepository {
     /// Nonterminal work is left alone, completion queues one idempotent
     /// successor, and every unsuccessful terminal disposition blocks pursuit
     /// with scheduler-only execution-failure provenance.
-    pub async fn reconcile_after_execution<SelectDefinition>(
+    pub async fn reconcile_current_after_execution<SelectDefinition>(
         &self,
         session: SessionId,
-        predecessor: TurnId,
         candidates: GoalTurnCandidates,
         failure_need: GoalNeed,
         select_definition: SelectDefinition,
@@ -308,15 +308,10 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTurnContinuationOutcome::NotPursuing);
         }
-        let Some(generation) = goal_turn_generation(&mut transaction, session, predecessor).await?
-        else {
-            transaction.rollback().await?;
-            return Ok(GoalTurnContinuationOutcome::NotCurrentGoalTurn);
-        };
-        if generation != goal.current().generation() {
-            transaction.rollback().await?;
-            return Ok(GoalTurnContinuationOutcome::NotCurrentGoalTurn);
-        }
+        let generation = goal.current().generation();
+        let predecessor = current_goal_turn(&mut transaction, session, generation)
+            .await?
+            .ok_or(GoalCorruption::Missing("current goal turn"))?;
         match goal_turn_terminal_state(&mut transaction, session, predecessor).await? {
             GoalTurnTerminalState::NotTerminal => {
                 transaction.rollback().await?;

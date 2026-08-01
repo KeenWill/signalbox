@@ -223,6 +223,29 @@ pub(crate) async fn goal_turn_generation(
     Ok(Some(GoalGeneration::new(generation)))
 }
 
+pub(crate) async fn current_goal_turn(
+    connection: &mut PgConnection,
+    session: SessionId,
+    generation: GoalGeneration,
+) -> Result<Option<TurnId>, GoalRepositoryError> {
+    let turn = sqlx::query_scalar::<_, Uuid>(
+        "SELECT goal.turn_id
+           FROM goal_turn AS goal
+           JOIN accepted_input AS accepted
+             ON accepted.accepted_input_id = goal.accepted_input_id
+            AND accepted.session_id = goal.session_id
+            AND accepted.origin_turn_id = goal.turn_id
+          WHERE goal.session_id = $1 AND goal.goal_generation = $2
+          ORDER BY accepted.acceptance_position DESC
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(Decimal::from(generation.get()))
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(turn.map(crate::mapping::turn_id_from_uuid))
+}
+
 pub(crate) async fn goal_turn_terminal_state(
     connection: &mut PgConnection,
     session: SessionId,
