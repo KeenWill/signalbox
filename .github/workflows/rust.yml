@@ -6,10 +6,13 @@ on:
     branches: [main]
 
 # Superseded pull-request runs release their slots against the public
-# concurrency cap. Only pull-request runs are cancelable: a run for any other
-# trigger always finishes.
+# concurrency cap. Every other event takes a group of its own: sharing one
+# group would let a third run cancel a second still pending behind the first,
+# which `cancel-in-progress: false` does not prevent.
 concurrency:
-  group: rust-${{ github.ref }}
+  group: >-
+    rust-${{ github.event_name == 'pull_request'
+    && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
