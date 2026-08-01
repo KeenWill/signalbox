@@ -14,10 +14,11 @@ surface was verified against the implementing stack through PR #252
 (`agent/import-directory-scan`); the derived display title and its startup
 backfill through PR #304 (`agent/unified-conversation-listing`); and the
 imported-conversation inspection read through PR #303
-(`agent/imported-conversation-inspection`). Later session creation from one
-imported frontier is owned by
-[sessions-and-transcript](sessions-and-transcript.md); native turn activation
-and model-call rendering are owned by
+(`agent/imported-conversation-inspection`); and the chunked transport, total
+bound, and typed rejection evidence against `agent/import-chunks-protocol` and
+`agent/import-chunks`. Later session creation from one imported frontier is
+owned by [sessions-and-transcript](sessions-and-transcript.md); native turn
+activation and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
