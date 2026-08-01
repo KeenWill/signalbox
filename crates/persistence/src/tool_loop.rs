@@ -1765,6 +1765,7 @@ async fn load_user_decision_receipts(
                 command.result_earliest_undecided_request_id,
                 request.request_ordinal, request.tool_name,
                 request.arguments_kind, request.arguments_text,
+                request.approval_posture,
                 request.producing_model_call_id, request.session_id,
                 request.turn_id
            FROM decide_tool_request_command AS command
