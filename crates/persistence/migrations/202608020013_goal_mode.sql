@@ -63,7 +63,8 @@ CREATE TABLE goal_command (
         rejection_kind IS NULL OR rejection_kind IN (
             'session_not_found', 'goal_already_attached', 'goal_not_attached',
             'unknown_model_alias', 'requires_blocked', 'requires_pursuing_or_blocked',
-            'generation_exhausted', 'event_ordinal_exhausted'
+            'generation_exhausted', 'event_ordinal_exhausted',
+            'acceptance_position_exhausted'
         )
     ),
     result_event_ordinal numeric(20, 0) CHECK (
@@ -84,11 +85,13 @@ CREATE TABLE goal_command (
         OR rejection_kind = 'session_not_found'
         OR (operation_kind = 'attach' AND rejection_kind IN (
             'goal_already_attached', 'unknown_model_alias',
-            'generation_exhausted', 'event_ordinal_exhausted'
+            'generation_exhausted', 'event_ordinal_exhausted',
+            'acceptance_position_exhausted'
         ))
         OR (operation_kind = 'resume' AND rejection_kind IN (
             'goal_not_attached', 'unknown_model_alias',
-            'requires_blocked', 'event_ordinal_exhausted'
+            'requires_blocked', 'event_ordinal_exhausted',
+            'acceptance_position_exhausted'
         ))
         OR (operation_kind = 'stop' AND rejection_kind IN (
             'goal_not_attached', 'requires_pursuing_or_blocked',
@@ -97,7 +100,7 @@ CREATE TABLE goal_command (
         OR (operation_kind = 'supersede' AND rejection_kind IN (
             'goal_not_attached', 'unknown_model_alias',
             'requires_pursuing_or_blocked', 'generation_exhausted',
-            'event_ordinal_exhausted'
+            'event_ordinal_exhausted', 'acceptance_position_exhausted'
         ))
     ),
     CONSTRAINT goal_command_session_correlation_key UNIQUE (command_id, session_id),
@@ -255,6 +258,62 @@ ALTER TABLE goal_event
         REFERENCES goal_turn(session_id, turn_id, goal_generation)
 
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+CREATE FUNCTION enforce_goal_model_declaration_request()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    stored_tool_name text;
+    stored_arguments_kind text;
+    stored_arguments jsonb;
+    expected_arguments jsonb;
+BEGIN
+    IF NEW.model_tool_request_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT
+        request.tool_name,
+        request.arguments_kind,
+        CASE
+            WHEN request.arguments_kind = 'json'
+                THEN request.arguments_text::jsonb
+        END
+      INTO stored_tool_name, stored_arguments_kind, stored_arguments
+      FROM tool_request AS request
+     WHERE request.request_id = NEW.model_tool_request_id;
+
+    expected_arguments := CASE NEW.event_kind
+        WHEN 'achieved' THEN jsonb_build_object(
+            'transition', 'achieved',
+            'report', NEW.report
+        )
+        WHEN 'blocked' THEN jsonb_build_object(
+            'transition', 'blocked',
+            'reason', NEW.blocked_reason,
+            'need', NEW.need
+        )
+    END;
+
+    IF stored_tool_name IS DISTINCT FROM 'goal_declare'
+        OR stored_arguments_kind IS DISTINCT FROM 'json'
+        OR stored_arguments IS DISTINCT FROM expected_arguments
+    THEN
+        RAISE EXCEPTION 'goal model event lacks its exact declaration request'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'goal_event_model_declaration_request';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER goal_event_model_declaration_request
+AFTER INSERT OR UPDATE ON goal_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION enforce_goal_model_declaration_request();
+
 -- Queued goal turns remain immutable history after their generation ends, but
 -- only the queued turn of the current pursuing generation participates in
 -- runtime scheduling or queue predecessor selection.

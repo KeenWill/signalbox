@@ -20,6 +20,24 @@ use crate::{
 
 /// Fresh identities for one goal-owned accepted-input origin and turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GoalTurnInsertion {
+    position: SessionInputPosition,
+    candidates: GoalTurnCandidates,
+}
+
+impl GoalTurnInsertion {
+    pub(crate) const fn new(
+        position: SessionInputPosition,
+        candidates: GoalTurnCandidates,
+    ) -> Self {
+        Self {
+            position,
+            candidates,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GoalTurnCandidates {
     accepted_input: AcceptedInputId,
     turn: TurnId,
@@ -30,6 +48,12 @@ pub(crate) enum GoalTurnTerminalState {
     NotTerminal,
     Completed,
     Unsuccessful,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GoalTurnAcceptancePosition {
+    Available(SessionInputPosition),
+    Exhausted { last: SessionInputPosition },
 }
 
 #[derive(FromRow)]
@@ -70,6 +94,11 @@ pub enum GoalTurnContinuationOutcome {
         /// The unavailable alias selected by the current defaults epoch.
         alias: ModelAlias,
     },
+    /// The session's accepted-input position cannot advance beyond `u64::MAX`.
+    AcceptancePositionExhausted {
+        /// The maximum durable position already occupied by the session.
+        last: SessionInputPosition,
+    },
     /// This predecessor already has its one durable goal successor.
     AlreadyScheduled,
 }
@@ -94,15 +123,10 @@ impl GoalTurnCandidates {
     }
 }
 
-pub(crate) async fn insert_goal_turn(
+pub(crate) async fn next_goal_turn_acceptance_position(
     connection: &mut PgConnection,
     session: SessionId,
-    generation: GoalGeneration,
-    source: GoalTurnSource,
-    content: &str,
-    configuration: &OriginConfiguration,
-    candidates: GoalTurnCandidates,
-) -> Result<(), GoalRepositoryError> {
+) -> Result<GoalTurnAcceptancePosition, GoalRepositoryError> {
     let previous = sqlx::query_scalar::<_, Decimal>(
         "SELECT acceptance_position
            FROM accepted_input
@@ -116,12 +140,26 @@ pub(crate) async fn insert_goal_turn(
     .map(input_position_from_numeric)
     .transpose()
     .map_err(GoalCorruption::InvalidOrdinal)?;
-    let position = match previous {
-        Some(previous) => previous.checked_next().ok_or(GoalCorruption::Inconsistent(
-            "goal turn acceptance position exhausted",
-        ))?,
-        None => SessionInputPosition::first(),
-    };
+    Ok(match previous {
+        Some(last) => match last.checked_next() {
+            Some(position) => GoalTurnAcceptancePosition::Available(position),
+            None => GoalTurnAcceptancePosition::Exhausted { last },
+        },
+        None => GoalTurnAcceptancePosition::Available(SessionInputPosition::first()),
+    })
+}
+
+pub(crate) async fn insert_goal_turn(
+    connection: &mut PgConnection,
+    session: SessionId,
+    generation: GoalGeneration,
+    source: GoalTurnSource,
+    content: &str,
+    configuration: &OriginConfiguration,
+    insertion: GoalTurnInsertion,
+) -> Result<(), GoalRepositoryError> {
+    let position = insertion.position;
+    let candidates = insertion.candidates;
     let requested = encode_selection(configuration.requested().model());
     let frozen = encode_frozen(configuration.effective().model());
     let accepted = accepted_input_id_to_uuid(candidates.accepted_input());

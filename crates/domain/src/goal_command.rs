@@ -64,6 +64,8 @@ pub enum GoalCommandRejection {
     GoalNotAttached,
     /// The session's selected model alias was unknown at turn acceptance.
     UnknownModelAlias,
+    /// The session's accepted-input position cannot advance beyond `u64::MAX`.
+    AcceptancePositionExhausted,
     /// Resume requires the current generation to be blocked.
     RequiresBlocked,
     /// Stop and supersede require a pursuing or blocked generation.

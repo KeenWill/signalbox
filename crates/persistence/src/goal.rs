@@ -21,9 +21,10 @@ use crate::{
     command_registry::{self, CommandKind, GOAL_KIND, RegistryCorruption, RegistryInspectionError},
     commit_failure_is_ambiguous,
     goal_turn::{
-        GoalTurnCandidates, GoalTurnContinuationOutcome, GoalTurnTerminalState,
-        continuation_exists, current_goal_turn, goal_turn_frozen_alias_definition,
-        goal_turn_generation, goal_turn_terminal_state, insert_goal_turn,
+        GoalTurnAcceptancePosition, GoalTurnCandidates, GoalTurnContinuationOutcome,
+        GoalTurnInsertion, GoalTurnTerminalState, continuation_exists, current_goal_turn,
+        goal_turn_frozen_alias_definition, goal_turn_generation, goal_turn_terminal_state,
+        insert_goal_turn, next_goal_turn_acceptance_position,
     },
     mapping::{
         DurableCommandIdMappingError, GoalEventDiscriminator, GoalOperationKind,
@@ -248,7 +249,7 @@ impl GoalRepository {
         } else {
             apply_user_command(&mut transaction, &command).await?
         };
-        let configuration = if let GoalCommandResult::Applied(event) = &result
+        let turn_admission = if let GoalCommandResult::Applied(event) = &result
             && event_starts_pursuit(event)
         {
             match current_origin_configuration(
@@ -258,7 +259,21 @@ impl GoalRepository {
             )
             .await?
             {
-                CurrentOriginConfiguration::Selected(configuration) => Some(configuration),
+                CurrentOriginConfiguration::Selected(configuration) => {
+                    match next_goal_turn_acceptance_position(&mut transaction, command.session())
+                        .await?
+                    {
+                        GoalTurnAcceptancePosition::Available(position) => {
+                            Some((configuration, position))
+                        }
+                        GoalTurnAcceptancePosition::Exhausted { .. } => {
+                            result = GoalCommandResult::Rejected(
+                                GoalCommandRejection::AcceptancePositionExhausted,
+                            );
+                            None
+                        }
+                    }
+                }
                 CurrentOriginConfiguration::UnknownAlias(_) => {
                     result = GoalCommandResult::Rejected(GoalCommandRejection::UnknownModelAlias);
                     None
@@ -274,8 +289,8 @@ impl GoalRepository {
                 let candidates = candidates.ok_or(GoalCorruption::Missing(
                     "turn candidates for pursuing command",
                 ))?;
-                let configuration = configuration.ok_or(GoalCorruption::Missing(
-                    "configuration for pursuing command",
+                let (configuration, position) = turn_admission.ok_or(GoalCorruption::Missing(
+                    "turn admission for pursuing command",
                 ))?;
                 let goal = load_goal_from_connection(&mut transaction, command.session())
                     .await?
@@ -287,7 +302,7 @@ impl GoalRepository {
                     GoalTurnSource::UserEvent(event.ordinal()),
                     pursuit_input(&goal, event)?,
                     &configuration,
-                    candidates,
+                    GoalTurnInsertion::new(position, candidates),
                 )
                 .await?;
             }
@@ -391,6 +406,13 @@ impl GoalRepository {
                 return Ok(GoalTurnContinuationOutcome::UnknownModelAlias { alias });
             }
         };
+        let position = match next_goal_turn_acceptance_position(&mut transaction, session).await? {
+            GoalTurnAcceptancePosition::Available(position) => position,
+            GoalTurnAcceptancePosition::Exhausted { last } => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::AcceptancePositionExhausted { last });
+            }
+        };
         insert_goal_turn(
             &mut transaction,
             session,
@@ -398,7 +420,7 @@ impl GoalRepository {
             GoalTurnSource::SuccessfulTurn(predecessor),
             goal.current().statement().as_str(),
             &configuration,
-            candidates,
+            GoalTurnInsertion::new(position, candidates),
         )
         .await?;
         commit(transaction).await?;
@@ -474,6 +496,13 @@ impl GoalRepository {
         }
         let generation = goal_turn_generation(&mut transaction, session, transition.turn()).await?;
         if generation != Some(goal.current().generation()) {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+        }
+        if matches!(transition, SystemTransition::ExecutionFailure { .. })
+            && current_goal_turn(&mut transaction, session, goal.current().generation()).await?
+                != Some(transition.turn())
+        {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
         }

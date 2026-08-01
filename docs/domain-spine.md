@@ -7040,6 +7040,7 @@ pub enum GoalCommandRejection {
     GoalAlreadyAttached,
     GoalNotAttached,
     UnknownModelAlias,
+    AcceptancePositionExhausted,
     RequiresBlocked,
     RequiresPursuingOrBlocked,
     GenerationExhausted,
