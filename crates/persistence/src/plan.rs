@@ -70,7 +70,7 @@ const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
  LIMIT 1";
 
 const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
-           WHEN head.event_ordinal IS NULL THEN latest.event_ordinal IS NOT NULL
+           WHEN head.event_ordinal IS NULL THEN latest.row_present IS NOT NULL
            ELSE latest.event_ordinal IS DISTINCT FROM head.event_ordinal
                 OR certified.event_ordinal IS NULL
                 OR NOT session_plan_event_has_authority(certified)
@@ -79,7 +79,7 @@ const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
   LEFT JOIN session_plan_head AS head
     ON head.session_id = $1
   LEFT JOIN LATERAL (
-      SELECT event_ordinal
+      SELECT event_ordinal, TRUE AS row_present
         FROM session_plan_event
        WHERE session_id = $1
        ORDER BY event_ordinal DESC
