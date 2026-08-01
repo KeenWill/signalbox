@@ -1725,7 +1725,12 @@ where
                                 .copied()
                                 .unwrap_or(InitialToolApproval::Confirm);
                             approval_index += 1;
-                            every_request_approved &= approval != InitialToolApproval::Confirm;
+                            every_request_approved &= match approval {
+                                InitialToolApproval::Confirm
+                                | InitialToolApproval::AlwaysConfirm => false,
+                                InitialToolApproval::PolicyAuto
+                                | InitialToolApproval::SessionBlanket => true,
+                            };
                             continuing.push(ToolResponsePartIdentity::tool_call(
                                 self.ids.next_semantic_entry_id(),
                                 self.ids.next_tool_request_id(),
@@ -3052,6 +3057,18 @@ mod tests {
         };
         assert_eq!(*first_approval, InitialToolApproval::PolicyAuto);
         assert_eq!(*second_approval, InitialToolApproval::Confirm);
+
+        let non_overridable_approvals = [
+            InitialToolApproval::PolicyAuto,
+            InitialToolApproval::AlwaysConfirm,
+        ];
+        service.ids = FixedIds::baseline();
+        let ModelCallTerminalIdentityCandidates::ToolRound { continuing, .. } =
+            service.next_terminal_identities(&observation, &non_overridable_approvals)
+        else {
+            panic!("tool response requires both race-safe closures");
+        };
+        assert_eq!(continuing.continuation_attempt(), None);
         assert_eq!(
             stopped,
             StoppedToolRoundModelCallIdentities::new(
