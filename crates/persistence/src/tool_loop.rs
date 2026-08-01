@@ -2439,6 +2439,15 @@ async fn persist_batch_decision(
             ));
         }
     }
+    outbox::append(
+        connection,
+        OutboxEvent::ToolApprovalDecided {
+            session: decision.batch().session(),
+            turn: decision.batch().turn(),
+            request: applied.resolution().request(),
+        },
+    )
+    .await?;
     Ok(())
 }
 

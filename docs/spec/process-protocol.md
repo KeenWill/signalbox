@@ -6,6 +6,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
+The tool-approval decision event surface was re-verified through PR #396
+(`agent/approval-judge`).
+
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
@@ -1419,6 +1422,7 @@ closed `event` object. The protocol admits these event shapes:
 | `goal_turn_retired`            | `turn_id`                                                                     |
 | `turn_activated`               | `turn_id` and `current_attempt_id`                                            |
 | `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                       |
+| `tool_approval_decided`        | `turn_id`, `tool_request_id`, `decision`, `decider`, and nullable `rationale` |
 | `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
 | `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                     |
 | `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
@@ -1436,6 +1440,12 @@ The protocol additionally admits
 The event is appended atomically with the completed dedicated call, summary
 entry, and projected frontier. A follower receives the event even when its
 initial snapshot predates the compaction commit.
+
+The `tool_approval_decided` decision is exactly `approve {}` or
+`deny { reason }`, where `reason` is required-nullable because delegate denials
+carry no user-authored reason. Its decider is exactly `user { command_id }` or
+`delegate { model_selection_id, model_call_id }`; `rationale` is
+required-nullable and present only for a delegate decision.
 
 The protocol additionally admits
 `tool_batch_transition { turn_id, model_call_id, state }`, where `state` is

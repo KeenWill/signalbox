@@ -2820,6 +2820,7 @@ fn terminal_event_state(
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
+        | SessionEvent::ToolApprovalDecided { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -2972,6 +2973,7 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
+        | SessionEvent::ToolApprovalDecided { .. }
         | SessionEvent::ModelCallTransition { .. } => None,
     }
 }

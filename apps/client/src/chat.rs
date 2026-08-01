@@ -1194,6 +1194,7 @@ fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnE
         SessionEvent::SessionCreated {}
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
+        | SessionEvent::ToolApprovalDecided { .. }
         | SessionEvent::ContextCompacted { .. } => TurnEventEffect::None,
     }
 }
