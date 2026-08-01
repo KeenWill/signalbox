@@ -1443,12 +1443,13 @@ fn sandbox_process_result(mut result: ProcessRunResult, capture_bytes: usize) ->
     if dispatched {
         return process_result(ExecutionConfinement::FilesystemConfined, result);
     }
-    let outcome = if result.outcome == ProcessOutcome::TimedOut {
-        ProcessOutcome::TimedOut
-    } else {
-        ProcessOutcome::SpawnFailed {
+    let outcome = match result.outcome {
+        ProcessOutcome::TimedOut => ProcessOutcome::TimedOut,
+        ProcessOutcome::Exited { .. }
+        | ProcessOutcome::SpawnFailed { .. }
+        | ProcessOutcome::SupervisionFailed { .. } => ProcessOutcome::SpawnFailed {
             reason: ProcessSpawnFailure::SandboxSetup,
-        }
+        },
     };
     ExecResult {
         confinement: ExecutionConfinement::SandboxSetupFailed,
@@ -1832,8 +1833,12 @@ fn outer_observe_descendants(
                 }
                 continue;
             }
-            let children = match outer_process_children(parent) {
+            let children = match outer_process_children_until(parent, stop, deadline) {
                 Ok(children) => children,
+                Err(OuterProcessChildrenError::Interrupted) => {
+                    interrupted = true;
+                    break;
+                }
                 Err(OuterProcessChildrenError::Gone) if parent == root => continue,
                 Err(OuterProcessChildrenError::Gone) => {
                     known.remove(&parent);
@@ -2024,11 +2029,21 @@ fn outer_process_gone(error: &std::io::Error) -> bool {
 #[derive(Clone, Copy)]
 enum OuterProcessChildrenError {
     Gone,
+    Interrupted,
     Unsupported,
 }
 
 #[cfg(target_os = "linux")]
 fn outer_process_children(pid: u32) -> Result<Vec<u32>, OuterProcessChildrenError> {
+    outer_process_children_until(pid, None, None)
+}
+
+#[cfg(target_os = "linux")]
+fn outer_process_children_until(
+    pid: u32,
+    stop: Option<&AtomicBool>,
+    deadline: Option<Instant>,
+) -> Result<Vec<u32>, OuterProcessChildrenError> {
     let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).map_err(|error| {
         if outer_process_gone(&error) {
             OuterProcessChildrenError::Gone
@@ -2039,12 +2054,18 @@ fn outer_process_children(pid: u32) -> Result<Vec<u32>, OuterProcessChildrenErro
     let mut children = Vec::new();
     let mut observed_task = false;
     for entry in tasks {
+        if outer_observation_should_stop(stop, deadline) {
+            return Err(OuterProcessChildrenError::Interrupted);
+        }
         let entry = entry.map_err(|_| OuterProcessChildrenError::Unsupported)?;
         let task = entry
             .file_name()
             .to_string_lossy()
             .parse::<u32>()
             .map_err(|_| OuterProcessChildrenError::Unsupported)?;
+        if outer_observation_should_stop(stop, deadline) {
+            return Err(OuterProcessChildrenError::Interrupted);
+        }
         match std::fs::read_to_string(format!("/proc/{pid}/task/{task}/children")) {
             Ok(values) => {
                 observed_task = true;
@@ -2282,6 +2303,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             reason: ProcessSupervisionFailure::Cleanup,
         });
     }
+    let wait_failed = wait_failure.is_some();
     let captures = tokio::time::timeout_at(async_cleanup_deadline, async {
         let stdout = (&mut stdout_task).await;
         let stderr = (&mut stderr_task).await;
@@ -2301,7 +2323,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     match (stdout, stderr) {
         (Ok(Ok((stdout, status, launcher_status))), Ok(Ok(stderr))) => {
             let (supervised_stdout, supervised_stderr) =
-                supervisor_capture_completeness(status, launcher_status);
+                outer_capture_completeness(wait_failed, status, launcher_status);
             ProcessRunResult {
                 outcome: wait_failure
                     .unwrap_or_else(|| supervisor_outcome(status, launcher_status)),
@@ -2428,6 +2450,22 @@ fn supervisor_capture_completeness(
         combined_supervisor_completeness(outer.0, nested.0),
         combined_supervisor_completeness(outer.1, nested.1),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn outer_capture_completeness(
+    wait_failed: bool,
+    status: SupervisorStatus,
+    launcher_status: Option<LauncherStatus>,
+) -> (SupervisorCaptureCompleteness, SupervisorCaptureCompleteness) {
+    if wait_failed {
+        (
+            SupervisorCaptureCompleteness::Incomplete,
+            SupervisorCaptureCompleteness::Incomplete,
+        )
+    } else {
+        supervisor_capture_completeness(status, launcher_status)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2565,6 +2603,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn outer_wait_failure_distrusts_complete_status_trailers() {
+        let completeness = outer_capture_completeness(
+            true,
+            SupervisorStatus::Exited {
+                code: Some(0),
+                stdout: SupervisorCaptureCompleteness::Complete,
+                stderr: SupervisorCaptureCompleteness::Complete,
+            },
+            Some(LauncherStatus::Exited {
+                code: Some(0),
+                stdout: SupervisorCaptureCompleteness::Complete,
+                stderr: SupervisorCaptureCompleteness::Complete,
+            }),
+        );
+
+        assert_eq!(
+            completeness,
+            (
+                SupervisorCaptureCompleteness::Incomplete,
+                SupervisorCaptureCompleteness::Incomplete,
+            )
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn outer_retirement_honors_the_watcher_stop_signal() {
         let stop = AtomicBool::new(true);
         let tracked = Arc::new(Mutex::new(BTreeMap::new()));
@@ -2584,6 +2648,17 @@ mod tests {
             outer_retire_reused(u32::MAX, &tracked, None, Some(Instant::now())),
             Ok(OuterObservationStatus::Interrupted)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn outer_thread_enumeration_honors_the_watcher_stop_signal() {
+        let stop = AtomicBool::new(true);
+
+        assert!(matches!(
+            outer_process_children_until(std::process::id(), Some(&stop), None),
+            Err(OuterProcessChildrenError::Interrupted)
+        ));
     }
 
     struct ReplacementWorkspace {
