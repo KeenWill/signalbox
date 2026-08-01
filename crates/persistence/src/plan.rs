@@ -63,7 +63,10 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
 const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
   FROM session_plan_event
  WHERE session_id = $1
-   AND event_kind NOT IN ('created', 'text_revised', 'status_changed')
+   AND (
+        event_kind IS NULL
+        OR event_kind NOT IN ('created', 'text_revised', 'status_changed')
+   )
  LIMIT 1";
 
 const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
@@ -416,11 +419,13 @@ impl SessionPlanRepository {
             .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
                 "current limit",
             ))?;
-        let unsupported_kind: Option<String> = sqlx::query_scalar(UNSUPPORTED_EVENT_KIND_SQL)
-            .bind(request.session().into_uuid())
-            .fetch_optional(&mut *transaction)
-            .await?;
+        let unsupported_kind: Option<Option<String>> =
+            sqlx::query_scalar(UNSUPPORTED_EVENT_KIND_SQL)
+                .bind(request.session().into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?;
         if let Some(value) = unsupported_kind {
+            let value = value.ok_or(SessionPlanCorruption::Missing("event kind"))?;
             return Err(SessionPlanCorruption::Unsupported {
                 field: "event kind",
                 value,
