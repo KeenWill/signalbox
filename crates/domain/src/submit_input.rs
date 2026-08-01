@@ -23,11 +23,12 @@ use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueuePriority, AcceptedInputQueueWork, AcceptedInputSchedulingProjection, Actor,
     AppliedInterruptCommandResult, AppliedInterruptState, CurrentTurnAttemptState, DeliveryRequest,
-    DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
-    ModelSelectionRequest, OriginConfiguration, PerInputConfigurationChoices, ReconciliationReason,
-    Session, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SteeringBinding, TurnDisposition, TurnId, UserContent,
-    VersionedSessionConfigurationDefaults, derive_accepted_input_total_order,
+    DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, GoalGeneration, GoalTurnSource,
+    ModelAlias, ModelSelectionRequest, OriginConfiguration, PerInputConfigurationChoices,
+    ReconciliationReason, Session, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
+    TurnDisposition, TurnId, UserContent, VersionedSessionConfigurationDefaults,
+    derive_accepted_input_total_order,
 };
 
 /// One canonical user-global durable input command.
@@ -1024,13 +1025,30 @@ pub struct SubmitInputTurnOriginReconstitutionInput {
 
 #[derive(Clone, Debug)]
 struct SubmitInputTurnOriginReconstitutionFacts {
-    receipt: ReconstitutedSubmitInput,
+    provenance: TurnOriginProvenance,
     lifecycle: AcceptedInputLifecycle,
     queue_accepted_input: AcceptedInputId,
     queue_session: SessionId,
     queue_turn: TurnId,
     queue_order: AcceptedInputQueueOrder,
     source_terminal: Option<SubmitInputTerminalFacts>,
+}
+
+#[derive(Clone, Debug)]
+enum TurnOriginProvenance {
+    Submit(ReconstitutedSubmitInput),
+    Goal(GoalTurnOriginFacts),
+}
+
+#[derive(Clone, Debug)]
+struct GoalTurnOriginFacts {
+    _generation: GoalGeneration,
+    source: GoalTurnSource,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+    acceptance_position: SessionInputPosition,
+    content: UserContent,
 }
 
 /// Complete purpose-specific facts proving that a reclassified origin's
@@ -1122,6 +1140,35 @@ impl SubmitInputTerminalSourceReconstitutionInput {
     }
 }
 
+/// Named durable facts for one goal-owned autonomous turn origin.
+#[derive(Clone, Debug)]
+pub struct GoalTurnOriginConstructionInput {
+    /// Immutable statement generation pursued by the turn.
+    pub generation: GoalGeneration,
+    /// Event or successful predecessor that caused this turn.
+    pub source: GoalTurnSource,
+    /// Owning session.
+    pub session: SessionId,
+    /// Accepted input identity.
+    pub accepted_input: AcceptedInputId,
+    /// Logical turn identity.
+    pub turn: TurnId,
+    /// Immutable session acceptance position.
+    pub acceptance_position: SessionInputPosition,
+    /// Exact statement or resume guidance delivered to the model.
+    pub content: UserContent,
+    /// Accepted input's current lifecycle.
+    pub lifecycle: AcceptedInputLifecycle,
+    /// Accepted-input identity keyed by the queue association.
+    pub queue_accepted_input: AcceptedInputId,
+    /// Session identity stored with the queue association.
+    pub queue_session: SessionId,
+    /// Turn identity stored with the queue association.
+    pub queue_turn: TurnId,
+    /// Immutable queue order stored for the origin turn.
+    pub queue_order: AcceptedInputQueueOrder,
+}
+
 /// Named facts for one directly created accepted-input turn origin.
 #[derive(Clone, Debug)]
 pub struct SubmitInputDirectTurnOriginConstructionInput {
@@ -1172,7 +1219,45 @@ impl SubmitInputTurnOriginReconstitutionInput {
         } = input;
         Self {
             chain: vec![SubmitInputTurnOriginReconstitutionFacts {
-                receipt,
+                provenance: TurnOriginProvenance::Submit(receipt),
+                lifecycle,
+                queue_accepted_input,
+                queue_session,
+                queue_turn,
+                queue_order,
+                source_terminal: None,
+            }],
+        }
+    }
+
+    /// Supplies a goal-owned origin with its event-stream provenance and
+    /// accepted-input-keyed lifecycle and queue facts.
+    pub fn from_goal(input: GoalTurnOriginConstructionInput) -> Self {
+        let GoalTurnOriginConstructionInput {
+            generation,
+            source,
+            session,
+            accepted_input,
+            turn,
+            acceptance_position,
+            content,
+            lifecycle,
+            queue_accepted_input,
+            queue_session,
+            queue_turn,
+            queue_order,
+        } = input;
+        Self {
+            chain: vec![SubmitInputTurnOriginReconstitutionFacts {
+                provenance: TurnOriginProvenance::Goal(GoalTurnOriginFacts {
+                    _generation: generation,
+                    source,
+                    session,
+                    accepted_input,
+                    turn,
+                    acceptance_position,
+                    content,
+                }),
                 lifecycle,
                 queue_accepted_input,
                 queue_session,
@@ -1201,7 +1286,7 @@ impl SubmitInputTurnOriginReconstitutionInput {
             disposition,
         } = source_terminal;
         origin.chain.push(SubmitInputTurnOriginReconstitutionFacts {
-            receipt,
+            provenance: TurnOriginProvenance::Submit(receipt),
             lifecycle,
             queue_accepted_input,
             queue_session,
@@ -2667,6 +2752,13 @@ struct ValidatedTurnOrigin {
     turns: HashSet<TurnId>,
 }
 
+fn goal_turn_source_references_turn(source: GoalTurnSource, turn: TurnId) -> bool {
+    match source {
+        GoalTurnSource::UserEvent(_) => false,
+        GoalTurnSource::SuccessfulTurn(predecessor) => predecessor == turn,
+    }
+}
+
 fn validate_turn_origin_reconstitution_input(
     input: &SubmitInputTurnOriginReconstitutionInput,
 ) -> Option<ValidatedTurnOrigin> {
@@ -2684,11 +2776,40 @@ fn validate_turn_origin_reconstitution_input(
     let mut turns = HashSet::with_capacity(input.chain.len());
 
     for facts in &input.chain {
-        let SubmitInputResult::Applied(applied) = facts.receipt.result() else {
+        let receipt = match &facts.provenance {
+            TurnOriginProvenance::Submit(receipt) => receipt,
+            TurnOriginProvenance::Goal(goal) => {
+                if validated.is_some()
+                    || facts.source_terminal.is_some()
+                    || !accepted_inputs.insert(goal.accepted_input)
+                    || !turns.insert(goal.turn)
+                    || facts.lifecycle.id() != goal.accepted_input
+                    || facts.lifecycle.disposition()
+                        != &AcceptedInputDisposition::OriginOf(goal.turn)
+                    || facts.queue_accepted_input != goal.accepted_input
+                    || facts.queue_session != goal.session
+                    || facts.queue_turn != goal.turn
+                    || facts.queue_order
+                        != AcceptedInputQueueOrder::ordinary(goal.acceptance_position)
+                    || goal_turn_source_references_turn(goal.source, goal.turn)
+                {
+                    return None;
+                }
+                validated = Some(ValidatedOriginPosition {
+                    session: goal.session,
+                    turn: goal.turn,
+                    acceptance_position: goal.acceptance_position,
+                    accepted_input: goal.accepted_input,
+                    content: goal.content.clone(),
+                });
+                continue;
+            }
+        };
+        let SubmitInputResult::Applied(applied) = receipt.result() else {
             return None;
         };
         if !accepted_inputs.insert(applied.accepted_input())
-            || !command_ids.insert(facts.receipt.command().command_id())
+            || !command_ids.insert(receipt.command().command_id())
         {
             return None;
         }
@@ -2748,7 +2869,7 @@ fn validate_turn_origin_reconstitution_input(
             turn,
             acceptance_position: applied.acceptance_position(),
             accepted_input: applied.accepted_input(),
-            content: facts.receipt.command().content().clone(),
+            content: receipt.command().content().clone(),
         });
     }
 
@@ -3351,7 +3472,7 @@ mod tests {
         source
             .chain
             .push(super::SubmitInputTurnOriginReconstitutionFacts {
-                receipt: ReconstitutedSubmitInput {
+                provenance: super::TurnOriginProvenance::Submit(ReconstitutedSubmitInput {
                     command,
                     result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
                         super::SubmitInputPendingSteeringAppliedResult {
@@ -3361,7 +3482,7 @@ mod tests {
                             binding: SteeringBinding::new(source_turn),
                         },
                     )),
-                },
+                }),
                 lifecycle: AcceptedInputLifecycle::new(
                     accepted_input,
                     AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
