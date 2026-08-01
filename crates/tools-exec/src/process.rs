@@ -757,19 +757,23 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     };
                 }
                 #[cfg(target_os = "linux")]
-                let working_directory_identity = match self
-                    .workspace_identity
-                    .pin_relative_directory(&arguments.working_directory)
-                    .and_then(WorkspaceDirectoryIdentity::inherit)
-                {
-                    Ok(directory) => directory,
-                    Err(reason) => {
-                        return ExecResult {
-                            confinement: ExecutionConfinement::SandboxSetupFailed,
-                            outcome: ProcessOutcome::SpawnFailed { reason },
-                            stdout: OutputCapture::empty(),
-                            stderr: OutputCapture::empty(),
-                        };
+                let working_directory_identity = if arguments.working_directory == "." {
+                    None
+                } else {
+                    match self
+                        .workspace_identity
+                        .pin_relative_directory(&arguments.working_directory)
+                        .and_then(WorkspaceDirectoryIdentity::inherit)
+                    {
+                        Ok(directory) => Some(directory),
+                        Err(reason) => {
+                            return ExecResult {
+                                confinement: ExecutionConfinement::SandboxSetupFailed,
+                                outcome: ProcessOutcome::SpawnFailed { reason },
+                                stdout: OutputCapture::empty(),
+                                stderr: OutputCapture::empty(),
+                            };
+                        }
                     }
                 };
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -790,9 +794,9 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         bind_source: &self.workspace_root,
                         launcher: &self.sandbox_launcher,
                         #[cfg(target_os = "linux")]
-                        working_directory_bind_source: Some(
-                            &working_directory_identity.bind_source,
-                        ),
+                        working_directory_bind_source: working_directory_identity
+                            .as_ref()
+                            .map(|directory| directory.bind_source.as_path()),
                         #[cfg(not(target_os = "linux"))]
                         working_directory_bind_source: None,
                     },
@@ -2574,6 +2578,7 @@ mod tests {
     const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
     const UNUSABLE_PROBE_EXIT_CODE: i32 = 1;
     const REQUEST_TIMEOUT_SECONDS: u64 = 1;
+    const ROOT_WORKSPACE_BIND_COUNT: usize = 1;
     const SLOW_PROBE_DELAY: Duration = Duration::from_millis(1_100);
     const TEST_SANDBOX_LAUNCHER: &str = "/fixture/signalbox-exec-supervisor";
 
@@ -3727,6 +3732,39 @@ mod tests {
                 .any(|arguments| arguments == launcher_arguments)
         );
         assert!(request.arguments.ends_with(&dispatch_arguments));
+        assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_root_request_does_not_rebind_the_workspace() -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, &workspace.path)?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+        let requests = observation.recorded_requests();
+        let request = requests
+            .first()
+            .ok_or_else(|| std::io::Error::other("one requested process"))?;
+        let workspace_bind_count = request
+            .arguments
+            .windows(3)
+            .filter(|arguments| arguments[0] == "--bind" && arguments[2] == SANDBOX_WORKSPACE)
+            .count();
+
+        assert_eq!(workspace_bind_count, ROOT_WORKSPACE_BIND_COUNT);
         assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
         Ok(())
     }
