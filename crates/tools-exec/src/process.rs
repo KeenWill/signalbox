@@ -827,6 +827,12 @@ struct WorkspaceIdentity {
 #[cfg(target_os = "linux")]
 impl WorkspaceIdentity {
     fn capture(path: &Path) -> Result<Self, ExecToolConstructionError> {
+        if !path.is_absolute() {
+            return Err(ExecToolConstructionError::WorkspaceRoot {
+                path: path.to_owned(),
+                source: None,
+            });
+        }
         let directory = rustix::fs::open(
             path,
             rustix::fs::OFlags::RDONLY
@@ -1049,6 +1055,12 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
 
 #[cfg(not(target_os = "linux"))]
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, ExecToolConstructionError> {
+    if !root.is_absolute() {
+        return Err(ExecToolConstructionError::WorkspaceRoot {
+            path: root.to_owned(),
+            source: None,
+        });
+    }
     let supplied_metadata =
         root.symlink_metadata()
             .map_err(|source| ExecToolConstructionError::WorkspaceRoot {
@@ -1677,6 +1689,7 @@ impl OuterProcessTreeGuard {
     }
 
     fn finish(&mut self, deadline: Instant) -> OuterCleanupStatus {
+        self.armed = false;
         self.stop_watcher();
         loop {
             let observation =
@@ -1694,7 +1707,6 @@ impl OuterProcessTreeGuard {
             }
             match self.all_tracked_absent(deadline) {
                 Ok(true) => {
-                    self.armed = false;
                     return if self.process_tree_supported.load(Ordering::Acquire) {
                         OuterCleanupStatus::Complete
                     } else {
@@ -2833,6 +2845,27 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn command_runners_reject_a_relative_workspace_root() {
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_process(b"must remain unused"),
+        );
+
+        let sandboxed = SandboxedCommandRunner::try_new(runner.clone(), Path::new("."));
+        let unsandboxed = UnsandboxedCommandRunner::try_new(runner, Path::new("."));
+
+        assert!(matches!(
+            sandboxed,
+            Err(ExecToolConstructionError::WorkspaceRoot { .. })
+        ));
+        assert!(matches!(
+            unsandboxed,
+            Err(ExecToolConstructionError::WorkspaceRoot { .. })
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn process_runner_rejects_a_non_executable_supervisor() -> Result<(), Box<dyn Error>> {
         let supervisor = ReplacementSupervisor::new()?;
         std::fs::set_permissions(&supervisor.path, std::fs::Permissions::from_mode(0o600))?;
@@ -2938,6 +2971,24 @@ mod tests {
         let result = OuterProcessTreeGuard::new_with_watcher(std::process::id(), |_| Err(()));
 
         assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_finish_disarms_drop_cleanup_instead_of_granting_a_fresh_deadline() {
+        let mut guard = OuterProcessTreeGuard {
+            root: std::process::id(),
+            descendants: Arc::new(Mutex::new(BTreeMap::new())),
+            stop: Arc::new(AtomicBool::new(true)),
+            watcher: None,
+            process_tree_supported: Arc::new(AtomicBool::new(true)),
+            armed: true,
+        };
+
+        let result = guard.finish(Instant::now());
+
+        assert_eq!(result, OuterCleanupStatus::Failed);
+        assert!(!guard.armed);
     }
 
     #[cfg(target_os = "linux")]
