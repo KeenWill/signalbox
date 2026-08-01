@@ -341,7 +341,7 @@ ALLOWLIST = (
             r"loss before and after pin, owner replacement|complete owner facts|"
             r"operation-owner facts|"
             r"(?:defaults|pending steering|snapshot) owner cross-wired|"
-            r"OwnerMismatch|OwnerIDs?|"
+            r"OwnerMismatch|"
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
             r"cross_wired_attempt_owner|cross_wired_defaults_owner|"
             r"foreign_attachment_owner|foreign_event_owner|foreign_observation_owner|"

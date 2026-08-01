@@ -62,6 +62,7 @@ def main() -> int:
         )
         author_violation = reviewed_author.with_name("example.rs")
         imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
+        domain_record = root / "crates" / "domain" / "src" / "session.rs"
         mixed_storage_path = (
             root / "apps" / "signalboxd" / "tests" / "offline_tool_loop.rs"
         )
@@ -181,6 +182,7 @@ def main() -> int:
             "}",
             "// The owner approves this tool.",
         )
+        domain_record_lines = ('let OwnerID = "human who approves tools";',)
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
         mixed_storage_path.parent.mkdir(parents=True)
@@ -254,11 +256,15 @@ def main() -> int:
             fixture_text(local_socket_lines), encoding="utf-8"
         )
         imported.write_text(fixture_text(imported_lines), encoding="utf-8")
+        domain_record.write_text(
+            fixture_text(domain_record_lines), encoding="utf-8"
+        )
         git(root, "init", "--quiet")
         git(
             root,
             "add",
             "crates/domain/src/imported_conversation.rs",
+            "crates/domain/src/session.rs",
             "crates/tools-code-host/src/code_host/review_slog/convergence.rs",
             "crates/tools-code-host/src/code_host/review_slog/example.rs",
             "crates/tools-github/src/lib.rs",
@@ -322,6 +328,9 @@ def main() -> int:
                 imported_lines[-1:],
             ),
             *expected_diagnostics(
+                "crates/domain/src/session.rs", domain_record_lines
+            ),
+            *expected_diagnostics(
                 "apps/signalboxd/tests/offline_tool_loop.rs",
                 mixed_storage_lines,
                 mixed_storage_lines[:1],
@@ -369,6 +378,9 @@ def main() -> int:
             encoding="utf-8",
         )
         imported.write_text(fixture_text(imported_lines[:-1]), encoding="utf-8")
+        domain_record.write_text(
+            'let user_id = "human who approves tools";\n', encoding="utf-8"
+        )
         mixed_storage_path.write_text(
             'const PROCESS_ACTOR: &str = "user";\n'
             'const DECISION_SOURCE: &str = "owner_command";\n',
