@@ -51,6 +51,7 @@ const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
 const MAX_RESULT_SNIPPET_BYTES: usize = 16 * 1024;
 const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_FORM_DECODE_PASSES: usize = 4;
+const MAX_HTML_DECODE_PASSES: usize = 4;
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
 /// Configured web-search provider.
@@ -930,6 +931,7 @@ fn build_provider_request(
     if request.query().contains(credential_text)
         || form_decoded_contains(request.query(), credential.expose_bytes())
         || html_decoded_contains(request.query(), credential_text)
+        || fixed_request_metadata_contains_credential(endpoint, credential_text)
     {
         return Err(WebSearchTransportFailure::RequestFailed);
     }
@@ -939,7 +941,7 @@ fn build_provider_request(
         .append_pair("count", BRAVE_RESULT_COUNT_QUERY)
         .append_pair("result_filter", "web")
         .append_pair("text_decorations", "false");
-    if url.as_str().contains(credential_text)
+    if ascii_case_insensitive_contains(url.as_str(), credential_text)
         || form_decoded_contains(url.as_str(), credential.expose_bytes())
     {
         return Err(WebSearchTransportFailure::RequestFailed);
@@ -953,10 +955,24 @@ fn build_provider_request(
         .header(endpoint.credential_header, credential_header)
         .build()
         .map_err(|_| WebSearchTransportFailure::RequestFailed)?;
-    if format!("{http_request:?}").contains(credential_text) {
+    if ascii_case_insensitive_contains(&format!("{http_request:?}"), credential_text) {
         return Err(WebSearchTransportFailure::RequestFailed);
     }
     Ok(http_request)
+}
+
+fn fixed_request_metadata_contains_credential(
+    endpoint: ProviderEndpoint,
+    credential: &str,
+) -> bool {
+    [
+        endpoint.url,
+        endpoint.credential_header,
+        "GET",
+        "application/json",
+    ]
+    .into_iter()
+    .any(|value| ascii_case_insensitive_contains(value, credential))
 }
 
 async fn collect_complete_body(
@@ -1012,7 +1028,7 @@ struct BraveResponse {
     #[serde(rename = "type")]
     response_type: String,
     query: BraveQueryFacts,
-    web: BraveWebResults,
+    web: Option<BraveWebResults>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1053,7 +1069,7 @@ fn decode_brave_response(body: &[u8]) -> Result<WebSearchResponse, WebSearchTran
     } else {
         WebSearchPageCompleteness::Complete
     };
-    let raw_results = response.web.results;
+    let raw_results = response.web.map_or_else(Vec::new, |web| web.results);
     if raw_results.len() > MAX_PROVIDER_RESULTS {
         return Err(WebSearchTransportFailure::InvalidResponse);
     }
@@ -1208,7 +1224,13 @@ where
             let _reporting = report_transport_failure(failure, correlation, &credential);
         }
         let outcome = match transport_result {
-            Ok(response) => success_evidence(response, &scrubber),
+            Ok(response) => match success_evidence(response, &scrubber) {
+                Ok(evidence) => Ok(evidence),
+                Err(WebSearchExecutorError::EvidenceEncoding) => {
+                    Ok(self.invalid_response_evidence(&scrubber))
+                }
+                Err(error) => Err(error),
+            },
             Err(WebSearchTransportFailure::InvalidCredential) => {
                 known_failure_evidence(self.credential_unavailable_detail.clone(), &scrubber)
             }
@@ -1280,6 +1302,12 @@ where
                 }
             }
         }
+    }
+
+    fn invalid_response_evidence(&self, scrubber: &CredentialScrubber) -> ToolExecutorEvidence {
+        let detail = (!scrubber.contains_credential(self.invalid_response_detail.as_str()))
+            .then(|| self.invalid_response_detail.clone());
+        ToolExecutorEvidence::KnownFailed { detail }
     }
 }
 
@@ -1727,7 +1755,10 @@ impl CredentialScrubber {
             return true;
         }
         let (unicode_host, decoding) = idna::domain_to_unicode(host);
-        decoding.is_err() || self.contains_credential(&unicode_host)
+        decoding.is_err()
+            || unicode_case_insensitive_contains(&unicode_host, &self.exact)
+            || unicode_case_insensitive_contains(&unicode_host, &self.json_escaped)
+            || self.contains_credential(&unicode_host)
     }
 
     fn redact_body(&self, body: &[u8]) -> String {
@@ -1754,29 +1785,53 @@ fn ascii_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
 }
 
 fn html_decoded_contains(text: &str, credential: &str) -> bool {
+    if text.contains(credential) {
+        return true;
+    }
+    let mut decoded = String::from(text);
+    for _ in 0..MAX_HTML_DECODE_PASSES {
+        let Some((next, changed)) = decode_html_character_references(&decoded) else {
+            return true;
+        };
+        if next.contains(credential) {
+            return true;
+        }
+        if !changed {
+            return false;
+        }
+        decoded = next;
+    }
+    decode_html_character_references(&decoded).is_none_or(|(_, changed)| changed)
+}
+
+fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
     const MAX_CHARACTER_REFERENCE_BYTES: usize = 64;
     let mut decoded = String::with_capacity(text.len());
     let mut remaining = text;
+    let mut changed = false;
     while let Some(reference_start) = remaining.find('&') {
         decoded.push_str(&remaining[..reference_start]);
         let reference = &remaining[reference_start..];
         let Some(relative_end) = reference
-            .get(..MAX_CHARACTER_REFERENCE_BYTES.min(reference.len()))
-            .and_then(|candidate| candidate.find(';'))
+            .find(';')
+            .filter(|end| *end < MAX_CHARACTER_REFERENCE_BYTES)
         else {
             decoded.push('&');
             remaining = &reference[1..];
             continue;
         };
         let entity = &reference[1..relative_end];
-        let Some(replacement) = decode_html_character_reference(entity) else {
-            return true;
-        };
+        let replacement = decode_html_character_reference(entity)?;
         decoded.push_str(&replacement);
+        changed = true;
         remaining = &reference[relative_end + 1..];
     }
     decoded.push_str(remaining);
-    decoded.contains(credential)
+    Some((decoded, changed))
+}
+
+fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
+    !needle.is_empty() && haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn decode_html_character_reference(entity: &str) -> Option<String> {
@@ -1917,12 +1972,15 @@ mod tests {
     const FIXTURE_UPPERCASE_SCHEME_RESULT_URL: &str = "HTTPS://example.com/result";
     const FIXTURE_BACKSLASH_RESULT_URL: &str = "https://example.com/abc\\def";
     const FIXTURE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-ABCDEF.example/result";
+    const FIXTURE_UNICODE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-bücher.example/result";
     const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
     const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
     const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";
     const FIXTURE_ORIGIN_ONLY_RESULT_URL: &str = "https://example.com";
     const FIXTURE_CANONICAL_ORIGIN_RESULT_URL: &str = "https://example.com/";
     const ACCEPT_HEADER_COLLISION_KEY: &str = "application/json";
+    const ACCEPT_HEADER_CASE_COLLISION_KEY: &str = "APPLICATION/JSON";
+    const PROVIDER_HOST_CASE_COLLISION_KEY: &str = "API.SEARCH.BRAVE.COM";
     const URL_SCHEME_COLLISION_KEY: &str = "https";
     const URL_SCHEME_CASE_COLLISION_KEY: &str = "HTTPS";
     const URL_ENCODED_COLLISION_KEY: &str = "secret/key";
@@ -1936,8 +1994,10 @@ mod tests {
     const URL_LEGACY_IPV4_COLLISION_KEY: &str = "2130706433";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
     const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
+    const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
     const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
+    const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
     const SHORT_DIAGNOSTIC_COLLISION_KEY: &str = "r";
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
@@ -2363,6 +2423,19 @@ mod tests {
             ToolExecutorEvidence::CompletedText(content) => content,
             other => panic!("expected completed text, got {other:?}"),
         }
+    }
+
+    fn known_failure_detail(evidence: ToolExecutorEvidence) -> Option<String> {
+        match evidence {
+            ToolExecutorEvidence::KnownFailed { detail } => {
+                detail.map(|detail| String::from(detail.as_str()))
+            }
+            other => panic!("expected known failure, got {other:?}"),
+        }
+    }
+
+    fn html_multibyte_boundary_reflection() -> String {
+        format!("{HTML_ENTITY_COLLISION_VALUE}{}é", "x".repeat(55))
     }
 
     fn provider_rejection(failure: WebSearchTransportFailure) -> WebSearchProviderError {
@@ -2952,6 +3025,29 @@ mod tests {
         );
     }
 
+    /// INV-035: Unicode host decoding and case normalization cannot conceal an
+    /// embedded credential in a provider result host.
+    #[test]
+    fn web_search_rejects_embedded_unicode_case_normalized_credential_in_result_host() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_UNICODE_EMBEDDED_HOST_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("Unicode host fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_UNICODE_HOST_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// IP-literal result hosts bypass domain-only IDNA decoding and remain
     /// valid structured search evidence.
     #[test]
@@ -3036,6 +3132,42 @@ mod tests {
 
         assert!(!content.contains(HTML_ENTITY_COLLISION_KEY));
         assert!(!content.contains(HTML_ENTITY_COLLISION_VALUE));
+    }
+
+    /// INV-035: repeated HTML character-reference decoding cannot conceal a
+    /// credential reflected in provider-controlled text.
+    #[test]
+    fn web_search_redacts_nested_html_encoded_credential_in_result_text() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(HTML_NESTED_ENTITY_COLLISION_VALUE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("nested HTML entity fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            HTML_ENTITY_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(HTML_ENTITY_COLLISION_KEY));
+        assert!(!content.contains(HTML_NESTED_ENTITY_COLLISION_VALUE));
+    }
+
+    /// INV-035: an early HTML reference is still decoded when a later
+    /// multibyte scalar crosses the character-reference scan bound.
+    #[test]
+    fn web_search_html_reference_scan_handles_multibyte_boundaries() {
+        let reflection = html_multibyte_boundary_reflection();
+
+        assert!(html_decoded_contains(
+            &reflection,
+            HTML_ENTITY_COLLISION_KEY
+        ));
     }
 
     #[test]
@@ -3230,6 +3362,22 @@ mod tests {
         );
     }
 
+    /// INV-035: repeated HTML character-reference decoding cannot conceal an
+    /// API key in a query before dispatch.
+    #[test]
+    fn brave_request_rejects_nested_html_encoded_query_credential_collision() {
+        let failure = build_brave_request(
+            HTML_NESTED_ENTITY_COLLISION_VALUE,
+            HTML_ENTITY_COLLISION_KEY,
+        )
+        .expect_err("nested HTML-encoded credential query is rejected");
+
+        assert_eq!(
+            failure.class(),
+            WebSearchTransportFailureClass::RequestFailed
+        );
+    }
+
     /// INV-035: a key matching fixed provider URL text fails before the URL
     /// can be dispatched or recorded.
     #[test]
@@ -3248,6 +3396,45 @@ mod tests {
             build_brave_request(FIXTURE_QUERY, ACCEPT_HEADER_COLLISION_KEY),
             Err(WebSearchTransportFailure::RequestFailed)
         ));
+    }
+
+    /// INV-035: canonicalized scheme spelling in fixed request metadata cannot
+    /// conceal the credential before dispatch.
+    #[test]
+    fn brave_request_rejects_case_normalized_fixed_scheme_collision() {
+        let failure = build_brave_request(FIXTURE_QUERY, URL_SCHEME_CASE_COLLISION_KEY)
+            .expect_err("case-normalized fixed scheme collision is rejected");
+
+        assert_eq!(
+            failure.class(),
+            WebSearchTransportFailureClass::RequestFailed
+        );
+    }
+
+    /// INV-035: canonicalized host spelling in fixed request metadata cannot
+    /// conceal the credential before dispatch.
+    #[test]
+    fn brave_request_rejects_case_normalized_fixed_host_collision() {
+        let failure = build_brave_request(FIXTURE_QUERY, PROVIDER_HOST_CASE_COLLISION_KEY)
+            .expect_err("case-normalized fixed host collision is rejected");
+
+        assert_eq!(
+            failure.class(),
+            WebSearchTransportFailureClass::RequestFailed
+        );
+    }
+
+    /// INV-035: canonicalized media-type spelling in fixed request metadata
+    /// cannot conceal the credential before dispatch.
+    #[test]
+    fn brave_request_rejects_case_normalized_fixed_media_type_collision() {
+        let failure = build_brave_request(FIXTURE_QUERY, ACCEPT_HEADER_CASE_COLLISION_KEY)
+            .expect_err("case-normalized fixed media-type collision is rejected");
+
+        assert_eq!(
+            failure.class(),
+            WebSearchTransportFailureClass::RequestFailed
+        );
     }
 
     /// INV-035: a provider status equal to the API key is retained for
@@ -3481,10 +3668,10 @@ mod tests {
         assert_eq!(detail, INVALID_RESPONSE_DETAIL);
     }
 
-    /// INV-035: an evidence-encoding error arising after credential resolution
-    /// is rendered through a request-scoped safe executor diagnostic.
+    /// INV-035: a post-response sanitization failure is definitive invalid
+    /// response evidence rather than a dispatch-ambiguous executor error.
     #[tokio::test]
-    async fn web_search_sanitizes_credential_dependent_evidence_error() {
+    async fn web_search_post_response_sanitization_failure_is_known_failed() {
         const EVIDENCE_ERROR_COLLISION_KEY: &str = "encoding";
         let credentials = StaticCredentials {
             value: EVIDENCE_ERROR_COLLISION_KEY,
@@ -3494,22 +3681,15 @@ mod tests {
                 .expect("fixture web_search tool compiles")
                 .into_parts();
         let correlation = dispatch_correlation();
-        let executor_error = executor
+        let evidence = executor
             .execute_request(request(), &correlation)
             .await
             .into_result()
-            .expect_err("credential removal invalidates the result title");
+            .expect("completed response sanitization has a definitive outcome");
+        let detail = known_failure_detail(evidence).expect("invalid response detail is safe");
 
-        assert!(!format!("{executor_error:?}").contains(EVIDENCE_ERROR_COLLISION_KEY));
-        assert!(
-            !executor_error
-                .to_string()
-                .contains(EVIDENCE_ERROR_COLLISION_KEY)
-        );
-        assert_eq!(
-            executor_error.operator_failure_class(),
-            OperatorFailureClass::CallerOrHubBug
-        );
+        assert!(!detail.contains(EVIDENCE_ERROR_COLLISION_KEY));
+        assert_eq!(detail, INVALID_RESPONSE_DETAIL);
     }
 
     #[test]
@@ -3717,6 +3897,27 @@ mod tests {
         assert_eq!(decoded.title(), FIXTURE_RESULT_TITLE);
         assert_eq!(decoded.url(), FIXTURE_RESULT_URL);
         assert_eq!(decoded.snippet(), FIXTURE_RESULT_SNIPPET);
+        assert!(!response.more_results_available());
+    }
+
+    /// A recorded Brave success envelope with `web: null` is an empty page;
+    /// the required pagination fact still determines completeness.
+    #[test]
+    fn brave_recorded_null_web_response_decodes_empty_results() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "type": "search",
+            "query": {
+                "original": FIXTURE_QUERY,
+                "more_results_available": false,
+            },
+            "web": null,
+        }))
+        .expect("recorded response fixture encodes");
+
+        let response = decode_provider_response(WebSearchProvider::Brave, &body)
+            .expect("recorded empty provider response decodes");
+
+        assert!(response.results().is_empty());
         assert!(!response.more_results_available());
     }
 
