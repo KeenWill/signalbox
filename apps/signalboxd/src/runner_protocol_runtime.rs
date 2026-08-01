@@ -232,12 +232,6 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
-        tracing::info!(
-            enrollment_id = %receipt.enrollment().enrollment().into_uuid(),
-            runner_id = %receipt.enrollment().runner().into_uuid(),
-            registration_revision = receipt.registration().revision().get(),
-            "runner registration revision stored"
-        );
         let connection = self
             .store
             .open_connection(receipt.enrollment().enrollment())
@@ -412,8 +406,9 @@ fn log_connection_transition(
     transition: RunnerConnectionTransition,
     outcome: RunnerConnectionTransitionOutcome,
 ) {
-    let RunnerConnectionTransitionOutcome::Current(snapshot) = outcome else {
-        return;
+    let snapshot = match outcome {
+        RunnerConnectionTransitionOutcome::Current(snapshot) => snapshot,
+        RunnerConnectionTransitionOutcome::Stale { .. } => return,
     };
     match (transition, snapshot.cause()) {
         (RunnerConnectionTransition::DaemonShutdown, RunnerConnectionCause::DaemonShutdown)
@@ -1885,6 +1880,11 @@ mod tests {
     const DATABASE_PASSWORD: &str = "signalbox-test";
     const DATABASE_NAME: &str = "signalbox";
     const CONFIGURED_REPOSITORY: &str = "signalbox";
+    const ARBITRARY_PROVISION_AUTHORIZATION_ID_SEED: u128 = 5;
+    const ARBITRARY_PROVISION_SESSION_ID_SEED: u128 = 6;
+    const ARBITRARY_PROVISION_RUNNER_ID_SEED: u128 = 7;
+    const ARBITRARY_PROVISION_PLACEMENT_REVISION: u64 = 1;
+    const ARBITRARY_PROVISION_REGISTRATION_REVISION: u64 = 1;
 
     #[derive(Clone)]
     struct EnrollmentService {
@@ -1982,12 +1982,12 @@ mod tests {
 
     fn workspace_provision_correlation() -> signalbox_runner_wire::ProvisionCorrelation {
         signalbox_runner_wire::ProvisionCorrelation {
-            authorization_id: identity(5),
-            session_id: identity(6),
-            placement_revision: PositiveU64::try_new(1)
+            authorization_id: identity(ARBITRARY_PROVISION_AUTHORIZATION_ID_SEED),
+            session_id: identity(ARBITRARY_PROVISION_SESSION_ID_SEED),
+            placement_revision: PositiveU64::try_new(ARBITRARY_PROVISION_PLACEMENT_REVISION)
                 .expect("the fixture placement revision is positive"),
-            runner_id: identity(7),
-            registration_revision: PositiveU64::try_new(1)
+            runner_id: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: PositiveU64::try_new(ARBITRARY_PROVISION_REGISTRATION_REVISION)
                 .expect("the fixture registration revision is positive"),
             repository: None,
             sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
