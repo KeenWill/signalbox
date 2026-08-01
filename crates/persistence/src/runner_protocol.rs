@@ -43,6 +43,7 @@ use crate::lock_inventory::{
     RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
     RUNNER_REGISTRATION_HEAD,
 };
+use crate::mapping::{tool_permission_default_from_str, tool_permission_default_to_str};
 
 /// Adapter-owned positive revision of one validated registration.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -2508,7 +2509,7 @@ async fn insert_registration(
         .bind(tool.name().as_str())
         .bind(tool.model().description())
         .bind(tool.model().input_schema().as_str())
-        .bind(encode_permission(tool.permission()))
+        .bind(tool_permission_default_to_str(tool.permission()))
         .bind(encode_effect(tool.effect()))
         .bind(loci.kind)
         .bind(loci.selector_kind)
@@ -4353,19 +4354,9 @@ fn decode_permission_override(
     }
 }
 
-const fn encode_permission(permission: ToolPermissionDefault) -> &'static str {
-    match permission {
-        ToolPermissionDefault::Auto => "auto",
-        ToolPermissionDefault::Confirm => "confirm",
-    }
-}
-
 fn decode_permission(value: String) -> Result<ToolPermissionDefault, RunnerProtocolStoreError> {
-    match value.as_str() {
-        "auto" => Ok(ToolPermissionDefault::Auto),
-        "confirm" => Ok(ToolPermissionDefault::Confirm),
-        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-    }
+    tool_permission_default_from_str(&value)
+        .ok_or_else(|| RunnerProtocolCorruption::InvalidEncoding.into())
 }
 
 const fn encode_effect(effect: RunnerToolEffectClass) -> &'static str {
