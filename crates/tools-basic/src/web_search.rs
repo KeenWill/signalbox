@@ -1104,6 +1104,10 @@ fn dynamic_success_value_boundary_may_collide(
     rendered: &str,
     scrubber: &CredentialScrubber,
 ) -> bool {
+    let normalized_credentials = scrubber
+        .output_collision_variants()
+        .map(unicode_case_folded_nfd)
+        .collect::<Vec<_>>();
     let mut marker_spans = Vec::with_capacity(DYNAMIC_SUCCESS_VALUE_MARKERS.len());
     for marker in DYNAMIC_SUCCESS_VALUE_MARKERS {
         let Some((prefix, suffix)) = rendered.split_once(marker) else {
@@ -1112,10 +1116,12 @@ fn dynamic_success_value_boundary_may_collide(
         if suffix.contains(marker) {
             return true;
         }
-        if scrubber.output_collision_variants().any(|credential| {
+        let normalized_prefix = unicode_case_folded_nfd(prefix);
+        let normalized_suffix = unicode_case_folded_nfd(suffix);
+        if normalized_credentials.iter().any(|credential| {
             credential.char_indices().skip(1).any(|(split, _)| {
-                unicode_case_insensitive_ends_with(prefix, &credential[..split])
-                    || unicode_case_insensitive_starts_with(suffix, &credential[split..])
+                normalized_prefix.ends_with(&credential[..split])
+                    || normalized_suffix.starts_with(&credential[split..])
             })
         }) {
             return true;
@@ -2104,16 +2110,25 @@ fn formatter_variant_may_span_event(credential: &str, controlled_event: &str) ->
     {
         return true;
     }
+    let normalized_credential = unicode_case_folded_nfd(credential);
+    let normalized_event = unicode_case_folded_nfd(controlled_event);
+    let dynamic_prefix_end = credential
+        .char_indices()
+        .find(|(_, character)| !DYNAMIC_METADATA_CHARACTERS.contains(*character))
+        .map_or(credential.len(), |(index, _)| index);
+    let dynamic_suffix_start = credential
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !DYNAMIC_METADATA_CHARACTERS.contains(*character))
+        .map_or(0, |(index, character)| index + character.len_utf8());
     credential.char_indices().skip(1).any(|(split, _)| {
-        let (leading, trailing) = credential.split_at(split);
-        (leading
-            .chars()
-            .all(|character| DYNAMIC_METADATA_CHARACTERS.contains(character))
-            && unicode_case_insensitive_starts_with(controlled_event, trailing))
-            || (trailing
-                .chars()
-                .all(|character| DYNAMIC_METADATA_CHARACTERS.contains(character))
-                && unicode_case_insensitive_ends_with(controlled_event, leading))
+        let trailing_length = credential.len() - split;
+        (split <= dynamic_prefix_end
+            && normalized_event.starts_with(&normalized_credential[split..]))
+            || (split >= dynamic_suffix_start
+                && normalized_event.ends_with(
+                    &normalized_credential[..normalized_credential.len() - trailing_length],
+                ))
     })
 }
 
@@ -2416,8 +2431,13 @@ impl CredentialScrubber {
                     let result_components = result_ipv6.segments();
                     let result_octets = result_ipv6.octets();
                     return self.reversible_variants().any(|variant| {
-                        canonicalized_ipv6_hextet(variant)
-                            .is_some_and(|component| result_components.contains(&component))
+                        canonicalized_ipv6_fragments(variant)
+                            .into_iter()
+                            .any(|fragment| {
+                                result_components
+                                    .windows(fragment.len())
+                                    .any(|window| window == fragment)
+                            })
                             || canonicalized_ipv4_tail_fragments(variant).into_iter().any(
                                 |fragment| {
                                     result_octets
@@ -2638,17 +2658,6 @@ fn legacy_named_character_reference_prefix(reference: &str) -> bool {
 fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
     let normalized_needle = unicode_case_folded_nfd(needle);
     !normalized_needle.is_empty() && unicode_case_folded_nfd(haystack).contains(&normalized_needle)
-}
-
-fn unicode_case_insensitive_starts_with(haystack: &str, needle: &str) -> bool {
-    let normalized_needle = unicode_case_folded_nfd(needle);
-    !normalized_needle.is_empty()
-        && unicode_case_folded_nfd(haystack).starts_with(&normalized_needle)
-}
-
-fn unicode_case_insensitive_ends_with(haystack: &str, needle: &str) -> bool {
-    let normalized_needle = unicode_case_folded_nfd(needle);
-    !normalized_needle.is_empty() && unicode_case_folded_nfd(haystack).ends_with(&normalized_needle)
 }
 
 fn unicode_case_folded_nfd(text: &str) -> String {
@@ -2989,8 +2998,25 @@ fn canonicalized_ipv4_fragment(host: &str, positions: std::ops::Range<usize>) ->
     components.get(positions).map(<[u8]>::to_vec)
 }
 
-fn canonicalized_ipv6_hextet(value: &str) -> Option<u16> {
-    let candidate = format!("http://[{value}:0:0:0:0:0:0:1]/");
+fn canonicalized_ipv6_fragments(value: &str) -> Vec<Vec<u16>> {
+    let component_count = value.split(':').count();
+    if component_count > 8 || value.split(':').any(str::is_empty) {
+        return Vec::new();
+    }
+    let mut fragments = Vec::new();
+    for start in 0..=8 - component_count {
+        let prefix = "0:".repeat(start);
+        let suffix = ":0".repeat(8 - start - component_count);
+        let host = format!("{prefix}{value}{suffix}");
+        if let Some(fragment) = canonicalized_ipv6_fragment(&host, start..start + component_count) {
+            fragments.push(fragment);
+        }
+    }
+    fragments
+}
+
+fn canonicalized_ipv6_fragment(host: &str, positions: std::ops::Range<usize>) -> Option<Vec<u16>> {
+    let candidate = format!("http://[{host}]/");
     let url = Url::parse(&candidate).ok()?;
     if !url.username().is_empty()
         || url.password().is_some()
@@ -3004,7 +3030,7 @@ fn canonicalized_ipv6_hextet(value: &str) -> Option<u16> {
     let std::net::IpAddr::V6(address) = parse_ip_literal(url.host_str()?)? else {
         return None;
     };
-    address.segments().first().copied()
+    address.segments().get(positions).map(<[u16]>::to_vec)
 }
 
 fn canonicalized_ipv4_tail_fragments(value: &str) -> Vec<Vec<u8>> {
@@ -3118,6 +3144,7 @@ mod tests {
     const FIXTURE_RESULT_TITLE: &str = "Synthetic result";
     const FIXTURE_RESULT_URL: &str = "https://example.com/result";
     const FIXTURE_IPV6_RESULT_URL: &str = "https://[2001:db8::1]/result";
+    const FIXTURE_MULTI_HEXTET_IPV6_RESULT_URL: &str = "https://[2001:db8:0:1::]/";
     const FIXTURE_IPV4_TAIL_IPV6_RESULT_URL: &str = "http://[::ffff:c0a8:1]/";
     const FIXTURE_LEGACY_IPV4_RESULT_URL: &str = "https://2130706433/result";
     const FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.0.1/";
@@ -3178,6 +3205,7 @@ mod tests {
     const URL_HEX_IPV4_COMPONENT_COLLISION_KEY: &str = "0x7f";
     const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
     const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
+    const URL_IPV6_MULTI_HEXTET_COLLISION_KEY: &str = "0db8:0000";
     const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
     const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
@@ -6340,6 +6368,29 @@ mod tests {
         );
     }
 
+    /// INV-035: a multi-hextet credential fragment is canonicalized as one
+    /// contiguous sequence before comparison with an IPv6 result host.
+    #[test]
+    fn web_search_rejects_canonicalized_multi_hextet_credential_in_result_host() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_MULTI_HEXTET_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("multi-hextet fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_IPV6_MULTI_HEXTET_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// INV-035: canonical hexadecimal rendering of an embedded dotted IPv4
     /// tail cannot conceal a credential in an IPv6 provider result host.
     #[test]
@@ -7472,9 +7523,10 @@ mod tests {
         assert_eq!(searches, 0);
     }
 
-    /// A resolved credential at the application byte bound remains usable.
+    /// INV-035: a credential at the byte bound crosses all boundary preflights
+    /// without repeated normalization and remains usable.
     #[tokio::test]
-    async fn credential_at_byte_bound_may_reach_transport() {
+    async fn inv035_credential_at_byte_bound_reaches_transport_with_linear_scan() {
         let credential = vec![b'x'; MAX_CREDENTIAL_BYTES];
 
         let (outcome, searches) = execute_raw_credential_through_service(&credential).await;
