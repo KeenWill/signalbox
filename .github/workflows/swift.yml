@@ -21,6 +21,12 @@ on:
       - ".github/workflows/swift.yml"
       - "rust-toolchain.toml"
 
+# Superseded pull-request runs release their slots against the public
+# concurrency cap; runs for pushes to main are never canceled.
+concurrency:
+  group: swift-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

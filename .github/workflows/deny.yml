@@ -7,6 +7,12 @@ on:
     # surface between pull requests.
     - cron: "17 6 * * 1"
 
+# Superseded pull-request runs release their slots against the public
+# concurrency cap; scheduled sweeps are never canceled.
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

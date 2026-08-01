@@ -16,6 +16,12 @@ on:
   push:
     branches: [main]
 
+# Superseded pull-request runs release their slots against the public
+# concurrency cap; runs for pushes to main are never canceled.
+concurrency:
+  group: tool-live-smokes-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   pull-requests: read

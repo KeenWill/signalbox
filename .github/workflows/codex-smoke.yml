@@ -39,6 +39,13 @@ on:
     paths:
       - "tooling/codex-cli/**"
 
+# Superseded pull-request runs release their slots against the public
+# concurrency cap; runs for pushes to main and manual dispatches are never
+# canceled.
+concurrency:
+  group: codex-cli-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions: {}
 
 jobs:
