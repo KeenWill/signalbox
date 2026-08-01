@@ -206,12 +206,15 @@ const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
            WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL
            ELSE head.event_ordinal IS NULL
                 OR latest.event_ordinal IS DISTINCT FROM head.event_ordinal
+                OR latest_dependency.first_event_ordinal IS DISTINCT FROM
+                    head.dependency_event_ordinal
                 OR certified.event_ordinal IS NULL
                 OR NOT session_plan_event_has_authority(certified)
        END
   FROM (VALUES (1)) AS singleton(marker)
   LEFT JOIN LATERAL (
-      SELECT session_id, event_ordinal, TRUE AS row_present
+      SELECT session_id, event_ordinal, dependency_event_ordinal,
+             TRUE AS row_present
         FROM session_plan_head
        WHERE session_id = $1
   ) AS head ON TRUE
@@ -222,6 +225,13 @@ const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
        ORDER BY event_ordinal DESC
        LIMIT 1
   ) AS latest ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT first_event_ordinal
+        FROM session_plan_current_dependency
+       WHERE session_id = $1
+       ORDER BY first_event_ordinal DESC
+       LIMIT 1
+  ) AS latest_dependency ON TRUE
   LEFT JOIN session_plan_event AS certified
     ON certified.session_id = head.session_id
    AND certified.event_ordinal = head.event_ordinal";
@@ -451,6 +461,14 @@ impl SessionPlanRepository {
             .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
                 "next event ordinal",
             ))?;
+        let invalid_sequence: bool = sqlx::query_scalar(INVALID_EVENT_SEQUENCE_SQL)
+            .bind(request.session().into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        if invalid_sequence {
+            transaction.rollback().await?;
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
         let encoded = EncodedDraft::new(next, request.draft());
         let correlation = request.provenance().correlation();
         let authorized: Option<Uuid> = sqlx::query_scalar(lock_inventory::PLAN_APPEND_ATTEMPT)
@@ -637,12 +655,6 @@ impl SessionPlanRepository {
         let dependency_rows = if entry_ordinals.is_empty() {
             Vec::new()
         } else {
-            validate_relevant_dependency_graph(
-                &mut transaction,
-                request.session(),
-                &entries.iter().map(PlanEntry::id).collect::<Vec<_>>(),
-            )
-            .await?;
             sqlx::query(CURRENT_DEPENDENCIES_SQL)
                 .bind(request.session().into_uuid())
                 .bind(&entry_ordinals)
@@ -785,15 +797,6 @@ fn dependency_query_limit() -> Result<i64, SessionPlanRepositoryError> {
         .ok_or(SessionPlanCorruption::InvalidPositiveInteger("dependency query limit").into())
 }
 
-async fn validate_relevant_dependency_graph(
-    transaction: &mut Transaction<'_, Postgres>,
-    session: SessionId,
-    roots: &[PlanEntryId],
-) -> Result<(), SessionPlanRepositoryError> {
-    let graph = load_relevant_dependency_graph(transaction, session, roots).await?;
-    validate_dependency_graph_acyclic(&graph)
-}
-
 async fn find_dependency_cycle(
     transaction: &mut Transaction<'_, Postgres>,
     session: SessionId,
@@ -801,7 +804,6 @@ async fn find_dependency_cycle(
     dependency: PlanEntryId,
 ) -> Result<Option<PlanDependencyCycle>, SessionPlanRepositoryError> {
     let graph = load_relevant_dependency_graph(transaction, session, &[entry, dependency]).await?;
-    validate_dependency_graph_acyclic(&graph)?;
     let mut queued = VecDeque::from([dependency]);
     let mut visited = HashSet::from([dependency]);
     let mut parents = HashMap::<PlanEntryId, PlanEntryId>::new();
@@ -896,41 +898,6 @@ async fn load_relevant_dependency_graph(
             )
         })
         .collect())
-}
-
-fn validate_dependency_graph_acyclic(
-    graph: &HashMap<PlanEntryId, Vec<PlanEntryId>>,
-) -> Result<(), SessionPlanRepositoryError> {
-    let mut incoming = HashMap::<PlanEntryId, usize>::new();
-    for (entry, dependencies) in graph {
-        incoming.entry(*entry).or_insert(0);
-        for dependency in dependencies {
-            *incoming.entry(*dependency).or_insert(0) += 1;
-        }
-    }
-    let mut ready = incoming
-        .iter()
-        .filter_map(|(entry, count)| (*count == 0).then_some(*entry))
-        .collect::<VecDeque<_>>();
-    let mut visited = 0_usize;
-    while let Some(entry) = ready.pop_front() {
-        visited += 1;
-        for dependency in graph.get(&entry).into_iter().flatten() {
-            let count = incoming
-                .get_mut(dependency)
-                .ok_or(SessionPlanCorruption::InvalidEventSequence)?;
-            *count = count
-                .checked_sub(1)
-                .ok_or(SessionPlanCorruption::InvalidEventSequence)?;
-            if *count == 0 {
-                ready.push_back(*dependency);
-            }
-        }
-    }
-    if visited != incoming.len() {
-        return Err(SessionPlanCorruption::InvalidEventSequence.into());
-    }
-    Ok(())
 }
 
 fn dependency_path_entry(value: Decimal) -> Result<PlanEntryId, SessionPlanRepositoryError> {
@@ -1422,10 +1389,33 @@ fn optional_projected_authority(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PLAN_DEPENDENCIES_PER_ENTRY, RELEVANT_DEPENDENCY_GRAPH_SQL};
+    use super::{
+        CURRENT_DEPENDENCIES_SQL, INVALID_EVENT_SEQUENCE_SQL, MAX_PLAN_DEPENDENCIES_PER_ENTRY,
+        RELEVANT_DEPENDENCY_GRAPH_SQL,
+    };
 
     const SESSION_PLAN_MIGRATION: &str =
         include_str!("../migrations/202608020011_session_plan.sql");
+
+    #[test]
+    fn ordinary_read_uses_only_bounded_direct_dependencies() {
+        assert!(CURRENT_DEPENDENCIES_SQL.contains("LIMIT $3"));
+        assert!(!CURRENT_DEPENDENCIES_SQL.contains("WITH RECURSIVE"));
+    }
+
+    #[test]
+    fn event_head_certifies_the_latest_projected_dependency() {
+        assert!(INVALID_EVENT_SEQUENCE_SQL.contains("head.dependency_event_ordinal"));
+        assert!(INVALID_EVENT_SEQUENCE_SQL.contains("latest_dependency.first_event_ordinal"));
+    }
+
+    #[test]
+    fn append_cycle_checks_do_not_copy_postgres_arrays() {
+        assert!(SESSION_PLAN_MIGRATION.contains("session_plan_event_advances_projection"));
+        assert!(!SESSION_PLAN_MIGRATION.contains("session_plan_dependency_cycle_exists"));
+        assert!(!SESSION_PLAN_MIGRATION.contains("array_append"));
+        assert!(!SESSION_PLAN_MIGRATION.contains("trim_array"));
+    }
 
     #[test]
     fn dependency_graph_reads_the_bounded_current_projection() {

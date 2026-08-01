@@ -163,8 +163,8 @@ Implemented table families (across the forward-only migrations):
   daemon-owned session advisory pool fences;
 - `session_plan_event` retains creation, revision, status, and dependency events
   with exact provenance; duplicate edges stay in history.
-  `session_plan_current_dependency` stores one first append per distinct edge
-  (at most 32 per entry); `session_plan_head` certifies the complete prefix; and
+  `session_plan_current_dependency` stores a predecessor-linked first append per
+  distinct edge (max 32 per entry); `session_plan_head` certifies both tips; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -555,10 +555,10 @@ Locks per transaction, in acquisition order:
   `FOR NO KEY UPDATE` before reading the trigger-maintained head. The adapter
   uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the exact active
   tool attempt `FOR SHARE` while authenticating its request. The insert trigger
-  reacquires those locks in session-then-attempt order, caps distinct
-  dependencies from the current-edge projection, rejects existing and proposed
-  cycles, projects first occurrences, and advances the head. A repeatable read
-  checks relevant rows and linearly rejects cycles before bounded projection.
+  reacquires locks session-then-attempt, caps distinct edges, and rejects cycles
+  with node-deduplicated reachability. It projects first occurrences while
+  advancing both heads. Reads fetch at most 32 direct dependencies per returned
+  entry after verifying both heads; they never load transitive closure.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or

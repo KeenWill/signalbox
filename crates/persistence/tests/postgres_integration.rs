@@ -21469,11 +21469,48 @@ async fn session_plan_current_projection_deduplicates_edges_when_rejecting_cycle
     Ok(())
 }
 
-/// A read rejects a cyclic dependency projection even when no history was
-/// requested and the append guard was bypassed.
+/// The head-to-edge chain keeps every current dependency row reachable by
+/// foreign key, so bypassing immutability still cannot lose a projection row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_read_rejects_a_cyclic_dependency_projection() -> Result<(), Box<dyn Error>> {
+async fn session_plan_dependency_head_prevents_projection_loss() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = dependency_plan_fixture(&pool, Vec::new()).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+
+    let deletion = sqlx::query(
+        "DELETE FROM session_plan_current_dependency
+          WHERE session_id = $1
+            AND first_event_ordinal = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(3_u64))
+    .execute(&pool)
+    .await
+    .expect_err("the dependency head retains the projected edge");
+
+    assert_eq!(
+        deletion
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_head_session_id_dependency_event_ordinal_fkey")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A read rejects an unprojected dependency event even when no history was
+/// requested and both append-time triggers were deliberately bypassed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_an_unprojected_dependency_event() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let prerequisite =
         PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
@@ -21482,27 +21519,39 @@ async fn session_plan_read_rejects_a_cyclic_dependency_projection() -> Result<()
     let mut fixture =
         dependency_plan_fixture(&pool, vec![depends_plan_arguments(prerequisite, dependent)])
             .await?;
-    let cycle_attempt = fixture.batch.authorize_next().await?;
+    let corrupt_attempt = fixture.batch.authorize_next().await?;
     sqlx::query(
         "ALTER TABLE session_plan_event
          DISABLE TRIGGER session_plan_event_append_guard",
     )
     .execute(&pool)
     .await?;
-    insert_direct_dependency_event(&pool, &fixture, &cycle_attempt).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_advances_projection",
+    )
+    .execute(&pool)
+    .await?;
+    insert_direct_dependency_event(&pool, &fixture, &corrupt_attempt).await?;
     sqlx::query(
         "ALTER TABLE session_plan_event
          ENABLE TRIGGER session_plan_event_append_guard",
     )
     .execute(&pool)
     .await?;
-    fixture.batch.finish(cycle_attempt).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_advances_projection",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(corrupt_attempt).await?;
 
     let error = fixture
         .repository
         .read(PlanReadRequest::new(fixture.session, None, None))
         .await
-        .expect_err("the cyclic current projection is corruption");
+        .expect_err("the unprojected dependency invalidates the certified head");
 
     assert_eq!(
         plan_repository_error_kind(error),
@@ -21514,11 +21563,49 @@ async fn session_plan_read_rejects_a_cyclic_dependency_projection() -> Result<()
     Ok(())
 }
 
-/// Repository and schema append guards reject a pre-existing corrupt cycle
-/// before they can extend its trusted event history.
+/// The projection trigger independently rechecks cycles when the before-insert
+/// append guard is deliberately bypassed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_append_rejects_an_already_cyclic_projection() -> Result<(), Box<dyn Error>> {
+async fn session_plan_projection_rechecks_cycle_after_append_guard_bypass()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![depends_plan_arguments(prerequisite, dependent)])
+            .await?;
+    let corrupt_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+
+    let trigger_error = insert_direct_dependency_event(&pool, &fixture, &corrupt_attempt)
+        .await
+        .expect_err("the projection trigger independently rejects the cycle");
+
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_cycle")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A repository append rejects a dependency event that escaped both append
+/// triggers because the durable event and dependency heads no longer agree.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_an_uncertified_projection() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let prerequisite =
         PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
@@ -21539,10 +21626,22 @@ async fn session_plan_append_rejects_an_already_cyclic_projection() -> Result<()
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_advances_projection",
+    )
+    .execute(&pool)
+    .await?;
     insert_direct_dependency_event(&pool, &fixture, &corrupt_attempt).await?;
     sqlx::query(
         "ALTER TABLE session_plan_event
          ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_advances_projection",
     )
     .execute(&pool)
     .await?;
@@ -21559,28 +21658,11 @@ async fn session_plan_append_rejects_an_already_cyclic_projection() -> Result<()
             },
         ))
         .await
-        .expect_err("repository validation rejects the existing cycle");
-    let trigger_error = insert_direct_dependency_event_at(
-        &pool,
-        &fixture,
-        &append_attempt,
-        4,
-        5,
-        fixture.dependent,
-        fixture.prerequisite,
-    )
-    .await
-    .expect_err("the schema trigger rejects the existing cycle");
+        .expect_err("repository validation rejects the uncertified projection");
 
     assert_eq!(
         plan_repository_error_kind(repository_error),
         PlanRepositoryErrorKind::EventSequence
-    );
-    assert_eq!(
-        trigger_error
-            .as_database_error()
-            .and_then(|database| database.constraint()),
-        Some("session_plan_dependency_graph_cycle")
     );
 
     pool.close().await;
@@ -21588,8 +21670,8 @@ async fn session_plan_append_rejects_an_already_cyclic_projection() -> Result<()
     Ok(())
 }
 
-/// A paged read validates dependency edges reached through entries excluded by
-/// its cursor, so corrupt non-creation targets cannot hide outside the page.
+/// A paged read checks the projection certificate before applying its cursor,
+/// so an uncertified hidden edge cannot be mistaken for bounded current truth.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn session_plan_read_rejects_an_invalid_edge_reached_outside_the_page()
@@ -21611,6 +21693,12 @@ async fn session_plan_read_rejects_an_invalid_edge_reached_outside_the_page()
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_advances_projection",
+    )
+    .execute(&pool)
+    .await?;
     insert_direct_dependency_event_between(
         &pool,
         &fixture,
@@ -21622,6 +21710,12 @@ async fn session_plan_read_rejects_an_invalid_edge_reached_outside_the_page()
     sqlx::query(
         "ALTER TABLE session_plan_event
          ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_advances_projection",
     )
     .execute(&pool)
     .await?;
@@ -21668,7 +21762,7 @@ async fn session_plan_read_rejects_malformed_current_creation_payload() -> Resul
     )
     .execute(&pool)
     .await?;
-    sqlx::query(
+    let corrupted = sqlx::query(
         "UPDATE session_plan_event
             SET dependency_ordinal = $1
           WHERE session_id = $2
@@ -21679,6 +21773,7 @@ async fn session_plan_read_rejects_malformed_current_creation_payload() -> Resul
     .bind(Decimal::from(CREATION_EVENT_ORDINAL))
     .execute(&pool)
     .await?;
+    assert_eq!(corrupted.rows_affected(), 1);
     sqlx::query(
         "ALTER TABLE session_plan_event
          ENABLE TRIGGER session_plan_event_immutable",
@@ -21724,7 +21819,7 @@ async fn session_plan_read_rejects_malformed_dependency_edge_payload() -> Result
     )
     .execute(&pool)
     .await?;
-    sqlx::query(
+    let corrupted = sqlx::query(
         "UPDATE session_plan_event
             SET entry_text = $1
           WHERE session_id = $2
@@ -21735,6 +21830,7 @@ async fn session_plan_read_rejects_malformed_dependency_edge_payload() -> Result
     .bind(Decimal::from(DEPENDENCY_EVENT_ORDINAL))
     .execute(&pool)
     .await?;
+    assert_eq!(corrupted.rows_affected(), 1);
     sqlx::query(
         "ALTER TABLE session_plan_event
          ENABLE TRIGGER session_plan_event_immutable",

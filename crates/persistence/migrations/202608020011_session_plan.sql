@@ -108,7 +108,8 @@ CREATE TABLE session_plan_event (
 );
 
 -- This bounded projection keeps one row for each distinct current edge while
--- the event table retains every duplicate append as history.
+-- the event table retains every duplicate append as history. Its predecessor
+-- foreign key and the head reference make every projected row durable.
 CREATE TABLE session_plan_current_dependency (
     session_id uuid NOT NULL,
     entry_ordinal numeric(20, 0) NOT NULL
@@ -117,6 +118,8 @@ CREATE TABLE session_plan_current_dependency (
         CHECK (dependency_ordinal BETWEEN 1 AND 18446744073709551615),
     first_event_ordinal numeric(20, 0) NOT NULL
         CHECK (first_event_ordinal BETWEEN 1 AND 18446744073709551615),
+    prior_first_event_ordinal numeric(20, 0)
+        CHECK (prior_first_event_ordinal BETWEEN 1 AND 18446744073709551615),
 
     PRIMARY KEY (session_id, entry_ordinal, dependency_ordinal),
     UNIQUE (session_id, first_event_ordinal),
@@ -129,22 +132,42 @@ CREATE TABLE session_plan_current_dependency (
     FOREIGN KEY (session_id, first_event_ordinal)
         REFERENCES session_plan_event (session_id, event_ordinal)
         ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, prior_first_event_ordinal)
+        REFERENCES session_plan_current_dependency (
+            session_id, first_event_ordinal
+        )
+        ON DELETE RESTRICT,
     CHECK (entry_ordinal <> dependency_ordinal),
     CHECK (first_event_ordinal > entry_ordinal),
-    CHECK (first_event_ordinal > dependency_ordinal)
+    CHECK (first_event_ordinal > dependency_ordinal),
+    CHECK (
+        prior_first_event_ordinal IS NULL
+        OR prior_first_event_ordinal < first_event_ordinal
+    )
 );
 
--- This mutable head certifies the complete contiguous prefix admitted by the
--- append guard. Reads compare it with the indexed latest event instead of
--- replaying an unbounded history to rediscover sequence integrity.
+-- This mutable head certifies both the contiguous event prefix and the latest
+-- distinct dependency edge. Reads compare those indexed tips instead of
+-- replaying unbounded history or dependency closure.
 CREATE TABLE session_plan_head (
     session_id uuid PRIMARY KEY
         REFERENCES session(session_id) ON DELETE RESTRICT,
     event_ordinal numeric(20, 0) NOT NULL
         CHECK (event_ordinal BETWEEN 1 AND 18446744073709551615),
+    dependency_event_ordinal numeric(20, 0)
+        CHECK (dependency_event_ordinal BETWEEN 1 AND 18446744073709551615),
     FOREIGN KEY (session_id, event_ordinal)
         REFERENCES session_plan_event (session_id, event_ordinal)
-        ON DELETE RESTRICT
+        ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, dependency_event_ordinal)
+        REFERENCES session_plan_current_dependency (
+            session_id, first_event_ordinal
+        )
+        ON DELETE RESTRICT,
+    CHECK (
+        dependency_event_ordinal IS NULL
+        OR dependency_event_ordinal <= event_ordinal
+    )
 );
 
 CREATE FUNCTION session_plan_request_arguments_json(
@@ -258,68 +281,6 @@ BEGIN
       FROM session_plan_head
      WHERE session_id = target_session_id;
     RETURN coalesce(latest_ordinal + 1, 1);
-END;
-$$;
-
-CREATE FUNCTION session_plan_dependency_cycle_exists(
-    target_session_id uuid,
-    root_ordinals numeric[]
-)
-RETURNS boolean
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
-    root_ordinal numeric;
-    stack_nodes numeric[] := ARRAY[]::numeric[];
-    stack_positions integer[] := ARRAY[]::integer[];
-    visited_nodes numeric[] := ARRAY[]::numeric[];
-    active_nodes numeric[] := ARRAY[]::numeric[];
-    stack_size integer;
-    current_node numeric;
-    current_position integer;
-    next_node numeric;
-BEGIN
-    FOREACH root_ordinal IN ARRAY root_ordinals LOOP
-        IF root_ordinal = ANY(visited_nodes) THEN
-            CONTINUE;
-        END IF;
-        stack_nodes := array_append(stack_nodes, root_ordinal);
-        stack_positions := array_append(stack_positions, 0);
-        active_nodes := array_append(active_nodes, root_ordinal);
-
-        WHILE cardinality(stack_nodes) > 0 LOOP
-            stack_size := cardinality(stack_nodes);
-            current_node := stack_nodes[stack_size];
-            current_position := stack_positions[stack_size];
-
-            SELECT edge.dependency_ordinal
-              INTO next_node
-              FROM session_plan_current_dependency AS edge
-             WHERE edge.session_id = target_session_id
-               AND edge.entry_ordinal = current_node
-             ORDER BY edge.first_event_ordinal
-             OFFSET current_position
-             LIMIT 1;
-            IF NOT FOUND THEN
-                visited_nodes := array_append(visited_nodes, current_node);
-                active_nodes := array_remove(active_nodes, current_node);
-                stack_nodes := trim_array(stack_nodes, 1);
-                stack_positions := trim_array(stack_positions, 1);
-            ELSE
-                stack_positions[stack_size] := current_position + 1;
-                IF next_node = ANY(active_nodes) THEN
-                    RETURN TRUE;
-                END IF;
-                IF NOT (next_node = ANY(visited_nodes)) THEN
-                    stack_nodes := array_append(stack_nodes, next_node);
-                    stack_positions := array_append(stack_positions, 0);
-                    active_nodes := array_append(active_nodes, next_node);
-                END IF;
-            END IF;
-        END LOOP;
-    END LOOP;
-    RETURN FALSE;
 END;
 $$;
 
@@ -500,15 +461,6 @@ BEGIN
             END IF;
         END IF;
 
-        IF session_plan_dependency_cycle_exists(
-            NEW.session_id,
-            ARRAY[NEW.entry_ordinal, NEW.dependency_ordinal]
-        ) THEN
-            RAISE EXCEPTION 'session plan dependency graph is already cyclic'
-                USING ERRCODE = '23514',
-                    CONSTRAINT = 'session_plan_dependency_graph_cycle';
-        END IF;
-
         WITH RECURSIVE dependency_node(node) AS (
             SELECT NEW.dependency_ordinal
             UNION
@@ -538,64 +490,135 @@ CREATE TRIGGER session_plan_event_append_guard
 BEFORE INSERT ON session_plan_event
 FOR EACH ROW EXECUTE FUNCTION guard_session_plan_event_append();
 
-CREATE FUNCTION project_session_plan_current_dependency()
+CREATE FUNCTION advance_session_plan_projection()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    prior_dependency_event_ordinal numeric(20, 0);
+    dependency_count bigint;
+    target_kind text;
+    closes_cycle boolean;
+    projected boolean := FALSE;
 BEGIN
+    SELECT dependency_event_ordinal
+      INTO prior_dependency_event_ordinal
+      FROM session_plan_head
+     WHERE session_id = NEW.session_id;
+
     IF NEW.event_kind = 'depends_on' THEN
-        INSERT INTO session_plan_current_dependency (
-            session_id,
-            entry_ordinal,
-            dependency_ordinal,
-            first_event_ordinal
+        IF NEW.entry_ordinal >= NEW.event_ordinal
+            OR NEW.dependency_ordinal IS NULL
+            OR NEW.dependency_ordinal >= NEW.event_ordinal
+            OR NEW.dependency_ordinal = NEW.entry_ordinal
+            OR NEW.entry_text IS NOT NULL
+            OR NEW.entry_status IS NOT NULL
+            OR NOT session_plan_event_has_authority(NEW)
+        THEN
+            RAISE EXCEPTION 'session plan dependency has invalid certified shape'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_shape';
+        END IF;
+
+        SELECT event_kind
+          INTO target_kind
+          FROM session_plan_event
+         WHERE session_id = NEW.session_id
+           AND event_ordinal = NEW.entry_ordinal;
+        IF target_kind IS DISTINCT FROM 'created' THEN
+            RAISE EXCEPTION 'session plan dependency entry must be a creation'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_entry';
+        END IF;
+        SELECT event_kind
+          INTO target_kind
+          FROM session_plan_event
+         WHERE session_id = NEW.session_id
+           AND event_ordinal = NEW.dependency_ordinal;
+        IF target_kind IS DISTINCT FROM 'created' THEN
+            RAISE EXCEPTION 'session plan dependency target must be a creation'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_target';
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+              FROM session_plan_current_dependency AS edge
+             WHERE edge.session_id = NEW.session_id
+               AND edge.entry_ordinal = NEW.entry_ordinal
+               AND edge.dependency_ordinal = NEW.dependency_ordinal
+        ) THEN
+            SELECT count(*)
+              INTO dependency_count
+              FROM session_plan_current_dependency AS edge
+             WHERE edge.session_id = NEW.session_id
+               AND edge.entry_ordinal = NEW.entry_ordinal;
+            -- Checked mechanically against MAX_PLAN_DEPENDENCIES_PER_ENTRY.
+            IF dependency_count >= 32 THEN
+                RAISE EXCEPTION 'session plan entry dependency limit reached'
+                    USING ERRCODE = '23514',
+                        CONSTRAINT = 'session_plan_dependency_limit';
+            END IF;
+
+            WITH RECURSIVE dependency_node(node) AS (
+                SELECT NEW.dependency_ordinal
+                UNION
+                SELECT edge.dependency_ordinal
+                  FROM dependency_node
+                  JOIN session_plan_current_dependency AS edge
+                    ON edge.session_id = NEW.session_id
+                   AND edge.entry_ordinal = dependency_node.node
+            )
+            SELECT EXISTS (
+                SELECT 1
+                  FROM dependency_node
+                 WHERE node = NEW.entry_ordinal
+            )
+              INTO closes_cycle;
+            IF closes_cycle THEN
+                RAISE EXCEPTION 'session plan dependency would create a cycle'
+                    USING ERRCODE = '23514',
+                        CONSTRAINT = 'session_plan_dependency_cycle';
+            END IF;
+
+            INSERT INTO session_plan_current_dependency (
+                session_id,
+                entry_ordinal,
+                dependency_ordinal,
+                first_event_ordinal,
+                prior_first_event_ordinal
+            )
+            VALUES (
+                NEW.session_id,
+                NEW.entry_ordinal,
+                NEW.dependency_ordinal,
+                NEW.event_ordinal,
+                prior_dependency_event_ordinal
+            );
+            projected := TRUE;
+        END IF;
+    END IF;
+
+    IF NEW.event_ordinal = 1 THEN
+        INSERT INTO session_plan_head (
+            session_id, event_ordinal, dependency_event_ordinal
         )
         VALUES (
             NEW.session_id,
-            NEW.entry_ordinal,
-            NEW.dependency_ordinal,
-            NEW.event_ordinal
-        )
-        ON CONFLICT (session_id, entry_ordinal, dependency_ordinal)
-        DO NOTHING;
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-CREATE TRIGGER session_plan_event_projects_dependency
-AFTER INSERT ON session_plan_event
-FOR EACH ROW EXECUTE FUNCTION project_session_plan_current_dependency();
-
-CREATE FUNCTION guard_session_plan_current_dependency_maintenance()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    IF pg_trigger_depth() < 2 THEN
-        RAISE EXCEPTION 'session plan current dependencies are trigger-maintained';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-CREATE TRIGGER session_plan_current_dependency_maintenance_guard
-BEFORE INSERT ON session_plan_current_dependency
-FOR EACH ROW EXECUTE FUNCTION guard_session_plan_current_dependency_maintenance();
-
-CREATE FUNCTION advance_session_plan_head()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    IF NEW.event_ordinal = 1 THEN
-        INSERT INTO session_plan_head (session_id, event_ordinal)
-        VALUES (NEW.session_id, NEW.event_ordinal);
+            NEW.event_ordinal,
+            CASE WHEN projected THEN NEW.event_ordinal ELSE NULL END
+        );
     ELSE
         UPDATE session_plan_head
-           SET event_ordinal = NEW.event_ordinal
+           SET event_ordinal = NEW.event_ordinal,
+               dependency_event_ordinal = CASE
+                   WHEN projected THEN NEW.event_ordinal
+                   ELSE prior_dependency_event_ordinal
+               END
          WHERE session_id = NEW.session_id
-           AND event_ordinal = NEW.prior_event_ordinal;
+           AND event_ordinal = NEW.prior_event_ordinal
+           AND dependency_event_ordinal IS NOT DISTINCT FROM
+               prior_dependency_event_ordinal;
         IF NOT FOUND THEN
             RAISE EXCEPTION 'session plan head must advance by one ordinal';
         END IF;
@@ -604,9 +627,9 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER session_plan_event_advances_head
+CREATE TRIGGER session_plan_event_advances_projection
 AFTER INSERT ON session_plan_event
-FOR EACH ROW EXECUTE FUNCTION advance_session_plan_head();
+FOR EACH ROW EXECUTE FUNCTION advance_session_plan_projection();
 
 CREATE FUNCTION guard_session_plan_head_maintenance()
 RETURNS trigger
