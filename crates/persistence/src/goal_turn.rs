@@ -2,8 +2,9 @@
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, FrozenModelSelection, GoalGeneration, GoalTurnSource, ModelSelectionRequest,
-    OriginConfiguration, SessionId, SessionInputPosition, TurnId,
+    AcceptedInputId, DirectModelSelection, FrozenAliasDefinition, FrozenModelSelection,
+    GoalGeneration, GoalTurnSource, ModelAlias, ModelSelectionRequest, OriginConfiguration,
+    SessionId, SessionInputPosition, TurnId,
 };
 use sqlx::{FromRow, PgConnection, types::Uuid};
 
@@ -14,6 +15,7 @@ use crate::{
         defaults_version_to_numeric, input_position_from_numeric, input_position_to_numeric,
         session_id_to_uuid, turn_id_to_uuid,
     },
+    outbox::{self, OutboxEvent},
 };
 
 /// Fresh identities for one goal-owned accepted-input origin and turn.
@@ -34,6 +36,14 @@ pub(crate) enum GoalTurnTerminalState {
 struct StoredGoalTurnTerminalState {
     state_kind: String,
     terminal_disposition_kind: Option<String>,
+}
+
+#[derive(FromRow)]
+struct StoredGoalTurnFrozenModel {
+    frozen_model_kind: String,
+    frozen_direct_model_selection_id: Option<Uuid>,
+    frozen_model_alias_id: Option<Uuid>,
+    frozen_alias_selected_direct_id: Option<Uuid>,
 }
 
 /// Result of reconciling one goal turn after a daemon execution pass.
@@ -202,7 +212,60 @@ pub(crate) async fn insert_goal_turn(
     .bind(predecessor)
     .execute(&mut *connection)
     .await?;
+
+    outbox::append(
+        connection,
+        OutboxEvent::InputAccepted {
+            session,
+            accepted_input: candidates.accepted_input(),
+            turn: candidates.turn(),
+            acceptance_position: position,
+        },
+    )
+    .await?;
     Ok(())
+}
+
+pub(crate) async fn goal_turn_frozen_alias_definition(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<Option<(ModelAlias, FrozenAliasDefinition)>, GoalRepositoryError> {
+    let stored = sqlx::query_as::<_, StoredGoalTurnFrozenModel>(
+        "SELECT
+            frozen_model_kind,
+            frozen_direct_model_selection_id,
+            frozen_model_alias_id,
+            frozen_alias_selected_direct_id
+           FROM queued_input_origin
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(GoalCorruption::Missing("goal turn frozen model"))?;
+
+    match (
+        stored.frozen_model_kind.as_str(),
+        stored.frozen_direct_model_selection_id,
+        stored.frozen_model_alias_id,
+        stored.frozen_alias_selected_direct_id,
+    ) {
+        ("direct", Some(_), None, None) => Ok(None),
+        ("frozen_alias", None, Some(alias), Some(selected)) => Ok(Some((
+            ModelAlias::from_uuid(alias),
+            FrozenAliasDefinition::selecting(DirectModelSelection::from_uuid(selected)),
+        ))),
+        ("direct" | "frozen_alias", _, _, _) => {
+            Err(GoalCorruption::Inconsistent("goal turn frozen model").into())
+        }
+        (_, _, _, _) => Err(GoalCorruption::Unsupported {
+            field: "goal turn frozen model kind",
+            value: stored.frozen_model_kind,
+        }
+        .into()),
+    }
 }
 
 pub(crate) async fn goal_turn_generation(

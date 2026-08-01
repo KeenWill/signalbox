@@ -96,9 +96,13 @@ generation and schedules its first turn. Resuming schedules exactly one next
 turn and supplies guidance as that turn's accepted input when present. A queued
 turn whose goal generation becomes blocked, achieved, user-stopped, or
 superseded remains immutable history but is ineligible for activation and is
-excluded from queue predecessor selection. Durable event and input correlation
-makes retrying command delivery idempotent rather than duplicating continuation
-work.
+excluded from queue predecessor selection. When such a retired origin falls
+inside an active turn's accepted-input tail, the runtime projection retains its
+immutable acceptance position with an explicit retired-goal-origin marker while
+omitting it from the runnable turn inventory; tail completeness and the session
+acceptance high-water mark therefore remain exact. Durable event and input
+correlation makes retrying command delivery idempotent rather than duplicating
+continuation work.
 
 ## Persistence and process surfaces
 
@@ -106,11 +110,11 @@ work.
 `goal_event`. Both are append-only and reject truncation. Relational checks
 close every discriminator and payload shape; a session-row lock serializes event
 append, a trigger enforces ordinal and generation continuity, an applied receipt
-can reference only the event carrying its own command identity, each model
-declaration request is single-use, composite foreign keys enforce user-command,
-model-invocation, and scheduler-turn provenance, and loads replay complete rows
-through the domain aggregate rather than reading a mutable current-state
-projection (INV-048).
+can reference only the event carrying its own command identity and the event
+kind corresponding to its immutable operation, each model declaration request is
+single-use, composite foreign keys enforce user-command, model-invocation, and
+scheduler-turn provenance, and loads replay complete rows through the domain
+aggregate rather than reading a mutable current-state projection (INV-048).
 
 **Implemented behavior.** The process protocol exposes attach, show, resume,
 stop, and supersede requests. Show returns the current generation and complete

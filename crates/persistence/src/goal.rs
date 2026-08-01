@@ -22,8 +22,8 @@ use crate::{
     commit_failure_is_ambiguous,
     goal_turn::{
         GoalTurnCandidates, GoalTurnContinuationOutcome, GoalTurnTerminalState,
-        continuation_exists, current_goal_turn, goal_turn_generation, goal_turn_terminal_state,
-        insert_goal_turn,
+        continuation_exists, current_goal_turn, goal_turn_frozen_alias_definition,
+        goal_turn_generation, goal_turn_terminal_state, insert_goal_turn,
     },
     mapping::{
         DurableCommandIdMappingError, GoalEventDiscriminator, GoalOperationKind,
@@ -364,12 +364,15 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTurnContinuationOutcome::AlreadyScheduled);
         }
-        let configuration =
-            current_origin_configuration(&mut transaction, session, select_definition)
-                .await?
-                .ok_or(GoalCorruption::Inconsistent(
-                    "current goal turn model alias",
-                ))?;
+        let frozen_alias =
+            goal_turn_frozen_alias_definition(&mut transaction, session, predecessor).await?;
+        let configuration = current_origin_configuration(&mut transaction, session, |alias| {
+            select_definition_with_frozen_fallback(alias, select_definition(alias), frozen_alias)
+        })
+        .await?
+        .ok_or(GoalCorruption::Inconsistent(
+            "current goal turn model alias",
+        ))?;
         insert_goal_turn(
             &mut transaction,
             session,
@@ -507,6 +510,18 @@ fn pursuit_input<'a>(goal: &'a Goal, event: &'a GoalEvent) -> Result<&'a str, Go
             "non-pursuing event scheduled a turn",
         )),
     }
+}
+
+fn select_definition_with_frozen_fallback(
+    requested: ModelAlias,
+    current: Option<FrozenAliasDefinition>,
+    frozen: Option<(ModelAlias, FrozenAliasDefinition)>,
+) -> Option<FrozenAliasDefinition> {
+    current.or_else(|| {
+        frozen
+            .filter(|(alias, _)| *alias == requested)
+            .map(|(_, definition)| definition)
+    })
 }
 
 async fn current_origin_configuration<SelectDefinition>(
@@ -1114,5 +1129,23 @@ fn action_from_stored(
 impl From<sqlx::Error> for GoalCorruption {
     fn from(error: sqlx::Error) -> Self {
         GoalCorruption::Column(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_continuation_reuses_frozen_alias_when_catalog_entry_is_absent() {
+        let alias = ModelAlias::from_uuid(Uuid::from_u128(0xa11));
+        let frozen = FrozenAliasDefinition::selecting(
+            signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xa12)),
+        );
+
+        assert_eq!(
+            select_definition_with_frozen_fallback(alias, None, Some((alias, frozen))),
+            Some(frozen)
+        );
     }
 }

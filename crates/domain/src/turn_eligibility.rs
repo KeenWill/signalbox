@@ -742,6 +742,7 @@ pub struct SessionAcceptanceTailEntryReconstitutionInput {
     accepted_input: AcceptedInputLifecycle,
     position: SessionInputPosition,
     delivery: DeliveryRequest,
+    retired_goal_origin: bool,
 }
 
 impl SessionAcceptanceTailEntryReconstitutionInput {
@@ -757,6 +758,26 @@ impl SessionAcceptanceTailEntryReconstitutionInput {
             accepted_input,
             position,
             delivery,
+            retired_goal_origin: false,
+        }
+    }
+
+    /// Supplies an immutable goal origin retired from runtime scheduling.
+    ///
+    /// The scheduling seam admits this marker only for an `OriginOf` input
+    /// whose correlated goal turn is absent from the runtime turn inventory.
+    pub const fn retired_goal_origin(
+        session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        position: SessionInputPosition,
+        delivery: DeliveryRequest,
+    ) -> Self {
+        Self {
+            session,
+            accepted_input,
+            position,
+            delivery,
+            retired_goal_origin: true,
         }
     }
 
@@ -5715,42 +5736,55 @@ fn reconstitute_active_acceptance_tail(
             );
         }
 
-        let disposition_valid = match entry.accepted_input.disposition() {
-            AcceptedInputDisposition::OriginOf(origin)
-            | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn: origin, .. } => {
-                records_by_turn.get(origin).is_some_and(|record| {
-                    record.accepted_input == entry.accepted_input
-                        && record.order.acceptance_position() == entry.position
-                        && entry.delivery == record.origin_delivery
-                        && origin_delivery_matches_record(
-                            record.origin_delivery,
-                            record,
-                            records_by_turn,
+        let disposition_valid = if entry.retired_goal_origin {
+            matches!(
+                entry.accepted_input.disposition(),
+                AcceptedInputDisposition::OriginOf(origin)
+                    if !records_by_turn.contains_key(origin)
+                        && !accepted_input_turns.contains_key(&accepted_input)
+                        && matches!(
+                            entry.delivery,
+                            DeliveryRequest::StartWhenNoActiveTurn { .. }
                         )
-                })
-            }
-            AcceptedInputDisposition::PendingSteering { binding } => {
-                pending_steering_seen = true;
-                !accepted_input_turns.contains_key(&accepted_input)
-                    && !origin_by_position.contains_key(&entry.position)
-                    && matches!(
-                        entry.delivery,
-                        DeliveryRequest::NextSafePoint {
-                            expected_active_turn,
-                        } if expected_active_turn == binding.source_turn()
-                            && expected_active_turn == active
-                    )
-            }
-            AcceptedInputDisposition::ConsumedAsSteering { .. } => {
-                !pending_steering_seen
-                    && !accepted_input_turns.contains_key(&accepted_input)
-                    && !origin_by_position.contains_key(&entry.position)
-                    && matches!(
-                        entry.delivery,
-                        DeliveryRequest::NextSafePoint {
-                            expected_active_turn,
-                        } if expected_active_turn == active
-                    )
+            )
+        } else {
+            match entry.accepted_input.disposition() {
+                AcceptedInputDisposition::OriginOf(origin)
+                | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn: origin, .. } => {
+                    records_by_turn.get(origin).is_some_and(|record| {
+                        record.accepted_input == entry.accepted_input
+                            && record.order.acceptance_position() == entry.position
+                            && entry.delivery == record.origin_delivery
+                            && origin_delivery_matches_record(
+                                record.origin_delivery,
+                                record,
+                                records_by_turn,
+                            )
+                    })
+                }
+                AcceptedInputDisposition::PendingSteering { binding } => {
+                    pending_steering_seen = true;
+                    !accepted_input_turns.contains_key(&accepted_input)
+                        && !origin_by_position.contains_key(&entry.position)
+                        && matches!(
+                            entry.delivery,
+                            DeliveryRequest::NextSafePoint {
+                                expected_active_turn,
+                            } if expected_active_turn == binding.source_turn()
+                                && expected_active_turn == active
+                        )
+                }
+                AcceptedInputDisposition::ConsumedAsSteering { .. } => {
+                    !pending_steering_seen
+                        && !accepted_input_turns.contains_key(&accepted_input)
+                        && !origin_by_position.contains_key(&entry.position)
+                        && matches!(
+                            entry.delivery,
+                            DeliveryRequest::NextSafePoint {
+                                expected_active_turn,
+                            } if expected_active_turn == active
+                        )
+                }
             }
         };
         if !disposition_valid
