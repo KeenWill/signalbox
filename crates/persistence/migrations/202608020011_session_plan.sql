@@ -71,6 +71,50 @@ CREATE TABLE session_plan_event (
     )
 );
 
+CREATE FUNCTION session_plan_event_has_authority(candidate session_plan_event)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM tool_attempt AS attempt
+          JOIN tool_request AS request
+            ON request.request_id = attempt.request_id
+         WHERE attempt.attempt_id = candidate.provenance_attempt_id
+           AND attempt.request_id = candidate.provenance_request_id
+           AND attempt.issuing_turn_attempt_id =
+                candidate.provenance_issuing_turn_attempt_id
+           AND attempt.dispatch_generation =
+                candidate.provenance_dispatch_generation
+           AND attempt.turn_id = candidate.provenance_turn_id
+           AND attempt.session_id = candidate.session_id
+           AND attempt.effect_class = 'external_effect'
+           AND request.request_id = candidate.provenance_request_id
+           AND request.session_id = candidate.session_id
+           AND request.turn_id = candidate.provenance_turn_id
+           AND request.tool_name = 'plan_write'
+           AND request.arguments_kind = 'json'
+           AND request.arguments_text::jsonb =
+                CASE candidate.event_kind
+                    WHEN 'created' THEN jsonb_build_object(
+                        'kind', 'create',
+                        'text', candidate.entry_text
+                    )
+                    WHEN 'text_revised' THEN jsonb_build_object(
+                        'kind', 'revise',
+                        'entry_id', candidate.entry_ordinal,
+                        'text', candidate.entry_text
+                    )
+                    WHEN 'status_changed' THEN jsonb_build_object(
+                        'kind', 'set_status',
+                        'entry_id', candidate.entry_ordinal,
+                        'status', candidate.entry_status
+                    )
+                END
+    );
+$$;
+
 CREATE FUNCTION next_session_plan_event_ordinal(target_session_id uuid)
 RETURNS numeric(20, 0)
 LANGUAGE plpgsql

@@ -24,16 +24,20 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
        created.entry_ordinal AS entry_ordinal,
        created.entry_text AS created_text,
        created.entry_status AS created_status,
+       session_plan_event_has_authority(created) AS created_authorized,
        revision.event_ordinal AS revision_event_ordinal,
        revision.entry_text AS revised_text,
        revision.entry_status AS revised_status,
+       revision.authorized AS revision_authorized,
        movement.event_ordinal AS status_event_ordinal,
        movement.entry_text AS moved_text,
-       movement.entry_status AS moved_status
+       movement.entry_status AS moved_status,
+       movement.authorized AS movement_authorized
   FROM session_plan_event AS created
   LEFT JOIN LATERAL (
-      SELECT event_ordinal, entry_text, entry_status
-        FROM session_plan_event
+      SELECT event_ordinal, entry_text, entry_status,
+             session_plan_event_has_authority(candidate) AS authorized
+        FROM session_plan_event AS candidate
        WHERE session_id = created.session_id
          AND entry_ordinal = created.event_ordinal
          AND event_kind = 'text_revised'
@@ -41,8 +45,9 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
        LIMIT 1
   ) AS revision ON TRUE
   LEFT JOIN LATERAL (
-      SELECT event_ordinal, entry_text, entry_status
-        FROM session_plan_event
+      SELECT event_ordinal, entry_text, entry_status,
+             session_plan_event_has_authority(candidate) AS authorized
+        FROM session_plan_event AS candidate
        WHERE session_id = created.session_id
          AND entry_ordinal = created.event_ordinal
          AND event_kind = 'status_changed'
@@ -54,6 +59,42 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
    AND ($2::numeric IS NULL OR created.event_ordinal > $2)
  ORDER BY created.event_ordinal
  LIMIT $3";
+
+const ACTIVE_APPEND_AUTHORITY_SQL: &str = "SELECT attempt.attempt_id
+  FROM tool_attempt AS attempt
+  JOIN tool_request AS request
+    ON request.request_id = attempt.request_id
+ WHERE attempt.attempt_id = $1
+   AND attempt.request_id = $2
+   AND attempt.issuing_turn_attempt_id = $3
+   AND attempt.dispatch_generation = $4
+   AND attempt.turn_id = $5
+   AND attempt.session_id = $6
+   AND attempt.effect_class = 'external_effect'
+   AND attempt.state_kind = 'in_flight'
+   AND request.request_id = $2
+   AND request.session_id = $6
+   AND request.turn_id = $5
+   AND request.tool_name = 'plan_write'
+   AND request.arguments_kind = 'json'
+   AND request.arguments_text::jsonb =
+        CASE $7::text
+            WHEN 'created' THEN jsonb_build_object(
+                'kind', 'create',
+                'text', $9::text
+            )
+            WHEN 'text_revised' THEN jsonb_build_object(
+                'kind', 'revise',
+                'entry_id', $8::numeric,
+                'text', $9::text
+            )
+            WHEN 'status_changed' THEN jsonb_build_object(
+                'kind', 'set_status',
+                'entry_id', $8::numeric,
+                'status', $10::text
+            )
+        END
+ FOR SHARE OF attempt";
 
 const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
   FROM session_plan_event
@@ -264,6 +305,26 @@ impl SessionPlanRepository {
             .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
                 "next event ordinal",
             ))?;
+        let encoded = EncodedDraft::new(next, request.draft());
+        let correlation = request.provenance().correlation();
+        let authorized: Option<Uuid> = sqlx::query_scalar(ACTIVE_APPEND_AUTHORITY_SQL)
+            .bind(correlation.attempt().into_uuid())
+            .bind(correlation.request().into_uuid())
+            .bind(correlation.issuing_attempt().into_uuid())
+            .bind(Decimal::from(correlation.generation().as_u64()))
+            .bind(correlation.turn().into_uuid())
+            .bind(request.session().into_uuid())
+            .bind(mapping::plan_event_kind_to_str(encoded.kind))
+            .bind(Decimal::from(encoded.entry.as_u64()))
+            .bind(encoded.text)
+            .bind(encoded.status)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if authorized.is_none() {
+            transaction.rollback().await?;
+            return Err(SessionPlanRepositoryError::InvalidAppendProvenance);
+        }
+
         if let Some(entry) = draft_target(request.draft()) {
             let exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
@@ -285,8 +346,6 @@ impl SessionPlanRepository {
                 ));
             }
         }
-
-        let encoded = EncodedDraft::new(next, request.draft());
 
         sqlx::query(
             "INSERT INTO session_plan_event
@@ -498,6 +557,10 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     if entry.creation_ordinal() != creation_ordinal {
         return Err(SessionPlanCorruption::MismatchedIdentity("current entry identity").into());
     }
+    let created_authorized: bool = required(row, "created_authorized")?;
+    if !created_authorized {
+        return Err(SessionPlanCorruption::UntrustedProvenance.into());
+    }
     let created_text: String = required(row, "created_text")?;
     let created_status: Option<String> = row.try_get("created_status")?;
     if created_status.is_some() {
@@ -506,9 +569,15 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     let revision_ordinal: Option<Decimal> = row.try_get("revision_event_ordinal")?;
     let revised_text: Option<String> = row.try_get("revised_text")?;
     let revised_status: Option<String> = row.try_get("revised_status")?;
-    let text = match (revision_ordinal, revised_text, revised_status) {
-        (None, None, None) => created_text,
-        (Some(revision_ordinal), Some(revised_text), None) => {
+    let revision_authorized: Option<bool> = row.try_get("revision_authorized")?;
+    let text = match (
+        revision_ordinal,
+        revised_text,
+        revised_status,
+        revision_authorized,
+    ) {
+        (None, None, None, None) => created_text,
+        (Some(revision_ordinal), Some(revised_text), None, Some(true)) => {
             let revision_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
                 revision_ordinal,
                 "revision event ordinal",
@@ -523,6 +592,9 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
             }
             revised_text
         }
+        (Some(_), Some(_), None, Some(false)) => {
+            return Err(SessionPlanCorruption::UntrustedProvenance.into());
+        }
         _ => {
             return Err(SessionPlanCorruption::InvalidEventPayload("current text revision").into());
         }
@@ -532,9 +604,15 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     let status_ordinal: Option<Decimal> = row.try_get("status_event_ordinal")?;
     let moved_text: Option<String> = row.try_get("moved_text")?;
     let moved_status: Option<String> = row.try_get("moved_status")?;
-    let status = match (status_ordinal, moved_text, moved_status) {
-        (None, None, None) => PlanStatus::Pending,
-        (Some(status_ordinal), None, Some(moved_status)) => {
+    let movement_authorized: Option<bool> = row.try_get("movement_authorized")?;
+    let status = match (
+        status_ordinal,
+        moved_text,
+        moved_status,
+        movement_authorized,
+    ) {
+        (None, None, None, None) => PlanStatus::Pending,
+        (Some(status_ordinal), None, Some(moved_status), Some(true)) => {
             let status_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
                 status_ordinal,
                 "status event ordinal",
@@ -553,6 +631,9 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
                     value: moved_status,
                 }
             })?
+        }
+        (Some(_), None, Some(_), Some(false)) => {
+            return Err(SessionPlanCorruption::UntrustedProvenance.into());
         }
         _ => {
             return Err(SessionPlanCorruption::InvalidEventPayload("current status change").into());
