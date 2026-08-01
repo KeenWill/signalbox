@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `849e8316` on 2026-08-01.
+Verified against repository head `e0538237` on 2026-08-01.
 
 ## Scope and method
 
@@ -21,12 +21,14 @@ The audit compared:
   [synchronizer](../Sources/SignalboxClient/SessionSynchronization.swift), and
   [timeline projector](../Sources/SignalboxClient/ProcessTranscriptProjector.swift).
 
-The current Rust protocol has 41 client request verbs and 58 server message
+The current Rust protocol has 46 client request verbs and 63 server message
 kinds. Before this work, native modeled 16 request verbs and 35 server message
-kinds, plus a generic unknown-message envelope. All 12 current durable
+kinds, plus a generic unknown-message envelope. Twelve of the 13 current durable
 `SessionEvent` variants and all four current text-entry variants were named, but
 some nested future variants were rejected during synchronization. Native named
-eight of the nine current non-text transcript-entry variants.
+eight of the nine current non-text transcript-entry variants. The remaining
+durable event, `goal_turn_retired`, arrived after the initial inventory and is
+preserved through the generic visibly-unrecognized event representation.
 
 Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
@@ -62,7 +64,7 @@ Disposition counts are by the gap rows below, not by individual wire variants:
 | S06 | Medium   | Native lacks the review mutation verbs `create_review_target`, `start_review_run`, `activate_review_pass`, `complete_review_pass`, `record_review_findings`, `record_review_finding_event`, `reserve_review_external_link`, `attach_review_external_link`, `start_review_orchestration`, `record_review_import_outcome`, `record_review_concern_outcome`, `record_review_judgment_plan`, `record_review_judgment_effect`, `record_review_repair_outcomes`, and `record_review_publication_outcomes`. It also lacks their creation, activation, completion, recording, linking, and orchestration receipts. | **staged** — see [client scope](../../../docs/open-questions.md#client-scope).                                               |
 | S07 | Medium   | Native lacks `read_review_target`, `read_review_run`, `read_review_finding`, `list_review_findings`, and `read_review_orchestration`, plus `review_target`, `review_run`, `review_finding`, the three finding-page messages, and `review_orchestration`.                                                                                                                                                                                                                                                                                                                                                   | **staged** — see [client scope](../../../docs/open-questions.md#client-scope).                                               |
 | S08 | Medium   | The daemon template catalog exposes only template name and bundle version, which is insufficient for a useful native template browser without another source of display metadata.                                                                                                                                                                                                                                                                                                                                                                                                                          | **staged** — see [template storage and authoring](../../../docs/open-questions.md#template-storage-and-authoring).          |
-| S09 | Medium   | The current process protocol exposes no independent goal-mode read model for a native goal-mode display.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | **staged** — see [destination features](../../../docs/open-questions.md#destination-features-target-model).                 |
+| S09 | Medium   | Native lacks the goal-mode requests `attach_goal`, `read_goal`, `resume_goal`, `stop_goal`, and `supersede_goal`; the five goal-history/transition responses; and typed goal lifecycle, history-event, provenance, blocked-reason, and rejection vocabularies.                                                                                                                                                                                                                                                                                                                                           | **staged** — see [destination features](../../../docs/open-questions.md#destination-features-target-model).                 |
 | S10 | Medium   | Plans are available only as model tool calls/results; there is no independent client plan-read verb or server projection.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | **staged** — see [client scope](../../../docs/open-questions.md#client-scope).                                               |
 | S11 | High     | Added members on known version-one frames, messages, nested states, errors, or details invalidate the closed wire shape and therefore erase the known projection.                                                                                                                                                                                                                                                                                                                                                                                                                                            | **staged** — changing that rule requires a revision to the [process protocol](../../../docs/spec/process-protocol.md). |
 
@@ -74,11 +76,14 @@ Disposition counts are by the gap rows below, not by individual wire variants:
 
 ## Current shape catalog
 
-The 25 request verbs absent from native are the five non-review verbs in S01
-through S05 and the 20 review verbs in S06 and S07. The 23 named server kinds
+The 30 request verbs absent from native are the five non-review verbs in S01
+through S05, the 20 review verbs in S06 and S07, and the five goal verbs in S09.
+The 28 named server kinds
 absent before this work are `steering_submitted`; the three template sequence
-kinds; `session_defaults_replaced`; `session_compacted`; and these 17 review
-kinds: `review_target_created`, `review_run_started`, `review_pass_activated`,
+kinds; `session_defaults_replaced`; `session_compacted`; the five goal kinds
+`goal_transition_applied`, `goal_history_start`, `goal_history_state`,
+`goal_history_item`, and `goal_history_end`; and these 17 review kinds:
+`review_target_created`, `review_run_started`, `review_pass_activated`,
 `review_pass_completed`, `review_findings_recorded`,
 `review_finding_event_recorded`, `review_external_link_reserved`,
 `review_external_link_attached`, `review_target`, `review_run`,
@@ -90,10 +95,11 @@ The durable event family itself is current: `session_created`, `input_accepted`,
 `turn_activated`, `model_call_transition`, `tool_batch_transition`,
 `context_compacted`, `turn_completed`, `turn_failed`, `turn_refused`,
 `turn_cancelled`, `turn_reconciliation_required`, and
-`turn_tool_reconciliation_required` are all decoded. Native also carries a
-generic unknown-event representation for forward compatibility. The gap was
-acceptance or presentation of newer nested/event content, covered by C03 and
-C07.
+`turn_tool_reconciliation_required` are all decoded. The current
+`goal_turn_retired` variant and future variants use native's generic
+unknown-event representation for forward compatibility. The gap was acceptance
+or presentation of newer nested/event content, covered by C03 and C07; a full
+goal-mode surface remains S09.
 
 The non-text transcript family is `model_identity_changed`,
 `assistant_tool_use`, `tool_execution_result`, `tool_denied`, `tool_closed`,

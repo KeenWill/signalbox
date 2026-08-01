@@ -517,6 +517,15 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(projection.activity, ProcessProjectionFixture.quotaExhaustedActivity)
   }
 
+  func testUnknownFailedDispositionAppearsInNativeActivity() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownFailedDisposition()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(projection.activity, ProcessProjectionFixture.unknownFailedActivity)
+  }
+
   func testSnapshotPreservesPendingAcceptanceOrderAndActiveActivity() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithQueuedAndActiveTurns()
     var projector = SignalboxProcessTranscriptProjector()
@@ -528,6 +537,15 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       ProcessProjectionFixture.pendingIDsInAcceptanceOrder
     )
     XCTAssertEqual(projection.activity, ProcessProjectionFixture.runningActivity)
+  }
+
+  func testUnknownTurnActivityPrecedesLaterQueuedActivity() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownAndQueuedTurns()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(projection.activity, ProcessProjectionFixture.unavailableActivity)
   }
 
   func testUnknownCurrentModelCallStateRequiresRecovery() throws {
@@ -4008,6 +4026,10 @@ private enum ProcessProjectionFixture {
     state: .failed,
     label: "Failed: provider quota exhausted"
   )
+  static let unknownFailedActivity = SignalboxProcessActivity(
+    state: .failed,
+    label: "Failed: unrecognized disposition (\(unknownDisposition))"
+  )
   static let cancelledActivity = SignalboxProcessActivity(state: .cancelled, label: "Cancelled")
   static let waitingActivity = SignalboxProcessActivity(
     state: .waitingForToolDecision,
@@ -4061,6 +4083,22 @@ private enum ProcessProjectionFixture {
   }
 
   static func snapshotWithFailedProviderCause() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithFailedModelCall(
+      disposition: "known_failed",
+      causeMember: ",\"cause\":\"quota_exhausted\""
+    )
+  }
+
+  static func snapshotWithUnknownFailedDisposition() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshotWithFailedModelCall(disposition: unknownDisposition, causeMember: "")
+  }
+
+  private static func snapshotWithFailedModelCall(
+    disposition: String,
+    causeMember: String
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
         """
@@ -4081,8 +4119,7 @@ private enum ProcessProjectionFixture {
             "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
             "terminal_model_call":{
               "model_call_id":"\(ProcessDriverFixture.modelCall)",
-              "disposition":"known_failed",
-              "cause":"quota_exhausted"
+              "disposition":"\(disposition)"\(causeMember)
             }
           }
         }
@@ -4723,6 +4760,28 @@ private enum ProcessProjectionFixture {
   }
 
   static func snapshotWithQueuedAndActiveTurns() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithQueuedTurns(
+      middleState: """
+        {
+          "type":"active_running",
+          "current_attempt_id":"\(ProcessDriverFixture.attempt)",
+          "current_model_call":null
+        }
+        """
+    )
+  }
+
+  static func snapshotWithUnknownAndQueuedTurns() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithQueuedTurns(
+      middleState: """
+        {"type":"fixture_future_turn_state","retained":true}
+        """
+    )
+  }
+
+  private static func snapshotWithQueuedTurns(
+    middleState: String
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
         """
@@ -4749,11 +4808,7 @@ private enum ProcessProjectionFixture {
           "type":"transcript_turn",
           "turn_id":"\(ProcessDriverFixture.turn)",
           "acceptance_position":"2",
-          "state":{
-            "type":"active_running",
-            "current_attempt_id":"\(ProcessDriverFixture.attempt)",
-            "current_model_call":null
-          }
+          "state":\(middleState)
         }
         """,
         """

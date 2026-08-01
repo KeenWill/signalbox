@@ -111,6 +111,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
     var latestActivity = SignalboxProcessActivity.unavailable
     var activeActivity: SignalboxProcessActivity?
+    var unknownTurnActivity: SignalboxProcessActivity?
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
 
@@ -118,6 +119,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       switch record {
       case .turn(let turn):
         latestActivity = activity(for: turn.state)
+        if case .unknown = turn.state {
+          unknownTurnActivity = latestActivity
+        }
         if turnStateIsActive(turn.state) {
           activeActivity = latestActivity
         }
@@ -176,7 +180,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return SignalboxProcessTranscriptProjection(
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingInputs,
-      activity: activeActivity ?? latestActivity,
+      activity: unknownTurnActivity ?? activeActivity ?? latestActivity,
       materializedAcceptedInputIDs: materializedAcceptedInputIDs
     )
   }
@@ -703,6 +707,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .reconciliationRequired, .toolReconciliationRequired:
       return .init(state: .recoveryRequired, label: "Recovery required")
     case .failed(_, _, let terminalModelCall):
+      if let terminalModelCall, case .unknown(let value) = terminalModelCall.disposition {
+        return .init(state: .failed, label: "Failed: unrecognized disposition (\(value))")
+      }
       guard let cause = terminalModelCall?.cause else {
         return .init(state: .failed, label: "Failed")
       }
