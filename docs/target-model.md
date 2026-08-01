@@ -1,6 +1,6 @@
 # Target model
 
-This document records the maintainer.s directional product and domain target:
+This document records the maintainer's directional product and domain target:
 the destination Signalbox is being steered toward, written down so milestone
 selection aims at a destination instead of drifting.
 

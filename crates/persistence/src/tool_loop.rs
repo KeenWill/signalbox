@@ -2291,7 +2291,7 @@ async fn persist_batch_decision(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
              owner_command_id)
-         VALUES ($1, $2, 'user_command', $3, $4)",
+         VALUES ($1, $2, 'owner_command', $3, $4)",
     )
     .bind(tool_request_id_to_uuid(applied.resolution().request()))
     .bind(decision_kind)

@@ -37,19 +37,35 @@ def main() -> int:
         allowed.write_text(
             'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
         )
-        violation.write_text("The owner approves this tool.\n", encoding="utf-8")
+        violation.write_text(
+            "The owner approves this tool.\n"
+            "The owners approve this tool.\n"
+            "session_owners = []\n",
+            encoding="utf-8",
+        )
         git(root, "init", "--quiet")
         git(root, "add", "crates/example/src/lib.rs", "docs/spec/example.md")
         rejected = run_checker(root)
-        if rejected.returncode != 1:
-            raise AssertionError(f"violation unexpectedly passed:\n{rejected.stdout}{rejected.stderr}")
+        assert rejected.returncode == 1, (
+            f"violation unexpectedly passed:\n{rejected.stdout}{rejected.stderr}"
+        )
         expected = "docs/spec/example.md:1: The owner approves this tool."
-        if expected not in rejected.stdout:
-            raise AssertionError(f"violation was not named:\n{rejected.stdout}")
+        plural = "docs/spec/example.md:2: The owners approve this tool."
+        identifier = "docs/spec/example.md:3: session_owners = []"
+        assert expected in rejected.stdout, (
+            f"singular violation missing:\n{rejected.stdout}"
+        )
+        assert plural in rejected.stdout, (
+            f"plural violation missing:\n{rejected.stdout}"
+        )
+        assert identifier in rejected.stdout, (
+            f"identifier violation missing:\n{rejected.stdout}"
+        )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
         accepted = run_checker(root)
-        if accepted.returncode != 0:
-            raise AssertionError(f"allowed vocabulary failed:\n{accepted.stdout}{accepted.stderr}")
+        assert accepted.returncode == 0, (
+            f"allowed vocabulary failed:\n{accepted.stdout}{accepted.stderr}"
+        )
     print("user-vocabulary checker self-test passed")
     return 0
 

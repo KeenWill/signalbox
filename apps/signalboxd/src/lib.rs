@@ -26,6 +26,7 @@ use tokio::sync::watch;
 use tracing::Instrument;
 mod configuration;
 mod context_guard;
+mod conversation_introspection;
 mod daemon_tools;
 mod fenced_database;
 mod local_socket;
@@ -39,13 +40,16 @@ mod telemetry;
 pub mod usage_limits;
 
 pub use configuration::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
-    HubModelConfigurationError,
+    ANTHROPIC_CREDENTIAL_REFERENCE, DaemonToolConfiguration, FileCredentialAccess,
+    HubModelConfiguration, HubModelConfigurationError,
 };
 pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
+pub use conversation_introspection::{
+    ConversationIntrospectionError, PostgresConversationIntrospection,
+};
 pub use daemon_tools::{
     DaemonToolCatalog, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
-    DaemonToolsConstructionError,
+    DaemonToolsConstructionError, PinnedWorkspaceFileSystem,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
@@ -93,6 +97,24 @@ pub use signalbox_tools_code_host::{
     ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, StackStateArguments,
     StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
     ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments, ThreadResolveResult,
+};
+pub use signalbox_tools_conversations::{
+    CONVERSATION_TOOL_NAMES, ConversationExecutor, ConversationIntrospectionPort,
+    ConversationListItem, ConversationListPage, ConversationListRequest, ConversationTools,
+    ConversationTranscriptRequest, ImportedTranscriptRequest, TranscriptEntry, TranscriptEntryKind,
+    TranscriptPage,
+};
+pub use signalbox_tools_github::{
+    GITHUB_CREDENTIAL_REFERENCE, GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy,
+    GitHubExecutor, GitHubOperation, GitHubResult, GitHubTools, GitHubTransport,
+    GitHubTransportFailure, PULL_REQUEST_DIFF_NAME, PULL_REQUEST_METADATA_NAME,
+    PULL_REQUEST_PUBLISH_REVIEW_NAME, PULL_REQUEST_REVIEW_THREADS_NAME,
+};
+pub use signalbox_tools_workspace::{
+    APPLY_PATCH_NAME, EDIT_FILE_NAME, GLOB_FILES_NAME, LIST_DIRECTORY_NAME,
+    LocalWorkspaceFileSystem, READ_FILE_NAME, SEARCH_FILES_NAME, WORKSPACE_MUTATION_TOOL_NAMES,
+    WORKSPACE_READ_TOOL_NAMES, WRITE_FILE_NAME, WorkspaceFileSystem, WorkspaceMutationExecutor,
+    WorkspaceMutationFileSystem, WorkspaceMutationTools, WorkspaceReadExecutor, WorkspaceReadTools,
 };
 pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 pub use telemetry::{

@@ -834,7 +834,8 @@ Why (bytes, at admission): byte measurement matches wire and storage cost and
 keeps the domain value exactly as accepted; rejecting before construction can
 never truncate or rewrite content.
 
-This is a provisional user-approved floor, not the resource-governance policy.
+This is a provisional maintainer-approved floor, not the resource-governance
+policy.
 
 ## Actor attribution
 
