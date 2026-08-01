@@ -3,8 +3,13 @@ name: Tool live smokes
 on:
   pull_request:
     paths:
+      - "crates/persistence/**"
+      - "crates/tools-basic/**"
+      - "crates/tools-code-host/**"
+      - "crates/tools-conversations/**"
       - "crates/tools-github/**"
       - "crates/tools-plan/**"
+      - "crates/tools-workspace/**"
       - "apps/signalboxd/**"
       - "Cargo.lock"
       - ".github/workflows/tool-smokes.yml"

@@ -102,6 +102,64 @@ const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
 type SmokeResult<T = ()> = Result<T, Box<dyn Error>>;
 
+struct PlanEntryFixture {
+    entry_id: u64,
+    text: &'static str,
+    status: &'static str,
+}
+
+struct PlanFixture {
+    calls: Vec<(String, String)>,
+    entries: [PlanEntryFixture; 2],
+}
+
+impl PlanFixture {
+    fn new() -> Self {
+        let entries = [
+            PlanEntryFixture {
+                entry_id: 1,
+                text: FIRST_PLAN_TEXT,
+                status: FIRST_PLAN_STATUS,
+            },
+            PlanEntryFixture {
+                entry_id: 2,
+                text: SECOND_PLAN_TEXT,
+                status: SECOND_PLAN_STATUS,
+            },
+        ];
+        let calls = vec![
+            call(
+                PLAN_WRITE_NAME,
+                json!({"kind": "create", "text": entries[0].text}),
+            ),
+            call(
+                PLAN_WRITE_NAME,
+                json!({"kind": "create", "text": entries[1].text}),
+            ),
+            call(
+                PLAN_WRITE_NAME,
+                json!({"kind": "set_status", "entry_id": entries[0].entry_id, "status": entries[0].status}),
+            ),
+            call(
+                PLAN_WRITE_NAME,
+                json!({"kind": "set_status", "entry_id": entries[1].entry_id, "status": entries[1].status}),
+            ),
+            call(
+                PLAN_READ_NAME,
+                json!({"after_entry_id": null, "include_history": true}),
+            ),
+        ];
+        Self { calls, entries }
+    }
+
+    fn history_count(&self) -> usize {
+        self.calls
+            .iter()
+            .filter(|(name, _)| name == PLAN_WRITE_NAME)
+            .count()
+    }
+}
+
 #[test]
 #[ignore = "uses ephemeral PostgreSQL, a local Unix socket, single-digit public HTTP requests, and GITHUB_TOKEN"]
 fn live_daemon_executes_every_tool_family_and_denies_every_gate() -> SmokeResult {
@@ -183,9 +241,13 @@ async fn run_live_smoke() -> SmokeResult {
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();
-    assert_confirm_inventory(&tool_catalog);
+    let confirm_names = confirm_tool_names(&tool_catalog);
+    let confirm_name_refs = confirm_names.iter().map(String::as_str).collect::<Vec<_>>();
+    let gate_calls = confirm_calls(session);
+    assert_confirm_calls(&gate_calls, &confirm_name_refs);
+    let plan_fixture = PlanFixture::new();
 
-    let scripts = smoke_scripts(session);
+    let scripts = smoke_scripts(&plan_fixture, &gate_calls);
     let scripted = ScriptedModel::<ModelCallId>::following(scripts);
     let probe = scripted.clone();
     let provider = RuntimeModelCallProvider::new(scripted, runtime_models);
@@ -208,7 +270,7 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
-    assert_workspace_read_results(&latest_tool_results(&probe, 3)?)?;
+    assert_workspace_read_results(&current_tool_results(&probe)?)?;
 
     let mutation_turn = run_parking_turn(
         &pool,
@@ -242,7 +304,7 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
-    assert_workspace_readback(&latest_tool_results(&probe, 1)?)?;
+    assert_workspace_readback(&current_tool_results(&probe)?)?;
 
     run_automatic_turn(
         &pool,
@@ -252,7 +314,7 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
-    assert_change_request_summary(&latest_tool_results(&probe, 1)?)?;
+    assert_change_request_summary(&current_tool_results(&probe)?)?;
 
     run_automatic_turn(
         &pool,
@@ -262,7 +324,7 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
-    assert_github_metadata(&latest_tool_results(&probe, 1)?)?;
+    assert_github_metadata(&current_tool_results(&probe)?)?;
 
     run_automatic_turn(
         &pool,
@@ -272,7 +334,7 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
-    assert_own_transcript(&latest_tool_results(&probe, 1)?)?;
+    assert_own_transcript(&current_tool_results(&probe)?)?;
 
     run_automatic_turn(
         &pool,
@@ -282,7 +344,7 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
-    assert_plan_fold(&latest_tool_results(&probe, 5)?)?;
+    assert_plan_fold(&current_tool_results(&probe)?, &plan_fixture)?;
 
     run_automatic_turn(
         &pool,
@@ -292,7 +354,7 @@ async fn run_live_smoke() -> SmokeResult {
         &execution,
     )
     .await?;
-    assert_web_fetch(&latest_tool_results(&probe, 1)?)?;
+    assert_web_fetch(&current_tool_results(&probe)?)?;
 
     let gate_turn = run_parking_turn(
         &pool,
@@ -307,7 +369,7 @@ async fn run_live_smoke() -> SmokeResult {
         &mut connection,
         session,
         gate_turn,
-        &confirm_tool_names(),
+        &confirm_name_refs,
         DecisionPosture::Deny,
         &execution,
     )
@@ -394,7 +456,7 @@ fn session_template_configuration(
     Ok(SessionTemplateConfiguration::read(&path, || None, models)?)
 }
 
-fn smoke_scripts(session: CanonicalUuid) -> Vec<Script> {
+fn smoke_scripts(plan_fixture: &PlanFixture, gate_calls: &[(String, String)]) -> Vec<Script> {
     let workspace_reads = vec![
         call(
             READ_FILE_NAME,
@@ -443,30 +505,7 @@ fn smoke_scripts(session: CanonicalUuid) -> Vec<Script> {
         READ_OWN_CONVERSATION_NAME,
         json!({"after_position": null, "max_entries": 100, "max_bytes": 131072}),
     )];
-    let plan = vec![
-        call(
-            PLAN_WRITE_NAME,
-            json!({"kind": "create", "text": FIRST_PLAN_TEXT}),
-        ),
-        call(
-            PLAN_WRITE_NAME,
-            json!({"kind": "create", "text": SECOND_PLAN_TEXT}),
-        ),
-        call(
-            PLAN_WRITE_NAME,
-            json!({"kind": "set_status", "entry_id": 1, "status": FIRST_PLAN_STATUS}),
-        ),
-        call(
-            PLAN_WRITE_NAME,
-            json!({"kind": "set_status", "entry_id": 2, "status": SECOND_PLAN_STATUS}),
-        ),
-        call(
-            PLAN_READ_NAME,
-            json!({"after_entry_id": null, "include_history": true}),
-        ),
-    ];
     let web = vec![call(WEB_FETCH_NAME, json!({"url": WEB_URL}))];
-    let gates = confirm_calls(session);
 
     vec![
         tool_use_script(&workspace_reads),
@@ -481,11 +520,11 @@ fn smoke_scripts(session: CanonicalUuid) -> Vec<Script> {
         completion_script("github read observed"),
         tool_use_script(&conversations),
         completion_script("own transcript observed"),
-        tool_use_script(&plan),
+        tool_use_script(&plan_fixture.calls),
         completion_script("plan fold observed"),
         tool_use_script(&web),
         completion_script("web fetch observed"),
-        tool_use_script(&gates),
+        tool_use_script(gate_calls),
         completion_script("all gated requests denied"),
     ]
 }
@@ -527,21 +566,13 @@ fn completion_script(text: &str) -> Script {
     }))
 }
 
-fn confirm_tool_names() -> Vec<&'static str> {
-    vec![
-        APPLY_PATCH_NAME,
-        CHANGE_REQUEST_COMMENT_NAME,
-        CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME,
-        CHANGE_REQUEST_THREAD_REPLY_NAME,
-        CHANGE_REQUEST_THREAD_RESOLVE_NAME,
-        EDIT_FILE_NAME,
-        PULL_REQUEST_PUBLISH_REVIEW_NAME,
-        LIST_CONVERSATIONS_NAME,
-        READ_CONVERSATION_NAME,
-        READ_IMPORTED_CONVERSATION_NAME,
-        SESSION_STATUS_UPDATE_NAME,
-        WRITE_FILE_NAME,
-    ]
+fn confirm_tool_names(catalog: &impl ToolCatalog) -> Vec<String> {
+    catalog
+        .definitions()
+        .iter()
+        .filter(|definition| definition.permission_default() == ToolPermissionDefault::Confirm)
+        .map(|definition| definition.name().as_str().to_owned())
+        .collect()
 }
 
 fn confirm_calls(session: CanonicalUuid) -> Vec<(String, String)> {
@@ -613,25 +644,38 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<(String, String)> {
     ]
 }
 
-fn assert_confirm_inventory(catalog: &impl ToolCatalog) {
-    let actual = catalog
-        .definitions()
+fn assert_confirm_calls(calls: &[(String, String)], expected_names: &[&str]) {
+    let actual_names = calls
         .iter()
-        .filter(|definition| definition.permission_default() == ToolPermissionDefault::Confirm)
-        .map(|definition| definition.name().as_str().to_owned())
+        .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(actual, confirm_tool_names());
+    assert_eq!(actual_names, expected_names);
 }
 
-fn latest_tool_results(
-    model: &ScriptedModel<ModelCallId>,
-    expected_count: usize,
-) -> SmokeResult<Vec<Value>> {
+fn current_tool_results(model: &ScriptedModel<ModelCallId>) -> SmokeResult<Vec<Value>> {
     let operations = model.received_operations();
+    let before = operations
+        .iter()
+        .rev()
+        .nth(1)
+        .ok_or_else(|| io::Error::other("the tool-use model operation was not received"))?;
     let continuation = operations
         .last()
         .ok_or_else(|| io::Error::other("the continuation model operation was not received"))?;
-    let mut results = continuation
+    let previous_results = operation_tool_results(before)?;
+    let mut continuation_results = operation_tool_results(continuation)?;
+    if !continuation_results.starts_with(&previous_results) {
+        return Err(
+            io::Error::other("the continuation did not preserve prior tool results").into(),
+        );
+    }
+    Ok(continuation_results.split_off(previous_results.len()))
+}
+
+fn operation_tool_results(
+    operation: &signalbox_model_runtime::ModelOperation<ModelCallId>,
+) -> SmokeResult<Vec<Value>> {
+    Ok(operation
         .messages
         .iter()
         .flat_map(|message| &message.parts)
@@ -642,11 +686,7 @@ fn latest_tool_results(
             | MessagePart::Thinking { .. }
             | MessagePart::RedactedThinking { .. } => None,
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    if results.len() < expected_count {
-        return Err(io::Error::other("the continuation has too few tool results").into());
-    }
-    Ok(results.split_off(results.len() - expected_count))
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 fn assert_workspace_read_results(results: &[Value]) -> SmokeResult {
@@ -710,17 +750,21 @@ fn assert_own_transcript(results: &[Value]) -> SmokeResult {
     Ok(())
 }
 
-fn assert_plan_fold(results: &[Value]) -> SmokeResult {
-    let [_, _, _, _, plan] = results else {
-        return Err(io::Error::other("plan round returned the wrong result count").into());
-    };
-    assert_eq!(plan["entries"][0]["entry_id"], 1);
-    assert_eq!(plan["entries"][0]["text"], FIRST_PLAN_TEXT);
-    assert_eq!(plan["entries"][0]["status"], FIRST_PLAN_STATUS);
-    assert_eq!(plan["entries"][1]["entry_id"], 2);
-    assert_eq!(plan["entries"][1]["text"], SECOND_PLAN_TEXT);
-    assert_eq!(plan["entries"][1]["status"], SECOND_PLAN_STATUS);
-    assert_eq!(plan["history"].as_array().map(Vec::len), Some(4));
+fn assert_plan_fold(results: &[Value], fixture: &PlanFixture) -> SmokeResult {
+    assert_eq!(results.len(), fixture.calls.len());
+    let plan = results
+        .last()
+        .ok_or_else(|| io::Error::other("plan round returned no read result"))?;
+    assert_eq!(plan["entries"][0]["entry_id"], fixture.entries[0].entry_id);
+    assert_eq!(plan["entries"][0]["text"], fixture.entries[0].text);
+    assert_eq!(plan["entries"][0]["status"], fixture.entries[0].status);
+    assert_eq!(plan["entries"][1]["entry_id"], fixture.entries[1].entry_id);
+    assert_eq!(plan["entries"][1]["text"], fixture.entries[1].text);
+    assert_eq!(plan["entries"][1]["status"], fixture.entries[1].status);
+    assert_eq!(
+        plan["history"].as_array().map(Vec::len),
+        Some(fixture.history_count())
+    );
     Ok(())
 }
 
