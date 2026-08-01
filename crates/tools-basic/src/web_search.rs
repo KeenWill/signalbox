@@ -2431,6 +2431,8 @@ impl CredentialScrubber {
                     let result_components = result_ipv6.segments();
                     let result_octets = result_ipv6.octets();
                     return self.reversible_variants().any(|variant| {
+                        let (mixed_components, mixed_octets) =
+                            canonicalized_mixed_ipv6_ipv4_tail_fragments(variant);
                         canonicalized_ipv6_fragments(variant)
                             .into_iter()
                             .any(|fragment| {
@@ -2445,6 +2447,16 @@ impl CredentialScrubber {
                                         .any(|window| window == fragment)
                                 },
                             )
+                            || mixed_components.into_iter().any(|fragment| {
+                                result_components
+                                    .windows(fragment.len())
+                                    .any(|window| window == fragment)
+                            })
+                            || mixed_octets.into_iter().any(|fragment| {
+                                result_octets
+                                    .windows(fragment.len())
+                                    .any(|window| window == fragment)
+                            })
                     });
                 }
             }
@@ -3092,6 +3104,34 @@ fn canonicalized_ipv4_tail_fragments(value: &str) -> Vec<Vec<u8>> {
     fragments
 }
 
+fn canonicalized_mixed_ipv6_ipv4_tail_fragments(value: &str) -> (Vec<Vec<u16>>, Vec<Vec<u8>>) {
+    let Some((ipv6_prefix, ipv4_tail)) = value.rsplit_once(':') else {
+        return (Vec::new(), Vec::new());
+    };
+    if ipv6_prefix.is_empty()
+        || !ipv4_tail.contains('.')
+        || canonicalized_ipv6_fragments(&format!("{ipv6_prefix}:0")).is_empty()
+    {
+        return (Vec::new(), Vec::new());
+    }
+    let octet_fragments = canonicalized_ipv4_tail_fragments(ipv4_tail);
+    let mut component_fragments = Vec::new();
+    for octets in &octet_fragments {
+        if !octets.len().is_multiple_of(2) {
+            continue;
+        }
+        let canonical_tail = octets
+            .chunks_exact(2)
+            .map(|pair| format!("{:x}", u16::from_be_bytes([pair[0], pair[1]])))
+            .collect::<Vec<_>>()
+            .join(":");
+        component_fragments.extend(canonicalized_ipv6_fragments(&format!(
+            "{ipv6_prefix}:{canonical_tail}"
+        )));
+    }
+    (component_fragments, octet_fragments)
+}
+
 fn canonicalized_ipv4_tail_fragment(
     tail: &str,
     positions: std::ops::Range<usize>,
@@ -3248,6 +3288,7 @@ mod tests {
     const URL_IPV6_MULTI_HEXTET_COLLISION_KEY: &str = "0db8:0000";
     const URL_IPV6_COMPRESSED_FRAGMENT_COLLISION_KEY: &str = "0db8::1";
     const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
+    const URL_MIXED_COMPRESSED_IPV6_TAIL_COLLISION_KEY: &str = "::ffff:192.168";
     const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
     const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
@@ -6471,6 +6512,31 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_IPV4_TAIL_IPV6_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: a compressed IPv6 prefix and partial dotted IPv4 tail are
+    /// canonicalized together before comparison with a result host.
+    #[test]
+    fn web_search_rejects_canonicalized_mixed_compressed_ipv6_tail_fragment() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_IPV4_TAIL_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("mixed-tail fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_MIXED_COMPRESSED_IPV6_TAIL_COLLISION_KEY
+                .as_bytes()
+                .to_vec(),
         ))
         .expect("fixture credential is usable");
 
