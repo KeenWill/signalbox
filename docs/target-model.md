@@ -399,7 +399,7 @@ shape; their implemented behavior is owned by the [living spec](spec/README.md).
    ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
 3. **A model call against a scripted provider** — landed
    ([model-call-execution](spec/model-call-execution.md)).
-4. **A smoke against a real provider** — landed for the user-run smoke
+4. **A smoke against a real provider** — landed for the maintainer-run smoke
    ([model-call-execution](spec/model-call-execution.md),
    [runtime-substrate](spec/runtime-substrate.md)), including the production
    security posture for outbound provider calls. This was the gate before
