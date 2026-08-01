@@ -185,3 +185,17 @@ FOR EACH STATEMENT EXECUTE FUNCTION reject_session_plan_event_rewrite();
 
 CREATE INDEX session_plan_event_entry_history
     ON session_plan_event (session_id, entry_ordinal, event_ordinal);
+
+CREATE INDEX session_plan_event_created_page
+    ON session_plan_event (session_id, event_ordinal)
+    WHERE event_kind = 'created';
+
+CREATE INDEX session_plan_event_latest_text_revision
+    ON session_plan_event (session_id, entry_ordinal, event_ordinal DESC)
+    INCLUDE (entry_text, entry_status)
+    WHERE event_kind = 'text_revised';
+
+CREATE INDEX session_plan_event_latest_status_change
+    ON session_plan_event (session_id, entry_ordinal, event_ordinal DESC)
+    INCLUDE (entry_text, entry_status)
+    WHERE event_kind = 'status_changed';

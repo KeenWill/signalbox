@@ -1,6 +1,6 @@
 //! PostgreSQL storage for append-only session plan events.
 
-use std::{error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -9,12 +9,12 @@ use signalbox_domain::{
     ToolAttemptId, ToolDispatchGeneration, ToolRequestId, TurnAttemptId, TurnId,
 };
 use signalbox_tools_plan::{
-    PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntry, PlanEntryId, PlanEvent,
-    PlanEventDraft, PlanEventKind, PlanEventOrdinal, PlanEventProvenance, PlanFoldError,
-    PlanHistoryPage, PlanPageCompleteness, PlanReadPage, PlanReadRequest, PlanStatus, PlanText,
-    SessionPlanPort, fold_plan_events,
+    PLAN_WRITE_NAME, PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntry,
+    PlanEntryId, PlanEvent, PlanEventDraft, PlanEventKind, PlanEventOrdinal, PlanEventProvenance,
+    PlanFoldError, PlanHistoryPage, PlanPageCompleteness, PlanReadPage, PlanReadRequest,
+    PlanStatus, PlanText, SessionPlanPort, fold_plan_events,
 };
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{commit_failure_is_ambiguous, mapping};
 
@@ -55,13 +55,29 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
  ORDER BY created.event_ordinal
  LIMIT $3";
 
-const HISTORY_SQL: &str = "SELECT event_ordinal, event_kind, entry_ordinal,
-       entry_text, entry_status, provenance_turn_id,
-       provenance_issuing_turn_attempt_id, provenance_request_id,
-       provenance_attempt_id, provenance_dispatch_generation
-  FROM session_plan_event
- WHERE session_id = $1
- ORDER BY event_ordinal
+const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
+       event.entry_ordinal, event.entry_text, event.entry_status,
+       event.provenance_turn_id, event.provenance_issuing_turn_attempt_id,
+       event.provenance_request_id, event.provenance_attempt_id,
+       event.provenance_dispatch_generation,
+       attempt.attempt_id AS authority_attempt_id,
+       attempt.request_id AS authority_attempt_request_id,
+       attempt.session_id AS authority_attempt_session_id,
+       attempt.turn_id AS authority_attempt_turn_id,
+       attempt.issuing_turn_attempt_id AS authority_issuing_turn_attempt_id,
+       attempt.effect_class AS authority_effect_class,
+       attempt.dispatch_generation AS authority_dispatch_generation,
+       request.request_id AS authority_request_id,
+       request.session_id AS authority_request_session_id,
+       request.turn_id AS authority_request_turn_id,
+       request.tool_name AS authority_tool_name
+  FROM session_plan_event AS event
+  LEFT JOIN tool_attempt AS attempt
+    ON attempt.attempt_id = event.provenance_attempt_id
+  LEFT JOIN tool_request AS request
+    ON request.request_id = attempt.request_id
+ WHERE event.session_id = $1
+ ORDER BY event.event_ordinal
  LIMIT $2";
 
 /// A durable plan row failed checked reconstruction.
@@ -86,6 +102,10 @@ pub enum SessionPlanCorruption {
     InvalidText,
     /// The chronological durable prefix cannot be folded.
     InvalidHistory(PlanFoldError),
+    /// Two durable events claim the same physical tool attempt.
+    DuplicateProvenance,
+    /// Durable provenance does not match tool-attempt authority.
+    UntrustedProvenance,
 }
 
 impl fmt::Display for SessionPlanCorruption {
@@ -108,6 +128,12 @@ impl fmt::Display for SessionPlanCorruption {
             Self::InvalidHistory(error) => {
                 write!(formatter, "session plan history is invalid: {error}")
             }
+            Self::DuplicateProvenance => {
+                formatter.write_str("session plan history repeats tool-attempt provenance")
+            }
+            Self::UntrustedProvenance => {
+                formatter.write_str("session plan provenance lacks durable authority")
+            }
         }
     }
 }
@@ -121,7 +147,9 @@ impl Error for SessionPlanCorruption {
             | Self::Unsupported { .. }
             | Self::MismatchedIdentity(_)
             | Self::InvalidEventPayload(_)
-            | Self::InvalidText => None,
+            | Self::InvalidText
+            | Self::DuplicateProvenance
+            | Self::UntrustedProvenance => None,
         }
     }
 }
@@ -262,7 +290,7 @@ impl SessionPlanRepository {
         )
         .bind(request.session().into_uuid())
         .bind(Decimal::from(next.as_u64()))
-        .bind(encoded.kind)
+        .bind(mapping::plan_event_kind_to_str(encoded.kind))
         .bind(Decimal::from(encoded.entry.as_u64()))
         .bind(encoded.text)
         .bind(encoded.status)
@@ -343,6 +371,12 @@ impl SessionPlanRepository {
                     .iter()
                     .map(|row| decode_event(request.session(), row))
                     .collect::<Result<Vec<_>, _>>()?;
+                let mut provenance_attempts = HashSet::with_capacity(events.len());
+                if !events.iter().all(|event| {
+                    provenance_attempts.insert(event.provenance().correlation().attempt())
+                }) {
+                    return Err(SessionPlanCorruption::DuplicateProvenance.into());
+                }
                 fold_plan_events(&events).map_err(SessionPlanCorruption::InvalidHistory)?;
                 let has_more = events.len() > limit;
                 events.truncate(limit);
@@ -377,7 +411,7 @@ impl SessionPlanPort for SessionPlanRepository {
 }
 
 struct EncodedDraft<'a> {
-    kind: &'static str,
+    kind: mapping::PlanEventStorageKind,
     entry: PlanEntryId,
     text: Option<&'a str>,
     status: Option<&'static str>,
@@ -387,19 +421,19 @@ impl<'a> EncodedDraft<'a> {
     fn new(ordinal: PlanEventOrdinal, draft: &'a PlanEventDraft) -> Self {
         match draft {
             PlanEventDraft::Create { text } => Self {
-                kind: "created",
+                kind: mapping::PlanEventStorageKind::Created,
                 entry: PlanEntryId::from_creation_ordinal(ordinal),
                 text: Some(text.as_str()),
                 status: None,
             },
             PlanEventDraft::Revise { entry, text } => Self {
-                kind: "text_revised",
+                kind: mapping::PlanEventStorageKind::TextRevised,
                 entry: *entry,
                 text: Some(text.as_str()),
                 status: None,
             },
             PlanEventDraft::SetStatus { entry, status } => Self {
-                kind: "status_changed",
+                kind: mapping::PlanEventStorageKind::StatusChanged,
                 entry: *entry,
                 text: None,
                 status: Some(mapping::plan_status_to_str(*status)),
@@ -525,10 +559,16 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
     ))?;
     let provenance = decode_provenance(session, row)?;
     let event_kind: String = required(row, "event_kind")?;
+    let storage_kind = mapping::plan_event_kind_from_str(&event_kind).ok_or(
+        SessionPlanCorruption::Unsupported {
+            field: "event kind",
+            value: event_kind,
+        },
+    )?;
     let entry_text: Option<String> = row.try_get("entry_text")?;
     let entry_status: Option<String> = row.try_get("entry_status")?;
-    let kind = match event_kind.as_str() {
-        "created" => {
+    let kind = match storage_kind {
+        mapping::PlanEventStorageKind::Created => {
             let (Some(value), None) = (entry_text, entry_status) else {
                 return Err(SessionPlanCorruption::InvalidEventPayload("created event").into());
             };
@@ -541,7 +581,7 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
                 text: decode_text(value)?,
             }
         }
-        "text_revised" => {
+        mapping::PlanEventStorageKind::TextRevised => {
             let (Some(value), None) = (entry_text, entry_status) else {
                 return Err(
                     SessionPlanCorruption::InvalidEventPayload("text-revised event").into(),
@@ -558,7 +598,7 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
                 text: decode_text(value)?,
             }
         }
-        "status_changed" => {
+        mapping::PlanEventStorageKind::StatusChanged => {
             let (None, Some(value)) = (entry_text, entry_status) else {
                 return Err(
                     SessionPlanCorruption::InvalidEventPayload("status-changed event").into(),
@@ -578,13 +618,6 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
             })?;
             PlanEventKind::StatusChanged { entry, status }
         }
-        _ => {
-            return Err(SessionPlanCorruption::Unsupported {
-                field: "event kind",
-                value: event_kind,
-            }
-            .into());
-        }
     };
     Ok(PlanEvent::new(ordinal, provenance, kind))
 }
@@ -599,23 +632,47 @@ fn decode_provenance(
     session: SessionId,
     row: &PgRow,
 ) -> Result<PlanEventProvenance, SessionPlanRepositoryError> {
-    let generation = positive_u64(
-        row.try_get("provenance_dispatch_generation")?,
-        "provenance dispatch generation",
-    )?;
+    let turn: Uuid = row.try_get("provenance_turn_id")?;
+    let issuing_attempt: Uuid = row.try_get("provenance_issuing_turn_attempt_id")?;
+    let request: Uuid = row.try_get("provenance_request_id")?;
+    let attempt: Uuid = row.try_get("provenance_attempt_id")?;
+    let generation_value: Decimal = row.try_get("provenance_dispatch_generation")?;
+    let generation = positive_u64(generation_value, "provenance dispatch generation")?;
     let generation = ToolDispatchGeneration::try_from_u64(generation).ok_or(
         SessionPlanCorruption::InvalidPositiveInteger("provenance dispatch generation"),
     )?;
+    let session_uuid = session.into_uuid();
+    let authority_matches = row.try_get::<Option<Uuid>, _>("authority_attempt_id")?
+        == Some(attempt)
+        && row.try_get::<Option<Uuid>, _>("authority_attempt_request_id")? == Some(request)
+        && row.try_get::<Option<Uuid>, _>("authority_attempt_session_id")? == Some(session_uuid)
+        && row.try_get::<Option<Uuid>, _>("authority_attempt_turn_id")? == Some(turn)
+        && row.try_get::<Option<Uuid>, _>("authority_issuing_turn_attempt_id")?
+            == Some(issuing_attempt)
+        && row
+            .try_get::<Option<String>, _>("authority_effect_class")?
+            .as_deref()
+            == Some("external_effect")
+        && row.try_get::<Option<Decimal>, _>("authority_dispatch_generation")?
+            == Some(generation_value)
+        && row.try_get::<Option<Uuid>, _>("authority_request_id")? == Some(request)
+        && row.try_get::<Option<Uuid>, _>("authority_request_session_id")? == Some(session_uuid)
+        && row.try_get::<Option<Uuid>, _>("authority_request_turn_id")? == Some(turn)
+        && row
+            .try_get::<Option<String>, _>("authority_tool_name")?
+            .as_deref()
+            == Some(PLAN_WRITE_NAME);
+    if !authority_matches {
+        return Err(SessionPlanCorruption::UntrustedProvenance.into());
+    }
     Ok(PlanEventProvenance::from_invocation(
         ToolAttemptDispatchCorrelation::reconstitute(
             ToolAttemptDispatchCorrelationReconstitutionInput {
                 session,
-                turn: TurnId::from_uuid(row.try_get("provenance_turn_id")?),
-                issuing_attempt: TurnAttemptId::from_uuid(
-                    row.try_get("provenance_issuing_turn_attempt_id")?,
-                ),
-                request: ToolRequestId::from_uuid(row.try_get("provenance_request_id")?),
-                attempt: ToolAttemptId::from_uuid(row.try_get("provenance_attempt_id")?),
+                turn: TurnId::from_uuid(turn),
+                issuing_attempt: TurnAttemptId::from_uuid(issuing_attempt),
+                request: ToolRequestId::from_uuid(request),
+                attempt: ToolAttemptId::from_uuid(attempt),
                 generation,
             },
         ),
