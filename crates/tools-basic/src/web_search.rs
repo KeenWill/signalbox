@@ -1236,12 +1236,26 @@ where
             let detail = (credential_is_oversized
                 || !fixed_outer_error_debug_may_contain(credential_text))
             .then(|| self.credential_unavailable_detail.clone());
-            return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Uncredentialed(
-                ToolExecutorEvidence::KnownFailed { detail },
-            ));
+            let evidence = ToolExecutorEvidence::KnownFailed { detail };
+            let retain_for_bound_diagnostic = credential.expose_bytes().len()
+                <= MAX_CREDENTIAL_BYTES
+                && !credential_text.is_empty()
+                && has_http_header_boundary_whitespace(credential.expose_bytes());
+            return if retain_for_bound_diagnostic {
+                WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Credentialed {
+                    evidence,
+                    credential,
+                })
+            } else {
+                WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Uncredentialed(
+                    evidence,
+                ))
+            };
         };
         let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-        if fixed_bound_evidence_token_collides(&scrubber) {
+        if fixed_bound_evidence_token_collides(&scrubber)
+            || fixed_bound_wrapper_token_collides(&scrubber, correlation)
+        {
             return WebSearchRequestOutcome::Error {
                 error: WebSearchExecutorError::CredentialDiagnosticCollision(
                     WebSearchCredentialDiagnostic {
@@ -1477,7 +1491,7 @@ fn bind_request_outcome(
     };
     if credential_text.is_empty()
         || (check_rendered_collision
-            && text_contains_credential_variant(&rendered_result, credential_text))
+            && bound_diagnostic_contains_credential(&rendered_result, credential_text))
     {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
@@ -1554,6 +1568,7 @@ fn report_credential_value_failure(
     if credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES {
         tracing::warn!(
             target: "signalbox_tools_basic_web_search",
+            parent: None,
             failure = ?CredentialValueFailure::Unusable,
             session_id = %correlation.session().as_uuid(),
             turn_id = %correlation.turn().as_uuid(),
@@ -1582,6 +1597,7 @@ fn report_credential_value_failure(
     }
     tracing::warn!(
         target: "signalbox_tools_basic_web_search",
+        parent: None,
         failure = ?CredentialValueFailure::Unusable,
         session_id = %correlation.session().as_uuid(),
         turn_id = %correlation.turn().as_uuid(),
@@ -2161,7 +2177,42 @@ fn decode_html_character_reference(entity: &str) -> Option<String> {
         (entity.strip_prefix('#')?, 10)
     };
     let scalar = u32::from_str_radix(digits, radix).ok()?;
+    let scalar = html_numeric_reference_scalar(scalar);
     char::from_u32(scalar).map(|character| character.to_string())
+}
+
+const fn html_numeric_reference_scalar(scalar: u32) -> u32 {
+    match scalar {
+        0 | 0xd800..=0xdfff | 0x11_0000..=u32::MAX => 0xfffd,
+        0x80 => 0x20ac,
+        0x82 => 0x201a,
+        0x83 => 0x0192,
+        0x84 => 0x201e,
+        0x85 => 0x2026,
+        0x86 => 0x2020,
+        0x87 => 0x2021,
+        0x88 => 0x02c6,
+        0x89 => 0x2030,
+        0x8a => 0x0160,
+        0x8b => 0x2039,
+        0x8c => 0x0152,
+        0x8e => 0x017d,
+        0x91 => 0x2018,
+        0x92 => 0x2019,
+        0x93 => 0x201c,
+        0x94 => 0x201d,
+        0x95 => 0x2022,
+        0x96 => 0x2013,
+        0x97 => 0x2014,
+        0x98 => 0x02dc,
+        0x99 => 0x2122,
+        0x9a => 0x0161,
+        0x9b => 0x203a,
+        0x9c => 0x0153,
+        0x9e => 0x017e,
+        0x9f => 0x0178,
+        scalar => scalar,
+    }
 }
 
 fn fixed_outer_error_debug_may_contain(credential: &str) -> bool {
@@ -2186,6 +2237,29 @@ fn fixed_bound_evidence_token_collides(scrubber: &CredentialScrubber) -> bool {
         };
         probe = next;
     }
+}
+
+fn fixed_bound_wrapper_token_collides(
+    scrubber: &CredentialScrubber,
+    correlation: &ToolAttemptDispatchCorrelation,
+) -> bool {
+    let rendered = format!(
+        "{:?} {correlation:?} {} {}",
+        Result::<(), &WebSearchExecutorError>::Ok(()),
+        std::any::type_name::<CorrelatedToolExecutorEvidence>(),
+        std::any::type_name::<signalbox_domain::IssuedExecutorFence>(),
+    );
+    scrubber.contains_case_normalized_credential(&rendered)
+}
+
+fn bound_diagnostic_contains_credential(rendered: &str, credential: &str) -> bool {
+    if text_contains_credential_variant(rendered, credential) {
+        return true;
+    }
+    let trimmed = credential.trim_matches(|character| character == ' ' || character == '\t');
+    trimmed != credential
+        && !trimmed.is_empty()
+        && text_contains_credential_variant(rendered, trimmed)
 }
 
 fn next_fixed_bound_evidence_probe(
@@ -2319,6 +2393,8 @@ mod tests {
     const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
     const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
+    const HTML_NUMERIC_C1_COLLISION_KEY: &str = "€";
+    const HTML_NUMERIC_C1_COLLISION_VALUE: &str = "&#x80;";
     const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
     const FORM_HTML_COLLISION_VALUE: &str = "abc%26amp%3Bdef";
     const REVERSE_ENCODED_COLLISION_KEY: &str = "abc%26def";
@@ -2337,6 +2413,7 @@ mod tests {
     const EMPTY_CREDENTIAL_VALUE: &[u8] = b"";
     const NON_UTF8_CREDENTIAL_VALUE: &[u8] = &[0xff];
     const INTERIOR_NEWLINE_CREDENTIAL_VALUE: &[u8] = b"fixture\nsearch-key";
+    const BOUNDARY_WHITESPACE_BOUND_COLLISION_KEY: &[u8] = b"KnownFailed ";
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
     const TIMESTAMP_COLLISION_KEY: &str = "2026";
@@ -2347,6 +2424,7 @@ mod tests {
     const EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY: &str = "completedtext(";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const EXECUTOR_OK_WRAPPER_COLLISION_KEY: &str = "ok";
+    const EXECUTOR_BOUND_WRAPPER_COLLISION_KEY: &str = "correlated";
     const TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY: &str = "requestfailed";
     const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
     const UNICODE_FULL_FOLD_COLLISION_KEY: &str = "STRASSE";
@@ -2761,6 +2839,43 @@ mod tests {
         (outcome, searches.load(Ordering::Relaxed))
     }
 
+    async fn execute_formatted_raw_credential_through_service(
+        value: &[u8],
+    ) -> (bool, usize, String) {
+        let diagnostic = Arc::new(Mutex::new(String::new()));
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = RawCredentials {
+            value: value.to_vec(),
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("fixture web_search tool compiles")
+            .into_parts();
+        let executor = FormattingExecutor {
+            inner: executor,
+            diagnostic: Arc::clone(&diagnostic),
+        };
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let outcome = service.execute(batch.session(), batch.turn()).await;
+        let rendered = diagnostic
+            .lock()
+            .expect("captured executor diagnostic lock is available")
+            .clone();
+        (outcome.is_err(), searches.load(Ordering::Relaxed), rendered)
+    }
+
     async fn execute_request_failure_through_service(
         value: &'static str,
     ) -> (ToolExecutionServiceOutcome, usize) {
@@ -2904,6 +3019,26 @@ mod tests {
             .with_writer(output.clone())
             .finish();
         let result = tracing::subscriber::with_default(subscriber, || {
+            report_credential_value_failure(correlation, credential)
+        });
+        (output.text(), result)
+    }
+
+    fn capture_credential_value_failure_in_credential_span(
+        correlation: &ToolAttemptDispatchCorrelation,
+        credential: &CredentialValue,
+    ) -> (String, Result<(), WebSearchExecutorError>) {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        let credential_text =
+            std::str::from_utf8(credential.expose_bytes()).expect("fixture credential is UTF-8");
+        let result = tracing::subscriber::with_default(subscriber, || {
+            let caller = tracing::warn_span!("caller", credential = credential_text);
+            let _entered = caller.enter();
             report_credential_value_failure(correlation, credential)
         });
         (output.text(), result)
@@ -3186,6 +3321,37 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
+    /// INV-035: an HTML C1 numeric reference is decoded through its standard
+    /// replacement mapping before the injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_c1_numeric_reference_credential_before_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: HTML_NUMERIC_C1_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(HTML_NUMERIC_C1_COLLISION_VALUE),
+        };
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request, &correlation)
+            .await
+            .into_result()
+            .expect("C1 numeric-reference collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
     /// INV-035: reversible query decoding and Unicode case normalization
     /// cannot conceal a credential before the injected transport boundary.
     #[tokio::test]
@@ -3428,6 +3594,41 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
+    /// INV-035: fixed bound-wrapper vocabulary is checked before physical
+    /// dispatch, not only after evidence is correlated.
+    #[tokio::test]
+    async fn web_search_bound_wrapper_collision_fails_before_dispatch() {
+        let (failed, searches, rendered) = execute_formatted_raw_credential_through_service(
+            EXECUTOR_BOUND_WRAPPER_COLLISION_KEY.as_bytes(),
+        )
+        .await;
+
+        assert!(failed);
+        assert!(!unicode_case_insensitive_contains(
+            &rendered,
+            EXECUTOR_BOUND_WRAPPER_COLLISION_KEY,
+        ));
+        assert_eq!(searches, 0);
+    }
+
+    /// INV-035: boundary whitespace cannot hide a credential that normalizes
+    /// to fixed bound-evidence vocabulary.
+    #[tokio::test]
+    async fn web_search_bound_result_checks_trimmed_unusable_credential() {
+        let credential = std::str::from_utf8(BOUNDARY_WHITESPACE_BOUND_COLLISION_KEY)
+            .expect("fixture credential is UTF-8");
+        let trimmed = credential.trim();
+
+        let (failed, searches, rendered) = execute_formatted_raw_credential_through_service(
+            BOUNDARY_WHITESPACE_BOUND_COLLISION_KEY,
+        )
+        .await;
+
+        assert!(failed);
+        assert!(!unicode_case_insensitive_contains(&rendered, trimmed));
+        assert_eq!(searches, 0);
+    }
+
     /// INV-035: a credential matching the fixed `KnownFailed` Debug token is
     /// rejected before dispatch and omitted from the public executor result.
     #[tokio::test]
@@ -3561,7 +3762,7 @@ mod tests {
             &rendered,
             EXECUTOR_OK_WRAPPER_COLLISION_KEY,
         ));
-        assert_eq!(searches.load(Ordering::Relaxed), 1);
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
     /// INV-035: punctuation does not conceal a case-normalized fixed Debug
@@ -4272,6 +4473,30 @@ mod tests {
 
         assert!(!content.contains(HTML_ENTITY_COLLISION_KEY));
         assert!(!content.contains(HTML_ENTITY_COLLISION_VALUE));
+    }
+
+    /// INV-035: an HTML C1 numeric reference is decoded through its standard
+    /// replacement mapping before provider evidence is retained.
+    #[test]
+    fn web_search_redacts_c1_numeric_reference_credential_in_result_text() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(HTML_NUMERIC_C1_COLLISION_VALUE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("HTML numeric-reference fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            HTML_NUMERIC_C1_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(HTML_NUMERIC_C1_COLLISION_KEY));
+        assert!(!content.contains(HTML_NUMERIC_C1_COLLISION_VALUE));
     }
 
     /// INV-035: canonical Unicode normalization cannot conceal a credential
@@ -5041,6 +5266,23 @@ mod tests {
         assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
         assert!(diagnostic.contains(CREDENTIAL_VALUE_FAILURE_CLASSIFICATION));
         assert!(!diagnostic.contains(SYNTHETIC_KEY));
+    }
+
+    /// INV-035: unusable-credential telemetry cannot inherit resolved
+    /// credential bytes from an entered caller span.
+    #[test]
+    fn unusable_credential_value_diagnostic_ignores_credential_bearing_caller_span() {
+        let correlation = dispatch_correlation();
+        let credential = CredentialValue::new(LEADING_HEADER_WHITESPACE_KEY.as_bytes().to_vec());
+
+        let (diagnostic, result) =
+            capture_credential_value_failure_in_credential_span(&correlation, &credential);
+
+        result.expect("safe credential value diagnostic is emitted outside the caller span");
+        assert!(diagnostic.contains(SESSION_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(TURN_ID_DIAGNOSTIC));
+        assert!(diagnostic.contains(CREDENTIAL_VALUE_FAILURE_CLASSIFICATION));
+        assert!(!diagnostic.contains(LEADING_HEADER_WHITESPACE_KEY));
     }
 
     /// INV-035: an unusable one-byte credential suppresses colliding telemetry
