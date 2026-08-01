@@ -8,7 +8,8 @@ on:
     - cron: "17 6 * * 1"
 
 # Superseded pull-request runs release their slots against the public
-# concurrency cap; scheduled sweeps are never canceled.
+# concurrency cap. Only pull-request runs are cancelable: a run for any other
+# trigger always finishes.
 concurrency:
   group: supply-chain-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

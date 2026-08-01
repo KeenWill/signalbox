@@ -40,8 +40,8 @@ on:
       - "tooling/codex-cli/**"
 
 # Superseded pull-request runs release their slots against the public
-# concurrency cap; runs for pushes to main and manual dispatches are never
-# canceled.
+# concurrency cap. Only pull-request runs are cancelable: a run for any other
+# trigger always finishes.
 concurrency:
   group: codex-cli-smoke-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
