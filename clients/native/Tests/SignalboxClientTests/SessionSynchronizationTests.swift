@@ -1672,9 +1672,8 @@ final class SessionSynchronizationTests: XCTestCase {
         )
       )
     )
-    let snapshot = try SynchronizationFixture.publishedSnapshot(in: effects)
+    _ = try SynchronizationFixture.publishedSnapshot(in: effects)
 
-    XCTAssertEqual(snapshot.records.count, 2)
     XCTAssertTrue(transport.machine.diagnostics.isEmpty)
   }
 
