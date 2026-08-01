@@ -10,8 +10,9 @@ use signalbox_domain::{
 };
 use signalbox_tools_plan::{
     PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntry, PlanEntryId, PlanEvent,
-    PlanEventDraft, PlanEventKind, PlanEventOrdinal, PlanEventProvenance, PlanHistoryPage,
-    PlanPageCompleteness, PlanReadPage, PlanReadRequest, PlanStatus, PlanText, SessionPlanPort,
+    PlanEventDraft, PlanEventKind, PlanEventOrdinal, PlanEventProvenance, PlanFoldError,
+    PlanHistoryPage, PlanPageCompleteness, PlanReadPage, PlanReadRequest, PlanStatus, PlanText,
+    SessionPlanPort, fold_plan_events,
 };
 use sqlx::{PgPool, Row, postgres::PgRow};
 
@@ -83,6 +84,8 @@ pub enum SessionPlanCorruption {
     InvalidEventPayload(&'static str),
     /// Stored text violated the tool boundary.
     InvalidText,
+    /// The chronological durable prefix cannot be folded.
+    InvalidHistory(PlanFoldError),
 }
 
 impl fmt::Display for SessionPlanCorruption {
@@ -102,11 +105,26 @@ impl fmt::Display for SessionPlanCorruption {
                 write!(formatter, "session plan has invalid {kind} payload")
             }
             Self::InvalidText => formatter.write_str("session plan has invalid entry text"),
+            Self::InvalidHistory(error) => {
+                write!(formatter, "session plan history is invalid: {error}")
+            }
         }
     }
 }
 
-impl Error for SessionPlanCorruption {}
+impl Error for SessionPlanCorruption {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidHistory(error) => Some(error),
+            Self::Missing(_)
+            | Self::InvalidPositiveInteger(_)
+            | Self::Unsupported { .. }
+            | Self::MismatchedIdentity(_)
+            | Self::InvalidEventPayload(_)
+            | Self::InvalidText => None,
+        }
+    }
+}
 
 /// PostgreSQL plan storage failure.
 #[derive(Debug)]
@@ -120,6 +138,8 @@ pub enum SessionPlanRepositoryError {
     },
     /// Durable rows cannot satisfy the port contract.
     Corruption(SessionPlanCorruption),
+    /// The caller supplied provenance that is not an active plan-write attempt.
+    InvalidAppendProvenance,
 }
 
 impl fmt::Display for SessionPlanRepositoryError {
@@ -129,6 +149,9 @@ impl fmt::Display for SessionPlanRepositoryError {
                 write!(formatter, "session plan database failure: {source}")
             }
             Self::Corruption(error) => error.fmt(formatter),
+            Self::InvalidAppendProvenance => {
+                formatter.write_str("session plan append provenance is not active")
+            }
         }
     }
 }
@@ -138,12 +161,20 @@ impl Error for SessionPlanRepositoryError {
         match self {
             Self::Database { source, .. } => Some(source),
             Self::Corruption(error) => Some(error),
+            Self::InvalidAppendProvenance => None,
         }
     }
 }
 
 impl From<sqlx::Error> for SessionPlanRepositoryError {
     fn from(source: sqlx::Error) -> Self {
+        if source
+            .as_database_error()
+            .and_then(|database| database.constraint())
+            == Some("session_plan_event_requires_active_plan_write_attempt")
+        {
+            return Self::InvalidAppendProvenance;
+        }
         Self::Database {
             source,
             commit_ambiguous: false,
@@ -166,6 +197,7 @@ impl ClassifyOperatorFailure for SessionPlanRepositoryError {
                 commit_ambiguous: *commit_ambiguous,
             },
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+            Self::InvalidAppendProvenance => OperatorFailureClass::CallerOrHubBug,
         }
     }
 }
@@ -311,6 +343,7 @@ impl SessionPlanRepository {
                     .iter()
                     .map(|row| decode_event(request.session(), row))
                     .collect::<Result<Vec<_>, _>>()?;
+                fold_plan_events(&events).map_err(SessionPlanCorruption::InvalidHistory)?;
                 let has_more = events.len() > limit;
                 events.truncate(limit);
                 Some(PlanHistoryPage::new(events, page_completeness(has_more)))
