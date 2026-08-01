@@ -20745,8 +20745,9 @@ enum ConcurrentPlanAppendDisposition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PlanRepositoryErrorKind {
-    InvalidAppendProvenance,
-    InvalidEventSequence,
+    AppendProvenance,
+    DependencyStatus,
+    EventSequence,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -20954,10 +20955,13 @@ fn expect_dependency_cycle(outcome: PlanAppendOutcome) -> PlanDependencyCycle {
 fn plan_repository_error_kind(error: SessionPlanRepositoryError) -> PlanRepositoryErrorKind {
     match error {
         SessionPlanRepositoryError::InvalidAppendProvenance => {
-            PlanRepositoryErrorKind::InvalidAppendProvenance
+            PlanRepositoryErrorKind::AppendProvenance
         }
+        SessionPlanRepositoryError::Corruption(SessionPlanCorruption::InvalidEventPayload(
+            "dependency status",
+        )) => PlanRepositoryErrorKind::DependencyStatus,
         SessionPlanRepositoryError::Corruption(SessionPlanCorruption::InvalidEventSequence) => {
-            PlanRepositoryErrorKind::InvalidEventSequence
+            PlanRepositoryErrorKind::EventSequence
         }
         other => panic!("unexpected plan repository error: {other:?}"),
     }
@@ -21131,6 +21135,40 @@ async fn insert_direct_dependency_event_between(
     .bind(Decimal::from(PRIOR_EVENT_ORDINAL))
     .bind(Decimal::from(entry.as_u64()))
     .bind(Decimal::from(dependency.as_u64()))
+    .bind(correlation.turn().into_uuid())
+    .bind(correlation.issuing_attempt().into_uuid())
+    .bind(correlation.request().into_uuid())
+    .bind(correlation.attempt().into_uuid())
+    .bind(Decimal::from(correlation.generation().as_u64()))
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+async fn insert_direct_malformed_status_event(
+    pool: &PgPool,
+    fixture: &DependencyPlanFixture,
+    authorized: &AuthorizedToolAttempt,
+) -> Result<(), sqlx::Error> {
+    const PRIOR_EVENT_ORDINAL: u64 = 3;
+    const EVENT_ORDINAL: u64 = 4;
+    const MALFORMED_STATUS_TEXT: &str = "status event must not carry text";
+    let correlation = authorized.correlation();
+    sqlx::query(
+        "INSERT INTO session_plan_event
+            (session_id, event_ordinal, prior_event_ordinal,
+             event_kind, entry_ordinal, dependency_ordinal,
+             entry_text, entry_status, provenance_turn_id,
+             provenance_issuing_turn_attempt_id, provenance_request_id,
+             provenance_attempt_id, provenance_dispatch_generation)
+         VALUES ($1, $2, $3, 'status_changed', $4, NULL, $5, 'completed',
+                 $6, $7, $8, $9, $10)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(EVENT_ORDINAL))
+    .bind(Decimal::from(PRIOR_EVENT_ORDINAL))
+    .bind(Decimal::from(fixture.prerequisite.as_u64()))
+    .bind(MALFORMED_STATUS_TEXT)
     .bind(correlation.turn().into_uuid())
     .bind(correlation.issuing_attempt().into_uuid())
     .bind(correlation.request().into_uuid())
@@ -21442,7 +21480,7 @@ async fn session_plan_read_rejects_a_cyclic_dependency_projection() -> Result<()
 
     assert_eq!(
         plan_repository_error_kind(error),
-        PlanRepositoryErrorKind::InvalidEventSequence
+        PlanRepositoryErrorKind::EventSequence
     );
 
     pool.close().await;
@@ -21501,7 +21539,57 @@ async fn session_plan_read_rejects_an_invalid_edge_reached_outside_the_page()
 
     assert_eq!(
         plan_repository_error_kind(error),
-        PlanRepositoryErrorKind::InvalidEventSequence
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A cursor-hidden prerequisite status event must retain the complete certified
+/// shape before the repository derives dependency readiness from it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_malformed_hidden_dependency_status() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![status_plan_arguments(prerequisite, PlanStatus::Completed)],
+    )
+    .await?;
+    let corrupt_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DROP CONSTRAINT session_plan_event_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    insert_direct_malformed_status_event(&pool, &fixture, &corrupt_attempt).await?;
+    fixture.batch.finish(corrupt_attempt).await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(
+            fixture.session,
+            Some(prerequisite),
+            None,
+        ))
+        .await
+        .expect_err("the hidden malformed status payload is corruption");
+
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::DependencyStatus
     );
 
     pool.close().await;
@@ -21542,7 +21630,7 @@ async fn session_plan_append_classifies_missing_session_as_invalid_provenance()
 
     assert_eq!(
         plan_repository_error_kind(error),
-        PlanRepositoryErrorKind::InvalidAppendProvenance
+        PlanRepositoryErrorKind::AppendProvenance
     );
 
     pool.close().await;
@@ -21600,7 +21688,7 @@ async fn session_plan_read_rejects_prepared_attempt_provenance() -> Result<(), B
     assert!(!authorized);
     assert_eq!(
         plan_repository_error_kind(error),
-        PlanRepositoryErrorKind::InvalidEventSequence
+        PlanRepositoryErrorKind::EventSequence
     );
 
     pool.close().await;
@@ -21672,7 +21760,7 @@ async fn session_plan_append_rejects_untrusted_request() -> Result<(), Box<dyn E
 
     assert_eq!(
         plan_repository_error_kind(authority_error),
-        PlanRepositoryErrorKind::InvalidAppendProvenance
+        PlanRepositoryErrorKind::AppendProvenance
     );
 
     pool.close().await;
@@ -21721,7 +21809,7 @@ async fn session_plan_read_rejects_present_head_with_null_ordinal() -> Result<()
 
     assert_eq!(
         plan_repository_error_kind(corruption),
-        PlanRepositoryErrorKind::InvalidEventSequence
+        PlanRepositoryErrorKind::EventSequence
     );
 
     pool.close().await;

@@ -843,6 +843,37 @@ fn read_rejects_a_page_local_dependency_cycle_from_the_port() {
 }
 
 #[test]
+fn read_rejects_page_local_readiness_that_contradicts_dependency_status() {
+    let dispatch = correlation(10);
+    let prerequisite = entry(1);
+    let dependent = entry(2);
+    let prerequisite_entry = PlanEntry::new(prerequisite, text(INITIAL_TEXT), PlanStatus::Pending);
+    let dependent_entry = PlanEntry::with_dependencies(
+        dependent,
+        text(SECOND_TEXT),
+        PlanStatus::Pending,
+        vec![prerequisite],
+        PlanReadiness::Ready,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![prerequisite_entry, dependent_entry],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("contradictory page-local readiness violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
 fn read_output_exposes_dependencies_and_waiting_readiness() {
     const PREREQUISITE_ENTRY_ID: u64 = 1;
     let dispatch = correlation(10);
@@ -1060,6 +1091,36 @@ fn write_rejects_a_port_event_that_precedes_its_mutation_target() {
 
     let error = run_ready(executor.execute_operation(dispatch, operation))
         .expect_err("self-targeting durable mutation violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn write_rejects_a_self_dependency_returned_as_appended_by_the_port() {
+    let dispatch = correlation(10);
+    let provenance = PlanEventProvenance::from_invocation(dispatch);
+    let target = entry(1);
+    let appended = event(
+        2,
+        provenance,
+        PlanEventKind::DependsOn {
+            entry: target,
+            dependency: target,
+        },
+    );
+    let port = FakePort::appending(appended);
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "dependency_id": target.as_u64(),
+        "entry_id": target.as_u64(),
+        "kind": "depends_on"
+    })))
+    .expect("fixture dependency arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("an appended self-dependency violates the port contract");
 
     assert!(is_port_contract(&error));
 }

@@ -84,7 +84,9 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
        session_plan_event_has_authority(dependency) AS dependency_authorized,
        movement.event_ordinal AS dependency_status_event_ordinal,
        movement.entry_status AS dependency_status,
-       movement.authorized AS dependency_status_authorized
+       movement.authorized AS dependency_status_authorized,
+       movement.dependency_ordinal AS dependency_status_dependency_ordinal,
+       movement.entry_text AS dependency_status_text
   FROM edge
   LEFT JOIN session_plan_event AS dependency
     ON dependency.session_id = $1
@@ -92,6 +94,7 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
    AND dependency.event_kind = 'created'
   LEFT JOIN LATERAL (
       SELECT candidate.event_ordinal, candidate.entry_status,
+             candidate.dependency_ordinal, candidate.entry_text,
              session_plan_event_has_authority(candidate) AS authorized
         FROM session_plan_event AS candidate
        WHERE candidate.session_id = $1
@@ -1110,9 +1113,18 @@ fn apply_dependency_rows(
         let status_event: Option<Decimal> = row.try_get("dependency_status_event_ordinal")?;
         let status: Option<String> = row.try_get("dependency_status")?;
         let status_authority = optional_projected_authority(row, "dependency_status_authorized")?;
-        let status = match (status_event, status, status_authority) {
-            (None, None, None) => PlanStatus::Pending,
-            (Some(status_event), Some(status), Some(ProjectedAuthority::Trusted)) => {
+        let status_dependency: Option<Decimal> =
+            row.try_get("dependency_status_dependency_ordinal")?;
+        let status_text: Option<String> = row.try_get("dependency_status_text")?;
+        let status = match (
+            status_event,
+            status,
+            status_authority,
+            status_dependency,
+            status_text,
+        ) {
+            (None, None, None, None, None) => PlanStatus::Pending,
+            (Some(status_event), Some(status), Some(ProjectedAuthority::Trusted), None, None) => {
                 let status_event = PlanEventOrdinal::try_from_u64(positive_u64(
                     status_event,
                     "dependency status event ordinal",
@@ -1130,7 +1142,7 @@ fn apply_dependency_rows(
                     }
                 })?
             }
-            (Some(_), Some(_), Some(ProjectedAuthority::Untrusted)) => {
+            (Some(_), Some(_), Some(ProjectedAuthority::Untrusted), _, _) => {
                 return Err(SessionPlanCorruption::UntrustedProvenance.into());
             }
             _ => {

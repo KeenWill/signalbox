@@ -1340,6 +1340,7 @@ fn event_matches_draft(event: &PlanEvent, draft: &PlanEventDraft) -> bool {
         ) => {
             stored_entry == requested_entry
                 && stored_dependency == requested_dependency
+                && stored_entry != stored_dependency
                 && event.ordinal() > stored_entry.creation_ordinal()
                 && event.ordinal() > stored_dependency.creation_ordinal()
         }
@@ -1411,6 +1412,11 @@ fn validate_read_page<PortError>(
     {
         return Err(PlanExecutorError::PortContract);
     }
+    let page_statuses = page
+        .entries()
+        .iter()
+        .map(|entry| (entry.id(), entry.status()))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut previous = request.after_entry();
     for entry in page.entries() {
         if previous.is_some_and(|prior| entry.id() <= prior) {
@@ -1426,6 +1432,24 @@ fn validate_read_page<PortError>(
             .all(|dependency| dependencies.insert(*dependency))
         {
             return Err(PlanExecutorError::PortContract);
+        }
+        if entry
+            .dependencies()
+            .iter()
+            .all(|dependency| page_statuses.contains_key(dependency))
+        {
+            let expected_readiness = if entry
+                .dependencies()
+                .iter()
+                .all(|dependency| page_statuses.get(dependency) == Some(&PlanStatus::Completed))
+            {
+                PlanReadiness::Ready
+            } else {
+                PlanReadiness::Waiting
+            };
+            if entry.readiness() != expected_readiness {
+                return Err(PlanExecutorError::PortContract);
+            }
         }
         previous = Some(entry.id());
     }
