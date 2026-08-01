@@ -1370,7 +1370,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     ) -> Result<StageResult, LocalGitFailure> {
         let index_path = self.repository_authority.git_path("index");
         let index_lock_path = self.repository_authority.git_path("index.lock");
-        let (index_lock, mut index) = IndexLock::acquire(&index_path, &index_lock_path)?;
+        let (mut index_lock, mut index) = IndexLock::acquire(&index_path, &index_lock_path)?;
         validate_index_entry_count(&index)?;
         let filemode = repository_filemode(repository)?;
         let mut planned = Vec::with_capacity(arguments.paths.len());
@@ -1493,7 +1493,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             object_database,
             &written_objects,
         )?;
-        index_lock.write(&index)?;
+        index_lock.write(&mut index)?;
         drop(index);
         index_lock.commit()?;
         self.validate_current_repository()?;
@@ -1670,7 +1670,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         post_checkout: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
-        let index_lock = self.bind_locked_index(repository)?;
+        let mut index_lock = self.bind_locked_index(repository)?;
         if repository.state() != RepositoryState::Clean {
             return Err(LocalGitFailure::Operation);
         }
@@ -1711,7 +1711,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             validate_tree_discovery(repository, current_tree)?;
         }
         validate_tree_discovery(repository, &target_tree)?;
-        let current_index = repository.index().map_err(|_| LocalGitFailure::Operation)?;
+        let mut current_index = repository.index().map_err(|_| LocalGitFailure::Operation)?;
         if current_index.has_conflicts() {
             return Err(LocalGitFailure::Operation);
         }
@@ -1778,7 +1778,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .map_err(|_| LocalGitFailure::Operation)?;
             }
         }
-        index_lock.write(&next_index)?;
+        index_lock.write(&mut next_index)?;
         let mut checkout = CheckoutBuilder::new();
         checkout
             .safe()
@@ -1809,7 +1809,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             restore_index(
                 &self.repository_authority.git_path("index"),
                 &self.repository_authority.git_path("index.lock"),
-                &current_index,
+                &mut current_index,
             )?;
             return Err(LocalGitFailure::Operation);
         }
@@ -1869,9 +1869,9 @@ fn rollback_checkout(
 fn restore_index(
     index_path: &Path,
     index_lock_path: &Path,
-    index: &Index,
+    index: &mut Index,
 ) -> Result<(), LocalGitFailure> {
-    let (lock, _replacement) = IndexLock::acquire(index_path, index_lock_path)?;
+    let (mut lock, _replacement) = IndexLock::acquire(index_path, index_lock_path)?;
     lock.write(index)?;
     lock.commit()
 }
@@ -2264,6 +2264,8 @@ struct IndexLock {
     lock_path: PathBuf,
     lock: fs::File,
     identity: FileIdentity,
+    _private_directory: tempfile::TempDir,
+    private_index_path: PathBuf,
     committed: bool,
 }
 
@@ -2283,16 +2285,21 @@ impl IndexSnapshot {
 impl IndexLock {
     fn acquire(index_path: &Path, lock_path: &Path) -> Result<(Self, Index), LocalGitFailure> {
         let lock = fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(lock_path)
             .map_err(|_| LocalGitFailure::Operation)?;
         let identity = file_identity(&lock.metadata().map_err(|_| LocalGitFailure::Operation)?);
+        let private_directory = tempfile::tempdir().map_err(|_| LocalGitFailure::Operation)?;
+        let private_index_path = private_directory.path().join("index");
         let mut guard = Self {
             index_path: index_path.to_owned(),
             lock_path: lock_path.to_owned(),
             lock,
             identity,
+            _private_directory: private_directory,
+            private_index_path,
             committed: false,
         };
         copy_index_snapshot(index_path, &mut guard.lock, true)?;
@@ -2300,68 +2307,63 @@ impl IndexLock {
             .lock
             .sync_all()
             .map_err(|_| LocalGitFailure::Operation)?;
+        guard.copy_lock_to_private_index()?;
         let index =
-            Index::open(&descriptor_path(&guard.lock)).map_err(|_| LocalGitFailure::Operation)?;
+            Index::open(&guard.private_index_path).map_err(|_| LocalGitFailure::Operation)?;
         Ok((guard, index))
     }
 
-    fn write(&self, index: &Index) -> Result<(), LocalGitFailure> {
-        let mut bytes = Vec::new();
-        let version = if index.iter().any(|entry| entry.flags_extended != 0) {
-            3_u32
-        } else {
-            2_u32
-        };
-        bytes.extend_from_slice(b"DIRC");
-        bytes.extend_from_slice(&version.to_be_bytes());
-        bytes.extend_from_slice(
-            &u32::try_from(index.len())
-                .map_err(|_| LocalGitFailure::Operation)?
-                .to_be_bytes(),
-        );
-        for entry in index.iter() {
-            let entry_start = bytes.len();
-            for value in [
-                entry.ctime.seconds() as u32,
-                entry.ctime.nanoseconds(),
-                entry.mtime.seconds() as u32,
-                entry.mtime.nanoseconds(),
-                entry.dev,
-                entry.ino,
-                entry.mode,
-                entry.uid,
-                entry.gid,
-                entry.file_size,
-            ] {
-                bytes.extend_from_slice(&value.to_be_bytes());
-            }
-            bytes.extend_from_slice(entry.id.as_bytes());
-            let path_length = u16::try_from(entry.path.len())
-                .unwrap_or(u16::MAX)
-                .min(0x0fff);
-            let extended = entry.flags_extended != 0;
-            let flags = (entry.flags & !0x4fff) | path_length | if extended { 0x4000 } else { 0 };
-            bytes.extend_from_slice(&flags.to_be_bytes());
-            if extended {
-                bytes.extend_from_slice(&entry.flags_extended.to_be_bytes());
-            }
-            bytes.extend_from_slice(&entry.path);
-            bytes.push(0);
-            while (bytes.len() - entry_start) % 8 != 0 {
-                bytes.push(0);
-            }
-        }
-        bytes.extend_from_slice(&Sha1::digest(&bytes));
-        if bytes.len() > MAX_INDEX_BYTES {
+    fn copy_lock_to_private_index(&mut self) -> Result<(), LocalGitFailure> {
+        let mut private_index = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&self.private_index_path)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.lock.rewind().map_err(|_| LocalGitFailure::Operation)?;
+        let copied = std::io::copy(
+            &mut Read::by_ref(&mut self.lock).take((MAX_INDEX_BYTES + 1) as u64),
+            &mut private_index,
+        )
+        .map_err(|_| LocalGitFailure::Operation)?;
+        if copied > MAX_INDEX_BYTES as u64 {
             return Err(LocalGitFailure::Operation);
         }
-        let mut lock = &self.lock;
-        lock.set_len(0).map_err(|_| LocalGitFailure::Operation)?;
-        lock.seek(std::io::SeekFrom::Start(0))
-            .map_err(|_| LocalGitFailure::Operation)?;
-        lock.write_all(&bytes)
-            .and_then(|()| lock.sync_all())
+        private_index
+            .sync_all()
             .map_err(|_| LocalGitFailure::Operation)
+    }
+
+    fn write(&mut self, index: &mut Index) -> Result<(), LocalGitFailure> {
+        if index.path() != Some(self.private_index_path.as_path()) {
+            return write_index_entries(&mut self.lock, index);
+        }
+        index.write().map_err(|_| LocalGitFailure::Operation)?;
+        let descriptor = openat(
+            CWD,
+            &self.private_index_path,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Operation)?;
+        let mut source = fs::File::from(descriptor);
+        let metadata = source.metadata().map_err(|_| LocalGitFailure::Operation)?;
+        if !metadata.is_file() || metadata.len() > MAX_INDEX_BYTES as u64 {
+            return Err(LocalGitFailure::Operation);
+        }
+        self.lock
+            .set_len(0)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.lock.rewind().map_err(|_| LocalGitFailure::Operation)?;
+        let copied = std::io::copy(
+            &mut Read::by_ref(&mut source).take((MAX_INDEX_BYTES + 1) as u64),
+            &mut self.lock,
+        )
+        .map_err(|_| LocalGitFailure::Operation)?;
+        if copied != metadata.len() || copied > MAX_INDEX_BYTES as u64 {
+            return Err(LocalGitFailure::Operation);
+        }
+        self.lock.sync_all().map_err(|_| LocalGitFailure::Operation)
     }
 
     fn commit(mut self) -> Result<(), LocalGitFailure> {
@@ -2381,6 +2383,68 @@ impl IndexLock {
         self.committed = true;
         Ok(())
     }
+}
+
+fn write_index_entries(destination: &mut fs::File, index: &Index) -> Result<(), LocalGitFailure> {
+    let mut bytes = Vec::new();
+    let version = if index.iter().any(|entry| entry.flags_extended != 0) {
+        3_u32
+    } else {
+        2_u32
+    };
+    bytes.extend_from_slice(b"DIRC");
+    bytes.extend_from_slice(&version.to_be_bytes());
+    bytes.extend_from_slice(
+        &u32::try_from(index.len())
+            .map_err(|_| LocalGitFailure::Operation)?
+            .to_be_bytes(),
+    );
+    for entry in index.iter() {
+        let entry_start = bytes.len();
+        for value in [
+            entry.ctime.seconds() as u32,
+            entry.ctime.nanoseconds(),
+            entry.mtime.seconds() as u32,
+            entry.mtime.nanoseconds(),
+            entry.dev,
+            entry.ino,
+            entry.mode,
+            entry.uid,
+            entry.gid,
+            entry.file_size,
+        ] {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        bytes.extend_from_slice(entry.id.as_bytes());
+        let path_length = u16::try_from(entry.path.len())
+            .unwrap_or(u16::MAX)
+            .min(0x0fff);
+        let extended = entry.flags_extended != 0;
+        let flags = (entry.flags & !0x4fff) | path_length | if extended { 0x4000 } else { 0 };
+        bytes.extend_from_slice(&flags.to_be_bytes());
+        if extended {
+            bytes.extend_from_slice(&entry.flags_extended.to_be_bytes());
+        }
+        bytes.extend_from_slice(&entry.path);
+        bytes.push(0);
+        while (bytes.len() - entry_start) % 8 != 0 {
+            bytes.push(0);
+        }
+    }
+    bytes.extend_from_slice(&Sha1::digest(&bytes));
+    if bytes.len() > MAX_INDEX_BYTES {
+        return Err(LocalGitFailure::Operation);
+    }
+    destination
+        .set_len(0)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    destination
+        .rewind()
+        .map_err(|_| LocalGitFailure::Operation)?;
+    destination
+        .write_all(&bytes)
+        .and_then(|()| destination.sync_all())
+        .map_err(|_| LocalGitFailure::Operation)
 }
 
 fn copy_index_snapshot(
@@ -2928,7 +2992,10 @@ fn worktree_diff<FileSystem: WorkspaceFileSystem>(
                     return Err(LocalGitFailure::Path);
                 }
                 Err(WorkspaceResolveError::Io { source, .. })
-                    if source.kind() == std::io::ErrorKind::NotFound =>
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
                 {
                     None
                 }
@@ -4314,7 +4381,9 @@ fn create_loose_branch_reference_with_hook<Hook: FnOnce()>(
         Mode::empty(),
     )
     .map_err(|_| LocalGitFailure::Operation)?;
-    let mut directory = open_or_create_ref_directory(&refs, OsStr::new("heads"))?;
+    let (directory_mode, file_mode) = reference_installation_modes(&refs)?;
+    let mut directory =
+        open_or_create_ref_directory_with_mode(&refs, OsStr::new("heads"), directory_mode)?;
     let mut components = Path::new(branch).components().peekable();
     let mut leaf = None;
     while let Some(component) = components.next() {
@@ -4322,7 +4391,8 @@ fn create_loose_branch_reference_with_hook<Hook: FnOnce()>(
             return Err(LocalGitFailure::Operation);
         };
         if components.peek().is_some() {
-            directory = open_or_create_ref_directory(&directory, component)?;
+            directory =
+                open_or_create_ref_directory_with_mode(&directory, component, directory_mode)?;
         } else {
             leaf = Some(component.to_owned());
         }
@@ -4334,16 +4404,22 @@ fn create_loose_branch_reference_with_hook<Hook: FnOnce()>(
         &directory,
         &lock_name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::RUSR | Mode::WUSR,
+        file_mode,
     )
     .map_err(|_| LocalGitFailure::Operation)?;
     let mut lock = fs::File::from(lock);
     let identity = file_identity(&lock.metadata().map_err(|_| LocalGitFailure::Operation)?);
     let lock_path = descriptor_path_from_fd(&directory).join(&lock_name);
     let outcome = (|| {
+        lock.set_permissions(fs::Permissions::from_mode(file_mode.bits()))
+            .map_err(|_| LocalGitFailure::Operation)?;
         writeln!(lock, "{target}").map_err(|_| LocalGitFailure::Operation)?;
         lock.sync_all().map_err(|_| LocalGitFailure::Operation)?;
         post_write();
+        let reference_name = format!("refs/heads/{branch}");
+        if packed_reference_exists(authority, &reference_name)? {
+            return Err(LocalGitFailure::Operation);
+        }
         let path_identity = fs::symlink_metadata(&lock_path)
             .map(|metadata| file_identity(&metadata))
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -4370,17 +4446,41 @@ fn create_loose_branch_reference_with_hook<Hook: FnOnce()>(
     outcome
 }
 
+fn reference_installation_modes(refs: &OwnedFd) -> Result<(Mode, Mode), LocalGitFailure> {
+    let metadata = fs::File::from(dup(refs).map_err(|_| LocalGitFailure::Operation)?)
+        .metadata()
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let directory_mode = (metadata.mode() & 0o2777) | 0o700;
+    let file_mode = (metadata.mode() & 0o666) | 0o600;
+    Ok((
+        Mode::from_raw_mode(directory_mode),
+        Mode::from_raw_mode(file_mode),
+    ))
+}
+
 fn open_or_create_ref_directory(
     parent: &OwnedFd,
     name: &OsStr,
+) -> Result<OwnedFd, LocalGitFailure> {
+    open_or_create_ref_directory_with_mode(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR)
+}
+
+fn open_or_create_ref_directory_with_mode(
+    parent: &OwnedFd,
+    name: &OsStr,
+    mode: Mode,
 ) -> Result<OwnedFd, LocalGitFailure> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     match openat(parent, name, flags, Mode::empty()) {
         Ok(directory) => Ok(directory),
         Err(error) if error == rustix::io::Errno::NOENT => {
-            mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR)
+            mkdirat(parent, name, mode).map_err(|_| LocalGitFailure::Operation)?;
+            let directory = openat(parent, name, flags, Mode::empty())
                 .map_err(|_| LocalGitFailure::Operation)?;
-            openat(parent, name, flags, Mode::empty()).map_err(|_| LocalGitFailure::Operation)
+            fs::File::from(dup(&directory).map_err(|_| LocalGitFailure::Operation)?)
+                .set_permissions(fs::Permissions::from_mode(mode.bits()))
+                .map_err(|_| LocalGitFailure::Operation)?;
+            Ok(directory)
         }
         Err(_) => Err(LocalGitFailure::Operation),
     }
@@ -4686,6 +4786,19 @@ mod tests {
                 &parents,
             )
             .expect("fixture commit writes")
+    }
+
+    fn index_extension(bytes: &[u8], signature: &[u8; 4]) -> Vec<u8> {
+        let start = bytes
+            .windows(signature.len())
+            .position(|window| window == signature)
+            .expect("fixture index extension exists");
+        let size = u32::from_be_bytes(
+            bytes[start + 4..start + 8]
+                .try_into()
+                .expect("fixture extension length exists"),
+        ) as usize;
+        bytes[start..start + 8 + size].to_vec()
     }
 
     fn long_status_path() -> PathBuf {
@@ -5653,6 +5766,40 @@ mod tests {
     }
 
     #[test]
+    fn worktree_diff_renders_a_tracked_directory_replaced_by_a_file() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let tracked_directory = "src";
+        let tracked_child = "src/main.rs";
+        let tracked_content = b"fn main() {}\n";
+        let replacement_content = b"replacement file\n";
+        fs::create_dir(fixture.root().join(tracked_directory))
+            .expect("tracked fixture directory creates");
+        fs::write(fixture.root().join(tracked_child), tracked_content)
+            .expect("tracked fixture child writes");
+        commit_all(&repository, "add tracked directory");
+        fs::remove_dir_all(fixture.root().join(tracked_directory))
+            .expect("tracked fixture directory removes");
+        fs::write(fixture.root().join(tracked_directory), replacement_content)
+            .expect("replacement fixture file writes");
+        let executor = fixture.executor();
+
+        let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+        let patch = diff["patch"].as_str().expect("patch is text");
+
+        assert!(patch.contains(&format!("--- a/{tracked_child}")));
+        assert!(patch.contains(&format!(
+            "-{}",
+            String::from_utf8_lossy(tracked_content).trim_end()
+        )));
+        assert!(patch.contains(&format!("+++ b/{tracked_directory}")));
+        assert!(patch.contains(&format!(
+            "+{}",
+            String::from_utf8_lossy(replacement_content).trim_end()
+        )));
+    }
+
+    #[test]
     fn worktree_diff_reports_an_executable_mode_only_change() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -6409,18 +6556,52 @@ mod tests {
     }
 
     #[test]
+    fn stage_preserves_a_monolithic_index_resolve_undo_extension() {
+        let fixture = Fixture::new();
+        install_deleted_conflict(&fixture);
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("resolved fixture file writes");
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let mut index = repository.index().expect("fixture index opens");
+        index
+            .add_path(Path::new(TRACKED_PATH))
+            .expect("fixture conflict resolves");
+        index.write().expect("fixture resolve-undo index writes");
+        let expected_extension = index_extension(
+            &fs::read(fixture.root().join(".git/index")).expect("fixture index reads"),
+            b"REUC",
+        );
+        fs::write(fixture.root().join(UNTRACKED_PATH), UNTRACKED_CONTENT)
+            .expect("unrelated fixture file writes");
+        let executor = fixture.executor();
+
+        execute(
+            &executor,
+            LocalOperation::Stage(GitStageArguments {
+                paths: vec![UNTRACKED_PATH.to_owned()],
+            }),
+        );
+        let observed_extension = index_extension(
+            &fs::read(fixture.root().join(".git/index")).expect("staged index reads"),
+            b"REUC",
+        );
+
+        assert_eq!(observed_extension, expected_extension);
+    }
+
+    #[test]
     fn index_lock_rejects_a_replaced_lock_path_without_touching_it() {
         let fixture = Fixture::new();
         let index_path = fixture.root().join(".git/index");
         let lock_path = fixture.root().join(".git/index.lock");
-        let (index_lock, index) =
+        let (mut index_lock, mut index) =
             IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
         fs::remove_file(&lock_path).expect("owned fixture lock unlinks");
         mkfifoat(CWD, &lock_path, Mode::RUSR | Mode::WUSR)
             .expect("replacement lock FIFO constructs");
 
         index_lock
-            .write(&index)
+            .write(&mut index)
             .expect("descriptor-bound index write succeeds");
         let failure = index_lock
             .commit()
@@ -7351,6 +7532,66 @@ mod tests {
 
         assert_eq!(failure, LocalGitFailure::Operation);
         assert!(!fixture.root().join(".git/refs/heads/release").exists());
+    }
+
+    #[test]
+    fn branch_create_rechecks_packed_references_after_pinning_loose_hierarchy() {
+        let fixture = Fixture::new();
+        let executor = fixture.executor();
+        let packed_references = fixture.root().join(".git/packed-refs");
+
+        let failure = create_loose_branch_reference_with_hook(
+            &executor.repository_authority,
+            "release/v1",
+            fixture.initial,
+            || {
+                fs::write(
+                    &packed_references,
+                    format!(
+                        "# pack-refs with: peeled fully-peeled sorted\n{} refs/heads/release\n",
+                        fixture.initial
+                    ),
+                )
+                .expect("racing packed reference writes");
+            },
+        )
+        .expect_err("packed ancestor appearing before publication rejects");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert!(!fixture.root().join(".git/refs/heads/release/v1").exists());
+    }
+
+    #[test]
+    fn branch_create_uses_shared_reference_hierarchy_modes() {
+        let fixture = Fixture::new();
+        let refs = fixture.root().join(".git/refs");
+        let shared_refs_mode = 0o2770;
+        let expected_directory_mode = (shared_refs_mode & 0o2777) | 0o700;
+        let expected_file_mode = (shared_refs_mode & 0o666) | 0o600;
+        fs::set_permissions(&refs, fs::Permissions::from_mode(shared_refs_mode))
+            .expect("fixture shared refs permissions set");
+        let executor = fixture.executor();
+
+        execute(
+            &executor,
+            LocalOperation::BranchCreate(GitBranchCreateArguments {
+                name: "shared/topic/fix".to_owned(),
+                start: fixture.initial.to_string(),
+            }),
+        );
+        let created_directory_mode = fs::metadata(refs.join("heads/shared/topic"))
+            .expect("created reference directory metadata reads")
+            .permissions()
+            .mode()
+            & 0o7777;
+        let created_file_mode = fs::metadata(refs.join("heads/shared/topic/fix"))
+            .expect("created reference metadata reads")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(created_directory_mode, expected_directory_mode);
+        assert_eq!(created_file_mode, expected_file_mode);
     }
 
     #[test]
