@@ -64,6 +64,69 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(error, ProcessDriverFixture.noncontiguousImportedPositionError)
   }
 
+  func testImportedTranscriptCountsUnknownContentKindTowardCapacity() async throws {
+    let conversations = try await makeService().listConversations(includeArchived: true)
+    let imported = try fixtureConversation(
+      MockProcessProtocolFixtures.importedConversationID,
+      in: conversations
+    )
+    let requester = StaticProcessRequester(
+      frames: [
+        try ProcessDriverFixture.importedConversationStart(
+          conversationID: imported.conversationID
+        ),
+        try ProcessDriverFixture.importedConversationEntry(
+          position: SignalboxCanonicalUInt64(rawValue: 1),
+          entryID: MockProcessProtocolFixtures.importedUserEntryID,
+          sourceSpeaker: #"{"type":"not_attested"}"#,
+          contentKind: ProcessDriverFixture.unknownImportedContentKind
+        ),
+      ]
+    )
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.zeroImportedScalarCapacityPolicy
+    )
+
+    let error = await capturedServiceError {
+      _ = try await service.readImportedConversation(conversation: imported)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.importedTranscriptTextCapacityError)
+  }
+
+  func testImportedTranscriptCountsUnknownAttestedSpeakerTowardCapacity() async throws {
+    let conversations = try await makeService().listConversations(includeArchived: true)
+    let imported = try fixtureConversation(
+      MockProcessProtocolFixtures.importedConversationID,
+      in: conversations
+    )
+    let requester = StaticProcessRequester(
+      frames: [
+        try ProcessDriverFixture.importedConversationStart(
+          conversationID: imported.conversationID
+        ),
+        try ProcessDriverFixture.importedConversationEntry(
+          position: SignalboxCanonicalUInt64(rawValue: 1),
+          entryID: MockProcessProtocolFixtures.importedUserEntryID,
+          sourceSpeaker:
+            #"{"type":"attested","speaker":"fixture_future_speaker"}"#,
+          contentKind: "source_event"
+        ),
+      ]
+    )
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.zeroImportedScalarCapacityPolicy
+    )
+
+    let error = await capturedServiceError {
+      _ = try await service.readImportedConversation(conversation: imported)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.importedTranscriptTextCapacityError)
+  }
+
   func testModelAliasCatalogCreatesAUnifiedNativeConversation() async throws {
     let service = makeService()
 
@@ -96,6 +159,28 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let sessions = try await service.listSessions(includeArchived: true)
 
     XCTAssertEqual(sessions.count, MockProcessProtocolFixtures.sessionCount)
+  }
+
+  func testConversationListCountsUnknownSourceFormatTowardCapacity() async throws {
+    let requester = StaticProcessRequester(
+      frames: [
+        try ProcessDriverFixture.conversationPageStart(),
+        try ProcessDriverFixture.importedConversationSummary(
+          sourceFormat: ProcessDriverFixture.unknownImportedSourceFormat
+        ),
+        try ProcessDriverFixture.conversationPageEnd(),
+      ]
+    )
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.zeroConversationScalarCapacityPolicy
+    )
+
+    let error = await capturedServiceError {
+      _ = try await service.listConversations(includeArchived: true)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.conversationListTextCapacityError)
   }
 
   func testArchiveUsesCompleteMetadataReplace() async throws {
@@ -397,6 +482,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(marker.kind, ProcessProjectionFixture.modelIdentityKind)
   }
 
+  func testTurnActivationSideProjectionAllowsAbsentModelIdentityMarker() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithoutModelIdentityMarker()
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertTrue(projection.records.isEmpty)
+    XCTAssertEqual(projection.activity, ProcessProjectionFixture.runningActivity)
+  }
+
   func testFailedProviderCauseAppearsInNativeActivity() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithFailedProviderCause()
     var projector = SignalboxProcessTranscriptProjector()
@@ -495,6 +591,23 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertFalse(viewModel.canSend)
     XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testTerminalEventClearsUnknownTurnMutationGate() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownTurnState()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    viewModel.apply(.event(try ProcessProjectionFixture.refusedEvent()))
+
+    XCTAssertTrue(viewModel.canSend)
   }
 
   @MainActor
@@ -3313,6 +3426,14 @@ private enum ProcessDriverFixture {
   static let noncontiguousImportedPositionError = SignalboxProcessServiceError.invalidPage(
     "Imported transcript positions were not contiguous and one-based."
   )
+  static let conversationListTextCapacityError = SignalboxProcessServiceError.invalidPage(
+    "The native conversation list exceeded its retained UTF-8 byte limit."
+  )
+  static let importedTranscriptTextCapacityError = SignalboxProcessServiceError.invalidPage(
+    "The imported transcript exceeded the native preview-retention cap."
+  )
+  static let unknownImportedContentKind = "fixture_future_content_kind"
+  static let unknownImportedSourceFormat = "fixture_future_source_format"
 
   static func importedConversationStart(
     conversationID: SignalboxCanonicalUUID
@@ -3356,9 +3477,80 @@ private enum ProcessDriverFixture {
       )
     )
   }
+
+  static func importedConversationEntry(
+    position: SignalboxCanonicalUInt64,
+    entryID: String,
+    sourceSpeaker: String,
+    contentKind: String
+  ) throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"imported_conversation_entry",
+        "position":"\(position.rawValue)",
+        "imported_entry_id":"\(entryID)",
+        "source_speaker":\(sourceSpeaker),
+        "content_kind":"\(contentKind)",
+        "text_preview":null
+      }
+      """
+    )
+  }
+
+  static func conversationPageStart() throws -> SignalboxProcessServerFrame {
+    try frame(#"{"type":"conversation_page_start"}"#)
+  }
+
+  static func importedConversationSummary(
+    sourceFormat: String
+  ) throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"conversation_summary",
+        "conversation":{
+          "origin":"imported_conversation",
+          "imported_conversation_id":"\(MockProcessProtocolFixtures.importedConversationID)",
+          "title":null,
+          "entry_count":"1",
+          "source_format":"\(sourceFormat)"
+        }
+      }
+      """
+    )
+  }
+
+  static func conversationPageEnd() throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"conversation_page_end",
+        "conversation_count":"1",
+        "next_after":null
+      }
+      """
+    )
+  }
   static let oneRowMetadataPolicy = SignalboxProcessApplicationPolicy(
     metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
+    ambiguousMutationRetryDelays:
+      SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
+    synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+  )
+  static let zeroConversationScalarCapacityPolicy = SignalboxProcessApplicationPolicy(
+    metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
+    maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
+    maximumMetadataListUTF8Bytes: 0,
+    ambiguousMutationRetryDelays:
+      SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
+    synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+  )
+  static let zeroImportedScalarCapacityPolicy = SignalboxProcessApplicationPolicy(
+    metadataPageSize: SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize,
+    maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
+    maximumImportedPreviewUTF8Bytes: 0,
     ambiguousMutationRetryDelays:
       SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
     synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
@@ -3905,6 +4097,18 @@ private enum ProcessProjectionFixture {
         }
         """,
       ]
+    )
+  }
+
+  static func snapshotWithoutModelIdentityMarker() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithActiveTurnState(
+      """
+      {
+        "type":"active_running",
+        "current_attempt_id":"\(ProcessDriverFixture.attempt)",
+        "current_model_call":null
+      }
+      """
     )
   }
 

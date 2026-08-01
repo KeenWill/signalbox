@@ -1511,7 +1511,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       entriesStarted = true
       guard
         modelCallsEnded,
-        !entry.entry.hasMalformedStoredProjection,
+        !entry.entry.hasMalformedStoredProjection && entry.entry.modelIdentityTurnIsKnown(in: turnAcceptancePositions),
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1730,6 +1730,15 @@ extension SignalboxCurrentModelCallState {
 }
 
 extension SignalboxTranscriptEntry {
+  fileprivate func modelIdentityTurnIsKnown(
+    in turnAcceptancePositions: [SignalboxCanonicalUUID: UInt64]
+  ) -> Bool {
+    if case .modelIdentityChanged(let turnID, _, _) = self {
+      return turnAcceptancePositions[turnID] != nil
+    }
+    return true
+  }
+
   fileprivate var hasMalformedStoredProjection: Bool {
     if case .unknown(_, _, let decodingDiagnostic) = self {
       return decodingDiagnostic != nil
@@ -1780,8 +1789,8 @@ extension SignalboxTranscriptTextEntry {
 extension SignalboxImportedSourceSpeaker {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
-    case .unknown(_, let payload):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload):
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
     case .attested(let speaker):
       return speaker.retainedUTF8Bytes
     case .notAttested, .attestedAbsent:

@@ -492,8 +492,10 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       )
       for conversation in page.conversations {
         let titleBytes = UInt(conversation.title?.utf8.count ?? 0)
+        let sourceFormatBytes = conversation.importedSourceFormat?.retainedUnknownUTF8Bytes ?? 0
+        let conversationBytes = titleBytes.saturatedAdding(sourceFormatBytes)
         let (nextBytes, overflowed) =
-          retainedUTF8Bytes.addingReportingOverflow(titleBytes)
+          retainedUTF8Bytes.addingReportingOverflow(conversationBytes)
         guard
           !overflowed,
           nextBytes <= policy.maximumMetadataListUTF8Bytes
@@ -686,8 +688,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
             )
           }
           let previewBytes = UInt(entry.textPreview?.preview.utf8.count ?? 0)
+          let entryBytes = previewBytes.saturatedAdding(entry.retainedUnknownUTF8Bytes)
           let (nextBytes, overflowed) =
-            retainedPreviewBytes.addingReportingOverflow(previewBytes)
+            retainedPreviewBytes.addingReportingOverflow(entryBytes)
           guard !overflowed, nextBytes <= policy.maximumImportedPreviewUTF8Bytes else {
             throw SignalboxProcessServiceError.invalidPage(
               "The imported transcript exceeded the native preview-retention cap."
@@ -1577,5 +1580,53 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     _ error: SignalboxProcessError
   ) -> SignalboxProcessServiceError {
     .remote(code: error.code, message: error.message, detail: error.detail)
+  }
+}
+
+extension SignalboxImportedConversationSourceFormat {
+  fileprivate var retainedUnknownUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
+extension SignalboxImportedConversationEntry {
+  fileprivate var retainedUnknownUTF8Bytes: UInt {
+    contentKind.retainedUnknownUTF8Bytes.saturatedAdding(
+      sourceSpeaker.retainedUnknownUTF8Bytes
+    )
+  }
+}
+
+extension SignalboxImportedContentKind {
+  fileprivate var retainedUnknownUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
+extension SignalboxImportedSourceSpeaker {
+  fileprivate var retainedUnknownUTF8Bytes: UInt {
+    switch self {
+    case .attested(.unknown(let value)):
+      return UInt(value.utf8.count)
+    case .unknown(let kind, let payload):
+      let payloadBytes =
+        (try? SignalboxJSONCoding.encoder().encode(payload)).map { UInt($0.count) } ?? .max
+      return UInt(kind.utf8.count).saturatedAdding(payloadBytes)
+    case .notAttested, .attestedAbsent, .attested:
+      return 0
+    }
+  }
+}
+
+extension UInt {
+  fileprivate func saturatedAdding(_ other: UInt) -> UInt {
+    let (sum, overflowed) = addingReportingOverflow(other)
+    return overflowed ? .max : sum
   }
 }
