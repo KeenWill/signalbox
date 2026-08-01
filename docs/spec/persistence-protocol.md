@@ -161,10 +161,10 @@ Implemented table families (across the forward-only migrations):
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
-- `session_plan_event` retains session-local creation, revision, status, and
-  dependency events with exact tool-dispatch provenance, capped at 32 distinct
-  current dependencies per entry; duplicate edge events stay in history.
-  Trigger-maintained `session_plan_head` certifies the complete prefix; and
+- `session_plan_event` retains creation, revision, status, and dependency events
+  with exact provenance; duplicate edges stay in history.
+  `session_plan_current_dependency` stores one first append per distinct edge
+  (at most 32 per entry); `session_plan_head` certifies the complete prefix; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -556,9 +556,9 @@ Locks per transaction, in acquisition order:
   uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the exact active
   tool attempt `FOR SHARE` while authenticating its request. The insert trigger
   reacquires those locks in session-then-attempt order, caps distinct
-  dependencies, rejects cycles by node-deduplicated traversal, and advances the
-  head last. A repeatable read verifies the head and every relevant dependency
-  edge before bounded entries, dependencies, and readiness are projected.
+  dependencies from the current-edge projection, rejects existing and proposed
+  cycles, projects first occurrences, and advances the head. A repeatable read
+  checks relevant rows and linearly rejects cycles before bounded projection.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or

@@ -21121,8 +21121,18 @@ async fn insert_direct_dependency_event_between(
     entry: PlanEntryId,
     dependency: PlanEntryId,
 ) -> Result<(), sqlx::Error> {
-    const PRIOR_EVENT_ORDINAL: u64 = 3;
-    const EVENT_ORDINAL: u64 = 4;
+    insert_direct_dependency_event_at(pool, fixture, authorized, 3, 4, entry, dependency).await
+}
+
+async fn insert_direct_dependency_event_at(
+    pool: &PgPool,
+    fixture: &DependencyPlanFixture,
+    authorized: &AuthorizedToolAttempt,
+    prior_event_ordinal: u64,
+    event_ordinal: u64,
+    entry: PlanEntryId,
+    dependency: PlanEntryId,
+) -> Result<(), sqlx::Error> {
     let correlation = authorized.correlation();
     sqlx::query(
         "INSERT INTO session_plan_event
@@ -21135,8 +21145,8 @@ async fn insert_direct_dependency_event_between(
                  $6, $7, $8, $9, $10)",
     )
     .bind(fixture.session.into_uuid())
-    .bind(Decimal::from(EVENT_ORDINAL))
-    .bind(Decimal::from(PRIOR_EVENT_ORDINAL))
+    .bind(Decimal::from(event_ordinal))
+    .bind(Decimal::from(prior_event_ordinal))
     .bind(Decimal::from(entry.as_u64()))
     .bind(Decimal::from(dependency.as_u64()))
     .bind(correlation.turn().into_uuid())
@@ -21392,12 +21402,13 @@ async fn session_plan_shape_rejects_a_dependency_without_a_target() -> Result<()
     Ok(())
 }
 
-/// Repository cycle traversal expands each distinct dependency node once even
-/// when repeated physical events retain the same edge in history.
+/// Repeated physical edge events retain history while the bounded current
+/// projection stores the relationship once.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_repository_deduplicates_edges_when_rejecting_cycle()
+async fn session_plan_current_projection_deduplicates_edges_when_rejecting_cycle()
 -> Result<(), Box<dyn Error>> {
+    const EXPECTED_PROJECTED_EDGE_COUNT: i64 = 1;
     let (container, pool, _database_url) = migrated_postgres().await?;
     let prerequisite =
         PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
@@ -21420,6 +21431,16 @@ async fn session_plan_repository_deduplicates_edges_when_rejecting_cycle()
         },
     )
     .await?;
+    let projected_edge_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM session_plan_current_dependency
+          WHERE session_id = $1
+            AND entry_ordinal = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(fixture.dependent.as_u64()))
+    .fetch_one(&pool)
+    .await?;
     let cycle_attempt = fixture.batch.authorize_next().await?;
     let outcome = fixture
         .repository
@@ -21438,6 +21459,7 @@ async fn session_plan_repository_deduplicates_edges_when_rejecting_cycle()
         fixture.prerequisite,
     ];
 
+    assert_eq!(projected_edge_count, EXPECTED_PROJECTED_EDGE_COUNT);
     assert_eq!(cycle.entry(), fixture.prerequisite);
     assert_eq!(cycle.dependency(), fixture.dependent);
     assert_eq!(cycle.path(), expected_path.as_slice());
@@ -21485,6 +21507,80 @@ async fn session_plan_read_rejects_a_cyclic_dependency_projection() -> Result<()
     assert_eq!(
         plan_repository_error_kind(error),
         PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Repository and schema append guards reject a pre-existing corrupt cycle
+/// before they can extend its trusted event history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_an_already_cyclic_projection() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            depends_plan_arguments(prerequisite, dependent),
+            depends_plan_arguments(dependent, prerequisite),
+        ],
+    )
+    .await?;
+    let corrupt_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    insert_direct_dependency_event(&pool, &fixture, &corrupt_attempt).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(corrupt_attempt).await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let repository_error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::DependsOn {
+                entry: fixture.dependent,
+                dependency: fixture.prerequisite,
+            },
+        ))
+        .await
+        .expect_err("repository validation rejects the existing cycle");
+    let trigger_error = insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &append_attempt,
+        4,
+        5,
+        fixture.dependent,
+        fixture.prerequisite,
+    )
+    .await
+    .expect_err("the schema trigger rejects the existing cycle");
+
+    assert_eq!(
+        plan_repository_error_kind(repository_error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_graph_cycle")
     );
 
     pool.close().await;
