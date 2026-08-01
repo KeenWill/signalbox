@@ -70,14 +70,18 @@ const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
  LIMIT 1";
 
 const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
-           WHEN head.event_ordinal IS NULL THEN latest.row_present IS NOT NULL
-           ELSE latest.event_ordinal IS DISTINCT FROM head.event_ordinal
+           WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL
+           ELSE head.event_ordinal IS NULL
+                OR latest.event_ordinal IS DISTINCT FROM head.event_ordinal
                 OR certified.event_ordinal IS NULL
                 OR NOT session_plan_event_has_authority(certified)
        END
-  FROM (VALUES (1)) AS singleton(only)
-  LEFT JOIN session_plan_head AS head
-    ON head.session_id = $1
+  FROM (VALUES (1)) AS singleton(marker)
+  LEFT JOIN LATERAL (
+      SELECT session_id, event_ordinal, TRUE AS row_present
+        FROM session_plan_head
+       WHERE session_id = $1
+  ) AS head ON TRUE
   LEFT JOIN LATERAL (
       SELECT event_ordinal, TRUE AS row_present
         FROM session_plan_event
@@ -557,6 +561,12 @@ fn event_kind_from_draft(draft: PlanEventDraft) -> PlanEventKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectedAuthority {
+    Trusted,
+    Untrusted,
+}
+
 fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     let entry = PlanEntryId::try_from_u64(positive_u64(
         required(row, "entry_ordinal")?,
@@ -575,8 +585,8 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     if entry.creation_ordinal() != creation_ordinal {
         return Err(SessionPlanCorruption::MismatchedIdentity("current entry identity").into());
     }
-    let created_authorized: bool = required(row, "created_authorized")?;
-    if !created_authorized {
+    let created_authority = required_projected_authority(row, "created_authorized")?;
+    if created_authority == ProjectedAuthority::Untrusted {
         return Err(SessionPlanCorruption::UntrustedProvenance.into());
     }
     let created_text: String = required(row, "created_text")?;
@@ -587,15 +597,15 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     let revision_ordinal: Option<Decimal> = row.try_get("revision_event_ordinal")?;
     let revised_text: Option<String> = row.try_get("revised_text")?;
     let revised_status: Option<String> = row.try_get("revised_status")?;
-    let revision_authorized: Option<bool> = row.try_get("revision_authorized")?;
+    let revision_authority = optional_projected_authority(row, "revision_authorized")?;
     let text = match (
         revision_ordinal,
         revised_text,
         revised_status,
-        revision_authorized,
+        revision_authority,
     ) {
         (None, None, None, None) => created_text,
-        (Some(revision_ordinal), Some(revised_text), None, Some(true)) => {
+        (Some(revision_ordinal), Some(revised_text), None, Some(ProjectedAuthority::Trusted)) => {
             let revision_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
                 revision_ordinal,
                 "revision event ordinal",
@@ -610,7 +620,7 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
             }
             revised_text
         }
-        (Some(_), Some(_), None, Some(false)) => {
+        (Some(_), Some(_), None, Some(ProjectedAuthority::Untrusted)) => {
             return Err(SessionPlanCorruption::UntrustedProvenance.into());
         }
         _ => {
@@ -622,15 +632,10 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     let status_ordinal: Option<Decimal> = row.try_get("status_event_ordinal")?;
     let moved_text: Option<String> = row.try_get("moved_text")?;
     let moved_status: Option<String> = row.try_get("moved_status")?;
-    let movement_authorized: Option<bool> = row.try_get("movement_authorized")?;
-    let status = match (
-        status_ordinal,
-        moved_text,
-        moved_status,
-        movement_authorized,
-    ) {
+    let movement_authority = optional_projected_authority(row, "movement_authorized")?;
+    let status = match (status_ordinal, moved_text, moved_status, movement_authority) {
         (None, None, None, None) => PlanStatus::Pending,
-        (Some(status_ordinal), None, Some(moved_status), Some(true)) => {
+        (Some(status_ordinal), None, Some(moved_status), Some(ProjectedAuthority::Trusted)) => {
             let status_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
                 status_ordinal,
                 "status event ordinal",
@@ -650,7 +655,7 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
                 }
             })?
         }
-        (Some(_), None, Some(_), Some(false)) => {
+        (Some(_), None, Some(_), Some(ProjectedAuthority::Untrusted)) => {
             return Err(SessionPlanCorruption::UntrustedProvenance.into());
         }
         _ => {
@@ -850,4 +855,26 @@ where
 {
     row.try_get::<Option<T>, _>(field)?
         .ok_or(SessionPlanCorruption::Missing(field).into())
+}
+
+fn required_projected_authority(
+    row: &PgRow,
+    field: &'static str,
+) -> Result<ProjectedAuthority, SessionPlanRepositoryError> {
+    optional_projected_authority(row, field)?.ok_or(SessionPlanCorruption::Missing(field).into())
+}
+
+fn optional_projected_authority(
+    row: &PgRow,
+    field: &'static str,
+) -> Result<Option<ProjectedAuthority>, sqlx::Error> {
+    row.try_get::<Option<bool>, _>(field).map(|authority| {
+        authority.map(|authority| {
+            if authority {
+                ProjectedAuthority::Trusted
+            } else {
+                ProjectedAuthority::Untrusted
+            }
+        })
+    })
 }

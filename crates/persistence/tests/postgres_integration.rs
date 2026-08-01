@@ -11,7 +11,7 @@
 mod support;
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     error::Error,
     sync::{
         Arc, Mutex,
@@ -81,6 +81,7 @@ use signalbox_persistence::{
         DispatchedReconciliationOperation, DispatchedToolBatchState, OutboxCorruption,
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
+    plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessModelCallRecoveryPrecondition, ProcessModelSelection,
@@ -108,6 +109,11 @@ use signalbox_persistence::{
         SubmitInputRepositoryError,
     },
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
+};
+use signalbox_tools_plan::{
+    PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntryId, PlanEvent,
+    PlanEventDraft, PlanEventProvenance, PlanPageCompleteness, PlanReadRequest, PlanStatus,
+    PlanText,
 };
 use sqlx::{PgConnection, PgPool, Row, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -20684,6 +20690,348 @@ async fn s03_inv015_context_compaction_constraints_use_projected_successor_order
             .as_deref(),
         Some("23514")
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ConcurrentPlanAppendDisposition {
+    Appended,
+    DuplicateAttempt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlanRepositoryErrorKind {
+    InvalidAppendProvenance,
+    InvalidEventSequence,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PlanStorageSnapshot {
+    event_count: i64,
+    head_ordinal: Decimal,
+}
+
+static NEXT_PLAN_FIXTURE_SEED: AtomicU64 = AtomicU64::new(0xd100);
+const PLAN_FIXTURE_SEED_STRIDE: u64 = 0x200;
+
+fn plan_text(value: &str) -> PlanText {
+    PlanText::try_new(String::from(value)).expect("the plan text fixture is valid")
+}
+
+fn create_plan_arguments(text: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "kind": "create",
+        "text": text,
+    }))
+    .expect("the plan create arguments fixture serializes")
+}
+
+fn revise_plan_arguments(entry: PlanEntryId, text: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "entry_id": entry.as_u64(),
+        "kind": "revise",
+        "text": text,
+    }))
+    .expect("the plan revision arguments fixture serializes")
+}
+
+async fn authorize_plan_write(
+    pool: &PgPool,
+    arguments: &str,
+) -> Result<(SessionId, PlanEventProvenance), Box<dyn Error>> {
+    let seed =
+        u128::from(NEXT_PLAN_FIXTURE_SEED.fetch_add(PLAN_FIXTURE_SEED_STRIDE, Ordering::Relaxed));
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(pool, seed, "plan_write", arguments).await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xd2));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?
+        .expect("the approved plan-write fixture prepares its physical attempt");
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    Ok((
+        fixture.session,
+        PlanEventProvenance::from_invocation(authorized.correlation()),
+    ))
+}
+
+fn expect_appended(outcome: PlanAppendOutcome) -> PlanEvent {
+    match outcome {
+        PlanAppendOutcome::Appended(event) => event,
+        PlanAppendOutcome::Rejected(rejection) => {
+            panic!("the plan append fixture was unexpectedly rejected: {rejection:?}")
+        }
+    }
+}
+
+fn plan_repository_error_kind(error: SessionPlanRepositoryError) -> PlanRepositoryErrorKind {
+    match error {
+        SessionPlanRepositoryError::InvalidAppendProvenance => {
+            PlanRepositoryErrorKind::InvalidAppendProvenance
+        }
+        SessionPlanRepositoryError::Corruption(SessionPlanCorruption::InvalidEventSequence) => {
+            PlanRepositoryErrorKind::InvalidEventSequence
+        }
+        other => panic!("unexpected plan repository error: {other:?}"),
+    }
+}
+
+fn concurrent_append_disposition(
+    result: Result<PlanAppendOutcome, SessionPlanRepositoryError>,
+) -> ConcurrentPlanAppendDisposition {
+    match result {
+        Ok(PlanAppendOutcome::Appended(_)) => ConcurrentPlanAppendDisposition::Appended,
+        Err(SessionPlanRepositoryError::DuplicateAppendAttempt) => {
+            ConcurrentPlanAppendDisposition::DuplicateAttempt
+        }
+        Ok(PlanAppendOutcome::Rejected(rejection)) => {
+            panic!("the competing append was unexpectedly rejected: {rejection:?}")
+        }
+        Err(error) => panic!("the competing append failed unexpectedly: {error:?}"),
+    }
+}
+
+/// The first authoritative append advances the certified head and round-trips
+/// through both the current projection and chronological history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_and_read_round_trip_through_postgres() -> Result<(), Box<dyn Error>> {
+    const REQUESTED_HISTORY_LIMIT: usize = 10;
+    const EXPECTED_ENTRY_COUNT: usize = 1;
+    const CREATED_TEXT: &str = "persist the durable plan";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments = create_plan_arguments(CREATED_TEXT);
+    let (session, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    let event = expect_appended(
+        repository
+            .append(PlanAppendRequest::new(
+                provenance,
+                PlanEventDraft::Create {
+                    text: plan_text(CREATED_TEXT),
+                },
+            ))
+            .await?,
+    );
+    let page = repository
+        .read(PlanReadRequest::new(
+            session,
+            None,
+            Some(REQUESTED_HISTORY_LIMIT),
+        ))
+        .await?;
+    let history = page
+        .history()
+        .expect("the requested plan history is returned");
+
+    assert_eq!(page.completeness(), PlanPageCompleteness::Complete);
+    let entry = page
+        .entries()
+        .first()
+        .expect("the created entry is projected");
+
+    assert_eq!(page.entries().len(), EXPECTED_ENTRY_COUNT);
+    assert_eq!(entry.id().as_u64(), event.ordinal().as_u64());
+    assert_eq!(entry.text().as_str(), CREATED_TEXT);
+    assert_eq!(entry.status(), PlanStatus::Pending);
+    assert_eq!(history.events(), std::slice::from_ref(&event));
+    assert_eq!(history.completeness(), PlanPageCompleteness::Complete);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A revision naming no creation event returns its typed rejection without an
+/// append or ordinal allocation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_unknown_entry() -> Result<(), Box<dyn Error>> {
+    const MISSING_ENTRY_ID: u64 = 7;
+    const REQUESTED_TEXT: &str = "replace a missing step";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let missing_entry =
+        PlanEntryId::try_from_u64(MISSING_ENTRY_ID).expect("the missing entry fixture is positive");
+    let arguments = revise_plan_arguments(missing_entry, REQUESTED_TEXT);
+    let (_, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    let rejection = repository
+        .append(PlanAppendRequest::new(
+            provenance,
+            PlanEventDraft::Revise {
+                entry: missing_entry,
+                text: plan_text(REQUESTED_TEXT),
+            },
+        ))
+        .await?;
+
+    assert_eq!(
+        rejection,
+        PlanAppendOutcome::Rejected(PlanAppendRejection::UnknownEntry {
+            entry: missing_entry,
+        })
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Arguments that differ from the durable plan-write request cannot authorize
+/// an append even when the physical attempt itself is in flight.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_untrusted_request() -> Result<(), Box<dyn Error>> {
+    const MISSING_ENTRY_ID: u64 = 7;
+    const REQUESTED_TEXT: &str = "replace a missing step";
+    const MISMATCHED_TEXT: &str = "different request payload";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let missing_entry =
+        PlanEntryId::try_from_u64(MISSING_ENTRY_ID).expect("the missing entry fixture is positive");
+    let arguments = revise_plan_arguments(missing_entry, REQUESTED_TEXT);
+    let (_, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    let authority_error = repository
+        .append(PlanAppendRequest::new(
+            provenance,
+            PlanEventDraft::Revise {
+                entry: missing_entry,
+                text: plan_text(MISMATCHED_TEXT),
+            },
+        ))
+        .await
+        .expect_err("mismatched request arguments cannot authorize an append");
+
+    assert_eq!(
+        plan_repository_error_kind(authority_error),
+        PlanRepositoryErrorKind::InvalidAppendProvenance
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A physically present but malformed head is not projected as an honest empty
+/// plan when required-column and trigger defenses are deliberately bypassed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_present_head_with_null_ordinal() -> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "detect a corrupt plan head";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments = create_plan_arguments(CREATED_TEXT);
+    let (session, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    expect_appended(
+        repository
+            .append(PlanAppendRequest::new(
+                provenance,
+                PlanEventDraft::Create {
+                    text: plan_text(CREATED_TEXT),
+                },
+            ))
+            .await?,
+    );
+    sqlx::query("ALTER TABLE session_plan_head DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_plan_head ALTER COLUMN event_ordinal DROP NOT NULL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE session_plan_head SET event_ordinal = NULL WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_plan_head ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corruption = repository
+        .read(PlanReadRequest::new(session, None, None))
+        .await
+        .expect_err("a present malformed plan head fails closed");
+
+    assert_eq!(
+        plan_repository_error_kind(corruption),
+        PlanRepositoryErrorKind::InvalidEventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Competing submission of one physical plan-write attempt serializes to one
+/// append and one typed duplicate-attempt failure without advancing twice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_competing_append_uses_one_ordinal() -> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "append once under contention";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments = create_plan_arguments(CREATED_TEXT);
+    let (session, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let request = PlanAppendRequest::new(
+        provenance,
+        PlanEventDraft::Create {
+            text: plan_text(CREATED_TEXT),
+        },
+    );
+    let first_repository = SessionPlanRepository::new(pool.clone());
+    let second_repository = SessionPlanRepository::new(pool.clone());
+    let (first, second) = tokio::join!(
+        first_repository.append(request.clone()),
+        second_repository.append(request),
+    );
+    let dispositions = HashSet::from([
+        concurrent_append_disposition(first),
+        concurrent_append_disposition(second),
+    ]);
+    let snapshot = sqlx::query_as::<_, PlanStorageSnapshot>(
+        "SELECT count(event.event_ordinal) AS event_count,
+                head.event_ordinal AS head_ordinal
+           FROM session_plan_event AS event
+           JOIN session_plan_head AS head ON head.session_id = event.session_id
+          WHERE event.session_id = $1
+          GROUP BY head.event_ordinal",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        dispositions,
+        HashSet::from([
+            ConcurrentPlanAppendDisposition::Appended,
+            ConcurrentPlanAppendDisposition::DuplicateAttempt,
+        ])
+    );
+    assert_eq!(snapshot.event_count, 1);
+    assert_eq!(snapshot.head_ordinal, Decimal::ONE);
 
     pool.close().await;
     drop(container);
