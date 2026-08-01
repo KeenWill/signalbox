@@ -404,7 +404,7 @@ BEGIN
              WHERE edge.session_id = NEW.session_id
                AND edge.event_kind = 'depends_on'
                AND edge.entry_ordinal = NEW.entry_ordinal;
-            -- Mirrors MAX_PLAN_DEPENDENCIES_PER_ENTRY in tools-plan.
+            -- Checked mechanically against MAX_PLAN_DEPENDENCIES_PER_ENTRY.
             IF dependency_count >= 32 THEN
                 RAISE EXCEPTION
                     'session plan entry dependency limit reached'

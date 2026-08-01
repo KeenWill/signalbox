@@ -21096,6 +21096,23 @@ async fn insert_direct_dependency_event(
     fixture: &DependencyPlanFixture,
     authorized: &AuthorizedToolAttempt,
 ) -> Result<(), sqlx::Error> {
+    insert_direct_dependency_event_between(
+        pool,
+        fixture,
+        authorized,
+        fixture.prerequisite,
+        fixture.dependent,
+    )
+    .await
+}
+
+async fn insert_direct_dependency_event_between(
+    pool: &PgPool,
+    fixture: &DependencyPlanFixture,
+    authorized: &AuthorizedToolAttempt,
+    entry: PlanEntryId,
+    dependency: PlanEntryId,
+) -> Result<(), sqlx::Error> {
     const PRIOR_EVENT_ORDINAL: u64 = 3;
     const EVENT_ORDINAL: u64 = 4;
     let correlation = authorized.correlation();
@@ -21112,8 +21129,8 @@ async fn insert_direct_dependency_event(
     .bind(fixture.session.into_uuid())
     .bind(Decimal::from(EVENT_ORDINAL))
     .bind(Decimal::from(PRIOR_EVENT_ORDINAL))
-    .bind(Decimal::from(fixture.prerequisite.as_u64()))
-    .bind(Decimal::from(fixture.dependent.as_u64()))
+    .bind(Decimal::from(entry.as_u64()))
+    .bind(Decimal::from(dependency.as_u64()))
     .bind(correlation.turn().into_uuid())
     .bind(correlation.issuing_attempt().into_uuid())
     .bind(correlation.request().into_uuid())
@@ -21422,6 +21439,65 @@ async fn session_plan_read_rejects_a_cyclic_dependency_projection() -> Result<()
         .read(PlanReadRequest::new(fixture.session, None, None))
         .await
         .expect_err("the cyclic current projection is corruption");
+
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::InvalidEventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A paged read validates dependency edges reached through entries excluded by
+/// its cursor, so corrupt non-creation targets cannot hide outside the page.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_an_invalid_edge_reached_outside_the_page()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let invalid_dependency =
+        PlanEntryId::try_from_u64(3).expect("the non-creation fixture ordinal is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![depends_plan_arguments(prerequisite, invalid_dependency)],
+    )
+    .await?;
+    let corrupt_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    insert_direct_dependency_event_between(
+        &pool,
+        &fixture,
+        &corrupt_attempt,
+        prerequisite,
+        invalid_dependency,
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(corrupt_attempt).await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(
+            fixture.session,
+            Some(prerequisite),
+            None,
+        ))
+        .await
+        .expect_err("the traversed non-creation target is corruption");
 
     assert_eq!(
         plan_repository_error_kind(error),

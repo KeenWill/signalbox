@@ -666,6 +666,51 @@ fn write_returns_a_known_failure_for_typed_cycle_evidence() {
 }
 
 #[test]
+fn dependency_overflow_fixture_has_exact_boundary_shape() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let maximum = u64::try_from(MAX_PLAN_DEPENDENCIES_PER_ENTRY)
+        .expect("the fixture dependency limit fits u64");
+    let last_dependency = maximum + 2;
+    let first_edge = maximum + 3;
+    let last_event = maximum * 2 + 3;
+    let events = dependency_overflow_history();
+    let expected_last_creation = event(
+        last_dependency,
+        provenance,
+        PlanEventKind::Created {
+            text: text(INITIAL_TEXT),
+        },
+    );
+    let expected_first_edge = event(
+        first_edge,
+        provenance,
+        PlanEventKind::DependsOn {
+            entry: entry(1),
+            dependency: entry(2),
+        },
+    );
+    let expected_last_edge = event(
+        last_event,
+        provenance,
+        PlanEventKind::DependsOn {
+            entry: entry(1),
+            dependency: entry(last_dependency),
+        },
+    );
+
+    assert_eq!(events.len(), MAX_PLAN_DEPENDENCIES_PER_ENTRY * 2 + 3);
+    assert_eq!(
+        events.get(MAX_PLAN_DEPENDENCIES_PER_ENTRY + 1),
+        Some(&expected_last_creation)
+    );
+    assert_eq!(
+        events.get(MAX_PLAN_DEPENDENCIES_PER_ENTRY + 2),
+        Some(&expected_first_edge)
+    );
+    assert_eq!(events.last(), Some(&expected_last_edge));
+}
+
+#[test]
 fn fold_rejects_a_dependency_set_above_the_read_bound() {
     let dependent = entry(1);
     let events = dependency_overflow_history();
@@ -727,6 +772,72 @@ fn read_rejects_a_dependency_set_above_the_port_bound() {
 
     let error = run_ready(executor.execute_operation(dispatch, operation))
         .expect_err("the oversized fake page violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_rejects_a_self_dependency_from_the_port() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let current = PlanEntry::with_dependencies(
+        dependent,
+        text(INITIAL_TEXT),
+        PlanStatus::Pending,
+        vec![dependent],
+        PlanReadiness::Waiting,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![current],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("a self-dependency violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_rejects_a_page_local_dependency_cycle_from_the_port() {
+    let dispatch = correlation(10);
+    let first = entry(1);
+    let second = entry(2);
+    let first_entry = PlanEntry::with_dependencies(
+        first,
+        text(INITIAL_TEXT),
+        PlanStatus::Pending,
+        vec![second],
+        PlanReadiness::Waiting,
+    );
+    let second_entry = PlanEntry::with_dependencies(
+        second,
+        text(SECOND_TEXT),
+        PlanStatus::Pending,
+        vec![first],
+        PlanReadiness::Waiting,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![first_entry, second_entry],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("a page-local cycle violates the port contract");
 
     assert!(is_port_contract(&error));
 }

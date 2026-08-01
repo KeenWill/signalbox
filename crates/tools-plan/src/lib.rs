@@ -1429,6 +1429,14 @@ fn validate_read_page<PortError>(
         }
         previous = Some(entry.id());
     }
+    if page.entries().iter().any(|entry| {
+        entry
+            .dependencies()
+            .iter()
+            .any(|dependency| dependency_cycle(page.entries(), entry.id(), *dependency).is_some())
+    }) {
+        return Err(PlanExecutorError::PortContract);
+    }
     if let Some(history) = page.history() {
         let limit = request
             .history_limit()

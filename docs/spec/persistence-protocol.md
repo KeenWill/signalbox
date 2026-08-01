@@ -557,8 +557,9 @@ Locks per transaction, in acquisition order:
   tool attempt `FOR SHARE` while authenticating its request. The insert trigger
   reacquires those locks in session-then-attempt order, caps distinct
   dependencies, rejects cycles by node-deduplicated traversal, and advances the
-  head last. A repeatable-read verifies the head and relevant dependency graph
-  before projecting bounded entries, dependencies, and readiness.
+  head last. A repeatable-read verifies the head and every edge in the relevant
+  dependency graph through scalar corruption evidence before projecting bounded
+  entries, dependencies, and readiness.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or

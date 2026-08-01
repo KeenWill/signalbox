@@ -106,6 +106,7 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
 const RELEVANT_DEPENDENCY_GRAPH_SQL: &str = "WITH RECURSIVE ranked_edge AS (
     SELECT candidate.entry_ordinal, candidate.dependency_ordinal,
            min(candidate.event_ordinal) AS first_event_ordinal,
+           bool_and(session_plan_event_has_authority(candidate)) AS authorized,
            row_number() OVER (
                PARTITION BY candidate.entry_ordinal
                ORDER BY min(candidate.event_ordinal)
@@ -117,7 +118,7 @@ const RELEVANT_DEPENDENCY_GRAPH_SQL: &str = "WITH RECURSIVE ranked_edge AS (
 ),
 edge AS (
     SELECT entry_ordinal, dependency_ordinal,
-           first_event_ordinal, dependency_position
+           first_event_ordinal, authorized, dependency_position
       FROM ranked_edge
      WHERE dependency_position <= $3
 ),
@@ -130,11 +131,103 @@ reachable_node(node) AS (
         ON edge.entry_ordinal = reachable_node.node
 )
 SELECT edge.entry_ordinal, edge.dependency_ordinal,
-       edge.first_event_ordinal, edge.dependency_position
+       edge.first_event_ordinal, edge.dependency_position,
+       edge.authorized AS edge_authorized,
+       entry.event_ordinal IS NOT NULL AS entry_created,
+       session_plan_event_has_authority(entry) AS entry_authorized,
+       dependency.event_ordinal IS NOT NULL AS dependency_created,
+       session_plan_event_has_authority(dependency) AS dependency_authorized
   FROM edge
   JOIN reachable_node
     ON reachable_node.node = edge.entry_ordinal
+  LEFT JOIN session_plan_event AS entry
+    ON entry.session_id = $1
+   AND entry.event_ordinal = edge.entry_ordinal
+   AND entry.event_kind = 'created'
+  LEFT JOIN session_plan_event AS dependency
+    ON dependency.session_id = $1
+   AND dependency.event_ordinal = edge.dependency_ordinal
+   AND dependency.event_kind = 'created'
  ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
+
+const RELEVANT_DEPENDENCY_VALIDATION_SQL: &str = "WITH RECURSIVE ranked_edge AS (
+    SELECT candidate.entry_ordinal, candidate.dependency_ordinal,
+           min(candidate.event_ordinal) AS first_event_ordinal,
+           bool_and(session_plan_event_has_authority(candidate)) AS authorized,
+           row_number() OVER (
+               PARTITION BY candidate.entry_ordinal
+               ORDER BY min(candidate.event_ordinal)
+           ) AS dependency_position
+      FROM session_plan_event AS candidate
+     WHERE candidate.session_id = $1
+       AND candidate.event_kind = 'depends_on'
+     GROUP BY candidate.entry_ordinal, candidate.dependency_ordinal
+),
+edge AS (
+    SELECT entry_ordinal, dependency_ordinal, first_event_ordinal,
+           authorized, dependency_position
+      FROM ranked_edge
+     WHERE dependency_position <= $3
+),
+reachable_node(node) AS (
+    SELECT unnest($2::numeric[])
+    UNION
+    SELECT edge.dependency_ordinal
+      FROM reachable_node
+      JOIN edge
+        ON edge.entry_ordinal = reachable_node.node
+),
+relevant_edge AS (
+    SELECT edge.entry_ordinal, edge.dependency_ordinal,
+           edge.first_event_ordinal, edge.dependency_position,
+           edge.authorized AS edge_authorized,
+           entry.event_ordinal IS NOT NULL AS entry_created,
+           session_plan_event_has_authority(entry) AS entry_authorized,
+           dependency.event_ordinal IS NOT NULL AS dependency_created,
+           session_plan_event_has_authority(dependency) AS dependency_authorized
+      FROM edge
+      JOIN reachable_node
+        ON reachable_node.node = edge.entry_ordinal
+      LEFT JOIN session_plan_event AS entry
+        ON entry.session_id = $1
+       AND entry.event_ordinal = edge.entry_ordinal
+       AND entry.event_kind = 'created'
+      LEFT JOIN session_plan_event AS dependency
+        ON dependency.session_id = $1
+       AND dependency.event_ordinal = edge.dependency_ordinal
+       AND dependency.event_kind = 'created'
+),
+walk(node) AS (
+    SELECT unnest($2::numeric[])
+    UNION ALL
+    SELECT edge.dependency_ordinal
+      FROM walk
+      JOIN edge
+        ON edge.entry_ordinal = walk.node
+     WHERE NOT walk.is_cycle
+) CYCLE node SET is_cycle USING cycle_path
+SELECT EXISTS (
+           SELECT 1
+             FROM relevant_edge
+            WHERE dependency_position > $4
+               OR NOT entry_created
+               OR NOT dependency_created
+               OR first_event_ordinal <= entry_ordinal
+               OR first_event_ordinal <= dependency_ordinal
+               OR entry_ordinal = dependency_ordinal
+       ) AS invalid_sequence,
+       EXISTS (
+           SELECT 1
+             FROM relevant_edge
+            WHERE NOT edge_authorized
+               OR NOT entry_authorized
+               OR NOT dependency_authorized
+       ) AS untrusted,
+       EXISTS (
+           SELECT 1
+             FROM walk
+            WHERE is_cycle
+       ) AS cyclic";
 
 const DEPENDENCY_LIMIT_REACHED_SQL: &str = "SELECT
     NOT EXISTS (
@@ -601,15 +694,12 @@ impl SessionPlanRepository {
         let dependency_rows = if entry_ordinals.is_empty() {
             Vec::new()
         } else {
-            let graph = load_relevant_dependency_graph(
+            validate_relevant_dependency_graph(
                 &mut transaction,
                 request.session(),
                 &entries.iter().map(PlanEntry::id).collect::<Vec<_>>(),
             )
             .await?;
-            if dependency_graph_has_cycle(&graph) {
-                return Err(SessionPlanCorruption::InvalidEventSequence.into());
-            }
             sqlx::query(CURRENT_DEPENDENCIES_SQL)
                 .bind(request.session().into_uuid())
                 .bind(&entry_ordinals)
@@ -752,6 +842,31 @@ fn dependency_query_limit() -> Result<i64, SessionPlanRepositoryError> {
         .ok_or(SessionPlanCorruption::InvalidPositiveInteger("dependency query limit").into())
 }
 
+async fn validate_relevant_dependency_graph(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+    roots: &[PlanEntryId],
+) -> Result<(), SessionPlanRepositoryError> {
+    let root_ordinals = roots
+        .iter()
+        .map(|root| Decimal::from(root.as_u64()))
+        .collect::<Vec<_>>();
+    let row = sqlx::query(RELEVANT_DEPENDENCY_VALIDATION_SQL)
+        .bind(session.into_uuid())
+        .bind(&root_ordinals)
+        .bind(dependency_query_limit()?)
+        .bind(dependency_capacity()?)
+        .fetch_one(&mut **transaction)
+        .await?;
+    if required::<bool>(&row, "invalid_sequence")? || required::<bool>(&row, "cyclic")? {
+        return Err(SessionPlanCorruption::InvalidEventSequence.into());
+    }
+    if required::<bool>(&row, "untrusted")? {
+        return Err(SessionPlanCorruption::UntrustedProvenance.into());
+    }
+    Ok(())
+}
+
 async fn find_dependency_cycle(
     transaction: &mut Transaction<'_, Postgres>,
     session: SessionId,
@@ -805,48 +920,54 @@ async fn load_relevant_dependency_graph(
         .fetch_all(&mut **transaction)
         .await?;
     let capacity = dependency_capacity()?;
-    let mut graph = HashMap::<PlanEntryId, Vec<PlanEntryId>>::new();
+    let mut ordered_graph = HashMap::<PlanEntryId, Vec<(PlanEventOrdinal, PlanEntryId)>>::new();
     for row in &rows {
         let position: i64 = required(row, "dependency_position")?;
-        if position > capacity {
+        if position > capacity
+            || !required::<bool>(row, "entry_created")?
+            || !required::<bool>(row, "dependency_created")?
+        {
             return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
+        if !required::<bool>(row, "edge_authorized")?
+            || !required::<bool>(row, "entry_authorized")?
+            || !required::<bool>(row, "dependency_authorized")?
+        {
+            return Err(SessionPlanCorruption::UntrustedProvenance.into());
         }
         let entry = dependency_path_entry(required(row, "entry_ordinal")?)?;
         let dependency = dependency_path_entry(required(row, "dependency_ordinal")?)?;
-        graph.entry(entry).or_default().push(dependency);
-    }
-    Ok(graph)
-}
-
-fn dependency_graph_has_cycle(graph: &HashMap<PlanEntryId, Vec<PlanEntryId>>) -> bool {
-    let mut completed = HashSet::<PlanEntryId>::new();
-    for root in graph.keys().copied() {
-        if completed.contains(&root) {
-            continue;
+        let first_event = PlanEventOrdinal::try_from_u64(positive_u64(
+            required(row, "first_event_ordinal")?,
+            "dependency event ordinal",
+        )?)
+        .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+            "dependency event ordinal",
+        ))?;
+        if first_event <= entry.creation_ordinal()
+            || first_event <= dependency.creation_ordinal()
+            || entry == dependency
+        {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
         }
-        let mut active = HashSet::from([root]);
-        let mut stack = vec![(root, 0_usize)];
-        while let Some((node, next_index)) = stack.last_mut() {
-            let dependencies = graph.get(node).map(Vec::as_slice).unwrap_or_default();
-            if *next_index == dependencies.len() {
-                let finished = *node;
-                stack.pop();
-                active.remove(&finished);
-                completed.insert(finished);
-                continue;
-            }
-            let dependency = dependencies[*next_index];
-            *next_index += 1;
-            if active.contains(&dependency) {
-                return true;
-            }
-            if !completed.contains(&dependency) {
-                active.insert(dependency);
-                stack.push((dependency, 0));
-            }
-        }
+        ordered_graph
+            .entry(entry)
+            .or_default()
+            .push((first_event, dependency));
     }
-    false
+    Ok(ordered_graph
+        .into_iter()
+        .map(|(entry, mut dependencies)| {
+            dependencies.sort_by_key(|(ordinal, _dependency)| *ordinal);
+            (
+                entry,
+                dependencies
+                    .into_iter()
+                    .map(|(_ordinal, dependency)| dependency)
+                    .collect(),
+            )
+        })
+        .collect())
 }
 
 fn dependency_path_entry(value: Decimal) -> Result<PlanEntryId, SessionPlanRepositoryError> {
@@ -1286,4 +1407,20 @@ fn optional_projected_authority(
             }
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MAX_PLAN_DEPENDENCIES_PER_ENTRY;
+
+    const SESSION_PLAN_MIGRATION: &str =
+        include_str!("../migrations/202608020011_session_plan.sql");
+
+    #[test]
+    fn migration_dependency_limit_matches_the_tools_plan_constant() {
+        let expected_guard =
+            format!("IF dependency_count >= {MAX_PLAN_DEPENDENCIES_PER_ENTRY} THEN");
+
+        assert!(SESSION_PLAN_MIGRATION.contains(&expected_guard));
+    }
 }
