@@ -6,9 +6,11 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 CHECKER = Path(__file__).resolve().parent / "check_user_vocabulary.py"
+
 
 def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -18,6 +20,7 @@ def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
         text=True,
     )
 
+
 def git(root: Path, *arguments: str) -> None:
     subprocess.run(
         ["git", *arguments],
@@ -26,6 +29,23 @@ def git(root: Path, *arguments: str) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def fixture_text(lines: tuple[str, ...]) -> str:
+    return "".join(f"{line}\n" for line in lines)
+
+
+def expected_diagnostics(
+    path: str,
+    fixture_lines: tuple[str, ...],
+    rejected_lines: tuple[str, ...] | None = None,
+) -> list[str]:
+    selected = fixture_lines if rejected_lines is None else rejected_lines
+    return [
+        f"{path}:{fixture_lines.index(line) + 1}: {line.strip()}"
+        for line in selected
+    ]
+
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="signalbox-user-vocabulary-") as directory:
@@ -61,6 +81,66 @@ def main() -> int:
         reviewed_domain_path = root / "docs" / "spec" / "review-workflows.md"
         reviewed_github_path = root / "docs" / "spec" / "tool-loop.md"
         reviewed_unix_path = root / "docs" / "spec" / "process-protocol.md"
+        violation_lines = (
+            "The owner approves this tool.",
+            "The owners approve this tool.",
+            "session_owners = []",
+            "owner2 = []",
+            "Owner2 = []",
+            "session_owner2 = []",
+            "owner2_id = nil",
+            "Owner2Id = nil",
+            "session_owner2_id = nil",
+            "The session owner approves this tool.",
+            "The owner field identifies the human who approves this tool.",
+            "sessionOwner2 = nil",
+            "sessionOwner2Id = nil",
+            "The current owner prevents the tool from running.",
+            "The wrong owner approves this tool.",
+            'The process protocol emits {"type":"owner"}.',
+            "A request by an owner, member, or collaborator approves tools.",
+            "isCollapsedByOwner = true",
+            "sessionowner = []",
+            "ownerid = nil",
+            "Sessionowner = []",
+            "ownerId = nil",
+            "SESSIONOWNER = []",
+            "OWNERID = nil",
+            "Ownerid = nil",
+        )
+        mixed_storage_lines = (
+            'const PROCESS_ACTOR: &str = "owner";',
+            'const DECISION_SOURCE: &str = "owner_command";',
+        )
+        future_migration_lines = (
+            "-- New owner actor",
+            "CHECK (actor_kind = 'owner');",
+        )
+        native_lines = ('let sessionOwner = "human who approves tools"',)
+        reviewed_domain_lines = (
+            "The foreign owner approves this tool.",
+            "`foreign_session_owner` names the human who approves this tool.",
+        )
+        reviewed_github_lines = (
+            "A request by an owner, member, or collaborator approves tools.",
+            'author_association = "HUMAN_OWNER"',
+        )
+        reviewed_unix_lines = (
+            "The wrong owner approves this tool.",
+            "HumanRoleOwnerMismatch = true",
+        )
+        imported_lines = (
+            "struct EntryFixture {",
+            "    owner: ImportedConversationId,",
+            "}",
+            "fn fixture() {",
+            "    let owner = conversation(1);",
+            "    consume(",
+            "        owner,",
+            "    );",
+            "}",
+            "// The owner approves this tool.",
+        )
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
         mixed_storage_path.parent.mkdir(parents=True)
@@ -70,74 +150,27 @@ def main() -> int:
         allowed.write_text(
             'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
         )
-        violation.write_text(
-            "The owner approves this tool.\n"
-            "The owners approve this tool.\n"
-            "session_owners = []\n"
-            "owner2 = []\n"
-            "Owner2 = []\n"
-            "session_owner2 = []\n"
-            "owner2_id = nil\n"
-            "Owner2Id = nil\n"
-            "session_owner2_id = nil\n"
-            "The session owner approves this tool.\n"
-            "The owner field identifies the human who approves this tool.\n"
-            "sessionOwner2 = nil\n"
-            "sessionOwner2Id = nil\n"
-            "The current owner prevents the tool from running.\n"
-            "The wrong owner approves this tool.\n"
-            "The process protocol emits {\"type\":\"owner\"}.\n"
-            "A request by an owner, member, or collaborator approves tools.\n"
-            "isCollapsedByOwner = true\n"
-            "sessionowner = []\n"
-            "ownerid = nil\n"
-            "Sessionowner = []\n"
-            "ownerId = nil\n"
-            "SESSIONOWNER = []\n"
-            "OWNERID = nil\n"
-            "Ownerid = nil\n",
-            encoding="utf-8",
-        )
+        violation.write_text(fixture_text(violation_lines), encoding="utf-8")
         mixed_storage_path.write_text(
-            'const PROCESS_ACTOR: &str = "owner";\n'
-            'const DECISION_SOURCE: &str = "owner_command";\n',
-            encoding="utf-8",
+            fixture_text(mixed_storage_lines), encoding="utf-8"
         )
         frozen_migration.write_text(
             "CHECK (cause = 'owner_initiated');\n", encoding="utf-8"
         )
         future_migration.write_text(
-            "-- New owner actor\nCHECK (actor_kind = 'owner');\n",
-            encoding="utf-8",
+            fixture_text(future_migration_lines), encoding="utf-8"
         )
-        native_path.write_text(
-            'let sessionOwner = "human who approves tools"\n', encoding="utf-8"
-        )
+        native_path.write_text(fixture_text(native_lines), encoding="utf-8")
         reviewed_domain_path.write_text(
-            "The foreign owner approves this tool.\n"
-            "`foreign_session_owner` names the human who approves this tool.\n",
-            encoding="utf-8",
+            fixture_text(reviewed_domain_lines), encoding="utf-8"
         )
         reviewed_github_path.write_text(
-            "A request by an owner, member, or collaborator approves tools.\n",
-            encoding="utf-8",
+            fixture_text(reviewed_github_lines), encoding="utf-8"
         )
         reviewed_unix_path.write_text(
-            "The wrong owner approves this tool.\n", encoding="utf-8"
+            fixture_text(reviewed_unix_lines), encoding="utf-8"
         )
-        imported.write_text(
-            "struct EntryFixture {\n"
-            "    owner: ImportedConversationId,\n"
-            "}\n"
-            "fn fixture() {\n"
-            "    let owner = conversation(1);\n"
-            "    consume(\n"
-            "        owner,\n"
-            "    );\n"
-            "}\n"
-            "// The owner approves this tool.\n",
-            encoding="utf-8",
-        )
+        imported.write_text(fixture_text(imported_lines), encoding="utf-8")
         git(root, "init", "--quiet")
         git(
             root,
@@ -157,201 +190,48 @@ def main() -> int:
         assert rejected.returncode == 1, (
             f"violation unexpectedly passed:\n{rejected.stdout}{rejected.stderr}"
         )
-        expected = "docs/spec/example.md:1: The owner approves this tool."
-        plural = "docs/spec/example.md:2: The owners approve this tool."
-        identifier = "docs/spec/example.md:3: session_owners = []"
-        numeric = "docs/spec/example.md:4: owner2 = []"
-        numeric_capitalized = "docs/spec/example.md:5: Owner2 = []"
-        numeric_identifier = "docs/spec/example.md:6: session_owner2 = []"
-        continued_numeric = "docs/spec/example.md:7: owner2_id = nil"
-        continued_capitalized = "docs/spec/example.md:8: Owner2Id = nil"
-        continued_numeric_identifier = "docs/spec/example.md:9: session_owner2_id = nil"
-        semantic_session_owner = (
-            "docs/spec/example.md:10: The session owner approves this tool."
-        )
-        generic_owner_phrase = (
-            "docs/spec/example.md:11: "
-            "The owner field identifies the human who approves this tool."
-        )
-        embedded_numeric = "docs/spec/example.md:12: sessionOwner2 = nil"
-        embedded_continued_numeric = "docs/spec/example.md:13: sessionOwner2Id = nil"
-        unreviewed_path_allowance = (
-            "docs/spec/example.md:14: "
-            "The current owner prevents the tool from running."
-        )
-        unix_owner_outside_reviewed_path = (
-            "docs/spec/example.md:15: The wrong owner approves this tool."
-        )
-        stale_wire_value = (
-            'docs/spec/example.md:16: The process protocol emits {"type":"owner"}.'
-        )
-        github_role_outside_reviewed_path = (
-            "docs/spec/example.md:17: "
-            "A request by an owner, member, or collaborator approves tools."
-        )
-        external_field_outside_reviewed_path = (
-            "docs/spec/example.md:18: isCollapsedByOwner = true"
-        )
-        lowercase_suffix = "docs/spec/example.md:19: sessionowner = []"
-        lowercase_prefix = "docs/spec/example.md:20: ownerid = nil"
-        mixed_case_suffix = "docs/spec/example.md:21: Sessionowner = []"
-        mixed_case_prefix = "docs/spec/example.md:22: ownerId = nil"
-        uppercase_suffix = "docs/spec/example.md:23: SESSIONOWNER = []"
-        uppercase_prefix = "docs/spec/example.md:24: OWNERID = nil"
-        capitalized_prefix = "docs/spec/example.md:25: Ownerid = nil"
-        unix_role_inside_reviewed_path = (
-            "docs/spec/process-protocol.md:1: The wrong owner approves this tool."
-        )
-        imported_role_owner = (
-            "crates/domain/src/imported_conversation.rs:10: "
-            "// The owner approves this tool."
-        )
-        stale_actor_in_mixed_storage_path = (
-            "apps/signalboxd/tests/offline_tool_loop.rs:1: "
-            'const PROCESS_ACTOR: &str = "owner";'
-        )
-        future_migration_prose = (
-            "crates/persistence/migrations/202608020009_user_vocabulary.sql:1: "
-            "-- New owner actor"
-        )
-        future_migration_encoding = (
-            "crates/persistence/migrations/202608020009_user_vocabulary.sql:2: "
-            "CHECK (actor_kind = 'owner');"
-        )
-        native_role_identifier = (
-            "clients/native/Sources/SignalboxClient/SessionSynchronization.swift:1: "
-            'let sessionOwner = "human who approves tools"'
-        )
-        domain_role_inside_reviewed_path = (
-            "docs/spec/review-workflows.md:1: The foreign owner approves this tool."
-        )
-        domain_role_identifier_inside_reviewed_path = (
-            "docs/spec/review-workflows.md:2: "
-            "`foreign_session_owner` names the human who approves this tool."
-        )
-        github_role_inside_reviewed_path = (
-            "docs/spec/tool-loop.md:1: "
-            "A request by an owner, member, or collaborator approves tools."
-        )
-        assert expected in rejected.stdout, (
-            f"singular violation missing:\n{rejected.stdout}"
-        )
-        assert plural in rejected.stdout, (
-            f"plural violation missing:\n{rejected.stdout}"
-        )
-        assert identifier in rejected.stdout, (
-            f"identifier violation missing:\n{rejected.stdout}"
-        )
-        assert numeric in rejected.stdout, (
-            f"numeric violation missing:\n{rejected.stdout}"
-        )
-        assert numeric_capitalized in rejected.stdout, (
-            f"capitalized numeric violation missing:\n{rejected.stdout}"
-        )
-        assert numeric_identifier in rejected.stdout, (
-            f"numeric identifier violation missing:\n{rejected.stdout}"
-        )
-        assert continued_numeric in rejected.stdout, (
-            f"continued numeric violation missing:\n{rejected.stdout}"
-        )
-        assert continued_capitalized in rejected.stdout, (
-            f"continued capitalized violation missing:\n{rejected.stdout}"
-        )
-        assert continued_numeric_identifier in rejected.stdout, (
-            f"continued numeric identifier violation missing:\n{rejected.stdout}"
-        )
-        assert semantic_session_owner in rejected.stdout, (
-            f"semantic session-owner violation missing:\n{rejected.stdout}"
-        )
-        assert generic_owner_phrase in rejected.stdout, (
-            f"generic owner-phrase violation missing:\n{rejected.stdout}"
-        )
-        assert embedded_numeric in rejected.stdout, (
-            f"embedded numeric violation missing:\n{rejected.stdout}"
-        )
-        assert embedded_continued_numeric in rejected.stdout, (
-            f"embedded continued numeric violation missing:\n{rejected.stdout}"
-        )
-        assert unreviewed_path_allowance in rejected.stdout, (
-            f"unreviewed-path allowance violation missing:\n{rejected.stdout}"
-        )
-        assert unix_owner_outside_reviewed_path in rejected.stdout, (
-            f"Unix-owner allowance violation missing:\n{rejected.stdout}"
-        )
-        assert stale_wire_value in rejected.stdout, (
-            f"stale wire-value violation missing:\n{rejected.stdout}"
-        )
-        assert github_role_outside_reviewed_path in rejected.stdout, (
-            f"GitHub-role allowance violation missing:\n{rejected.stdout}"
-        )
-        assert external_field_outside_reviewed_path in rejected.stdout, (
-            f"external-field allowance violation missing:\n{rejected.stdout}"
-        )
-        assert lowercase_suffix in rejected.stdout, (
-            f"lowercase suffix violation missing:\n{rejected.stdout}"
-        )
-        assert lowercase_prefix in rejected.stdout, (
-            f"lowercase prefix violation missing:\n{rejected.stdout}"
-        )
-        assert mixed_case_suffix in rejected.stdout, (
-            f"mixed-case suffix violation missing:\n{rejected.stdout}"
-        )
-        assert mixed_case_prefix in rejected.stdout, (
-            f"mixed-case prefix violation missing:\n{rejected.stdout}"
-        )
-        assert uppercase_suffix in rejected.stdout, (
-            f"uppercase suffix violation missing:\n{rejected.stdout}"
-        )
-        assert uppercase_prefix in rejected.stdout, (
-            f"uppercase prefix violation missing:\n{rejected.stdout}"
-        )
-        assert capitalized_prefix in rejected.stdout, (
-            f"capitalized prefix violation missing:\n{rejected.stdout}"
-        )
-        assert unix_role_inside_reviewed_path in rejected.stdout, (
-            f"reviewed-path Unix-role violation missing:\n{rejected.stdout}"
-        )
-        assert imported_role_owner in rejected.stdout, (
-            f"imported-file role violation missing:\n{rejected.stdout}"
-        )
-        assert stale_actor_in_mixed_storage_path in rejected.stdout, (
-            f"mixed storage-path actor violation missing:\n{rejected.stdout}"
-        )
-        assert future_migration_prose in rejected.stdout, (
-            f"future migration prose violation missing:\n{rejected.stdout}"
-        )
-        assert future_migration_encoding in rejected.stdout, (
-            f"future migration encoding violation missing:\n{rejected.stdout}"
-        )
-        assert native_role_identifier in rejected.stdout, (
-            f"native role identifier violation missing:\n{rejected.stdout}"
-        )
-        assert domain_role_inside_reviewed_path in rejected.stdout, (
-            f"domain reviewed-path role violation missing:\n{rejected.stdout}"
-        )
-        assert domain_role_identifier_inside_reviewed_path in rejected.stdout, (
-            f"domain reviewed-path identifier violation missing:\n{rejected.stdout}"
-        )
-        assert github_role_inside_reviewed_path in rejected.stdout, (
-            f"GitHub reviewed-path role violation missing:\n{rejected.stdout}"
+        reported = [
+            line.removeprefix("  - ")
+            for line in rejected.stdout.splitlines()
+            if line.startswith("  - ")
+        ]
+        expected = [
+            *expected_diagnostics("docs/spec/example.md", violation_lines),
+            *expected_diagnostics(
+                "docs/spec/process-protocol.md", reviewed_unix_lines
+            ),
+            *expected_diagnostics(
+                "docs/spec/review-workflows.md", reviewed_domain_lines
+            ),
+            *expected_diagnostics("docs/spec/tool-loop.md", reviewed_github_lines),
+            *expected_diagnostics(
+                "crates/domain/src/imported_conversation.rs",
+                imported_lines,
+                imported_lines[-1:],
+            ),
+            *expected_diagnostics(
+                "apps/signalboxd/tests/offline_tool_loop.rs",
+                mixed_storage_lines,
+                mixed_storage_lines[:1],
+            ),
+            *expected_diagnostics(
+                "crates/persistence/migrations/202608020009_user_vocabulary.sql",
+                future_migration_lines,
+            ),
+            *expected_diagnostics(
+                "clients/native/Sources/SignalboxClient/SessionSynchronization.swift",
+                native_lines,
+            ),
+        ]
+        assert Counter(reported) == Counter(expected), (
+            f"reported diagnostics differ: {rejected.stdout}"
         )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
         reviewed_unix_path.write_text(
             "signalboxd binds a socket with owner-only `0600` permissions.\n",
             encoding="utf-8",
         )
-        imported.write_text(
-            "struct EntryFixture {\n"
-            "    owner: ImportedConversationId,\n"
-            "}\n"
-            "fn fixture() {\n"
-            "    let owner = conversation(1);\n"
-            "    consume(\n"
-            "        owner,\n"
-            "    );\n"
-            "}\n",
-            encoding="utf-8",
-        )
+        imported.write_text(fixture_text(imported_lines[:-1]), encoding="utf-8")
         mixed_storage_path.write_text(
             'const PROCESS_ACTOR: &str = "user";\n'
             'const DECISION_SOURCE: &str = "owner_command";\n',
