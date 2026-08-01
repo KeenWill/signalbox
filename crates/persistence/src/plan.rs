@@ -19,7 +19,8 @@ use crate::{commit_failure_is_ambiguous, mapping};
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
 
-const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS entry_ordinal,
+const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_ordinal,
+       created.entry_ordinal AS entry_ordinal,
        COALESCE((
            SELECT revision.entry_text
              FROM session_plan_event AS revision
@@ -388,6 +389,16 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
         "entry ordinal",
     ))?;
+    let creation_ordinal = PlanEventOrdinal::try_from_u64(positive_u64(
+        row.try_get("creation_event_ordinal")?,
+        "creation event ordinal",
+    )?)
+    .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
+        "creation event ordinal",
+    ))?;
+    if entry.creation_ordinal() != creation_ordinal {
+        return Err(SessionPlanCorruption::MismatchedIdentity("current entry identity").into());
+    }
     let text: String = required(row, "current_text")?;
     let text = PlanText::try_new(text).map_err(|_| SessionPlanCorruption::InvalidText)?;
     let status_text: String = required(row, "current_status")?;
@@ -439,6 +450,12 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
                     SessionPlanCorruption::InvalidEventPayload("text-revised event").into(),
                 );
             };
+            if entry.creation_ordinal() >= ordinal {
+                return Err(SessionPlanCorruption::MismatchedIdentity(
+                    "text-revised target ordering",
+                )
+                .into());
+            }
             PlanEventKind::TextRevised {
                 entry,
                 text: decode_text(value)?,
@@ -450,6 +467,12 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
                     SessionPlanCorruption::InvalidEventPayload("status-changed event").into(),
                 );
             };
+            if entry.creation_ordinal() >= ordinal {
+                return Err(SessionPlanCorruption::MismatchedIdentity(
+                    "status-changed target ordering",
+                )
+                .into());
+            }
             let status = mapping::plan_status_from_str(&value).ok_or({
                 SessionPlanCorruption::Unsupported {
                     field: "entry status",
