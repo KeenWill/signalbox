@@ -519,7 +519,10 @@ pub enum PlanPageCompleteness {
 impl PlanPageCompleteness {
     /// Returns whether requested evidence was omitted.
     pub const fn is_truncated(self) -> bool {
-        matches!(self, Self::Truncated)
+        match self {
+            Self::Complete => false,
+            Self::Truncated => true,
+        }
     }
 }
 
