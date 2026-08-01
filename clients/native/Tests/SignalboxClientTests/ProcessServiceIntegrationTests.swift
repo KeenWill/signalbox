@@ -384,6 +384,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(message.role, .assistant)
   }
 
+  func testTurnActivationSideProjectionIncludesModelIdentityMarker() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithModelIdentityMarker()
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    let record = try XCTUnwrap(projection.records.first)
+    let marker = try ProcessProjectionFixture.conservativeEvent(in: record)
+
+    XCTAssertEqual(projection.records.count, ProcessProjectionFixture.singleRecordCount)
+    XCTAssertEqual(marker.kind, ProcessProjectionFixture.modelIdentityKind)
+  }
+
   func testFailedProviderCauseAppearsInNativeActivity() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithFailedProviderCause()
     var projector = SignalboxProcessTranscriptProjector()
@@ -404,6 +417,32 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       ProcessProjectionFixture.pendingIDsInAcceptanceOrder
     )
     XCTAssertEqual(projection.activity, ProcessProjectionFixture.runningActivity)
+  }
+
+  func testUnknownCurrentModelCallStateRequiresRecovery() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownCurrentModelCallState()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(projection.activity, ProcessProjectionFixture.recoveryActivity)
+  }
+
+  @MainActor
+  func testUnknownCurrentModelCallStateGatesMutations() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownCurrentModelCallState()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    XCTAssertFalse(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
   }
 
   @MainActor
@@ -439,6 +478,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertFalse(viewModel.canSend)
     XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testUnknownTurnStateGatesMutations() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownTurnState()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    XCTAssertFalse(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testUnknownToolBatchStateRequiresRecovery() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(.event(try ProcessProjectionFixture.unknownToolBatchEvent()))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertEqual(
+      viewModel.latestDiagnostic,
+      ProcessProjectionFixture.unknownToolBatchDiagnostic
+    )
   }
 
   @MainActor
@@ -3683,9 +3754,23 @@ private enum ProcessProjectionFixture {
   static let orderedMessageRoles = [SignalboxMessageRole.user, .assistant]
   static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
   static let completedAssistantTranscriptRowID = "timeline-message-1"
+  static let singleRecordCount = 1
+  static let modelIdentityKind = "model_identity_changed"
+  static let unknownToolBatchState = "fixture_future_tool_batch_state"
+  static let unknownToolBatchDiagnostic =
+    "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
 
   static func materializedAcceptedInputIDs() throws -> Set<SignalboxCanonicalUUID> {
     [try SignalboxCanonicalUUID(validating: ProcessSubmissionFixture.acceptedInputID)]
+  }
+
+  static func conservativeEvent(
+    in record: SignalboxStoredEvent
+  ) throws -> SignalboxProcessConservativeEvent {
+    guard case .processConservative(let event) = record.event else {
+      throw ProcessDriverUpdateRecorderError.expectedUnknownEvent
+    }
+    return event
   }
 
   static func snapshotWithFailedProviderCause() throws -> SignalboxSynchronizationSnapshot {
@@ -3735,6 +3820,115 @@ private enum ProcessProjectionFixture {
           "model_call_count":"1"
         }
         """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithUnknownCurrentModelCallState() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshotWithActiveTurnState(
+      """
+      {
+        "type":"active_running",
+        "current_attempt_id":"\(ProcessDriverFixture.attempt)",
+        "current_model_call":{
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "state":{"type":"\(unknownModelCallState)"}
+        }
+      }
+      """
+    )
+  }
+
+  static func snapshotWithUnknownTurnState() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithActiveTurnState(
+      """
+      {"type":"fixture_future_turn_state","retained":true}
+      """
+    )
+  }
+
+  static func snapshotWithModelIdentityMarker() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"active_running",
+            "current_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "current_model_call":null
+          }
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{
+            "type":"model_identity_changed",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "defaults_version":"1",
+            "selected_model_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"1"
+        }
+        """,
+      ]
+    )
+  }
+
+  private static func snapshotWithActiveTurnState(
+    _ state: String
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":\(state)
+        }
+        """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_snapshot_end",
@@ -4376,6 +4570,19 @@ private enum ProcessProjectionFixture {
         "type":"turn_activated",
         "turn_id":"\(ProcessDriverFixture.turn)",
         "current_attempt_id":"\(ProcessDriverFixture.attempt)"
+      }
+      """
+    )
+  }
+
+  static func unknownToolBatchEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_batch_transition",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "state":{"type":"\(unknownToolBatchState)"}
       }
       """
     )

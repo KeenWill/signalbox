@@ -480,6 +480,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     isAttributableTo trigger: SignalboxProcessSessionEvent
   ) -> Bool {
     switch trigger {
+    case .turnActivated(let turnID, _):
+      guard
+        case .modelIdentityChanged(let entryTurnID, _, _) = message.entry
+      else {
+        return false
+      }
+      return entryTurnID == turnID
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
@@ -512,7 +519,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryAttemptID == toolAttemptID && context.turnID == turnID
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+    case .sessionCreated, .inputAccepted, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }
@@ -547,6 +554,15 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for trigger: SignalboxProcessSessionEvent
   ) -> Bool {
     switch trigger {
+    case .turnActivated(let turnID, _):
+      return snapshot.records.contains {
+        guard case .entry(let message) = $0,
+          case .modelIdentityChanged(let entryTurnID, _, _) = message.entry
+        else {
+          return false
+        }
+        return entryTurnID == turnID
+      }
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
@@ -650,7 +666,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryAttemptID == toolAttemptID && context.turnID == turnID
       }
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
+    case .sessionCreated, .inputAccepted, .modelCallTransition, .turnRefused,
       .turnReconciliationRequired, .unknown:
       return true
     }
@@ -678,7 +694,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch state {
     case .queued:
       return .init(state: .queued, label: "Queued")
-    case .activeRunning:
+    case .activeRunning(_, let currentModelCall):
+      if let currentModelCall, case .unknown = currentModelCall.state {
+        return .init(state: .recoveryRequired, label: "Recovery required")
+      }
       return .init(state: .running, label: "Running")
     case .activeAwaitingToolApproval:
       return .init(state: .waitingForToolDecision, label: "Tool decision unavailable")

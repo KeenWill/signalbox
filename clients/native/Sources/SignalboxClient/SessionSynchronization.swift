@@ -1318,7 +1318,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition:
+    case .turnActivated:
+      return true
+    case .sessionCreated, .inputAccepted, .modelCallTransition:
       return false
     }
   }
@@ -1694,11 +1696,13 @@ extension SignalboxTranscriptTurnState {
       return UInt(content.utf8.count)
     case .activeRunning(_, let currentModelCall):
       return currentModelCall?.state.retainedUTF8Bytes ?? 0
+    case .failed(_, _, let terminalModelCall):
+      return terminalModelCall?.retainedUTF8Bytes ?? 0
     case .unknown(_, let payload, let diagnostic):
       return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
+      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return 0
     }
@@ -1745,8 +1749,8 @@ extension SignalboxTranscriptEntry {
       .toolDenied(_, let content),
       .toolClosed(_, let content):
       return UInt(content.utf8.count)
-    case .imported(_, _, let sourceSpeaker, _):
-      return sourceSpeaker.retainedUTF8Bytes
+    case .imported(_, _, let sourceSpeaker, let contentKind):
+      return sourceSpeaker.retainedUTF8Bytes.saturatedAdding(contentKind.retainedUTF8Bytes)
     case .unknown(_, let payload, let diagnostic):
       return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
@@ -1782,9 +1786,53 @@ extension SignalboxImportedSourceSpeaker {
     switch self {
     case .unknown(_, let payload):
       return payload.encodedUTF8Bytes
-    case .notAttested, .attestedAbsent, .attested:
+    case .attested(let speaker):
+      return speaker.retainedUTF8Bytes
+    case .notAttested, .attestedAbsent:
       return 0
     }
+  }
+}
+
+extension SignalboxFailedTerminalModelCall {
+  fileprivate var retainedUTF8Bytes: UInt {
+    disposition.retainedUTF8Bytes.saturatedAdding(cause?.retainedUTF8Bytes ?? 0)
+  }
+}
+
+extension SignalboxFailedModelCallDisposition {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
+extension SignalboxFailedModelCallCause {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
+extension SignalboxImportedContentKind {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
+extension SignalboxImportedSpeaker {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
   }
 }
 
@@ -1835,8 +1883,21 @@ extension SignalboxProcessSessionEvent {
 
 extension SignalboxModelCallState {
   fileprivate var retainedUTF8Bytes: UInt {
-    if case .unknown(_, let payload) = self {
+    switch self {
+    case .unknown(_, let payload):
       return payload.encodedUTF8Bytes
+    case .terminal(let disposition):
+      return disposition.retainedUTF8Bytes
+    case .prepared, .inFlight, .cancellationRequested:
+      return 0
+    }
+  }
+}
+
+extension SignalboxModelCallDisposition {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
     }
     return 0
   }

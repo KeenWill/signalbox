@@ -416,6 +416,19 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testModelIdentityChangedRejectsZeroDefaultsVersion() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.modelIdentityChangedFrame(
+        sessionID: sessionID,
+        turnID: turnID,
+        defaultsVersion: 0
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertTrue(diagnostic.message.contains(ProcessProtocolFixture.defaultsVersionField))
+  }
+
   func testFutureProviderFailureCauseRemainsClassifiable() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.failedTurnFrame(
@@ -513,14 +526,10 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  func testAddedFrameMemberDoesNotEraseKnownMessage() throws {
+  func testUnadmittedFrameMemberFailsClosed() {
     let encoded = ProcessProtocolFixture.frameWithAddedMember()
 
-    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
-
-    XCTAssertEqual(frame.version, .one)
-    XCTAssertEqual(frame.requestID.rawValue, ProcessProtocolFixture.requestID)
-    XCTAssertEqual(frame.message, .sessionsStart)
+    XCTAssertThrowsError(try SignalboxProcessServerFrame.decode(from: encoded))
   }
 
   func testNestedDuplicateMemberDegradesEnclosingMessage() throws {
@@ -553,30 +562,25 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertThrowsError(try SignalboxProcessServerFrame.decode(from: encoded))
   }
 
-  func testExpandedErrorMessageRetainsProtocolProjection() throws {
+  func testExpandedErrorMessageDegradesBeforeProtocolProjection() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.expandedErrorFrame()
     )
 
-    let error = try ProcessProtocolFixture.processError(in: frame.message)
-
-    XCTAssertEqual(error.code, .notFound)
-    XCTAssertEqual(error.message, ProcessProtocolFixture.expandedErrorMessage)
-    XCTAssertNil(error.detail)
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+      ProcessProtocolFixture.unadmittedErrorFieldDiagnostic
+    )
   }
 
-  func testExpandedKnownErrorDetailRetainsProtocolProjection() throws {
+  func testExpandedKnownErrorDetailDegradesBeforeProtocolProjection() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.expandedErrorDetailFrame(sessionID: sessionID)
     )
 
-    let error = try ProcessProtocolFixture.processError(in: frame.message)
-
-    XCTAssertEqual(error.code, .rejected)
-    XCTAssertEqual(error.message, ProcessProtocolFixture.expandedRejectionMessage)
     XCTAssertEqual(
-      error.detail,
-      .sessionNotFound(sessionID: try SignalboxCanonicalUUID(validating: sessionID))
+      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+      ProcessProtocolFixture.unadmittedDetailFieldDiagnostic
     )
   }
 
@@ -708,10 +712,17 @@ private enum ProcessProtocolFixture {
   static let firstEntryIndex: UInt64 = 0
   static let newerVersion: UInt64 = 2
   static let modelIdentityDefaultsVersion: UInt64 = 7
+  static let defaultsVersionField = "defaults_version"
   static let selectedModelID = "88888888-8888-4888-8888-888888888888"
   static let futureProviderFailureCause = "future_provider_failure"
   static let expandedErrorMessage = "fixture error"
   static let expandedRejectionMessage = "fixture rejection"
+  static let unadmittedErrorFieldDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Invalid field value at message.extra."
+  )
+  static let unadmittedDetailFieldDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Invalid field value at message.detail.extra."
+  )
   static let missingErrorDetailDiagnostic = SignalboxDecodingDiagnostic(
     message: "Missing required field at message.detail."
   )
@@ -754,7 +765,11 @@ private enum ProcessProtocolFixture {
     )
   }
 
-  static func modelIdentityChangedFrame(sessionID: String, turnID: String) -> Data {
+  static func modelIdentityChangedFrame(
+    sessionID: String,
+    turnID: String,
+    defaultsVersion: UInt64 = modelIdentityDefaultsVersion
+  ) -> Data {
     Data(
       """
       {
@@ -768,7 +783,7 @@ private enum ProcessProtocolFixture {
           "entry":{
             "type":"model_identity_changed",
             "turn_id":"\(turnID)",
-            "defaults_version":"\(modelIdentityDefaultsVersion)",
+            "defaults_version":"\(defaultsVersion)",
             "selected_model_id":"\(selectedModelID)"
           }
         }
@@ -1221,6 +1236,16 @@ private enum ProcessProtocolFixture {
       throw ProcessProtocolFixtureError.missingTranscriptEntry
     }
     return entry
+  }
+
+  static func transcriptEntryDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxDecodingDiagnostic {
+    let message = try transcriptEntry(in: message)
+    guard case .unknown(_, _, let diagnostic) = message.entry, let diagnostic else {
+      throw ProcessProtocolFixtureError.missingUnknownDiagnostic
+    }
+    return diagnostic
   }
 
   static func unknownDiagnostic(

@@ -1323,6 +1323,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var acceptedInputTimelineOffsets: [SignalboxCanonicalUUID: Int] = [:]
+  private var mutationBlockedByUnknownTurnState = false
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -1386,6 +1387,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     guard
       !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       !isSubmitting,
+      !mutationBlockedByUnknownTurnState,
       let service = connectedService
     else {
       return
@@ -1476,7 +1478,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     _ invocationID: SignalboxToolInvocationID,
     decision: SignalboxProcessToolDecision
   ) async {
-    guard !isDecidingTool, let service = connectedService else {
+    guard
+      !isDecidingTool,
+      !mutationBlockedByUnknownTurnState,
+      let service = connectedService
+    else {
       return
     }
     let generation = serviceGeneration
@@ -1543,6 +1549,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     guard
       !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       !isSubmitting,
+      !mutationBlockedByUnknownTurnState,
       let activeTurnID,
       let service = connectedService
     else {
@@ -1633,7 +1640,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   var canSubmit: Bool {
-    guard connectedService != nil else {
+    guard connectedService != nil, !mutationBlockedByUnknownTurnState else {
       return false
     }
     if case .steady = phase {
@@ -1681,6 +1688,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         materializedAcceptedInputIDs = projection.materializedAcceptedInputIDs
         terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activeTurnID = activeTurnID(in: snapshot)
+        mutationBlockedByUnknownTurnState = snapshot.records.contains {
+          guard case .turn(let turn) = $0 else {
+            return false
+          }
+          return turnStateBlocksMutation(turn.state)
+        }
         activity = projection.activity
         streamedText = nil
         errorMessage = nil
@@ -1812,6 +1825,22 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  private func turnStateBlocksMutation(_ state: SignalboxTranscriptTurnState) -> Bool {
+    switch state {
+    case .unknown:
+      return true
+    case .activeRunning(_, let currentModelCall):
+      guard let currentModelCall, case .unknown = currentModelCall.state else {
+        return false
+      }
+      return true
+    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
+      .reconciliationRequired, .toolReconciliationRequired:
+      return false
+    }
+  }
+
   private func resetServiceOwnedPresentation() {
     serviceGeneration &+= 1
     timeline = []
@@ -1820,6 +1849,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     acceptedInputTimelineOffsets = [:]
     activity = .unavailable
     activeTurnID = nil
+    mutationBlockedByUnknownTurnState = false
     phase = .stopped
     latestDiagnostic = nil
     isSubmitting = false
@@ -1872,8 +1902,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         activity = .init(state: .running, label: "Running")
       case .recoveryRequired:
         activity = .init(state: .recoveryRequired, label: "Recovery required")
-      case .unknown:
-        break
+      case .unknown(let kind, _):
+        activity = .init(state: .recoveryRequired, label: "Recovery required")
+        latestDiagnostic = "Preserved an unrecognized tool-batch state: \(kind)."
       }
     case .turnCompleted(let turnID, _, _, _):
       applyTerminalTurn(
