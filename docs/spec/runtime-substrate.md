@@ -27,7 +27,7 @@ shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
 (`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
 single-split parity, and geometric work bound). Exact Codex CLI usage-axis
-projection is verified against this PR (`agent/cost-accounting`). It covers the
+projection is verified against PR #389 (`agent/cost-accounting`). It covers the
 provider-neutral operation, observation, and evidence vocabulary; SSE framing;
 structured-output and tool decode; `ScriptedModel`; the four provider adapters;
 and their credential boundaries. Layer-2 authorization and evidence

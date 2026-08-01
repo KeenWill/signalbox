@@ -4,7 +4,7 @@ The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
 The credential billing-kind registry and versioned per-model rate catalog are
-verified against this PR (`agent/cost-accounting`).
+verified against PR #389 (`agent/cost-accounting`).
 
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217

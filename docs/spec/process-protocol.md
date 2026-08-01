@@ -4,7 +4,7 @@ The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
 The typed usage provenance, derived-cost row shape, and labeled client
-aggregation are verified against this PR (`agent/cost-accounting`).
+aggregation are verified against PR #389 (`agent/cost-accounting`).
 
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330

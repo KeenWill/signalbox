@@ -3,8 +3,8 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
-The durable usage-provenance column and read projection are verified against
-this PR (`agent/cost-accounting`).
+The durable usage-provenance column and read projection are verified against PR
+#389 (`agent/cost-accounting`).
 
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
