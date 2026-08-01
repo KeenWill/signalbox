@@ -54,11 +54,12 @@ impl <Identity> {
 }
 ```
 
-The twenty-one identities defined in `lib.rs`:
+The twenty-two identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
 pub struct SessionId(/* private */);
+pub struct DelegationMessageId(/* private */);
 pub struct ImportedConversationId(/* private */);
 pub struct ImportedTranscriptEntryId(/* private */);
 pub struct AcceptedInputId(/* private */);
@@ -578,6 +579,7 @@ impl SessionTemplateProvenance {
 ```rust
 pub enum SessionCreationCause {
     UserInitiated,
+    Delegated { spawning_request: ToolRequestId },
 }
 
 pub struct TranscriptFrontier { /* private */ }
@@ -604,6 +606,7 @@ pub enum TranscriptAncestry {
 pub struct SessionCreationProvenance { /* private */ }
 impl SessionCreationProvenance {
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
+    pub const fn delegated(spawning_request: ToolRequestId) -> Self;
     // accessors: cause(), ancestry()
 }
 
@@ -742,6 +745,7 @@ impl PreparedCreateSession {
 
 pub enum CreateSessionPreparationFailure {
     TranscriptAncestryUnavailable,
+    DelegatedCreationRequiresSpawn,
 }
 
 pub struct CreateSessionPreparationError { /* private */ }
@@ -784,6 +788,7 @@ pub enum CreateSessionReconstitutionFailure {
     TemplateProvenanceMismatch,
     DefaultsSessionMismatch,
     TranscriptAncestryUnavailable,
+    DelegatedCreationRequiresSpawn,
     DefaultsVersionIsNotFirst,
     DefaultsMismatch,
 }
@@ -800,6 +805,109 @@ pub struct ReconstitutedSessionCreation { /* private */ }
 // sealed: CreateSessionReconstitutionInput::reconstitute; authorizes no effect
 impl ReconstitutedSessionCreation {
     // accessors: command(), session(), applied_result()
+}
+```
+
+## domain: session_delegation
+
+```rust
+pub enum BoundChildAction { KeepRunning, Stop, Cancel }
+pub enum ChildRelationshipPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: BoundChildAction,
+        on_parent_cancelled: BoundChildAction,
+    },
+}
+pub enum DelegationWaitMode { Foreground, Background }
+pub enum DescendantTerminationScope { ParentAlone, ParentAndDescendants }
+
+pub struct DelegationContent(/* private NonEmptyUnicodeText */);
+impl DelegationContent {
+    pub fn try_new(value: String) -> Result<Self, DelegationContentError>;
+    pub fn as_str(&self) -> &str;
+}
+pub enum DelegationContentError {
+    Invalid(NonEmptyUnicodeTextFailure),
+    Oversized { utf8_byte_length: usize },
+}
+
+pub struct DelegationProvenance { /* private typed authority */ }
+impl DelegationProvenance {
+    pub fn from_tool_request(request: &ToolRequest) -> Self;
+    pub const fn from_child_turn(child: SessionId, turn: TurnId) -> Self;
+    pub const fn from_parent_command(parent: SessionId, command: DurableCommandId) -> Self;
+    // accessors: tool_request(), child_turn(), parent_command()
+}
+
+pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
+pub struct DelegationMessage { /* private */ }
+impl DelegationMessage {
+    // accessors: id(), direction(), content(), provenance()
+}
+pub enum DelegationOutcomeReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ParentStopped { scope: DescendantTerminationScope },
+    ParentCancelled { scope: DescendantTerminationScope },
+    BackgroundRelationship,
+    RelationshipPolicyContinue,
+}
+pub enum DelegationOutcome {
+    ResultReturned { content: DelegationContent, reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+    ChildFailed { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+    ChildStopped { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+    ChildCancelled { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+    ContinueRunning { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+}
+pub struct DelegationEventOrdinal(/* private NonZeroU64 */);
+impl DelegationEventOrdinal {
+    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+pub enum DelegationEvent {
+    Spawned { ordinal: DelegationEventOrdinal, provenance: DelegationProvenance },
+    MessageDelivered { ordinal: DelegationEventOrdinal, message: DelegationMessage },
+    OutcomeRecorded { ordinal: DelegationEventOrdinal, outcome: DelegationOutcome },
+}
+impl DelegationEvent {
+    // accessors: ordinal(), message(), outcome()
+}
+pub enum DelegationLifecycle { Active, Terminal }
+pub struct ChildWait { /* private spawning request + child */ }
+impl ChildWait {
+    // accessors: spawning_request(), child()
+}
+pub struct SessionDelegation { /* private */ }
+impl SessionDelegation {
+    pub fn spawn(
+        spawning_request: &ToolRequest,
+        child: SessionId,
+        policy: ChildRelationshipPolicy,
+        wait_mode: DelegationWaitMode,
+    ) -> Result<Self, DelegationTransitionError>;
+    pub fn deliver_message(
+        self,
+        id: DelegationMessageId,
+        content: DelegationContent,
+        provenance: DelegationProvenance,
+    ) -> Result<Self, DelegationTransitionError>;
+    pub fn record_outcome(self, outcome: DelegationOutcome)
+        -> Result<Self, DelegationTransitionError>;
+    // accessors: spawning_request(), parent(), child(), policy(), wait_mode(), lifecycle(),
+    //   events(), child_creation_provenance(), foreground_wait()
+}
+pub enum DelegationTransitionFailure {
+    SameSession,
+    AlreadyTerminal,
+    MissingSpawnEvent,
+    InvalidProvenance,
+    OutcomeReasonMismatch,
+    EventOrdinalExhausted,
+}
+pub struct DelegationTransitionError { /* private */ }
+impl DelegationTransitionError {
+    // accessor: failure()
 }
 ```
 
@@ -1788,6 +1896,7 @@ impl ReconciliationMarker {
 pub enum ActiveTurnPhase {
     Running { current_attempt: CurrentTurnAttempt },
     AwaitingApproval { request: ToolRequestId },
+    AwaitingChild { wait: ChildWait },
     AwaitingRecoveryDecision {
         ambiguous_operations: NonEmptyIssuedOperationRefs,
         applied_interrupt: Option<AppliedInterruptProof>,
@@ -7892,11 +8001,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 21                   |
+| domain: lib.rs identities                          | 22                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
+| domain: session_delegation                         | 18                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -7924,7 +8034,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **599 (+7 free fn)** |
+| **signalbox-domain total**                         | **618 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

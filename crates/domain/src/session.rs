@@ -61,6 +61,11 @@ enum SessionCreationDefaults {
 pub enum SessionCreationCause {
     /// The user started this conversation.
     UserInitiated,
+    /// One exact logical tool request spawned this delegated child.
+    Delegated {
+        /// The parent work to which the child must return its result.
+        spawning_request: crate::ToolRequestId,
+    },
 }
 
 /// Identifies one exact immutable source boundary in semantic history.
@@ -180,6 +185,14 @@ impl SessionCreationProvenance {
     /// Pairs the two required independent creation facts.
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self {
         Self { cause, ancestry }
+    }
+
+    /// Creates delegated provenance without inferring transcript ancestry.
+    pub const fn delegated(spawning_request: crate::ToolRequestId) -> Self {
+        Self {
+            cause: SessionCreationCause::Delegated { spawning_request },
+            ancestry: TranscriptAncestry::None,
+        }
     }
 
     /// Returns why this session exists.
@@ -898,6 +911,8 @@ pub enum CreateSessionPreparationFailure {
     /// Trusted production and validation of a source transcript frontier is
     /// not available in this slice.
     TranscriptAncestryUnavailable,
+    /// Delegated creation belongs to the spawning-request transaction family.
+    DelegatedCreationRequiresSpawn,
 }
 
 /// A failed pre-commit preparation retaining every supplied input unchanged.
@@ -955,6 +970,13 @@ impl CreateSession {
                     session,
                     command: Box::new(self),
                     failure: CreateSessionPreparationFailure::TranscriptAncestryUnavailable,
+                });
+            }
+            (SessionCreationCause::Delegated { .. }, _) => {
+                return Err(CreateSessionPreparationError {
+                    session,
+                    command: Box::new(self),
+                    failure: CreateSessionPreparationFailure::DelegatedCreationRequiresSpawn,
                 });
             }
         }
@@ -1129,6 +1151,12 @@ impl CreateSessionReconstitutionInput {
                     CreateSessionReconstitutionFailure::TranscriptAncestryUnavailable,
                 ));
             }
+            (SessionCreationCause::Delegated { .. }, _) => {
+                return Err(fail(
+                    self,
+                    CreateSessionReconstitutionFailure::DelegatedCreationRequiresSpawn,
+                ));
+            }
         }
         if self.defaults_version != crate::SessionConfigurationDefaultsVersion::first() {
             return Err(fail(
@@ -1173,6 +1201,8 @@ pub enum CreateSessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// Trusted source-frontier production is unavailable for this slice.
     TranscriptAncestryUnavailable,
+    /// Delegated creation belongs to its distinct spawning-request family.
+    DelegatedCreationRequiresSpawn,
     /// Session creation did not establish defaults version one.
     DefaultsVersionIsNotFirst,
     /// The stored initial defaults differ from the canonical command payload.

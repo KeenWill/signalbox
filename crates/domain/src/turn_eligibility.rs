@@ -6495,6 +6495,7 @@ fn prepare_active_turn_lost_failure(
         Some(ActiveTurnPhase::Running { current_attempt }) => current_attempt.clone(),
         Some(
             ActiveTurnPhase::AwaitingApproval { .. }
+            | ActiveTurnPhase::AwaitingChild { .. }
             | ActiveTurnPhase::AwaitingRecoveryDecision { .. },
         )
         | None => {
