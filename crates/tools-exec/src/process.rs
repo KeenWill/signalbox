@@ -499,6 +499,9 @@ pub trait ProcessRunner: Clone + Send {
     /// Exact helper executable used to prove sandboxed target startup.
     fn sandbox_launcher_program(&self) -> &Path;
 
+    /// Inherited descriptor for the exact sandbox launcher, when supported.
+    fn sandbox_launcher_descriptor(&self) -> Option<i32>;
+
     /// Probes the exact bubblewrap profile used for later execution.
     fn bwrap_availability(
         &mut self,
@@ -515,6 +518,8 @@ pub struct TokioProcessRunner {
     supervisor_program: PathBuf,
     #[cfg(target_os = "linux")]
     _supervisor: Arc<rustix::fd::OwnedFd>,
+    #[cfg(target_os = "linux")]
+    sandbox_launcher: Arc<rustix::fd::OwnedFd>,
 }
 
 #[cfg(target_os = "linux")]
@@ -544,19 +549,30 @@ impl TokioProcessRunner {
             });
         }
         #[cfg(target_os = "linux")]
-        let (supervisor_program, _supervisor) = {
+        let (supervisor_program, _supervisor, sandbox_launcher) = {
             let supervisor = rustix::fs::open(
                 supplied,
-                rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::NONBLOCK,
+                rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW,
                 rustix::fs::Mode::empty(),
             )
             .map_err(|source| ExecToolConstructionError::SupervisorProgram {
                 path: supplied.to_owned(),
                 source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
             })?;
-            pin_supervisor_program(supplied, supervisor)?
+            let (supervisor_program, supervisor) = pin_supervisor_program(supplied, supervisor)?;
+            let sandbox_launcher = inherited_descriptor_above_standard_streams(
+                rustix::io::dup(supervisor.as_ref()).map_err(|source| {
+                    ExecToolConstructionError::SupervisorProgram {
+                        path: supplied.to_owned(),
+                        source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                    }
+                })?,
+            )
+            .map_err(|source| ExecToolConstructionError::SupervisorProgram {
+                path: supplied.to_owned(),
+                source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+            })?;
+            (supervisor_program, supervisor, Arc::new(sandbox_launcher))
         };
         #[cfg(not(target_os = "linux"))]
         let supervisor_program = {
@@ -578,6 +594,8 @@ impl TokioProcessRunner {
             supervisor_program,
             #[cfg(target_os = "linux")]
             _supervisor,
+            #[cfg(target_os = "linux")]
+            sandbox_launcher,
         })
     }
 }
@@ -639,6 +657,19 @@ impl ProcessRunner for TokioProcessRunner {
         &self.supervisor_program
     }
 
+    fn sandbox_launcher_descriptor(&self) -> Option<i32> {
+        #[cfg(target_os = "linux")]
+        {
+            Some(rustix::fd::AsRawFd::as_raw_fd(
+                self.sandbox_launcher.as_ref(),
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
         let result = run_process(&self.supervisor_program, probe).await;
         classify_bwrap_availability(&result)
@@ -669,7 +700,10 @@ fn classify_bwrap_availability(result: &ProcessRunResult) -> BwrapAvailability {
 pub struct SandboxedCommandRunner<Runner> {
     runner: Runner,
     workspace_root: PathBuf,
+    #[cfg(not(target_os = "linux"))]
     sandbox_launcher: PathBuf,
+    #[cfg(target_os = "linux")]
+    sandbox_launcher_descriptor: i32,
     #[cfg(target_os = "linux")]
     workspace_identity: WorkspaceIdentity,
 }
@@ -687,9 +721,20 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         #[cfg(not(target_os = "linux"))]
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         let sandbox_launcher = runner.sandbox_launcher_program().to_owned();
+        #[cfg(target_os = "linux")]
+        let sandbox_launcher_descriptor = runner
+            .sandbox_launcher_descriptor()
+            .filter(|descriptor| *descriptor >= 3)
+            .ok_or_else(|| ExecToolConstructionError::SupervisorProgram {
+                path: sandbox_launcher.clone(),
+                source: None,
+            })?;
         Ok(Self {
             runner,
+            #[cfg(not(target_os = "linux"))]
             sandbox_launcher,
+            #[cfg(target_os = "linux")]
+            sandbox_launcher_descriptor,
             #[cfg(target_os = "linux")]
             workspace_identity,
             workspace_root,
@@ -752,10 +797,20 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 workspace_root: &self.workspace_root,
                 #[cfg(target_os = "linux")]
                 bind_source: &self.workspace_identity.bind_source,
+                #[cfg(target_os = "linux")]
+                bind_descriptor: rustix::fd::AsRawFd::as_raw_fd(
+                    self.workspace_identity._directory.as_ref(),
+                ),
                 #[cfg(not(target_os = "linux"))]
                 bind_source: &self.workspace_root,
+                #[cfg(not(target_os = "linux"))]
                 launcher: &self.sandbox_launcher,
+                #[cfg(target_os = "linux")]
+                launcher_descriptor: self.sandbox_launcher_descriptor,
+                #[cfg(not(target_os = "linux"))]
                 working_directory_bind_source: None,
+                #[cfg(target_os = "linux")]
+                working_directory_bind_descriptor: None,
             },
             &probe_program,
             &[String::from("-c"), String::from("exit 0")],
@@ -811,13 +866,20 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         workspace_root: &self.workspace_root,
                         #[cfg(target_os = "linux")]
                         bind_source: &self.workspace_identity.bind_source,
+                        #[cfg(target_os = "linux")]
+                        bind_descriptor: rustix::fd::AsRawFd::as_raw_fd(
+                            self.workspace_identity._directory.as_ref(),
+                        ),
                         #[cfg(not(target_os = "linux"))]
                         bind_source: &self.workspace_root,
+                        #[cfg(not(target_os = "linux"))]
                         launcher: &self.sandbox_launcher,
                         #[cfg(target_os = "linux")]
-                        working_directory_bind_source: working_directory_identity
+                        launcher_descriptor: self.sandbox_launcher_descriptor,
+                        #[cfg(target_os = "linux")]
+                        working_directory_bind_descriptor: working_directory_identity
                             .as_ref()
-                            .map(|directory| directory.bind_source.as_path()),
+                            .map(|directory| rustix::fd::AsRawFd::as_raw_fd(&directory._directory)),
                         #[cfg(not(target_os = "linux"))]
                         working_directory_bind_source: None,
                     },
@@ -1143,8 +1205,16 @@ fn direct_request(
 struct SandboxLaunchContext<'a> {
     workspace_root: &'a Path,
     bind_source: &'a Path,
+    #[cfg(target_os = "linux")]
+    bind_descriptor: i32,
+    #[cfg(not(target_os = "linux"))]
     launcher: &'a Path,
+    #[cfg(target_os = "linux")]
+    launcher_descriptor: i32,
+    #[cfg(not(target_os = "linux"))]
     working_directory_bind_source: Option<&'a Path>,
+    #[cfg(target_os = "linux")]
+    working_directory_bind_descriptor: Option<i32>,
 }
 
 fn bwrap_request(
@@ -1206,13 +1276,31 @@ fn bwrap_request(
         "--ro-bind-try",
         "/etc/ssl",
         "/etc/ssl",
-        "--bind",
     ]
     .into_iter()
     .map(OsString::from)
     .collect::<Vec<_>>();
-    bwrap_arguments.push(context.bind_source.as_os_str().to_owned());
-    bwrap_arguments.push(OsString::from(SANDBOX_WORKSPACE));
+    #[cfg(target_os = "linux")]
+    bwrap_arguments.extend([
+        OsString::from("--bind-fd"),
+        OsString::from(context.bind_descriptor.to_string()),
+        OsString::from(SANDBOX_WORKSPACE),
+    ]);
+    #[cfg(not(target_os = "linux"))]
+    bwrap_arguments.extend([
+        OsString::from("--bind"),
+        context.bind_source.as_os_str().to_owned(),
+        OsString::from(SANDBOX_WORKSPACE),
+    ]);
+    #[cfg(target_os = "linux")]
+    if let Some(working_directory_bind_descriptor) = context.working_directory_bind_descriptor {
+        bwrap_arguments.extend([
+            OsString::from("--bind-fd"),
+            OsString::from(working_directory_bind_descriptor.to_string()),
+            OsString::from(&sandbox_directory),
+        ]);
+    }
+    #[cfg(not(target_os = "linux"))]
     if let Some(working_directory_bind_source) = context.working_directory_bind_source {
         bwrap_arguments.extend([
             OsString::from("--bind"),
@@ -1220,10 +1308,19 @@ fn bwrap_request(
             OsString::from(&sandbox_directory),
         ]);
     }
+    #[cfg(target_os = "linux")]
+    bwrap_arguments.extend([
+        OsString::from("--ro-bind-fd"),
+        OsString::from(context.launcher_descriptor.to_string()),
+        OsString::from(SANDBOX_DISPATCH_PROGRAM),
+    ]);
+    #[cfg(not(target_os = "linux"))]
     bwrap_arguments.extend([
         OsString::from("--ro-bind"),
         context.launcher.as_os_str().to_owned(),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
+    ]);
+    bwrap_arguments.extend([
         OsString::from("--chdir"),
         OsString::from(sandbox_directory),
         OsString::from("--setenv"),
@@ -2600,6 +2697,7 @@ mod tests {
     const UNUSABLE_PROBE_EXIT_CODE: i32 = 1;
     const REQUEST_TIMEOUT_SECONDS: u64 = 1;
     const ROOT_WORKSPACE_BIND_COUNT: usize = 1;
+    const TEST_SANDBOX_LAUNCHER_DESCRIPTOR: i32 = 91;
     const SLOW_PROBE_DELAY: Duration = Duration::from_millis(1_100);
     const TEST_SANDBOX_LAUNCHER: &str = "/fixture/signalbox-exec-supervisor";
 
@@ -3284,6 +3382,10 @@ mod tests {
             Path::new(TEST_SANDBOX_LAUNCHER)
         }
 
+        fn sandbox_launcher_descriptor(&self) -> Option<i32> {
+            Some(TEST_SANDBOX_LAUNCHER_DESCRIPTOR)
+        }
+
         async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
             self.probes
                 .lock()
@@ -3661,7 +3763,8 @@ mod tests {
         );
         let observation = runner.clone();
         let mut command_runner = SandboxedCommandRunner::try_new(runner, &root)?;
-        let bind_source = command_runner.workspace_identity.bind_source.clone();
+        let bind_descriptor =
+            rustix::fd::AsRawFd::as_raw_fd(command_runner.workspace_identity._directory.as_ref());
         let arguments = ExecArguments {
             program: String::from("cargo"),
             arguments: vec![String::from("check")],
@@ -3679,8 +3782,8 @@ mod tests {
             .first()
             .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
         let bind_arguments = [
-            OsString::from("--bind"),
-            bind_source.into_os_string(),
+            OsString::from("--bind-fd"),
+            OsString::from(bind_descriptor.to_string()),
             OsString::from(SANDBOX_WORKSPACE),
         ];
         let chdir_arguments = [
@@ -3690,8 +3793,8 @@ mod tests {
         let working_directory_bind_destination =
             OsString::from(format!("{SANDBOX_WORKSPACE}/{SANDBOXED_WORKING_DIRECTORY}"));
         let launcher_arguments = [
-            OsString::from("--ro-bind"),
-            OsString::from(TEST_SANDBOX_LAUNCHER),
+            OsString::from("--ro-bind-fd"),
+            OsString::from(TEST_SANDBOX_LAUNCHER_DESCRIPTOR.to_string()),
             OsString::from(SANDBOX_DISPATCH_PROGRAM),
         ];
         let dispatch_arguments = [
@@ -3742,10 +3845,15 @@ mod tests {
             .arguments
             .windows(3)
             .find(|arguments| {
-                arguments[0] == "--bind" && arguments[2] == working_directory_bind_destination
+                arguments[0] == "--bind-fd" && arguments[2] == working_directory_bind_destination
             })
             .ok_or("nested working directory bind")?;
-        assert!(Path::new(&working_directory_bind[1]).starts_with("/proc/self/fd/"));
+        assert!(
+            working_directory_bind[1]
+                .to_string_lossy()
+                .parse::<i32>()
+                .is_ok()
+        );
         assert!(
             request
                 .arguments
@@ -3782,7 +3890,7 @@ mod tests {
         let workspace_bind_count = request
             .arguments
             .windows(3)
-            .filter(|arguments| arguments[0] == "--bind" && arguments[2] == SANDBOX_WORKSPACE)
+            .filter(|arguments| arguments[0] == "--bind-fd" && arguments[2] == SANDBOX_WORKSPACE)
             .count();
 
         assert_eq!(workspace_bind_count, ROOT_WORKSPACE_BIND_COUNT);
