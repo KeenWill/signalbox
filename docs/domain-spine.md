@@ -3325,6 +3325,7 @@ pub enum DangerousToolAutoApproval {
 pub enum ToolPermissionDefault {
     Auto,
     Confirm,
+    AlwaysConfirm,
 }
 pub enum ToolEffectClass {
     EffectFree,
@@ -3378,6 +3379,7 @@ pub struct ToolApprovalResolutionReconstitutionError { /* private */ }
 // accessors: input(), into_input()
 pub enum InitialToolApproval {
     Confirm,
+    AlwaysConfirm,
     PolicyAuto,
     SessionBlanket,
 }

@@ -20,20 +20,21 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
-at this foundation proposal extends the same laws to the runner locus. This page
-owns logical tool requests, approval policy and decisions, physical tool
-attempts, result admission, intra-turn continuation, crash classification, the
-compiled registry, and the daemon-local catalog. Turn and attempt lifecycle law
-lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entry vocabulary in
-[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
-provider translation in [model-call-execution](model-call-execution.md);
-durable-command identity in [identity-and-commands](identity-and-commands.md);
-and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant test index](../invariants.md). The
-runner-locus paragraphs in this page are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests.
+at this foundation proposal extends the same laws to the runner locus. The
+non-overridable explicit-approval posture is verified through PR #366
+(`agent/exec-tools`). This page owns logical tool requests, approval policy and
+decisions, physical tool attempts, result admission, intra-turn continuation,
+crash classification, the compiled registry, and the daemon-local catalog. Turn
+and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
+model-call staging and provider translation in
+[model-call-execution](model-call-execution.md); durable-command identity in
+[identity-and-commands](identity-and-commands.md); and relational mechanics in
+[persistence-protocol](persistence-protocol.md). Invariant tags cite
+[the invariant test index](../invariants.md). The runner-locus paragraphs in
+this page are the foundation proposal at the bottom of their implementing stack
+and become verified only with those child pull requests.
 
 ## Intra-turn rounds and request batches
 
@@ -96,7 +97,9 @@ implemented decision sources are:
 encoding or producer. An automated source never constructs `UserCommand` or
 claims user agency (INV-020).
 
-Daemon-local execution keeps this precedence:
+Daemon-local execution first leaves an `AlwaysConfirm` declaration undecided;
+the dangerous blanket cannot override that posture. All other declarations keep
+this precedence:
 
 1. the frozen session posture `DangerousToolAutoApproval::ApproveAll`;
 2. the registry default (`Auto` or `Confirm`); then
@@ -173,8 +176,8 @@ intact.
 
 The application `ToolCatalog` port supplies immutable daemon-local
 `ToolDefinition` values: name, model-facing description, argument JSON Schema,
-permission default (`Auto` or `Confirm`), and the stored two-class crash
-classification used by the implemented local attempt machinery.
+permission default (`Auto`, `Confirm`, or `AlwaysConfirm`), and the stored
+two-class crash classification used by the implemented local attempt machinery.
 
 The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
 per runner-advertisable name. It carries a required checked model-facing

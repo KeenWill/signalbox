@@ -3833,14 +3833,8 @@ fn assemble_tool_round(
                 if !used_entries.insert(entry) || !used_requests.insert(request) {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
-                let approval_matches = match dangerous_tool_auto_approval {
-                    DangerousToolAutoApproval::ApproveAll => {
-                        approval == InitialToolApproval::SessionBlanket
-                    }
-                    DangerousToolAutoApproval::Disabled => {
-                        approval != InitialToolApproval::SessionBlanket
-                    }
-                };
+                let approval_matches =
+                    initial_tool_approval_matches_posture(dangerous_tool_auto_approval, approval);
                 if !approval_matches {
                     return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
@@ -3913,6 +3907,29 @@ fn assemble_tool_round(
         yielded_snapshot,
         next_phase,
     })
+}
+
+fn initial_tool_approval_matches_posture(
+    posture: DangerousToolAutoApproval,
+    approval: InitialToolApproval,
+) -> bool {
+    match (posture, approval) {
+        (
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::AlwaysConfirm | InitialToolApproval::SessionBlanket,
+        )
+        | (
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Confirm
+            | InitialToolApproval::AlwaysConfirm
+            | InitialToolApproval::PolicyAuto,
+        ) => true,
+        (
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Confirm | InitialToolApproval::PolicyAuto,
+        )
+        | (DangerousToolAutoApproval::Disabled, InitialToolApproval::SessionBlanket) => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4479,6 +4496,46 @@ mod tests {
             turn_attempt_id, turn_id,
         },
     };
+
+    #[test]
+    fn always_confirm_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::AlwaysConfirm,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::SessionBlanket,
+        ));
+        assert!(!initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Confirm,
+        ));
+        assert!(!initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::PolicyAuto,
+        ));
+    }
+
+    #[test]
+    fn session_blanket_approval_is_rejected_when_blanket_posture_is_disabled() {
+        assert!(!initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::SessionBlanket,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::AlwaysConfirm,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Confirm,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::PolicyAuto,
+        ));
+    }
 
     fn active_execution() -> ModelCallExecution {
         let session_id = session_id(1);
