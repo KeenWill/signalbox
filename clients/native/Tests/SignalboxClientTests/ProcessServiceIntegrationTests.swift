@@ -1200,6 +1200,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testUnknownModelCallDispositionReplacesActiveActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.activatedEvent()))
+
+    viewModel.apply(.event(try ProcessProjectionFixture.unknownDispositionModelCallEvent()))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertEqual(
+      viewModel.latestDiagnostic,
+      ProcessProjectionFixture.unknownDispositionDiagnostic
+    )
+  }
+
+  @MainActor
+  func testUnknownModelCallStateReplacesActiveActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.activatedEvent()))
+
+    viewModel.apply(.event(try ProcessProjectionFixture.unknownStateModelCallEvent()))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertEqual(
+      viewModel.latestDiagnostic,
+      ProcessProjectionFixture.unknownStateDiagnostic
+    )
+  }
+
+  @MainActor
   func testAcceptedInputDoesNotReplaceActiveTurnActivity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -3629,6 +3661,12 @@ private enum ProcessProjectionFixture {
     state: .recoveryRequired,
     label: "Recovery required"
   )
+  static let unknownDisposition = "fixture_future_disposition"
+  static let unknownDispositionDiagnostic =
+    "Preserved an unrecognized model-call disposition: \(unknownDisposition)."
+  static let unknownModelCallState = "fixture_future_model_call_state"
+  static let unknownStateDiagnostic =
+    "Preserved an unrecognized model-call state: \(unknownModelCallState)."
   static let stoppedPhase = SignalboxSessionSynchronizationPhase.stopped
   static let steadyPhase = SignalboxSessionSynchronizationPhase.steady(
     generation: 1,
@@ -4424,6 +4462,23 @@ private enum ProcessProjectionFixture {
 
   static func ambiguousModelCallEvent() throws -> SignalboxFollowedSessionEvent {
     try modelCallEvent(disposition: "ambiguous")
+  }
+
+  static func unknownDispositionModelCallEvent() throws -> SignalboxFollowedSessionEvent {
+    try modelCallEvent(disposition: unknownDisposition)
+  }
+
+  static func unknownStateModelCallEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"model_call_transition",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "state":{"type":"\(unknownModelCallState)"}
+      }
+      """
+    )
   }
 
   private static func modelCallEvent(

@@ -2003,10 +2003,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .completed, .knownFailed, .refused, .cancelled:
         activity = .init(state: .running, label: "Running")
       case .unknown(let value):
+        activity = .init(state: .recoveryRequired, label: "Recovery required")
         latestDiagnostic = "Preserved an unrecognized model-call disposition: \(value)."
       }
-    case .unknown:
-      break
+    case .unknown(let kind, _):
+      activity = .init(state: .recoveryRequired, label: "Recovery required")
+      latestDiagnostic = "Preserved an unrecognized model-call state: \(kind)."
     }
   }
 }
