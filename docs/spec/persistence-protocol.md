@@ -162,7 +162,8 @@ Implemented table families (across the forward-only migrations):
   alongside the disposition before terminal-row immutability applies;
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
   plus the resolved `context_frontier_member` compatibility projection;
-- `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
+- `tool_round`, `tool_request`, `tool_approval_decision`,
+  `tool_approval_judge_model_call`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
 - `goal_event`, whose session-local positive ordinal sequence retains the
@@ -173,6 +174,11 @@ Implemented table families (across the forward-only migrations):
   entry creation, text revision, and status change with exact trusted
   tool-dispatch provenance, plus trigger-maintained `session_plan_head`, which
   certifies the complete validated prefix for bounded current reads; and
+- migration `202608020015` freezes `approval_posture` on each tool request,
+  records dedicated approval-judge calls in the global model-call identity
+  namespace, correlates delegate decisions to their completed call, selection,
+  recommendation, and rationale, and adds the typed
+  `tool_approval_decided_outbox_event` family;
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:

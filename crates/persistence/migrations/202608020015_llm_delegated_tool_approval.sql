@@ -1,0 +1,367 @@
+-- Freeze per-request approval authority and record delegate calls as dedicated
+-- model calls with decision provenance.
+
+ALTER TABLE tool_request ADD COLUMN approval_posture text;
+
+UPDATE tool_request AS request
+   SET approval_posture = CASE
+       WHEN EXISTS (
+           SELECT 1
+             FROM tool_approval_decision AS approval
+            WHERE approval.request_id = request.request_id
+              AND approval.decision_source IN ('policy_auto', 'session_blanket')
+       ) THEN 'auto'
+       ELSE 'human'
+   END;
+
+ALTER TABLE tool_request
+    ALTER COLUMN approval_posture SET NOT NULL,
+    ALTER COLUMN approval_posture SET DEFAULT 'human',
+    ADD CONSTRAINT tool_request_approval_posture_closed
+        CHECK (approval_posture IN ('auto', 'delegated', 'human'));
+
+ALTER TABLE model_call_identity
+    DROP CONSTRAINT model_call_identity_kind_closed,
+    ADD CONSTRAINT model_call_identity_kind_closed
+        CHECK (call_kind IN ('ordinary', 'context_compaction', 'approval_judge'));
+
+CREATE TABLE tool_approval_judge_model_call (
+    model_call_id uuid PRIMARY KEY,
+    request_id uuid NOT NULL UNIQUE,
+    session_id uuid NOT NULL,
+    turn_id uuid NOT NULL,
+    direct_model_selection_id uuid NOT NULL,
+    resolved_provider_model_identity_id uuid NOT NULL,
+    credential_reference text NOT NULL,
+    state_kind text NOT NULL,
+    terminal_disposition_kind text,
+    recommendation_kind text,
+    rationale text,
+    input_tokens numeric(20, 0),
+    output_tokens numeric(20, 0),
+    cache_read_input_tokens numeric(20, 0),
+    cache_creation_input_tokens numeric(20, 0),
+
+    CONSTRAINT tool_approval_judge_call_state_closed
+        CHECK (state_kind IN ('prepared', 'in_flight', 'terminal')),
+    CONSTRAINT tool_approval_judge_call_disposition_closed
+        CHECK (
+            terminal_disposition_kind IS NULL
+            OR terminal_disposition_kind IN (
+                'completed', 'known_failed', 'refused', 'cancelled', 'ambiguous'
+            )
+        ),
+    CONSTRAINT tool_approval_judge_call_recommendation_closed
+        CHECK (
+            recommendation_kind IS NULL
+            OR recommendation_kind IN ('approve', 'deny', 'escalate_to_human')
+        ),
+    CONSTRAINT tool_approval_judge_call_state_shape
+        CHECK (
+            (
+                state_kind <> 'terminal'
+                AND terminal_disposition_kind IS NULL
+                AND recommendation_kind IS NULL
+                AND rationale IS NULL
+            )
+            OR (
+                state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'
+                AND recommendation_kind IS NOT NULL
+                AND rationale IS NOT NULL
+                AND octet_length(rationale) BETWEEN 1 AND 4096
+            )
+            OR (
+                state_kind = 'terminal'
+                AND terminal_disposition_kind IS NOT NULL
+                AND terminal_disposition_kind <> 'completed'
+                AND recommendation_kind IS NULL
+                AND rationale IS NULL
+            )
+        ),
+    CONSTRAINT tool_approval_judge_call_credential_nonempty
+        CHECK (char_length(credential_reference) > 0),
+    CONSTRAINT tool_approval_judge_call_usage_nonnegative
+        CHECK (
+            (input_tokens IS NULL OR input_tokens >= 0)
+            AND (output_tokens IS NULL OR output_tokens >= 0)
+            AND (cache_read_input_tokens IS NULL OR cache_read_input_tokens >= 0)
+            AND (cache_creation_input_tokens IS NULL OR cache_creation_input_tokens >= 0)
+        ),
+    CONSTRAINT tool_approval_judge_call_session_key
+        UNIQUE (model_call_id, session_id),
+    CONSTRAINT tool_approval_judge_call_request_fk
+        FOREIGN KEY (request_id, turn_id, session_id)
+        REFERENCES tool_request (request_id, turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT tool_approval_judge_call_session_fk
+        FOREIGN KEY (session_id) REFERENCES session (session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
+CREATE TRIGGER tool_approval_judge_call_reserves_global_identity
+BEFORE INSERT ON tool_approval_judge_model_call
+FOR EACH ROW
+EXECUTE FUNCTION reserve_model_call_identity('approval_judge');
+
+CREATE FUNCTION reject_tool_approval_judge_call_invalid_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state_kind <> 'prepared'
+            OR NEW.terminal_disposition_kind IS NOT NULL
+            OR NEW.recommendation_kind IS NOT NULL
+            OR NEW.rationale IS NOT NULL
+            OR NEW.input_tokens IS NOT NULL
+            OR NEW.output_tokens IS NOT NULL
+            OR NEW.cache_read_input_tokens IS NOT NULL
+            OR NEW.cache_creation_input_tokens IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'approval judge call must be inserted as Prepared'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'approval judge call is not deletable'
+            USING ERRCODE = '23514';
+    END IF;
+    IF ROW(
+        OLD.model_call_id, OLD.request_id, OLD.session_id, OLD.turn_id,
+        OLD.direct_model_selection_id,
+        OLD.resolved_provider_model_identity_id,
+        OLD.credential_reference
+    ) IS DISTINCT FROM ROW(
+        NEW.model_call_id, NEW.request_id, NEW.session_id, NEW.turn_id,
+        NEW.direct_model_selection_id,
+        NEW.resolved_provider_model_identity_id,
+        NEW.credential_reference
+    ) THEN
+        RAISE EXCEPTION 'approval judge authorization facts are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    IF OLD.state_kind = 'terminal' THEN
+        RAISE EXCEPTION 'terminal approval judge call is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    IF OLD.state_kind = 'prepared'
+       AND NEW.state_kind = 'terminal'
+       AND NEW.terminal_disposition_kind NOT IN ('known_failed', 'cancelled')
+    THEN
+        RAISE EXCEPTION 'prepared approval judge cannot record provider outcome'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NOT (
+        (OLD.state_kind = 'prepared' AND NEW.state_kind IN ('in_flight', 'terminal'))
+        OR (OLD.state_kind = 'in_flight' AND NEW.state_kind = 'terminal')
+    ) THEN
+        RAISE EXCEPTION 'invalid approval judge call transition'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.state_kind <> 'terminal' AND (
+        NEW.input_tokens IS NOT NULL
+        OR NEW.output_tokens IS NOT NULL
+        OR NEW.cache_read_input_tokens IS NOT NULL
+        OR NEW.cache_creation_input_tokens IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'approval judge usage is terminal evidence'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER tool_approval_judge_call_changes_are_guarded
+BEFORE INSERT OR UPDATE OR DELETE ON tool_approval_judge_model_call
+FOR EACH ROW
+EXECUTE FUNCTION reject_tool_approval_judge_call_invalid_change();
+
+ALTER TABLE tool_approval_decision
+    ADD COLUMN delegate_model_selection_id uuid,
+    ADD COLUMN delegate_model_call_id uuid UNIQUE,
+    ADD COLUMN rationale text,
+    DROP CONSTRAINT tool_approval_decision_source_closed,
+    DROP CONSTRAINT tool_approval_decision_shape,
+    DROP CONSTRAINT tool_approval_decision_source_shape,
+    ADD CONSTRAINT tool_approval_decision_source_closed
+        CHECK (
+            decision_source IN (
+                'owner_command', 'policy_auto', 'session_blanket', 'delegate'
+            )
+        ),
+    ADD CONSTRAINT tool_approval_decision_shape
+        CHECK (
+            (decision_kind = 'approve' AND denial_reason IS NULL)
+            OR (
+                decision_kind = 'deny'
+                AND decision_source = 'owner_command'
+                AND (
+                    denial_reason IS NULL
+                    OR (
+                        octet_length(denial_reason) BETWEEN 1 AND 1024
+                        AND denial_reason !~ '[[:cntrl:]]'
+                        AND denial_reason !~ '^[[:space:]]'
+                        AND denial_reason !~ '[[:space:]]$'
+                    )
+                )
+            )
+            OR (
+                decision_kind = 'deny'
+                AND decision_source = 'delegate'
+                AND denial_reason IS NULL
+            )
+        ),
+    ADD CONSTRAINT tool_approval_decision_source_shape
+        CHECK (
+            (
+                decision_source = 'owner_command'
+                AND owner_command_id IS NOT NULL
+                AND delegate_model_selection_id IS NULL
+                AND delegate_model_call_id IS NULL
+                AND rationale IS NULL
+            )
+            OR (
+                decision_source IN ('policy_auto', 'session_blanket')
+                AND decision_kind = 'approve'
+                AND owner_command_id IS NULL
+                AND delegate_model_selection_id IS NULL
+                AND delegate_model_call_id IS NULL
+                AND rationale IS NULL
+            )
+            OR (
+                decision_source = 'delegate'
+                AND owner_command_id IS NULL
+                AND delegate_model_selection_id IS NOT NULL
+                AND delegate_model_call_id IS NOT NULL
+                AND rationale IS NOT NULL
+                AND octet_length(rationale) BETWEEN 1 AND 4096
+            )
+        ),
+    ADD CONSTRAINT tool_approval_decision_delegate_call_fk
+        FOREIGN KEY (delegate_model_call_id)
+        REFERENCES tool_approval_judge_model_call (model_call_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+CREATE FUNCTION require_delegate_approval_provenance()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matched bigint;
+BEGIN
+    IF NEW.decision_source <> 'delegate' THEN
+        RETURN NULL;
+    END IF;
+    SELECT count(*) INTO matched
+      FROM tool_request AS request
+      JOIN tool_approval_judge_model_call AS judge
+        ON judge.request_id = request.request_id
+     WHERE request.request_id = NEW.request_id
+       AND request.approval_posture = 'delegated'
+       AND judge.model_call_id = NEW.delegate_model_call_id
+       AND judge.direct_model_selection_id = NEW.delegate_model_selection_id
+       AND judge.state_kind = 'terminal'
+       AND judge.terminal_disposition_kind = 'completed'
+       AND judge.recommendation_kind = NEW.decision_kind
+       AND judge.rationale = NEW.rationale;
+    IF matched <> 1 THEN
+        RAISE EXCEPTION 'delegate decision lacks matching delegated authority'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'tool_approval_delegate_requires_checked_judge';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER tool_approval_delegate_provenance
+AFTER INSERT OR UPDATE ON tool_approval_decision
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_delegate_approval_provenance();
+
+ALTER TABLE outbox_event
+    DROP CONSTRAINT outbox_event_kind_closed,
+    ADD CONSTRAINT outbox_event_kind_closed
+        CHECK (
+            event_kind IN (
+                'session_created', 'input_accepted', 'goal_turn_retired',
+                'turn_activated', 'turn_failed', 'model_call_transition',
+                'tool_batch_transition', 'tool_approval_decided',
+                'context_compacted', 'turn_completed', 'turn_refused',
+                'turn_cancelled', 'turn_reconciliation_required'
+            )
+        );
+
+CREATE TABLE tool_approval_decided_outbox_event (
+    event_sequence numeric(20, 0) PRIMARY KEY,
+    event_kind text NOT NULL,
+    storage_version smallint NOT NULL,
+    session_id uuid NOT NULL,
+    turn_id uuid NOT NULL,
+    request_id uuid NOT NULL UNIQUE,
+
+    CONSTRAINT tool_approval_decided_outbox_kind_closed
+        CHECK (event_kind = 'tool_approval_decided'),
+    CONSTRAINT tool_approval_decided_outbox_version_supported
+        CHECK (storage_version = 1),
+    CONSTRAINT tool_approval_decided_outbox_header_fk
+        FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
+        REFERENCES outbox_event (
+            event_sequence, event_kind, storage_version, session_id
+        )
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT tool_approval_decided_outbox_request_fk
+        FOREIGN KEY (request_id, turn_id, session_id)
+        REFERENCES tool_request (request_id, turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT tool_approval_decided_outbox_decision_fk
+        FOREIGN KEY (request_id)
+        REFERENCES tool_approval_decision (request_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TRIGGER tool_approval_decided_outbox_event_is_append_only
+BEFORE UPDATE OR DELETE ON tool_approval_decided_outbox_event
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER tool_approval_decided_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON tool_approval_decided_outbox_event
+FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_records bigint;
+BEGIN
+    CASE NEW.event_kind
+        WHEN 'session_created' THEN SELECT count(*) INTO matching_records FROM session_created_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'input_accepted' THEN SELECT count(*) INTO matching_records FROM input_accepted_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'goal_turn_retired' THEN SELECT count(*) INTO matching_records FROM goal_turn_retired_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_activated' THEN SELECT count(*) INTO matching_records FROM turn_activated_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_failed' THEN SELECT count(*) INTO matching_records FROM turn_failed_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'model_call_transition' THEN SELECT count(*) INTO matching_records FROM model_call_transition_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'tool_batch_transition' THEN SELECT count(*) INTO matching_records FROM tool_batch_transition_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'tool_approval_decided' THEN SELECT count(*) INTO matching_records FROM tool_approval_decided_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'context_compacted' THEN SELECT count(*) INTO matching_records FROM context_compacted_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_completed' THEN SELECT count(*) INTO matching_records FROM turn_completed_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_refused' THEN SELECT count(*) INTO matching_records FROM turn_refused_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_cancelled' THEN SELECT count(*) INTO matching_records FROM turn_cancelled_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_reconciliation_required' THEN SELECT count(*) INTO matching_records FROM turn_reconciliation_required_outbox_event WHERE event_sequence = NEW.event_sequence;
+        ELSE
+            RAISE EXCEPTION 'unsupported outbox event kind %', NEW.event_kind
+                USING ERRCODE = '23514';
+    END CASE;
+    IF matching_records <> 1 THEN
+        RAISE EXCEPTION 'outbox event % requires exactly one % typed record',
+            NEW.event_sequence, NEW.event_kind USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;

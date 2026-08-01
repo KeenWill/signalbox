@@ -15,12 +15,12 @@ use std::{
 
 use crate::{
     ActiveTurnPhase, ApprovedToolRequest, AuthorizedToolAttempt, CurrentToolAttempt,
-    CurrentToolAttemptState, DecideToolRequest, DecideToolRequestResult, EndedToolAttempt,
-    PreparedDecideToolRequest, ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot,
-    RunnerToolAttemptAuthorization, SemanticTranscriptEntry, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision, ToolApprovalResolution,
-    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolEffectClass,
-    ToolExecutionErrorKind, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
+    CurrentToolAttemptState, DecideToolRequest, DecideToolRequestResult, DelegateToolApproval,
+    EndedToolAttempt, PreparedDecideToolRequest, ReconstitutedToolAttempt,
+    ResolvedContextFrontierSnapshot, RunnerToolAttemptAuthorization, SemanticTranscriptEntry,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
+    ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
+    ToolEffectClass, ToolExecutionErrorKind, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
     tool::MAX_TOOL_REQUESTS_PER_RESPONSE, tool_attempt::RUNNER_ISSUANCE_AVAILABLE,
     tool_attempt::RUNNER_ISSUANCE_ISSUED, tool_attempt::RUNNER_ISSUANCE_RETIRED,
 };
@@ -414,6 +414,101 @@ impl ToolBatch {
         Ok(PreparedToolBatchDecision {
             batch,
             prepared_command: prepared,
+            active_phase,
+        })
+    }
+
+    /// Applies one authority-checked delegate result to the exact parked request.
+    pub fn prepare_delegate_decision(
+        self,
+        approval: DelegateToolApproval,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Result<PreparedDelegateToolApproval, DelegateToolApprovalTransitionError> {
+        let ToolBatchPhase::AwaitingApproval {
+            request: waiting_on,
+        } = self.phase
+        else {
+            return Err(DelegateToolApprovalTransitionError::new(
+                self,
+                approval,
+                DelegateToolApprovalTransitionFailure::NoUndecidedRequest,
+            ));
+        };
+        let Some(request) = self
+            .requests
+            .iter()
+            .find(|request| request.id() == approval.request())
+        else {
+            return Err(DelegateToolApprovalTransitionError::new(
+                self,
+                approval,
+                DelegateToolApprovalTransitionFailure::RequestMismatch,
+            ));
+        };
+        if waiting_on != approval.request()
+            || self.approvals.contains_key(&approval.request())
+            || request.approval_posture() != approval.posture()
+        {
+            return Err(DelegateToolApprovalTransitionError::new(
+                self,
+                approval,
+                DelegateToolApprovalTransitionFailure::RequestMismatch,
+            ));
+        }
+        let resolution = match crate::ToolApprovalResolution::delegate(&approval) {
+            Some(resolution) => resolution,
+            None if continuation_attempt.is_none() => {
+                return Ok(PreparedDelegateToolApproval {
+                    batch: self,
+                    approval,
+                    resolution: None,
+                    active_phase: ActiveTurnPhase::AwaitingApproval {
+                        request: waiting_on,
+                    },
+                });
+            }
+            None => {
+                return Err(DelegateToolApprovalTransitionError::new(
+                    self,
+                    approval,
+                    DelegateToolApprovalTransitionFailure::ContinuationAttemptMismatch,
+                ));
+            }
+        };
+        let mut approvals = self.approvals.clone();
+        approvals.insert(approval.request(), resolution.clone());
+        let next_undecided = self
+            .requests
+            .iter()
+            .find(|candidate| !approvals.contains_key(&candidate.id()))
+            .map(ToolRequest::id);
+        let (phase, active_phase) = match (next_undecided, continuation_attempt) {
+            (Some(next), None) => (
+                ToolBatchPhase::AwaitingApproval { request: next },
+                ActiveTurnPhase::AwaitingApproval { request: next },
+            ),
+            (None, Some(turn_attempt)) => (
+                ToolBatchPhase::Executing { turn_attempt },
+                ActiveTurnPhase::Running {
+                    current_attempt: crate::CurrentTurnAttempt::prepared(turn_attempt),
+                },
+            ),
+            _ => {
+                return Err(DelegateToolApprovalTransitionError::new(
+                    self,
+                    approval,
+                    DelegateToolApprovalTransitionFailure::ContinuationAttemptMismatch,
+                ));
+            }
+        };
+        Ok(PreparedDelegateToolApproval {
+            batch: Self {
+                approvals,
+                phase,
+                ..self
+            },
+            approval,
+            resolution: Some(resolution),
             active_phase,
         })
     }
@@ -1155,6 +1250,85 @@ pub struct PreparedToolBatchDecision {
     batch: ToolBatch,
     prepared_command: PreparedDecideToolRequest,
     active_phase: ActiveTurnPhase,
+}
+
+/// One checked delegate result plus its exact successor active phase.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedDelegateToolApproval {
+    batch: ToolBatch,
+    approval: DelegateToolApproval,
+    resolution: Option<crate::ToolApprovalResolution>,
+    active_phase: ActiveTurnPhase,
+}
+
+impl PreparedDelegateToolApproval {
+    /// Borrows the updated or unchanged canonical batch.
+    pub const fn batch(&self) -> &ToolBatch {
+        &self.batch
+    }
+
+    /// Borrows the checked delegate result.
+    pub const fn approval(&self) -> &DelegateToolApproval {
+        &self.approval
+    }
+
+    /// Borrows the resulting approve-or-deny resolution, absent on escalation.
+    pub const fn resolution(&self) -> Option<&crate::ToolApprovalResolution> {
+        self.resolution.as_ref()
+    }
+
+    /// Borrows the exact active phase to store atomically.
+    pub const fn active_phase(&self) -> &ActiveTurnPhase {
+        &self.active_phase
+    }
+}
+
+/// Why a checked delegate result could not advance this exact batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegateToolApprovalTransitionFailure {
+    /// No request remains undecided.
+    NoUndecidedRequest,
+    /// The result does not name the exact earliest request and posture.
+    RequestMismatch,
+    /// The next phase and supplied continuation identity disagreed.
+    ContinuationAttemptMismatch,
+}
+
+/// Failed delegate transition retaining every unchanged input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegateToolApprovalTransitionError {
+    batch: Box<ToolBatch>,
+    approval: DelegateToolApproval,
+    failure: DelegateToolApprovalTransitionFailure,
+}
+
+impl DelegateToolApprovalTransitionError {
+    fn new(
+        batch: ToolBatch,
+        approval: DelegateToolApproval,
+        failure: DelegateToolApprovalTransitionFailure,
+    ) -> Self {
+        Self {
+            batch: Box::new(batch),
+            approval,
+            failure,
+        }
+    }
+
+    /// Borrows the unchanged batch.
+    pub const fn batch(&self) -> &ToolBatch {
+        &self.batch
+    }
+
+    /// Borrows the unchanged delegate result.
+    pub const fn approval(&self) -> &DelegateToolApproval {
+        &self.approval
+    }
+
+    /// Returns the exact failure.
+    pub const fn failure(&self) -> DelegateToolApprovalTransitionFailure {
+        self.failure
+    }
 }
 
 impl PreparedToolBatchDecision {

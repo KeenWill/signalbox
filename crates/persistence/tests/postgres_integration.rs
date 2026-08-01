@@ -5118,6 +5118,7 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
                             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
                             first_request,
                             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
+                            InitialToolApproval::Confirm,
                         ),
                         StoppedToolResponsePartIdentity::text(
                             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
@@ -5126,6 +5127,7 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
                             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27)),
                             second_request,
                             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 28)),
+                            InitialToolApproval::Confirm,
                         ),
                     ],
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29)),
@@ -5359,6 +5361,7 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
                         SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
                         signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 22)),
                         SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
+                        InitialToolApproval::Confirm,
                     )],
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),

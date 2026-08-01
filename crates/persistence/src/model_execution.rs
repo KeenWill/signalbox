@@ -4073,11 +4073,16 @@ async fn persist_tool_round_authority(
             signalbox_domain::ToolArgumentsKind::Json => "json",
             signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
         };
+        let approval_posture = match request.approval_posture() {
+            signalbox_domain::ToolApprovalPosture::Auto => "auto",
+            signalbox_domain::ToolApprovalPosture::Delegated => "delegated",
+            signalbox_domain::ToolApprovalPosture::Human => "human",
+        };
         sqlx::query(
             "INSERT INTO tool_request
                 (request_id, session_id, turn_id, producing_model_call_id,
-                 request_ordinal, tool_name, arguments_kind, arguments_text)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(tool_request_id_to_uuid(request.id()))
         .bind(session_id_to_uuid(request.session()))
@@ -4087,6 +4092,7 @@ async fn persist_tool_round_authority(
         .bind(request.name().as_str())
         .bind(arguments_kind)
         .bind(request.arguments().as_str())
+        .bind(approval_posture)
         .execute(&mut *connection)
         .await?;
     }
@@ -4162,7 +4168,7 @@ fn encode_tool_decision_source(
         ToolDecisionSource::UserCommand => Ok("owner_command"),
         ToolDecisionSource::PolicyAuto => Ok("policy_auto"),
         ToolDecisionSource::SessionBlanket => Ok("session_blanket"),
-        ToolDecisionSource::SessionOverride | ToolDecisionSource::JudgeRecommendation => {
+        ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             Err(ModelCallRepositoryError::InvalidTransition(
                 "unimplemented tool-decision source cannot be stored",
             ))

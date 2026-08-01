@@ -2236,6 +2236,8 @@ pub enum StoppedToolResponsePartIdentity {
         request: ToolRequestId,
         /// Fresh reference-only closed-result entry identity.
         closed_result_entry: SemanticTranscriptEntryId,
+        /// Frozen policy outcome for the request.
+        approval: InitialToolApproval,
     },
 }
 
@@ -2250,11 +2252,13 @@ impl StoppedToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     ) -> Self {
         Self::ToolCall {
             entry,
             request,
             closed_result_entry,
+            approval,
         }
     }
 }
@@ -3835,7 +3839,12 @@ fn assemble_tool_round(
                 }
                 let approval_matches = match dangerous_tool_auto_approval {
                     DangerousToolAutoApproval::ApproveAll => {
-                        approval == InitialToolApproval::SessionBlanket
+                        matches!(
+                            approval,
+                            InitialToolApproval::SessionBlanket
+                                | InitialToolApproval::Human
+                                | InitialToolApproval::Delegated
+                        )
                     }
                     DangerousToolAutoApproval::Disabled => {
                         approval != InitialToolApproval::SessionBlanket
@@ -3854,6 +3863,7 @@ fn assemble_tool_round(
                     call.id(),
                     ordinal,
                     proposal.clone(),
+                    approval,
                 );
                 match approval.resolution(request) {
                     Some(resolution) => automatic_approvals.push(resolution),
@@ -3973,6 +3983,7 @@ fn assemble_stopped_tool_round(
                     entry,
                     request,
                     closed_result_entry,
+                    approval,
                 },
             ) => {
                 if !used_entries.insert(entry)
@@ -3991,6 +4002,7 @@ fn assemble_stopped_tool_round(
                     call.id(),
                     ordinal,
                     proposal.clone(),
+                    approval,
                 ));
                 closed_result_entries.push(SemanticTranscriptEntry::from_validated_parts(
                     closed_result_entry,
@@ -6516,6 +6528,7 @@ mod tests {
                             semantic_transcript_entry_id(41),
                             request,
                             semantic_transcript_entry_id(42),
+                            InitialToolApproval::Confirm,
                         )],
                         semantic_transcript_entry_id(43),
                         context_frontier_id(44),

@@ -1725,7 +1725,7 @@ where
                                 .copied()
                                 .unwrap_or(InitialToolApproval::Confirm);
                             approval_index += 1;
-                            every_request_approved &= approval != InitialToolApproval::Confirm;
+                            every_request_approved &= !approval.requires_decision();
                             continuing.push(ToolResponsePartIdentity::tool_call(
                                 self.ids.next_semantic_entry_id(),
                                 self.ids.next_tool_request_id(),
@@ -1737,6 +1737,7 @@ where
                 debug_assert_eq!(approval_index, tool_approvals.len());
                 let continuation_attempt =
                     every_request_approved.then(|| self.ids.next_turn_attempt_id());
+                let mut stopped_approval_index = 0usize;
                 for part in response.parts() {
                     match part {
                         AssistantResponsePart::Text(_) => {
@@ -1745,10 +1746,16 @@ where
                             ));
                         }
                         AssistantResponsePart::ToolCall(_) => {
+                            let approval = tool_approvals
+                                .get(stopped_approval_index)
+                                .copied()
+                                .unwrap_or(InitialToolApproval::Confirm);
+                            stopped_approval_index += 1;
                             stopped.push(StoppedToolResponsePartIdentity::tool_call(
                                 self.ids.next_semantic_entry_id(),
                                 self.ids.next_tool_request_id(),
                                 self.ids.next_semantic_entry_id(),
+                                approval,
                             ));
                         }
                     }
@@ -3064,11 +3071,13 @@ mod tests {
                         identity(34, SemanticTranscriptEntryId::from_uuid),
                         identity(62, ToolRequestId::from_uuid),
                         identity(35, SemanticTranscriptEntryId::from_uuid),
+                        InitialToolApproval::PolicyAuto,
                     ),
                     StoppedToolResponsePartIdentity::tool_call(
                         identity(36, SemanticTranscriptEntryId::from_uuid),
                         identity(63, ToolRequestId::from_uuid),
                         identity(37, SemanticTranscriptEntryId::from_uuid),
+                        InitialToolApproval::Confirm,
                     ),
                 ],
                 identity(38, SemanticTranscriptEntryId::from_uuid),
