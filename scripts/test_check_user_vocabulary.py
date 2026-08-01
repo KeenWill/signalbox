@@ -33,6 +33,7 @@ def main() -> int:
         allowed = root / "crates" / "tools-github" / "src" / "lib.rs"
         imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
         violation = root / "docs" / "spec" / "example.md"
+        reviewed_unix_path = root / "docs" / "spec" / "process-protocol.md"
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
         violation.parent.mkdir(parents=True)
@@ -60,6 +61,9 @@ def main() -> int:
             "isCollapsedByOwner = true\n",
             encoding="utf-8",
         )
+        reviewed_unix_path.write_text(
+            "The wrong owner approves this tool.\n", encoding="utf-8"
+        )
         imported.write_text(
             "struct EntryFixture {\n"
             "    owner: ImportedConversationId,\n"
@@ -80,6 +84,7 @@ def main() -> int:
             "crates/domain/src/imported_conversation.rs",
             "crates/tools-github/src/lib.rs",
             "docs/spec/example.md",
+            "docs/spec/process-protocol.md",
         )
         rejected = run_checker(root)
         assert rejected.returncode == 1, (
@@ -119,6 +124,9 @@ def main() -> int:
         )
         external_field_outside_reviewed_path = (
             "docs/spec/example.md:18: isCollapsedByOwner = true"
+        )
+        unix_role_inside_reviewed_path = (
+            "docs/spec/process-protocol.md:1: The wrong owner approves this tool."
         )
         imported_role_owner = (
             "crates/domain/src/imported_conversation.rs:10: "
@@ -178,10 +186,17 @@ def main() -> int:
         assert external_field_outside_reviewed_path in rejected.stdout, (
             f"external-field allowance violation missing:\n{rejected.stdout}"
         )
+        assert unix_role_inside_reviewed_path in rejected.stdout, (
+            f"reviewed-path Unix-role violation missing:\n{rejected.stdout}"
+        )
         assert imported_role_owner in rejected.stdout, (
             f"imported-file role violation missing:\n{rejected.stdout}"
         )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
+        reviewed_unix_path.write_text(
+            "signalboxd binds a socket with owner-only `0600` permissions.\n",
+            encoding="utf-8",
+        )
         imported.write_text(
             "struct EntryFixture {\n"
             "    owner: ImportedConversationId,\n"
