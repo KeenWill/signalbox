@@ -39,7 +39,8 @@ use tokio::{
 
 #[cfg(target_os = "linux")]
 use crate::supervisor_protocol::{
-    SupervisorCaptureCompleteness, SupervisorFailureStage, SupervisorSpawnFailure, SupervisorStatus,
+    LAUNCH_STATUS_TAIL_BYTES, LAUNCH_STATUS_TRAILER, LauncherStatus, SupervisorCaptureCompleteness,
+    SupervisorFailureStage, SupervisorSpawnFailure, SupervisorStatus,
 };
 
 pub const SANDBOXED_EXEC_NAME: &str = "sandboxed_exec";
@@ -64,7 +65,7 @@ const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
 #[cfg(target_os = "linux")]
-const SUPERVISOR_STATUS_TAIL_BYTES: usize = 1024;
+const SUPERVISOR_STATUS_TAIL_BYTES: usize = LAUNCH_STATUS_TAIL_BYTES + 1024;
 #[cfg(target_os = "linux")]
 const SUPERVISOR_OUTER_MODE: &str = "--outer";
 #[cfg(target_os = "linux")]
@@ -455,6 +456,8 @@ pub struct ProcessRequest {
     pub environment: BTreeMap<OsString, OsString>,
     /// Whether the ambient parent environment remains visible.
     pub environment_inheritance: ProcessEnvironment,
+    /// Trusted status protocol expected from the supervised target.
+    pub status_protocol: ProcessStatusProtocol,
 }
 
 /// Ambient-environment posture for an injected process request.
@@ -464,6 +467,15 @@ pub enum ProcessEnvironment {
     Inherit,
     /// Clear the parent environment before applying explicit entries.
     Clear,
+}
+
+/// Trusted status protocol carried by one process request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessStatusProtocol {
+    /// Interpret only the outer supervisor's status.
+    Direct,
+    /// Require and interpret the sandbox dispatcher's nested launcher status.
+    SandboxDispatch,
 }
 
 /// Typed evidence from a bubblewrap usability probe.
@@ -1001,6 +1013,7 @@ fn direct_request(
         capture_bytes,
         environment: BTreeMap::new(),
         environment_inheritance: ProcessEnvironment::Inherit,
+        status_protocol: ProcessStatusProtocol::Direct,
     }
 }
 
@@ -1112,6 +1125,7 @@ fn bwrap_request(
             (OsString::from("PATH"), sandbox_path),
         ]),
         environment_inheritance: ProcessEnvironment::Clear,
+        status_protocol: ProcessStatusProtocol::SandboxDispatch,
     }
 }
 
@@ -1413,7 +1427,8 @@ async fn read_bounded(
 async fn read_supervised_stdout(
     mut reader: impl tokio::io::AsyncRead + Unpin,
     limit: usize,
-) -> std::io::Result<(BoundedBytes, SupervisorStatus)> {
+    status_protocol: ProcessStatusProtocol,
+) -> std::io::Result<(BoundedBytes, SupervisorStatus, Option<LauncherStatus>)> {
     let mut retained = Vec::with_capacity(limit);
     let mut tail = Vec::with_capacity(SUPERVISOR_STATUS_TAIL_BYTES);
     let mut buffer = [0_u8; 8192];
@@ -1443,7 +1458,23 @@ async fn read_supervised_stdout(
     let encoded = &tail[marker + SUPERVISOR_STATUS_TRAILER.len()..tail.len() - 1];
     let status = serde_json::from_slice(encoded)
         .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
-    let trailer_bytes = tail.len() - marker;
+    let launcher_status = match (status_protocol, status) {
+        (
+            ProcessStatusProtocol::SandboxDispatch,
+            SupervisorStatus::Exited { code: Some(0), .. },
+        ) => {
+            let (launcher_marker, launcher_status) = parse_launcher_status(&tail[..marker])
+                .ok_or_else(|| {
+                    std::io::Error::other("sandbox launcher status trailer is malformed")
+                })?;
+            Some((launcher_marker, launcher_status))
+        }
+        (ProcessStatusProtocol::Direct, _) | (ProcessStatusProtocol::SandboxDispatch, _) => None,
+    };
+    let first_trailer = launcher_status
+        .map(|(launcher_marker, _)| launcher_marker)
+        .unwrap_or(marker);
+    let trailer_bytes = tail.len() - first_trailer;
     let output_bytes = total_bytes.saturating_sub(trailer_bytes);
     retained.truncate(output_bytes.min(limit));
     Ok((
@@ -1456,7 +1487,22 @@ async fn read_supervised_stdout(
             },
         },
         status,
+        launcher_status.map(|(_, status)| status),
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_launcher_status(tail: &[u8]) -> Option<(usize, LauncherStatus)> {
+    if tail.last() != Some(&b'\n') {
+        return None;
+    }
+    let marker = tail
+        .windows(LAUNCH_STATUS_TRAILER.len())
+        .rposition(|window| window == LAUNCH_STATUS_TRAILER)?;
+    let encoded = &tail[marker + LAUNCH_STATUS_TRAILER.len()..tail.len() - 1];
+    serde_json::from_slice(encoded)
+        .ok()
+        .map(|status| (marker, status))
 }
 
 #[cfg(target_os = "linux")]
@@ -1484,6 +1530,13 @@ enum OuterCleanupStatus {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OuterObservationStatus {
+    Complete,
+    Interrupted,
+}
+
+#[cfg(target_os = "linux")]
 impl OuterProcessTreeGuard {
     fn new(root: u32) -> Result<Self, ()> {
         let root_process = outer_pin_process(root)?.ok_or(())?;
@@ -1495,7 +1548,9 @@ impl OuterProcessTreeGuard {
         let watcher_process_tree_supported = Arc::clone(&process_tree_supported);
         let watcher = std::thread::spawn(move || {
             while !watcher_stop.load(Ordering::Acquire) {
-                if outer_observe_descendants(root, &watcher_descendants).is_err() {
+                if outer_observe_descendants(root, &watcher_descendants, Some(&watcher_stop), None)
+                    .is_err()
+                {
                     watcher_process_tree_supported.store(false, Ordering::Release);
                     return;
                 }
@@ -1523,7 +1578,8 @@ impl OuterProcessTreeGuard {
 
     fn kill_all(&mut self) {
         self.stop_watcher();
-        if outer_observe_descendants(self.root, &self.descendants).is_err() {
+        let deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
+        if outer_observe_descendants(self.root, &self.descendants, None, Some(deadline)).is_err() {
             self.process_tree_supported.store(false, Ordering::Release);
         }
         self.kill_tracked();
@@ -1533,11 +1589,16 @@ impl OuterProcessTreeGuard {
         self.stop_watcher();
         let deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
         loop {
-            if outer_observe_descendants(self.root, &self.descendants).is_err() {
+            let observation =
+                outer_observe_descendants(self.root, &self.descendants, None, Some(deadline));
+            if observation.is_err() {
                 self.process_tree_supported.store(false, Ordering::Release);
             }
             self.kill_tracked();
             outer_reap_tracked(&self.descendants);
+            if observation == Ok(OuterObservationStatus::Interrupted) {
+                return OuterCleanupStatus::Failed;
+            }
             if self.all_tracked_absent() {
                 self.armed = false;
                 return if self.process_tree_supported.load(Ordering::Acquire) {
@@ -1610,7 +1671,9 @@ fn preflight_outer_process_tree() -> Result<OuterTrackedProcess, ()> {
 fn outer_observe_descendants(
     root: u32,
     descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
-) -> Result<(), ()> {
+    stop: Option<&AtomicBool>,
+    deadline: Option<Instant>,
+) -> Result<OuterObservationStatus, ()> {
     let mut known = {
         let tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
         tracked
@@ -1625,7 +1688,12 @@ fn outer_observe_descendants(
             .collect::<Vec<_>>();
         let mut additions = Vec::new();
         let mut retired = Vec::new();
+        let mut interrupted = false;
         for (parent, expected_start_time) in parents {
+            if outer_observation_should_stop(stop, deadline) {
+                interrupted = true;
+                break;
+            }
             if outer_process_start_time(parent)? != Some(expected_start_time) {
                 if parent != root {
                     known.remove(&parent);
@@ -1680,11 +1748,21 @@ fn outer_observe_descendants(
                 }
             }
         }
+        if interrupted {
+            return Ok(OuterObservationStatus::Interrupted);
+        }
         if !discovered {
             break;
         }
     }
-    outer_retire_reused(root, descendants)
+    outer_retire_reused(root, descendants)?;
+    Ok(OuterObservationStatus::Complete)
+}
+
+#[cfg(target_os = "linux")]
+fn outer_observation_should_stop(stop: Option<&AtomicBool>, deadline: Option<Instant>) -> bool {
+    stop.is_some_and(|stop| stop.load(Ordering::Acquire))
+        || deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
 #[cfg(target_os = "linux")]
@@ -1849,6 +1927,7 @@ async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> Proc
 #[cfg(target_os = "linux")]
 async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
     let request_deadline = tokio::time::Instant::now() + request.timeout;
+    let status_protocol = request.status_protocol;
     let outer_reservation = match preflight_outer_process_tree() {
         Ok(reservation) => reservation,
         Err(()) => {
@@ -1932,7 +2011,11 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             });
         }
     };
-    let mut stdout_task = tokio::spawn(read_supervised_stdout(stdout, request.capture_bytes));
+    let mut stdout_task = tokio::spawn(read_supervised_stdout(
+        stdout,
+        request.capture_bytes,
+        status_protocol,
+    ));
     let mut stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
     let startup = tokio::time::timeout_at(request_deadline, async {
         let control = control.as_mut().ok_or(())?;
@@ -2025,10 +2108,12 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         }
     };
     match (stdout, stderr) {
-        (Ok(Ok((stdout, status))), Ok(Ok(stderr))) => {
-            let (supervised_stdout, supervised_stderr) = supervisor_capture_completeness(status);
+        (Ok(Ok((stdout, status, launcher_status))), Ok(Ok(stderr))) => {
+            let (supervised_stdout, supervised_stderr) =
+                supervisor_capture_completeness(status, launcher_status);
             ProcessRunResult {
-                outcome: wait_failure.unwrap_or_else(|| supervisor_outcome(status)),
+                outcome: wait_failure
+                    .unwrap_or_else(|| supervisor_outcome(status, launcher_status)),
                 stdout: ProcessOutput {
                     bytes: stdout.bytes,
                     completeness: combined_capture_completeness(
@@ -2066,20 +2151,17 @@ fn kill_supervisor_process_group(raw_pid: u32) {
 }
 
 #[cfg(target_os = "linux")]
-fn supervisor_outcome(status: SupervisorStatus) -> ProcessOutcome {
+fn supervisor_outcome(
+    status: SupervisorStatus,
+    launcher_status: Option<LauncherStatus>,
+) -> ProcessOutcome {
+    if let Some(launcher_status) = launcher_status {
+        return launcher_outcome(launcher_status);
+    }
     match status {
         SupervisorStatus::Exited { code, .. } => ProcessOutcome::Exited { code },
         SupervisorStatus::TimedOut => ProcessOutcome::TimedOut,
-        SupervisorStatus::SpawnFailed { reason } => ProcessOutcome::SpawnFailed {
-            reason: match reason {
-                SupervisorSpawnFailure::NotFound => ProcessSpawnFailure::NotFound,
-                SupervisorSpawnFailure::PermissionDenied => ProcessSpawnFailure::PermissionDenied,
-                SupervisorSpawnFailure::ProcessTreeUnsupported => {
-                    ProcessSpawnFailure::ProcessTreeUnsupported
-                }
-                SupervisorSpawnFailure::Other => ProcessSpawnFailure::Other,
-            },
-        },
+        SupervisorStatus::SpawnFailed { reason } => process_spawn_failure(reason),
         SupervisorStatus::Cancelled => ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Wait,
         },
@@ -2093,10 +2175,36 @@ fn supervisor_outcome(status: SupervisorStatus) -> ProcessOutcome {
 }
 
 #[cfg(target_os = "linux")]
+fn launcher_outcome(status: LauncherStatus) -> ProcessOutcome {
+    match status {
+        LauncherStatus::Exited { code, .. } => ProcessOutcome::Exited { code },
+        LauncherStatus::SpawnFailed { reason } => process_spawn_failure(reason),
+        LauncherStatus::SupervisionFailed => ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Wait,
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_spawn_failure(reason: SupervisorSpawnFailure) -> ProcessOutcome {
+    ProcessOutcome::SpawnFailed {
+        reason: match reason {
+            SupervisorSpawnFailure::NotFound => ProcessSpawnFailure::NotFound,
+            SupervisorSpawnFailure::PermissionDenied => ProcessSpawnFailure::PermissionDenied,
+            SupervisorSpawnFailure::ProcessTreeUnsupported => {
+                ProcessSpawnFailure::ProcessTreeUnsupported
+            }
+            SupervisorSpawnFailure::Other => ProcessSpawnFailure::Other,
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn supervisor_capture_completeness(
     status: SupervisorStatus,
+    launcher_status: Option<LauncherStatus>,
 ) -> (SupervisorCaptureCompleteness, SupervisorCaptureCompleteness) {
-    match status {
+    let outer = match status {
         SupervisorStatus::Exited { stdout, stderr, .. } => (stdout, stderr),
         SupervisorStatus::TimedOut
         | SupervisorStatus::Cancelled
@@ -2105,6 +2213,33 @@ fn supervisor_capture_completeness(
             SupervisorCaptureCompleteness::Complete,
             SupervisorCaptureCompleteness::Complete,
         ),
+    };
+    let nested = match launcher_status {
+        Some(LauncherStatus::Exited { stdout, stderr, .. }) => (stdout, stderr),
+        Some(LauncherStatus::SpawnFailed { .. } | LauncherStatus::SupervisionFailed) | None => (
+            SupervisorCaptureCompleteness::Complete,
+            SupervisorCaptureCompleteness::Complete,
+        ),
+    };
+    (
+        combined_supervisor_completeness(outer.0, nested.0),
+        combined_supervisor_completeness(outer.1, nested.1),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn combined_supervisor_completeness(
+    outer: SupervisorCaptureCompleteness,
+    nested: SupervisorCaptureCompleteness,
+) -> SupervisorCaptureCompleteness {
+    match (outer, nested) {
+        (SupervisorCaptureCompleteness::Complete, SupervisorCaptureCompleteness::Complete) => {
+            SupervisorCaptureCompleteness::Complete
+        }
+        (SupervisorCaptureCompleteness::Complete, SupervisorCaptureCompleteness::Incomplete)
+        | (SupervisorCaptureCompleteness::Incomplete, _) => {
+            SupervisorCaptureCompleteness::Incomplete
+        }
     }
 }
 
@@ -2160,9 +2295,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn cleanup_supervision_failure_remains_distinct() {
-        let outcome = supervisor_outcome(SupervisorStatus::SupervisionFailed {
-            stage: SupervisorFailureStage::Cleanup,
-        });
+        let outcome = supervisor_outcome(
+            SupervisorStatus::SupervisionFailed {
+                stage: SupervisorFailureStage::Cleanup,
+            },
+            None,
+        );
 
         assert_eq!(
             outcome,
@@ -2606,6 +2744,7 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("one direct process request"))?;
 
         assert_eq!(result.confinement, ExecutionConfinement::Unsandboxed);
+        assert_eq!(request.status_protocol, ProcessStatusProtocol::Direct);
         assert!(
             request
                 .working_directory
@@ -2704,6 +2843,14 @@ mod tests {
 
         assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
         assert_eq!(probe.program, OsString::from(BWRAP_PROGRAM));
+        assert_eq!(
+            request.status_protocol,
+            ProcessStatusProtocol::SandboxDispatch
+        );
+        assert_eq!(
+            probe.status_protocol,
+            ProcessStatusProtocol::SandboxDispatch
+        );
         assert_eq!(
             request.capture_bytes,
             EXEC_CAPTURE_BYTES + SANDBOX_DISPATCH_MARKER.len()
@@ -2949,6 +3096,34 @@ mod tests {
             result.outcome,
             ProcessOutcome::Exited {
                 code: Some(LEGITIMATE_TARGET_EXIT_CODE),
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandboxed_target_spawn_failure_remains_typed() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let mut process = successful_sandbox_process(b"");
+        process.outcome = ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::NotFound,
+        };
+        let runner = FakeRunner::returning(BwrapAvailability::Available, process);
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, root)?;
+        let arguments = ExecArguments {
+            program: String::from("missing-target"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::FilesystemConfined);
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::NotFound,
             }
         );
         Ok(())
