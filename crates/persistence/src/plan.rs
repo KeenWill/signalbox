@@ -55,6 +55,12 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
  ORDER BY created.event_ordinal
  LIMIT $3";
 
+const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
+  FROM session_plan_event
+ WHERE session_id = $1
+   AND event_kind NOT IN ('created', 'text_revised', 'status_changed')
+ LIMIT 1";
+
 const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
        event.entry_ordinal, event.entry_text, event.entry_status,
        event.provenance_turn_id, event.provenance_issuing_turn_attempt_id,
@@ -70,7 +76,9 @@ const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
        request.request_id AS authority_request_id,
        request.session_id AS authority_request_session_id,
        request.turn_id AS authority_request_turn_id,
-       request.tool_name AS authority_tool_name
+       request.tool_name AS authority_tool_name,
+       request.arguments_kind AS authority_arguments_kind,
+       request.arguments_text AS authority_arguments_text
   FROM session_plan_event AS event
   LEFT JOIN tool_attempt AS attempt
     ON attempt.attempt_id = event.provenance_attempt_id
@@ -343,6 +351,17 @@ impl SessionPlanRepository {
             .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
                 "current limit",
             ))?;
+        let unsupported_kind: Option<String> = sqlx::query_scalar(UNSUPPORTED_EVENT_KIND_SQL)
+            .bind(request.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if let Some(value) = unsupported_kind {
+            return Err(SessionPlanCorruption::Unsupported {
+                field: "event kind",
+                value,
+            }
+            .into());
+        }
         let mut entries = sqlx::query(CURRENT_PLAN_SQL)
             .bind(request.session().into_uuid())
             .bind(after)
@@ -619,7 +638,41 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
             PlanEventKind::StatusChanged { entry, status }
         }
     };
+    if !authority_payload_matches(row, &kind)? {
+        return Err(SessionPlanCorruption::UntrustedProvenance.into());
+    }
     Ok(PlanEvent::new(ordinal, provenance, kind))
+}
+
+fn authority_payload_matches(row: &PgRow, event: &PlanEventKind) -> Result<bool, sqlx::Error> {
+    let arguments_kind: Option<String> = row.try_get("authority_arguments_kind")?;
+    let arguments_text: Option<String> = row.try_get("authority_arguments_text")?;
+    if arguments_kind.as_deref() != Some("json") {
+        return Ok(false);
+    }
+    let Some(arguments_text) = arguments_text else {
+        return Ok(false);
+    };
+    let Ok(actual) = serde_json::from_str::<serde_json::Value>(&arguments_text) else {
+        return Ok(false);
+    };
+    let expected = match event {
+        PlanEventKind::Created { text } => serde_json::json!({
+            "kind": "create",
+            "text": text.as_str(),
+        }),
+        PlanEventKind::TextRevised { entry, text } => serde_json::json!({
+            "kind": "revise",
+            "entry_id": entry.as_u64(),
+            "text": text.as_str(),
+        }),
+        PlanEventKind::StatusChanged { entry, status } => serde_json::json!({
+            "kind": "set_status",
+            "entry_id": entry.as_u64(),
+            "status": mapping::plan_status_to_str(*status),
+        }),
+    };
+    Ok(actual == expected)
 }
 
 fn decode_text(value: String) -> Result<PlanText, SessionPlanRepositoryError> {

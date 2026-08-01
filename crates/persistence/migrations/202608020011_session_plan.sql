@@ -115,6 +115,24 @@ BEGIN
        AND attempt.turn_id = NEW.provenance_turn_id
        AND attempt.session_id = NEW.session_id
        AND request.tool_name = 'plan_write'
+       AND request.arguments_kind = 'json'
+       AND request.arguments_text::jsonb =
+            CASE NEW.event_kind
+                WHEN 'created' THEN jsonb_build_object(
+                    'kind', 'create',
+                    'text', NEW.entry_text
+                )
+                WHEN 'text_revised' THEN jsonb_build_object(
+                    'kind', 'revise',
+                    'entry_id', NEW.entry_ordinal,
+                    'text', NEW.entry_text
+                )
+                WHEN 'status_changed' THEN jsonb_build_object(
+                    'kind', 'set_status',
+                    'entry_id', NEW.entry_ordinal,
+                    'status', NEW.entry_status
+                )
+            END
        AND attempt.effect_class = 'external_effect'
        AND attempt.state_kind = 'in_flight'
        FOR SHARE OF attempt;
@@ -185,6 +203,10 @@ FOR EACH STATEMENT EXECUTE FUNCTION reject_session_plan_event_rewrite();
 
 CREATE INDEX session_plan_event_entry_history
     ON session_plan_event (session_id, entry_ordinal, event_ordinal);
+
+CREATE INDEX session_plan_event_unsupported_kind
+    ON session_plan_event (session_id, event_kind)
+    WHERE event_kind NOT IN ('created', 'text_revised', 'status_changed');
 
 CREATE INDEX session_plan_event_created_page
     ON session_plan_event (session_id, event_ordinal)
