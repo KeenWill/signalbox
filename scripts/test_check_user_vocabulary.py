@@ -31,8 +31,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="signalbox-user-vocabulary-") as directory:
         root = Path(directory)
         allowed = root / "crates" / "example" / "src" / "lib.rs"
+        imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
         violation = root / "docs" / "spec" / "example.md"
         allowed.parent.mkdir(parents=True)
+        imported.parent.mkdir(parents=True)
         violation.parent.mkdir(parents=True)
         allowed.write_text(
             'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
@@ -50,8 +52,27 @@ def main() -> int:
             "The session owner approves this tool.\n",
             encoding="utf-8",
         )
+        imported.write_text(
+            "struct EntryFixture {\n"
+            "    owner: ImportedConversationId,\n"
+            "}\n"
+            "fn fixture() {\n"
+            "    let owner = conversation(1);\n"
+            "    consume(\n"
+            "        owner,\n"
+            "    );\n"
+            "}\n"
+            "// The owner approves this tool.\n",
+            encoding="utf-8",
+        )
         git(root, "init", "--quiet")
-        git(root, "add", "crates/example/src/lib.rs", "docs/spec/example.md")
+        git(
+            root,
+            "add",
+            "crates/domain/src/imported_conversation.rs",
+            "crates/example/src/lib.rs",
+            "docs/spec/example.md",
+        )
         rejected = run_checker(root)
         assert rejected.returncode == 1, (
             f"violation unexpectedly passed:\n{rejected.stdout}{rejected.stderr}"
@@ -67,6 +88,10 @@ def main() -> int:
         continued_numeric_identifier = "docs/spec/example.md:9: session_owner2_id = nil"
         semantic_session_owner = (
             "docs/spec/example.md:10: The session owner approves this tool."
+        )
+        imported_role_owner = (
+            "crates/domain/src/imported_conversation.rs:10: "
+            "// The owner approves this tool."
         )
         assert expected in rejected.stdout, (
             f"singular violation missing:\n{rejected.stdout}"
@@ -98,7 +123,22 @@ def main() -> int:
         assert semantic_session_owner in rejected.stdout, (
             f"semantic session-owner violation missing:\n{rejected.stdout}"
         )
+        assert imported_role_owner in rejected.stdout, (
+            f"imported-file role violation missing:\n{rejected.stdout}"
+        )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
+        imported.write_text(
+            "struct EntryFixture {\n"
+            "    owner: ImportedConversationId,\n"
+            "}\n"
+            "fn fixture() {\n"
+            "    let owner = conversation(1);\n"
+            "    consume(\n"
+            "        owner,\n"
+            "    );\n"
+            "}\n",
+            encoding="utf-8",
+        )
         accepted = run_checker(root)
         assert accepted.returncode == 0, (
             f"allowed vocabulary failed:\n{accepted.stdout}{accepted.stderr}"
