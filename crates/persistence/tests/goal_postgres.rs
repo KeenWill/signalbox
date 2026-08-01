@@ -14,16 +14,19 @@ use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
     CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DeliveryRequest,
     DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalCommandRejection,
-    GoalCommandResult, GoalGuidance, GoalNeed, GoalSchedulerProvenance, GoalStatement,
-    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest,
-    PreparedCreateSession, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
-    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
+    GoalSchedulerProvenance, GoalStatement, GoalUserAction, GoalUserCommand, GoalUserProvenance,
+    ModelAlias, ModelSelectionRequest, PreparedCreateSession, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
+    SessionInputPosition, SubmitInput, ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId,
+    UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
     create_session::CreateSessionRepository,
-    goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
+    goal::{
+        GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
+    },
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
     outbox::{
@@ -80,6 +83,10 @@ fn session(value: u128) -> SessionId {
 
 fn command(value: u128) -> DurableCommandId {
     DurableCommandId::from_uuid(Uuid::from_u128(value))
+}
+
+fn tool_request(value: u128) -> ToolRequestId {
+    ToolRequestId::from_uuid(Uuid::from_u128(value))
 }
 
 fn credential_pin() -> SessionCredentialPin {
@@ -229,6 +236,125 @@ async fn inv048_terminal_goal_disposition_survives_scheduler_restart() -> Result
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+async fn insert_goal_tool_request(
+    pool: &PgPool,
+    turn: TurnId,
+    request: ToolRequestId,
+    tool_name: &str,
+    arguments: &str,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 0, $5, 'json', $6)",
+    )
+    .bind(request.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
+    .bind(Uuid::from_u128(request.into_uuid().as_u128() + 0x1000))
+    .bind(tool_name)
+    .bind(arguments)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn set_goal_turn_acceptance_position(
+    pool: &PgPool,
+    turn: TurnId,
+    position: SessionInputPosition,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE queued_input_origin DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE input_accepted_outbox_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE accepted_input
+            SET acceptance_position = $3::numeric
+          WHERE session_id = $1 AND origin_turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
+    .bind(position.as_u64().to_string())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE queued_input_origin
+            SET acceptance_position = $3::numeric
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
+    .bind(position.as_u64().to_string())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET acceptance_position = $3::numeric
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
+    .bind(position.as_u64().to_string())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE input_accepted_outbox_event
+            SET acceptance_position = $3::numeric
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
+    .bind(position.as_u64().to_string())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE queued_input_origin ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE input_accepted_outbox_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[track_caller]
+fn assert_model_declaration_request_rejected(error: GoalRepositoryError) {
+    let GoalRepositoryError::Database(error) = error else {
+        panic!("declaration-request mismatch must be a database rejection");
+    };
+    let database = error
+        .as_database_error()
+        .expect("declaration-request mismatch reports a database constraint");
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(
+        database.constraint(),
+        Some("goal_event_model_declaration_request")
+    );
 }
 
 async fn mark_goal_turn_completed(pool: &PgPool, turn: TurnId) -> Result<(), Box<dyn Error>> {
@@ -1051,6 +1177,251 @@ async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Resul
         database.constraint(),
         Some("goal_command_applied_event_kind")
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: exhausting the session acceptance ordinal yields typed scheduler
+/// backpressure and a durable, replayable user-command rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xb81);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x981),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("exhaust the acceptance position")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    let maximum = SessionInputPosition::try_from_u64(u64::MAX)
+        .expect("the maximum positive position is admitted");
+    set_goal_turn_acceptance_position(&pool, attached_turn.turn(), maximum).await?;
+    assert_eq!(
+        activate_goal_turn(&pool, 0xd81).await?,
+        attached_turn.turn()
+    );
+    mark_goal_turn_completed(&pool, attached_turn.turn()).await?;
+    let history_before_rejection = repository
+        .load_goal(session(SESSION))
+        .await?
+        .expect("the attached lineage exists");
+
+    assert_eq!(
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                turn_candidates(0xb82),
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::AcceptancePositionExhausted { last: maximum }
+    );
+
+    let supersede = GoalUserCommand::new(
+        command(0x982),
+        session(SESSION),
+        GoalUserAction::Supersede(statement("replacement cannot yet be queued")),
+    );
+    let rejected = GoalCommandResult::Rejected(GoalCommandRejection::AcceptancePositionExhausted);
+    assert_eq!(
+        repository
+            .handle_user_command(supersede.clone(), Some(turn_candidates(0xb83)), |_| None,)
+            .await?,
+        GoalCommandHandlingOutcome::Recorded(rejected.clone())
+    );
+    let receipt = repository
+        .load_command(supersede.command_id())
+        .await?
+        .expect("the exhaustion receipt is durable");
+    assert_eq!(receipt.command(), &supersede);
+    assert_eq!(receipt.result(), &rejected);
+    let history_after_rejection = repository
+        .load_goal(session(SESSION))
+        .await?
+        .expect("the attached lineage remains");
+    assert_eq!(
+        history_after_rejection.events(),
+        history_before_rejection.events()
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: an unrecorded execution failure from an older turn cannot block a
+/// resumed generation whose newer goal turn is now current.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_delayed_unrecorded_failure_does_not_block_the_resumed_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let failed_turn = turn_candidates(0xb91);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x991),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("resume beyond the failed turn")),
+                ),
+                Some(failed_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(activate_goal_turn(&pool, 0xd91).await?, failed_turn.turn());
+    terminalize_goal_turn_as_failed(&pool, 0xe91).await?;
+    let need_text = "wait for user input";
+    let need = GoalNeed::try_new(String::from(need_text)).expect("fixture need is admitted");
+    let request = tool_request(0xf91);
+    let declaration_arguments = format!(
+        r#"{{"need":"{need_text}","reason":"user_input_required","transition":"blocked"}}"#
+    );
+    insert_goal_tool_request(
+        &pool,
+        failed_turn.turn(),
+        request,
+        "goal_declare",
+        &declaration_arguments,
+    )
+    .await?;
+    assert_applied_transition(
+        repository
+            .declare_blocked(
+                session(SESSION),
+                GoalModelBlockedReasonKind::UserInputRequired,
+                need,
+                GoalModelProvenance::new(failed_turn.turn(), request),
+            )
+            .await?,
+    );
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x992),
+                    session(SESSION),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(turn_candidates(0xb92)),
+                |_| None,
+            )
+            .await?,
+    );
+
+    assert_eq!(
+        repository
+            .block_execution_failure(
+                session(SESSION),
+                GoalNeed::try_new(String::from("repair the old failed turn"))
+                    .expect("fixture failure need is admitted"),
+                GoalSchedulerProvenance::new(failed_turn.turn()),
+            )
+            .await?,
+        GoalTransitionOutcome::NotCurrentGoalTurn
+    );
+    let scheduler_blocks: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM goal_event WHERE scheduler_turn_id = $1")
+            .bind(failed_turn.turn().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(scheduler_blocks, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: model goal events bind to the exact `goal_declare` name and
+/// canonical arguments carried by their trusted request identity.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xba1);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x9a1),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("bind the declaration request")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    let need =
+        GoalNeed::try_new(String::from("wait for user input")).expect("fixture need is admitted");
+    let matching_arguments =
+        r#"{"need":"wait for user input","reason":"user_input_required","transition":"blocked"}"#;
+    let wrong_name = tool_request(0xfa1);
+    insert_goal_tool_request(
+        &pool,
+        attached_turn.turn(),
+        wrong_name,
+        "inspect",
+        matching_arguments,
+    )
+    .await?;
+    let name_error = repository
+        .declare_blocked(
+            session(SESSION),
+            GoalModelBlockedReasonKind::UserInputRequired,
+            need.clone(),
+            GoalModelProvenance::new(attached_turn.turn(), wrong_name),
+        )
+        .await
+        .expect_err("an unrelated tool request cannot source a goal event");
+    assert_model_declaration_request_rejected(name_error);
+
+    let wrong_arguments = tool_request(0xfa2);
+    insert_goal_tool_request(
+        &pool,
+        attached_turn.turn(),
+        wrong_arguments,
+        "goal_declare",
+        r#"{"need":"different need","reason":"user_input_required","transition":"blocked"}"#,
+    )
+    .await?;
+    let arguments_error = repository
+        .declare_blocked(
+            session(SESSION),
+            GoalModelBlockedReasonKind::UserInputRequired,
+            need,
+            GoalModelProvenance::new(attached_turn.turn(), wrong_arguments),
+        )
+        .await
+        .expect_err("mismatched canonical arguments cannot source a goal event");
+    assert_model_declaration_request_rejected(arguments_error);
 
     pool.close().await;
     drop(container);

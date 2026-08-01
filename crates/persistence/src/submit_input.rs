@@ -3671,6 +3671,25 @@ fn require_stored_inherited_configuration(
     Ok(())
 }
 
+enum StoredOriginRuntimeState {
+    RuntimeRelevant,
+    RetiredGoal,
+}
+
+fn decode_origin_runtime_state(
+    value: &str,
+) -> Result<StoredOriginRuntimeState, SubmitInputRepositoryError> {
+    match value {
+        "runtime_relevant" => Ok(StoredOriginRuntimeState::RuntimeRelevant),
+        "retired_goal" => Ok(StoredOriginRuntimeState::RetiredGoal),
+        value => Err(SubmitInputCorruption::Unsupported {
+            field: "acceptance-tail origin runtime state",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
+}
+
 async fn load_active_acceptance_tail(
     connection: &mut PgConnection,
     session: SessionId,
@@ -3700,9 +3719,12 @@ async fn load_active_acceptance_tail(
             replacement_model_kind,
             replacement_direct_model_selection_id,
             replacement_model_alias_id,
-            NOT goal_turn_is_runtime_relevant(
-                accepted.session_id, accepted.origin_turn_id
-            ) AS retired_goal_origin
+            CASE
+                WHEN goal_turn_is_runtime_relevant(
+                    accepted.session_id, accepted.origin_turn_id
+                ) THEN 'runtime_relevant'
+                ELSE 'retired_goal'
+            END AS origin_runtime_state
            FROM accepted_input AS accepted
           WHERE accepted.session_id = $1
             AND accepted.acceptance_position >= $2
@@ -3790,20 +3812,24 @@ async fn load_active_acceptance_tail(
             }
         };
         let lifecycle = AcceptedInputLifecycle::new(accepted_input, disposition);
-        let entry = if required(&row, "retired_goal_origin")? {
-            SessionAcceptanceTailEntryReconstitutionInput::retired_goal_origin(
-                entry_session,
-                lifecycle,
-                position,
-                delivery,
-            )
-        } else {
-            SessionAcceptanceTailEntryReconstitutionInput::new(
-                entry_session,
-                lifecycle,
-                position,
-                delivery,
-            )
+        let runtime_state: String = required(&row, "origin_runtime_state")?;
+        let entry = match decode_origin_runtime_state(&runtime_state)? {
+            StoredOriginRuntimeState::RetiredGoal => {
+                SessionAcceptanceTailEntryReconstitutionInput::retired_goal_origin(
+                    entry_session,
+                    lifecycle,
+                    position,
+                    delivery,
+                )
+            }
+            StoredOriginRuntimeState::RuntimeRelevant => {
+                SessionAcceptanceTailEntryReconstitutionInput::new(
+                    entry_session,
+                    lifecycle,
+                    position,
+                    delivery,
+                )
+            }
         };
         entries.push(entry);
     }

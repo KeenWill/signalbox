@@ -24,16 +24,16 @@ use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, ActiveTurnPhase, AmbiguousModelCallTurn,
     AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurn,
     CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
-    CorrelatedModelCallTerminalObservation, DirectModelSelection, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
-    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
-    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
-    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
-    PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest,
-    PreparedToolResultProjection, ProviderModelCallFailureCause, ProviderModelIdentity,
-    ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
+    CorrelatedModelCallTerminalObservation, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
+    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
+    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
+    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
+    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetDefinition,
+    PendingSteeringReclassificationIdentity, PinnedProviderTargetReconstitutionInput,
+    PreparedModelCallRequest, PreparedToolResultProjection, ProviderModelCallFailureCause,
+    ProviderModelIdentity, ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
     ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
@@ -2892,6 +2892,11 @@ async fn load_call_snapshot(
     ))
 }
 
+enum StoredAcceptedInputProvenance {
+    Command(DurableCommandId),
+    Goal(UserContent),
+}
+
 async fn load_origin_contents(
     connection: &mut PgConnection,
     entries: &[SemanticTranscriptEntry],
@@ -2927,8 +2932,7 @@ async fn load_origin_contents(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT accepted.accepted_input_id, accepted.accepting_command_id,
-                accepted.content_text,
-                (goal.accepted_input_id IS NOT NULL) AS goal_owned
+                accepted.content_text, goal.turn_id AS goal_turn_id
            FROM accepted_input AS accepted
            LEFT JOIN goal_turn AS goal
              ON goal.accepted_input_id = accepted.accepted_input_id
@@ -2951,28 +2955,36 @@ async fn load_origin_contents(
         }
         let accepted = AcceptedInputId::from_uuid(accepted);
         let command: Option<Uuid> = row.try_get("accepting_command_id")?;
-        let goal_owned: bool = required(&row, "goal_owned")?;
-        match (command, goal_owned) {
-            (Some(command), false) => {
+        let goal_turn: Option<Uuid> = row.try_get("goal_turn_id")?;
+        let provenance = match (command, goal_turn) {
+            (Some(command), None) => {
                 let command = durable_command_id_from_uuid(command)
                     .map_err(|_| ModelCallCorruption::Inconsistent("accepting command identity"))?;
+                StoredAcceptedInputProvenance::Command(command)
+            }
+            (None, Some(_)) => {
+                let content = UserContent::try_text(required(&row, "content_text")?)
+                    .map_err(|_| ModelCallCorruption::Inconsistent("goal input content"))?;
+                StoredAcceptedInputProvenance::Goal(content)
+            }
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(ModelCallCorruption::Inconsistent("accepted input provenance").into());
+            }
+        };
+        match provenance {
+            StoredAcceptedInputProvenance::Command(command) => {
                 if command_by_accepted.insert(accepted, command).is_some() {
                     return Err(
                         ModelCallCorruption::Inconsistent("accepted receipt inventory").into(),
                     );
                 }
             }
-            (None, true) => {
-                let content = UserContent::try_text(required(&row, "content_text")?)
-                    .map_err(|_| ModelCallCorruption::Inconsistent("goal input content"))?;
+            StoredAcceptedInputProvenance::Goal(content) => {
                 if goal_content_by_accepted.insert(accepted, content).is_some() {
                     return Err(
                         ModelCallCorruption::Inconsistent("accepted receipt inventory").into(),
                     );
                 }
-            }
-            (Some(_), true) | (None, false) => {
-                return Err(ModelCallCorruption::Inconsistent("accepted input provenance").into());
             }
         }
     }

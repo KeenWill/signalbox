@@ -53,16 +53,20 @@ command identity. The user commands are attach, resume with optional guidance,
 stop, and supersede with a replacement statement. Their immutable receipts
 record either the appended event ordinal or a closed rejection, including
 `unknown_model_alias` when the session's selected alias is absent at turn
-acceptance. Equal replay returns the recorded result; structurally different
-reuse is a conflict.
+acceptance and `acceptance_position_exhausted` when the session's positive
+accepted-input ordinal cannot advance. Equal replay returns the recorded result;
+structurally different reuse is a conflict.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no
 caller-supplied session identity. Trusted tool-dispatch correlation supplies the
 invoking session, turn, and tool-request identity, and persistence requires that
-exact triple to name the request. A tool-request identity can cause at most one
-goal declaration event. An achieved event stores the exact final report and
-derives its transcript reference from that same invocation.
+exact triple to name the request. The request must name `goal_declare`, carry
+canonical JSON, and its exact transition, reason, need, or report values must
+match the event it causes. A request from another tool or with different
+arguments cannot commit. A tool-request identity can cause at most one goal
+declaration event. An achieved event stores the exact final report and derives
+its transcript reference from that same invocation.
 
 **Implemented behavior.** Model-selectable blocked reasons are
 `user_input_required`, `external_change_required`, and `authorization_required`.
@@ -88,16 +92,20 @@ model fallback. If current defaults still name the predecessor's alias, restart
 reconciliation may reuse that turn's frozen definition when the catalog entry
 has disappeared. A changed current alias with no definition instead returns a
 typed `UnknownModelAlias` continuation outcome and is never classified as
-durable corruption.
+durable corruption. If the session's positive accepted-input ordinal is already
+exhausted, continuation returns a typed `AcceptancePositionExhausted` outcome
+and appends no successor turn.
 
 **Implemented behavior.** A failed goal turn is not retried. In the same
 scheduler disposition path, the daemon appends `blocked` with reason
 `execution_failure`, need text describing the execution repair required, and the
-exact failed-turn provenance. That scheduler-turn provenance is single-use; a
-delayed replay returns the already-recorded blocked transition without appending
-a second event, including after resume. Continuation stops on blocked, achieved,
-user-stopped, and a superseded generation; supersession's successor is pursuing
-and therefore independently eligible to continue.
+exact failed-turn provenance. That scheduler-turn provenance is single-use. A
+delayed replay of an already-recorded failure returns that blocked transition
+without appending a second event, including after resume. An unrecorded failure
+from an older turn returns `NotCurrentGoalTurn` once resume has made a successor
+turn current, so it cannot block the resumed pursuit. Continuation stops on
+blocked, achieved, user-stopped, and a superseded generation; supersession's
+successor is pursuing and therefore independently eligible to continue.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
@@ -128,11 +136,14 @@ append, a trigger enforces ordinal and generation continuity, an applied receipt
 can reference only the event carrying its own command identity, operation, and
 statement or guidance payload; every user event reverse-correlates to that exact
 applied receipt, and rejected reasons are closed over the operations that can
-produce them. Every pursuit-starting user event reverse-correlates to exactly
-one queued goal turn, whose requested and frozen configuration derives from its
-exact defaults epoch. Model-declaration requests and scheduler-failure turns are
-single-use; composite foreign keys enforce user-command, model-invocation, and
-scheduler-turn provenance, and loads replay complete rows through the domain
+produce them, including durable acceptance-position exhaustion for
+pursuit-starting commands. Every pursuit-starting user event reverse-correlates
+to exactly one queued goal turn, whose requested and frozen configuration
+derives from its exact defaults epoch. Model-declaration requests and
+scheduler-failure turns are single-use; composite foreign keys enforce
+user-command, model-invocation, and scheduler-turn provenance, while a deferred
+constraint binds each model event to the exact `goal_declare` name and canonical
+arguments of its request. Loads replay complete rows through the domain
 aggregate rather than reading a mutable current-state projection (INV-048).
 
 **Implemented behavior.** The process protocol exposes attach, show, resume,
