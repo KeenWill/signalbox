@@ -79,7 +79,7 @@ pub enum GoalCorruption {
     /// Stored variant fields or relationships disagree.
     Inconsistent(&'static str),
     /// A PostgreSQL column could not decode into its declared Rust representation.
-    Column(String),
+    Column(&'static str),
     /// A positive stored ordinal cannot map to the domain.
     InvalidOrdinal(PositiveOrdinalMappingError),
     /// Stored bounded text cannot map to the domain.
@@ -115,7 +115,21 @@ impl fmt::Display for GoalCorruption {
     }
 }
 
-impl Error for GoalCorruption {}
+impl Error for GoalCorruption {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidOrdinal(error) => Some(error),
+            Self::InvalidText(error) => Some(error),
+            Self::InvalidCommandId(error) => Some(error),
+            Self::Session(error) => Some(error),
+            Self::Missing(_)
+            | Self::Unsupported { .. }
+            | Self::Inconsistent(_)
+            | Self::Column(_)
+            | Self::Domain(_) => None,
+        }
+    }
+}
 
 /// A database failure, ambiguous commit, wrong load purpose, or corruption.
 #[derive(Debug)]
@@ -244,8 +258,8 @@ impl GoalRepository {
             )
             .await?
             {
-                Some(configuration) => Some(configuration),
-                None => {
+                CurrentOriginConfiguration::Selected(configuration) => Some(configuration),
+                CurrentOriginConfiguration::UnknownAlias(_) => {
                     result = GoalCommandResult::Rejected(GoalCommandRejection::UnknownModelAlias);
                     None
                 }
@@ -366,13 +380,17 @@ impl GoalRepository {
         }
         let frozen_alias =
             goal_turn_frozen_alias_definition(&mut transaction, session, predecessor).await?;
-        let configuration = current_origin_configuration(&mut transaction, session, |alias| {
+        let configuration = match current_origin_configuration(&mut transaction, session, |alias| {
             select_definition_with_frozen_fallback(alias, select_definition(alias), frozen_alias)
         })
         .await?
-        .ok_or(GoalCorruption::Inconsistent(
-            "current goal turn model alias",
-        ))?;
+        {
+            CurrentOriginConfiguration::Selected(configuration) => configuration,
+            CurrentOriginConfiguration::UnknownAlias(alias) => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::UnknownModelAlias { alias });
+            }
+        };
         insert_goal_turn(
             &mut transaction,
             session,
@@ -447,6 +465,13 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         };
+        if matches!(transition, SystemTransition::ExecutionFailure { .. })
+            && let Some(event) = recorded_scheduler_failure(&goal, transition.turn())
+        {
+            let event = event.clone();
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::Applied(event));
+        }
         let generation = goal_turn_generation(&mut transaction, session, transition.turn()).await?;
         if generation != Some(goal.current().generation()) {
             transaction.rollback().await?;
@@ -484,6 +509,18 @@ impl GoalRepository {
         commit(transaction).await?;
         Ok(GoalTransitionOutcome::Applied(event))
     }
+}
+
+fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
+    goal.events().iter().find(|event| {
+        matches!(
+            event.kind(),
+            GoalEventKind::Blocked {
+                block: signalbox_domain::GoalBlockProvenance::ExecutionFailure { provenance },
+                ..
+            } if provenance.turn() == turn
+        )
+    })
 }
 
 fn event_starts_pursuit(event: &GoalEvent) -> bool {
@@ -524,11 +561,16 @@ fn select_definition_with_frozen_fallback(
     })
 }
 
+enum CurrentOriginConfiguration {
+    Selected(OriginConfiguration),
+    UnknownAlias(ModelAlias),
+}
+
 async fn current_origin_configuration<SelectDefinition>(
     connection: &mut PgConnection,
     session: SessionId,
     select_definition: SelectDefinition,
-) -> Result<Option<OriginConfiguration>, GoalRepositoryError>
+) -> Result<CurrentOriginConfiguration, GoalRepositoryError>
 where
     SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
 {
@@ -547,7 +589,12 @@ where
             ModelSelectionOverride::UseSessionDefault,
         )
         .map_err(|_| GoalCorruption::Inconsistent("current goal turn defaults version"))?;
-    Ok(OriginConfiguration::freeze(checked, select_definition).ok())
+    Ok(
+        match OriginConfiguration::freeze(checked, select_definition) {
+            Ok(configuration) => CurrentOriginConfiguration::Selected(configuration),
+            Err(error) => CurrentOriginConfiguration::UnknownAlias(error.alias()),
+        },
+    )
 }
 
 enum SystemTransition {
@@ -912,18 +959,18 @@ async fn load_goal_from_connection(
 }
 
 fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption> {
-    let ordinal = positive(row.try_get("event_ordinal")?)?;
-    let generation = positive(row.try_get("generation")?)?;
-    let kind: String = row.try_get("event_kind")?;
-    let statement: Option<String> = row.try_get("statement")?;
-    let blocked_reason: Option<String> = row.try_get("blocked_reason")?;
-    let need: Option<String> = row.try_get("need")?;
-    let guidance: Option<String> = row.try_get("guidance")?;
-    let report: Option<String> = row.try_get("report")?;
-    let user_command: Option<Uuid> = row.try_get("user_command_id")?;
-    let model_turn: Option<Uuid> = row.try_get("model_turn_id")?;
-    let model_tool_request: Option<Uuid> = row.try_get("model_tool_request_id")?;
-    let scheduler_turn: Option<Uuid> = row.try_get("scheduler_turn_id")?;
+    let ordinal = positive(column(row, "event_ordinal")?)?;
+    let generation = positive(column(row, "generation")?)?;
+    let kind: String = column(row, "event_kind")?;
+    let statement: Option<String> = column(row, "statement")?;
+    let blocked_reason: Option<String> = column(row, "blocked_reason")?;
+    let need: Option<String> = column(row, "need")?;
+    let guidance: Option<String> = column(row, "guidance")?;
+    let report: Option<String> = column(row, "report")?;
+    let user_command: Option<Uuid> = column(row, "user_command_id")?;
+    let model_turn: Option<Uuid> = column(row, "model_turn_id")?;
+    let model_tool_request: Option<Uuid> = column(row, "model_tool_request_id")?;
+    let scheduler_turn: Option<Uuid> = column(row, "scheduler_turn_id")?;
     let discriminator =
         goal_event_kind_from_str(&kind).ok_or_else(|| GoalCorruption::Unsupported {
             field: "event kind",
@@ -1029,16 +1076,16 @@ async fn load_command_from_connection(
     let Some(row) = row else {
         return Ok(None);
     };
-    let session_uuid: Uuid = row.try_get("session_id")?;
+    let session_uuid: Uuid = column(&row, "session_id")?;
     let session = signalbox_domain::SessionId::from_uuid(session_uuid);
-    let operation: String = row.try_get("operation_kind")?;
-    let statement: Option<String> = row.try_get("statement")?;
-    let guidance: Option<String> = row.try_get("guidance")?;
+    let operation: String = column(&row, "operation_kind")?;
+    let statement: Option<String> = column(&row, "statement")?;
+    let guidance: Option<String> = column(&row, "guidance")?;
     let action = action_from_stored(&operation, statement, guidance)?;
     let command = GoalUserCommand::new(command_id, session, action);
-    let result_kind: String = row.try_get("result_kind")?;
-    let rejection: Option<String> = row.try_get("rejection_kind")?;
-    let result_ordinal: Option<Decimal> = row.try_get("result_event_ordinal")?;
+    let result_kind: String = column(&row, "result_kind")?;
+    let rejection: Option<String> = column(&row, "rejection_kind")?;
+    let result_ordinal: Option<Decimal> = column(&row, "result_event_ordinal")?;
     let result = match result_kind.as_str() {
         "applied" => {
             let ordinal = positive(required(result_ordinal, "command result event ordinal")?)?;
@@ -1126,10 +1173,15 @@ fn action_from_stored(
     }
 }
 
-impl From<sqlx::Error> for GoalCorruption {
-    fn from(error: sqlx::Error) -> Self {
-        GoalCorruption::Column(error.to_string())
-    }
+fn column<'row, T>(
+    row: &'row sqlx::postgres::PgRow,
+    field: &'static str,
+) -> Result<T, GoalCorruption>
+where
+    T: sqlx::Decode<'row, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    row.try_get(field)
+        .map_err(|_| GoalCorruption::Column(field))
 }
 
 #[cfg(test)]
@@ -1146,6 +1198,36 @@ mod tests {
         assert_eq!(
             select_definition_with_frozen_fallback(alias, None, Some((alias, frozen))),
             Some(frozen)
+        );
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn goal_corruption_forwards_its_typed_session_source() {
+        let session = SessionCorruption::Missing("current defaults");
+        let corruption = GoalCorruption::Session(session.clone());
+
+        assert_eq!(
+            corruption.source().map(ToString::to_string),
+            Some(session.to_string())
+        );
+    }
+
+    #[test]
+    fn changed_unknown_alias_does_not_reuse_an_unrelated_frozen_definition() {
+        let requested = ModelAlias::from_uuid(Uuid::from_u128(0xa21));
+        let prior = ModelAlias::from_uuid(Uuid::from_u128(0xa22));
+        let frozen = FrozenAliasDefinition::selecting(
+            signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xa23)),
+        );
+
+        assert_eq!(
+            select_definition_with_frozen_fallback(requested, None, Some((prior, frozen))),
+            None
         );
     }
 }

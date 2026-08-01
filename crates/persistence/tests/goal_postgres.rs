@@ -13,12 +13,12 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
     CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, Goal, GoalCommandRejection, GoalCommandResult,
-    GoalGuidance, GoalNeed, GoalSchedulerProvenance, GoalStatement, GoalUserAction,
-    GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput, TranscriptAncestry,
-    TurnAttemptId, TurnId, UserContent,
+    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalCommandRejection,
+    GoalCommandResult, GoalGuidance, GoalNeed, GoalSchedulerProvenance, GoalStatement,
+    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest,
+    PreparedCreateSession, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
+    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -231,6 +231,30 @@ async fn inv048_terminal_goal_disposition_survives_scheduler_restart() -> Result
     Ok(())
 }
 
+async fn mark_goal_turn_completed(pool: &PgPool, turn: TurnId) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+                terminal_frontier_id = $3, active_phase_kind = NULL,
+                terminal_attempt_id = current_attempt_id, current_attempt_id = NULL,
+                terminal_model_call_id = $4
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
+    .bind(Uuid::from_u128(0xd75))
+    .bind(Uuid::from_u128(0xe75))
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[track_caller]
 fn assert_applied_transition(outcome: GoalTransitionOutcome) {
     let GoalTransitionOutcome::Applied(_) = outcome else {
@@ -429,11 +453,11 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
     let blocked = repository
         .block_execution_failure(
             session(SESSION),
-            failure_need,
+            failure_need.clone(),
             GoalSchedulerProvenance::new(attached_turn.turn()),
         )
         .await?;
-    assert_applied_transition(blocked);
+    assert_applied_transition(blocked.clone());
 
     let guidance = GoalGuidance::try_new(String::from("use the newly granted credential"))
         .expect("fixture guidance is admitted");
@@ -450,6 +474,21 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
         )
         .await?;
     assert_applied_command(resumed);
+    assert_eq!(
+        repository
+            .block_execution_failure(
+                session(SESSION),
+                failure_need,
+                GoalSchedulerProvenance::new(attached_turn.turn()),
+            )
+            .await?,
+        blocked
+    );
+    let scheduler_blocks: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM goal_event WHERE scheduler_turn_id = $1")
+            .bind(attached_turn.turn().into_uuid())
+            .fetch_one(&pool)
+            .await?;
 
     let resumed_content: String = sqlx::query_scalar(
         "SELECT content_text
@@ -471,6 +510,7 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
     .fetch_one(&pool)
     .await?;
 
+    assert_eq!(scheduler_blocks, 1);
     assert_eq!(resumed_content, guidance.as_str());
     assert_eq!(resumed_goal_turns, 1);
 
@@ -1036,6 +1076,417 @@ async fn inv048_model_goal_declaration_request_is_single_use() -> Result<(), Box
     .await?;
 
     assert!(unique_request);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: a changed current alias that is unavailable at reconciliation is
+/// a typed continuation outcome, not durable-state corruption.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    let first_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa21));
+    let changed_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa22));
+    let frozen =
+        FrozenAliasDefinition::selecting(DirectModelSelection::from_uuid(Uuid::from_u128(0xa23)));
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_with_model(ModelSelectionRequest::Alias(
+            first_alias,
+        )))
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xb71);
+    repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(0x971),
+                session(SESSION),
+                GoalUserAction::Attach(statement("continue after the defaults change")),
+            ),
+            Some(attached_turn),
+            |alias| {
+                assert_eq!(alias, first_alias);
+                Some(frozen)
+            },
+        )
+        .await?;
+    assert_eq!(
+        activate_goal_turn(&pool, 0xd71).await?,
+        attached_turn.turn()
+    );
+    mark_goal_turn_completed(&pool, attached_turn.turn()).await?;
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind, model_alias_id)
+         VALUES ($1, 2, 'alias', $2)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(changed_alias.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE session_current_defaults SET current_version = 2 WHERE session_id = $1")
+        .bind(Uuid::from_u128(SESSION))
+        .execute(&pool)
+        .await?;
+
+    assert_eq!(
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                turn_candidates(0xb72),
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::UnknownModelAlias {
+            alias: changed_alias
+        }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: every user-provenance event names an applied receipt at that exact
+/// event ordinal; rejected commands cannot source events.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_rejected_goal_command_cannot_source_an_event() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let rejected = command(0x972);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'goal', 1, transaction_timestamp())",
+    )
+    .bind(rejected.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, statement, result_kind, rejection_kind)
+         VALUES ($1, 'goal', 1, $2, 'attach', $3, 'rejected',
+                 'goal_already_attached')",
+    )
+    .bind(rejected.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind("rejected statement")
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, statement, user_command_id)
+         VALUES ($1, 1, 1, 'commissioned', $2, $3)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind("rejected statement")
+    .bind(rejected.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("a rejected command cannot source a goal event");
+    let database = error
+        .as_database_error()
+        .expect("deferred receipt correlation reports a database constraint");
+
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(
+        database.constraint(),
+        Some("goal_event_applied_command_receipt")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: applied command receipts and their exact events carry the same
+/// immutable statement or optional guidance payload.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_goal_command_payload_matches_the_applied_event() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let mismatched = command(0x973);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'goal', 1, transaction_timestamp())",
+    )
+    .bind(mismatched.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, statement, result_kind, result_event_ordinal)
+         VALUES ($1, 'goal', 1, $2, 'attach', $3, 'applied', 1)",
+    )
+    .bind(mismatched.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind("receipt statement")
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, statement, user_command_id)
+         VALUES ($1, 1, 1, 'commissioned', $2, $3)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind("different event statement")
+    .bind(mismatched.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("an applied receipt cannot disagree with its event payload");
+    let database = error
+        .as_database_error()
+        .expect("deferred payload correlation reports a database constraint");
+
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(
+        database.constraint(),
+        Some("goal_command_applied_event_kind")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: every pursuit-starting user event atomically creates exactly one
+/// goal-owned accepted input and turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_pursuing_goal_event_requires_its_goal_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let applied = command(0x974);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'goal', 1, transaction_timestamp())",
+    )
+    .bind(applied.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, statement, result_kind, result_event_ordinal)
+         VALUES ($1, 'goal', 1, $2, 'attach', $3, 'applied', 1)",
+    )
+    .bind(applied.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind("unscheduled statement")
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, statement, user_command_id)
+         VALUES ($1, 1, 1, 'commissioned', $2, $3)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind("unscheduled statement")
+    .bind(applied.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("a pursuit-starting event cannot omit its goal turn");
+    let database = error
+        .as_database_error()
+        .expect("deferred turn correlation reports a database constraint");
+
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(database.constraint(), Some("goal_event_pursuing_turn"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: a queued goal turn's requested and frozen configuration derive
+/// from the exact defaults epoch named by its accepted input.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_goal_turn_configuration_matches_its_defaults_epoch() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let applied = command(0x975);
+    let accepted = AcceptedInputId::from_uuid(Uuid::from_u128(0xa75));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xb75));
+    let mismatched_selection = Uuid::from_u128(0xc75);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'goal', 1, transaction_timestamp())",
+    )
+    .bind(applied.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, statement, result_kind, result_event_ordinal)
+         VALUES ($1, 'goal', 1, $2, 'attach', $3, 'applied', 1)",
+    )
+    .bind(applied.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind("misconfigured turn")
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, statement, user_command_id)
+         VALUES ($1, 1, 1, 'commissioned', $2, $3)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind("misconfigured turn")
+    .bind(applied.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO accepted_input
+            (accepted_input_id, accepting_command_id, session_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             acceptance_position, disposition_kind, origin_turn_id)
+         VALUES ($1, NULL, $2, 'text', $3, 'start_when_no_active_turn',
+                 NULL, 1, 'use_session_default', NULL, NULL, NULL,
+                 1, 'origin_of', $4)",
+    )
+    .bind(accepted.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind("misconfigured turn")
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO queued_input_origin
+            (turn_id, accepted_input_id, session_id, acceptance_position,
+             priority_kind, defaults_version, interrupt_predecessor_turn_id,
+             requested_model_kind, requested_direct_model_selection_id,
+             requested_model_alias_id, frozen_model_kind,
+             frozen_direct_model_selection_id, frozen_model_alias_id,
+             frozen_alias_selected_direct_id, model_parameters,
+             known_provider_failure_retry, model_fallback,
+             dangerous_tool_auto_approval)
+         VALUES ($1, $2, $3, 1, 'ordinary', 1, NULL,
+                 'direct', $4, NULL, 'direct', $4, NULL, NULL,
+                 'provider_defaults', 'disabled', 'disabled', 'disabled')",
+    )
+    .bind(turn.into_uuid())
+    .bind(accepted.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind(mismatched_selection)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id,
+             acceptance_position, state_kind)
+         VALUES ($1, $2, $3, 1, 'queued')",
+    )
+    .bind(turn.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .bind(accepted.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_turn
+            (session_id, goal_generation, turn_id, accepted_input_id,
+             source_event_ordinal, predecessor_turn_id)
+         VALUES ($1, 1, $2, $3, 1, NULL)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(turn.into_uuid())
+    .bind(accepted.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("a goal turn cannot cross-wire another defaults selection");
+    let database = error
+        .as_database_error()
+        .expect("deferred configuration correlation reports a database constraint");
+
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(database.constraint(), Some("goal_turn_runtime_shape"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: rejection reasons are closed over the operation paths that can
+/// produce them.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_goal_command_rejection_matches_its_operation() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let impossible = command(0x976);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'goal', 1, transaction_timestamp())",
+    )
+    .bind(impossible.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, result_kind, rejection_kind)
+         VALUES ($1, 'goal', 1, $2, 'stop', 'rejected', 'unknown_model_alias')",
+    )
+    .bind(impossible.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .execute(&mut *transaction)
+    .await
+    .expect_err("stop cannot record an alias-resolution rejection");
+    let database = error
+        .as_database_error()
+        .expect("operation rejection correlation reports a database constraint");
+
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(
+        database.constraint(),
+        Some("goal_command_rejection_operation")
+    );
+    drop(transaction);
 
     pool.close().await;
     drop(container);

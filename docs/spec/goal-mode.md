@@ -84,12 +84,18 @@ turn terminalization causes the daemon scheduler to create and start the next
 turn without user input. It repeats after each successful turn while replayed
 state remains pursuing. Goal state is the only continuation stopping condition:
 there is no goal turn count, elapsed-time budget, verdict counter, or silent
-model fallback.
+model fallback. If current defaults still name the predecessor's alias, restart
+reconciliation may reuse that turn's frozen definition when the catalog entry
+has disappeared. A changed current alias with no definition instead returns a
+typed `UnknownModelAlias` continuation outcome and is never classified as
+durable corruption.
 
 **Implemented behavior.** A failed goal turn is not retried. In the same
 scheduler disposition path, the daemon appends `blocked` with reason
 `execution_failure`, need text describing the execution repair required, and the
-exact failed-turn provenance. Continuation stops on blocked, achieved,
+exact failed-turn provenance. That scheduler-turn provenance is single-use; a
+delayed replay returns the already-recorded blocked transition without appending
+a second event, including after resume. Continuation stops on blocked, achieved,
 user-stopped, and a superseded generation; supersession's successor is pursuing
 and therefore independently eligible to continue.
 
@@ -119,9 +125,13 @@ continuation work.
 `goal_event`. Both are append-only and reject truncation. Relational checks
 close every discriminator and payload shape; a session-row lock serializes event
 append, a trigger enforces ordinal and generation continuity, an applied receipt
-can reference only the event carrying its own command identity and the event
-kind corresponding to its immutable operation, each model declaration request is
-single-use, composite foreign keys enforce user-command, model-invocation, and
+can reference only the event carrying its own command identity, operation, and
+statement or guidance payload; every user event reverse-correlates to that exact
+applied receipt, and rejected reasons are closed over the operations that can
+produce them. Every pursuit-starting user event reverse-correlates to exactly
+one queued goal turn, whose requested and frozen configuration derives from its
+exact defaults epoch. Model-declaration requests and scheduler-failure turns are
+single-use; composite foreign keys enforce user-command, model-invocation, and
 scheduler-turn provenance, and loads replay complete rows through the domain
 aggregate rather than reading a mutable current-state projection (INV-048).
 
