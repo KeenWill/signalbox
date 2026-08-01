@@ -31,6 +31,9 @@ pub(super) const FIXTURE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-ABCDEF.exam
 
 pub(super) const FIXTURE_UNICODE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-bücher.example/result";
 
+pub(super) const FIXTURE_IDNA_REMOVED_CODE_POINT_RESULT_URL: &str =
+    "https://x-ab\u{00ad}cd.example/result";
+
 pub(super) const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
 
 pub(super) const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
@@ -123,6 +126,8 @@ pub(super) const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
 
 pub(super) const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
 
+pub(super) const URL_IDNA_REMOVED_CODE_POINT_COLLISION_KEY: &str = "ab\u{00ad}cd";
+
 pub(super) const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
 
 pub(super) const URL_PORT_COLLISION_KEY: &str = ":08081";
@@ -186,6 +191,10 @@ pub(super) const UNICODE_COMBINING_MARK_COLLISION_KEY: &str = "\u{0301}x";
 pub(super) const UNICODE_COMBINING_MARK_COLLISION_VALUE: &str = "éx";
 
 pub(super) const PROVIDER_REJECTION_STATUS: u16 = 429;
+
+pub(super) const PROVIDER_ERROR_DEBUG_COLLISION_KEY: &str = "WebSearchProviderError";
+
+pub(super) const PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY: &str = "[provider-controlled]";
 
 pub(super) const FIXTURE_UNPARSED_PROVIDER_ERROR: &str =
     "synthetic provider-private response bytes";

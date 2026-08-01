@@ -1,7 +1,7 @@
 use reqwest::{Url, header::HeaderValue};
 use signalbox_model_runtime::{CredentialValue, redact_text};
 
-use super::{canonicalization::*, text_decoding::*};
+use super::{canonicalization::*, result::fixed_result_diagnostic_outputs, text_decoding::*};
 
 pub(super) const MAX_CREDENTIAL_BYTES: usize = 4 * 1024;
 
@@ -23,7 +23,7 @@ impl CredentialScrubber {
         let exact = std::str::from_utf8(credential.expose_bytes())
             .ok()?
             .to_owned();
-        if exact.is_empty() || fixed_outer_error_debug_may_contain(&exact) {
+        if exact.is_empty() || fixed_diagnostic_output_may_contain(&exact) {
             return None;
         }
         let decoded_variants = decoded_credential_variants(&exact)?;
@@ -201,8 +201,9 @@ impl CredentialScrubber {
             }
         }
         if self.reversible_variants().any(|variant| {
-            idna::domain_to_ascii(variant)
-                .is_ok_and(|credential_host| credential_host.eq_ignore_ascii_case(host))
+            idna::domain_to_ascii(variant).is_ok_and(|credential_host| {
+                unicode_case_insensitive_contains(host, &credential_host)
+            })
         }) {
             return true;
         }
@@ -269,6 +270,9 @@ pub(super) fn text_contains_credential_variant(text: &str, credential: &str) -> 
         })
 }
 
-pub(super) fn fixed_outer_error_debug_may_contain(credential: &str) -> bool {
+pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
     text_contains_credential_variant("Err()", credential)
+        || fixed_result_diagnostic_outputs()
+            .iter()
+            .any(|output| text_contains_credential_variant(output, credential))
 }

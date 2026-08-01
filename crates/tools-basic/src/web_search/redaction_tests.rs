@@ -22,6 +22,21 @@ fn web_search_success_evidence_redacts_reflected_credential() {
     assert!(!content.contains(SYNTHETIC_KEY));
 }
 
+/// INV-035: credentials colliding with fixed provider-result diagnostics are
+/// rejected before any provider response or error can be formatted.
+#[test]
+fn web_search_rejects_credentials_colliding_with_fixed_result_diagnostics() {
+    let provider_error_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        PROVIDER_ERROR_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
+    let placeholder_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
+
+    assert!(provider_error_collision.is_none());
+    assert!(placeholder_collision.is_none());
+}
+
 /// INV-035: JSON Unicode escapes in provider text are decoded within the
 /// bounded scrubber before completed evidence is formed.
 #[test]

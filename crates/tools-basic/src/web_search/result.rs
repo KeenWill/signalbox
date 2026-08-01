@@ -78,8 +78,8 @@ impl WebSearchResult {
     ///
     /// The result URL is reconstructed from its parsed components. User
     /// information and fragments are discarded, and only explicitly
-    /// allowlisted query parameters can survive. Snippets are entity-escaped
-    /// before they can become tool output.
+    /// allowlisted query parameters can survive. Titles and snippets are
+    /// entity-escaped before they can become tool output.
     pub fn try_new(fields: WebSearchResultFields) -> Option<Self> {
         Some(Self {
             title: ResultTitle::try_new(fields.title)?,
@@ -88,7 +88,7 @@ impl WebSearchResult {
         })
     }
 
-    /// Result title.
+    /// Entity-escaped provider result title.
     pub fn title(&self) -> &str {
         self.title.as_str()
     }
@@ -273,6 +273,40 @@ impl fmt::Display for WebSearchProviderError {
 }
 
 impl Error for WebSearchProviderError {}
+
+pub(super) fn fixed_result_diagnostic_outputs() -> [String; 6] {
+    let fields = WebSearchResultFields {
+        title: String::new(),
+        url: String::new(),
+        snippet: String::new(),
+    };
+    let result = WebSearchResult {
+        title: ResultTitle(String::new()),
+        url: ParsedResultUrl(String::new()),
+        snippet: EscapedSnippet(String::new()),
+    };
+    let complete_response = WebSearchResponse {
+        results: Vec::new(),
+        completeness: WebSearchPageCompleteness::Complete,
+    };
+    let partial_response = WebSearchResponse {
+        results: Vec::new(),
+        completeness: WebSearchPageCompleteness::MoreAvailable,
+    };
+    let provider_error = WebSearchProviderError {
+        status: StatusCode::BAD_REQUEST.as_u16(),
+        detail: None,
+        body_failure_class: None,
+    };
+    [
+        format!("{fields:?}"),
+        format!("{result:?}"),
+        format!("{complete_response:?}"),
+        format!("{partial_response:?}"),
+        format!("{provider_error:?}"),
+        provider_error.to_string(),
+    ]
+}
 
 impl WebSearchProviderError {
     /// Parses one complete provider error body without retaining raw bytes.

@@ -108,7 +108,7 @@ fn web_search_error_body_is_redacted_before_truncation() {
 /// after the provider body has been sanitized.
 #[test]
 fn web_search_final_error_detail_rejects_credential_collision() {
-    const ERROR_PREFIX_COLLISION_KEY: &str = "provider";
+    const ERROR_PREFIX_COLLISION_KEY: &str = "rejected";
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         ERROR_PREFIX_COLLISION_KEY.as_bytes().to_vec(),
     ))
