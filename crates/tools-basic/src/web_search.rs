@@ -1238,18 +1238,6 @@ where
             ));
         };
         let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-        if fixed_bound_evidence_token_collides(&scrubber) {
-            return WebSearchRequestOutcome::Error {
-                error: WebSearchExecutorError::CredentialDiagnosticCollision(
-                    WebSearchCredentialDiagnostic {
-                        rendered: safe_collision_diagnostic(credential_text),
-                        failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
-                        transport_failure_class: None,
-                    },
-                ),
-                credential,
-            };
-        }
         if query_contains_credential(request.query(), credential_text) {
             let outcome = known_failure_evidence(self.request_failed_detail.clone(), &scrubber);
             return match outcome {
@@ -1459,10 +1447,13 @@ fn bind_request_outcome(
             credential,
         } => (evidence, Some(credential)),
     };
-    let check_case_normalized_diagnostic = match &evidence {
-        ToolExecutorEvidence::CompletedText(_) => true,
-        ToolExecutorEvidence::KnownFailed { .. } => false,
-        ToolExecutorEvidence::Ambiguous => true,
+    let bound_diagnostic_check = match &evidence {
+        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => {
+            BoundDiagnosticCheck::AllCredentialVariants
+        }
+        ToolExecutorEvidence::KnownFailed { .. } => {
+            BoundDiagnosticCheck::PreserveDefinitiveFailureWord
+        }
     };
     let bound = invocation.bind(evidence);
     let Some(credential) = credential else {
@@ -1470,9 +1461,14 @@ fn bind_request_outcome(
     };
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let rendered_result = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&bound));
+    let check_rendered_collision = match bound_diagnostic_check {
+        BoundDiagnosticCheck::AllCredentialVariants => true,
+        BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
+            !unicode_case_insensitive_contains("Failed", credential_text)
+        }
+    };
     if credential_text.is_empty()
-        || rendered_result.contains(credential_text)
-        || (check_case_normalized_diagnostic
+        || (check_rendered_collision
             && text_contains_credential_variant(&rendered_result, credential_text))
     {
         return Err(WebSearchExecutorError::CredentialDiagnosticCollision(
@@ -1484,6 +1480,12 @@ fn bind_request_outcome(
         ));
     }
     Ok(bound)
+}
+
+#[derive(Clone, Copy)]
+enum BoundDiagnosticCheck {
+    AllCredentialVariants,
+    PreserveDefinitiveFailureWord,
 }
 
 impl<Credentials, Transport> ToolExecutor for WebSearchExecutor<Credentials, Transport>
@@ -1830,6 +1832,7 @@ impl CredentialScrubber {
         if has_http_header_boundary_whitespace(credential.expose_bytes()) {
             return None;
         }
+        HeaderValue::from_bytes(credential.expose_bytes()).ok()?;
         let exact = std::str::from_utf8(credential.expose_bytes())
             .ok()?
             .to_owned();
@@ -2133,44 +2136,6 @@ fn fixed_outer_error_debug_may_contain(credential: &str) -> bool {
     text_contains_credential_variant("Err()", credential)
 }
 
-fn fixed_bound_evidence_token_collides(scrubber: &CredentialScrubber) -> bool {
-    let evidence = [
-        ToolExecutorEvidence::CompletedText(String::new()),
-        ToolExecutorEvidence::KnownFailed { detail: None },
-        ToolExecutorEvidence::Ambiguous,
-    ];
-    evidence.iter().any(|evidence| {
-        fixed_bound_evidence_token_contains_credential(evidence, &scrubber.exact)
-            || scrubber
-                .decoded_variants
-                .iter()
-                .any(|variant| fixed_bound_evidence_token_contains_credential(evidence, variant))
-    })
-}
-
-fn fixed_bound_evidence_token_contains_credential(
-    evidence: &ToolExecutorEvidence,
-    credential: &str,
-) -> bool {
-    let token = fixed_bound_evidence_debug_token(evidence);
-    let collision = unicode_case_insensitive_contains(token, credential);
-    let definitive_failure_word_collision = match evidence {
-        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => false,
-        ToolExecutorEvidence::KnownFailed { .. } => {
-            unicode_case_insensitive_contains("Failed", credential)
-        }
-    };
-    collision && !definitive_failure_word_collision
-}
-
-fn fixed_bound_evidence_debug_token(evidence: &ToolExecutorEvidence) -> &'static str {
-    match evidence {
-        ToolExecutorEvidence::CompletedText(_) => "CompletedText",
-        ToolExecutorEvidence::KnownFailed { .. } => "KnownFailed",
-        ToolExecutorEvidence::Ambiguous => "Ambiguous",
-    }
-}
-
 fn canonicalized_url_host(value: &str) -> Option<String> {
     let candidate = format!("http://{value}/");
     let url = Url::parse(&candidate).ok()?;
@@ -2307,6 +2272,7 @@ mod tests {
     const TRAILING_HEADER_WHITESPACE_KEY: &[u8] = b"fixture-search-key\t";
     const EMPTY_CREDENTIAL_VALUE: &[u8] = b"";
     const NON_UTF8_CREDENTIAL_VALUE: &[u8] = &[0xff];
+    const INTERIOR_NEWLINE_CREDENTIAL_VALUE: &[u8] = b"fixture\nsearch-key";
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
     const TIMESTAMP_COLLISION_KEY: &str = "2026";
@@ -2316,6 +2282,7 @@ mod tests {
     const EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY: &str = "known";
     const EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY: &str = "completedtext(";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
+    const EXECUTOR_OK_WRAPPER_COLLISION_KEY: &str = "ok";
     const TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY: &str = "requestfailed";
     const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
     const UNICODE_FULL_FOLD_COLLISION_KEY: &str = "STRASSE";
@@ -3382,7 +3349,7 @@ mod tests {
     }
 
     /// INV-035: a credential matching the fixed `KnownFailed` Debug token is
-    /// rejected before dispatch and omitted from the public executor result.
+    /// omitted from the complete public executor result.
     #[tokio::test]
     async fn web_search_bound_known_failure_token_omits_case_folded_credential_collision() {
         let diagnostic = Arc::new(Mutex::new(String::new()));
@@ -3423,12 +3390,11 @@ mod tests {
             &rendered,
             EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY,
         ));
-        assert_eq!(searches.load(Ordering::Relaxed), 0);
+        assert_eq!(searches.load(Ordering::Relaxed), 1);
     }
 
     /// INV-035: a credential matching a substring of the fixed `KnownFailed`
-    /// Debug token is rejected before dispatch and omitted from the public
-    /// executor result.
+    /// Debug token is omitted from the complete public executor result.
     #[tokio::test]
     async fn web_search_bound_known_failure_token_omits_credential_substring_collision() {
         let diagnostic = Arc::new(Mutex::new(String::new()));
@@ -3469,7 +3435,52 @@ mod tests {
             &rendered,
             EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY,
         ));
-        assert_eq!(searches.load(Ordering::Relaxed), 0);
+        assert_eq!(searches.load(Ordering::Relaxed), 1);
+    }
+
+    /// INV-035: the outer `Ok` wrapper is included in case-normalized checks
+    /// of the complete public known-failure executor result.
+    #[tokio::test]
+    async fn web_search_bound_known_failure_omits_outer_ok_wrapper_collision() {
+        let diagnostic = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&diagnostic);
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: EXECUTOR_OK_WRAPPER_COLLISION_KEY,
+        };
+        let transport = RequestFailedTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("static web_search tool compiles")
+            .into_parts();
+        let executor = FormattingExecutor {
+            inner: executor,
+            diagnostic: captured,
+        };
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let rendered = diagnostic
+            .lock()
+            .expect("captured executor diagnostic lock is available")
+            .clone();
+
+        assert!(result.is_err());
+        assert!(!unicode_case_insensitive_contains(
+            &rendered,
+            EXECUTOR_OK_WRAPPER_COLLISION_KEY,
+        ));
+        assert_eq!(searches.load(Ordering::Relaxed), 1);
     }
 
     /// INV-035: punctuation does not conceal a case-normalized fixed Debug
@@ -4988,6 +4999,17 @@ mod tests {
     async fn non_utf8_credential_value_commits_known_failure_without_dispatch() {
         let (outcome, searches) =
             execute_raw_credential_through_service(NON_UTF8_CREDENTIAL_VALUE).await;
+
+        assert!(is_committed_known_failure(&outcome));
+        assert_eq!(searches, 0);
+    }
+
+    /// INV-035: an interior HTTP-header-invalid byte is a definitive
+    /// pre-dispatch failure and never reaches the injected transport.
+    #[tokio::test]
+    async fn interior_newline_credential_commits_without_dispatch() {
+        let (outcome, searches) =
+            execute_raw_credential_through_service(INTERIOR_NEWLINE_CREDENTIAL_VALUE).await;
 
         assert!(is_committed_known_failure(&outcome));
         assert_eq!(searches, 0);
