@@ -641,12 +641,12 @@ async fn serve_connection(
             version,
             request_id,
             request,
-            ConnectionRequestPermits {
-                import: import_permit,
-                review: review_command_permit,
+            ConnectionRequestResources {
+                import_permit,
+                review_command_permit,
+                pending_import: &mut pending_import,
             },
             &services,
-            &mut pending_import,
             shutdown.clone(),
         )
         .await?;
@@ -877,9 +877,10 @@ where
     }
 }
 
-struct ConnectionRequestPermits {
-    import: Option<OwnedSemaphorePermit>,
-    review: Option<OwnedSemaphorePermit>,
+struct ConnectionRequestResources<'connection> {
+    import_permit: Option<OwnedSemaphorePermit>,
+    review_command_permit: Option<OwnedSemaphorePermit>,
+    pending_import: &'connection mut Option<PendingConversationImport>,
 }
 
 struct PendingConversationImport {
@@ -895,19 +896,19 @@ async fn handle_request<Writer>(
     version: ProtocolVersion,
     request_id: RequestId,
     mut request: ClientRequest,
-    permits: ConnectionRequestPermits,
+    resources: ConnectionRequestResources<'_>,
     services: &ConnectionServices,
-    pending_import: &mut Option<PendingConversationImport>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let review_request = is_review_mutation(&request);
-    let ConnectionRequestPermits {
-        import: import_permit,
-        review: mut review_command_permit,
-    } = permits;
+    let ConnectionRequestResources {
+        import_permit,
+        mut review_command_permit,
+        pending_import,
+    } = resources;
     debug_assert_eq!(review_request, review_command_permit.is_some());
     let review_digest = if review_request {
         canonical_review_request_digest(&mut request)
