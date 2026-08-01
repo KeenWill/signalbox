@@ -478,10 +478,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
     let record = try XCTUnwrap(projection.records.first)
-    let marker = try ProcessProjectionFixture.conservativeEvent(in: record)
+    let marker = try ProcessProjectionFixture.modelIdentityEvent(in: record)
 
     XCTAssertEqual(projection.records.count, ProcessProjectionFixture.singleRecordCount)
-    XCTAssertEqual(marker.kind, ProcessProjectionFixture.modelIdentityKind)
+    XCTAssertEqual(
+      marker.defaultsVersion.rawValue,
+      ProcessProjectionFixture.activationModelIdentityDefaultsVersion
+    )
+    XCTAssertEqual(marker.selectedModelID.rawValue, ProcessDriverFixture.modelCall)
   }
 
   func testFailedProviderCauseAppearsInNativeActivity() throws {
@@ -3908,7 +3912,7 @@ private enum ProcessProjectionFixture {
   static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
   static let completedAssistantTranscriptRowID = "timeline-message-1"
   static let singleRecordCount = 1
-  static let modelIdentityKind = "model_identity_changed"
+  static let activationModelIdentityDefaultsVersion: UInt64 = 1
   static let unknownToolBatchState = "fixture_future_tool_batch_state"
   static let unknownToolBatchDiagnostic =
     "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
@@ -3917,10 +3921,10 @@ private enum ProcessProjectionFixture {
     [try SignalboxCanonicalUUID(validating: ProcessSubmissionFixture.acceptedInputID)]
   }
 
-  static func conservativeEvent(
+  static func modelIdentityEvent(
     in record: SignalboxStoredEvent
-  ) throws -> SignalboxProcessConservativeEvent {
-    guard case .processConservative(let event) = record.event else {
+  ) throws -> SignalboxProcessModelIdentityEvent {
+    guard case .processModelIdentity(let event) = record.event else {
       throw ProcessDriverUpdateRecorderError.expectedUnknownEvent
     }
     return event
@@ -4003,14 +4007,6 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithUnknownTurnState() throws -> SignalboxSynchronizationSnapshot {
-    try snapshotWithActiveTurnState(
-      """
-      {"type":"fixture_future_turn_state","retained":true}
-      """
-    )
-  }
-
   static func snapshotWithModelIdentityMarker() throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -4043,7 +4039,7 @@ private enum ProcessProjectionFixture {
           "entry":{
             "type":"model_identity_changed",
             "turn_id":"\(ProcessDriverFixture.turn)",
-            "defaults_version":"1",
+            "defaults_version":"\(activationModelIdentityDefaultsVersion)",
             "selected_model_id":"\(ProcessDriverFixture.modelCall)"
           }
         }
