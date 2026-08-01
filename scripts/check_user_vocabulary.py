@@ -32,8 +32,18 @@ class Allowance:
     def covers(self, path: str, line: str, match: re.Match[str]) -> bool:
         if self.paths.search(path) is None:
             return False
+        token_start = match.start()
+        while token_start > 0 and (
+            line[token_start - 1].isalnum() or line[token_start - 1] == "_"
+        ):
+            token_start -= 1
+        token_end = match.end()
+        while token_end < len(line) and (
+            line[token_end].isalnum() or line[token_end] == "_"
+        ):
+            token_end += 1
         return any(
-            allowed.start() <= match.start() and allowed.end() >= match.end()
+            allowed.start() <= token_start and allowed.end() >= token_end
             for allowed in self.lines.finditer(line)
         )
 
@@ -54,7 +64,8 @@ ALLOWLIST = (
             r"owner/repository|owner/name|repos/owner/|repository\(owner:|\$owner\b|"
             r"[\"']owner[\"']:\s*(?:arguments[.]repository\(\)[.]owner\(\)|"
             r"repository[.]owner\(\)|owner)(?:,|\s*$)|"
-            r"\.owner\(\)|let owner = .*owner_end|\bowner_end\b|"
+            r"(?:arguments[.]repository[(][)]|repository)[.]owner[(][)]|"
+            r"let owner = .*owner_end|\bowner_end\b|"
             r"let \(owner, name\) = repository|"
             r"Exact owner/repository|canonical `owner/repository`|"
             r"`@codex review` request by an owner, member, or collaborator|"
@@ -91,9 +102,11 @@ ALLOWLIST = (
             r"effective-user ownership|owner\s*==|"
             r"owner:\s*u32|child_owner|ParentOwnerMismatch|AncestorOwnerMismatch|"
             r"ExistingSocketOwnerMismatch|PeerOwnerMismatch|\bOwnerMismatch\b|"
-            r"ancestor_owner_is_trusted|ancestor_owner_must_be|file owner|"
+            r"ancestor_owner_is_trusted|"
+            r"ancestor_owner_must_be_root_or_the_effective_user|file owner|"
             r"owner_access|dropping the owner|its owner, so it cannot shadow|"
-            r"owner-vs-other",
+            r"owner-vs-other|"
+            r"guarded_bind_listens_only_with_owner_access",
             re.IGNORECASE,
         ),
     ),
@@ -257,6 +270,13 @@ ALLOWLIST = (
             r"cross_wired_attempt_owner|cross_wired_defaults_owner|"
             r"foreign_attachment_owner|foreign_event_owner|foreign_observation_owner|"
             r"foreign_owner|different_owner|returned_owner|"
+            r"s29_inv040_finding_history_rejects_foreign_event_owner|"
+            r"inv040_external_link_rejects_foreign_observation_owner|"
+            r"inv041_external_link_rejects_foreign_attachment_owner|"
+            r"s03_active_reconstitution_rejects_cross_wired_attempt_owner|"
+            r"inv040_finding_event_rejects_foreign_owner|"
+            r"inv041_external_attachment_rejects_foreign_owner|"
+            r"inv040_external_observation_rejects_foreign_owner|"
             r"against the current owner prevents evidence-free phase reconstruction|"
             r"exactly one owner: activation=|durable boundary must have one owner:|"
             r"event owner must equal the loaded finding|"

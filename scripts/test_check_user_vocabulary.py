@@ -121,6 +121,7 @@ def main() -> int:
         native_lines = ('let sessionOwner = "human who approves tools"',)
         reviewed_domain_lines = (
             "The foreign owner approves this tool.",
+            "human_foreign_owner names the person who approves tools.",
             "`foreign_session_owner` names the human who approves this tool.",
         )
         reviewed_github_lines = (
@@ -153,9 +154,11 @@ def main() -> int:
         frozen_migration.parent.mkdir(parents=True)
         native_path.parent.mkdir(parents=True)
         violation.parent.mkdir(parents=True)
-        allowed.write_text(
-            'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
+        github_accessor_lines = (
+            'const REPOSITORY: &str = "owner/repository";',
+            "let approval = session.owner();",
         )
+        allowed.write_text(fixture_text(github_accessor_lines), encoding="utf-8")
         violation.write_text(fixture_text(violation_lines), encoding="utf-8")
         ambiguous_message.write_text(
             "The runtime sends a user message.\n"
@@ -227,6 +230,11 @@ def main() -> int:
                 "docs/spec/identity-and-commands.md", reviewed_identity_lines
             ),
             *expected_diagnostics(
+                "crates/tools-github/src/lib.rs",
+                github_accessor_lines,
+                github_accessor_lines[-1:],
+            ),
+            *expected_diagnostics(
                 "crates/domain/src/imported_conversation.rs",
                 imported_lines,
                 imported_lines[-1:],
@@ -249,6 +257,11 @@ def main() -> int:
             f"reported diagnostics differ: {rejected.stdout}"
         )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
+        allowed.write_text(
+            'const REPOSITORY: &str = "owner/repository";\n'
+            "segments.push(repository.owner());\n",
+            encoding="utf-8",
+        )
         ambiguous_message.write_text(
             "The runtime sends a user-role message.\n"
             "The runtime also sends a message from the user.\n",
