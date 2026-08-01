@@ -652,6 +652,18 @@ impl WebSearchTransportFailure {
             Self::DispatchUnknown => WebSearchTransportFailureClass::DispatchUnknown,
         }
     }
+
+    const fn response_body_failure_class(&self) -> Option<WebSearchTransportFailureClass> {
+        match self {
+            Self::ProviderRejected(error) => error.body_failure_class,
+            Self::InvalidCredential
+            | Self::CredentialDiagnosticCollision(_)
+            | Self::RequestFailed
+            | Self::InvalidResponse
+            | Self::ResponseTooLarge
+            | Self::DispatchUnknown => None,
+        }
+    }
 }
 
 /// Credential-sanitized result of one injected transport request.
@@ -1411,8 +1423,8 @@ where
             .search(request, &credential)
             .await
             .into_result();
-        if let Err(WebSearchTransportFailure::ProviderRejected(error)) = &transport_result
-            && let Some(failure_class) = error.body_failure_class
+        if let Err(failure) = &transport_result
+            && let Some(failure_class) = failure.response_body_failure_class()
         {
             let _reporting = report_response_body_failure(failure_class, correlation, &credential);
         }
@@ -2603,13 +2615,60 @@ fn fixed_bound_wrapper_token_collides(
     scrubber: &CredentialScrubber,
     correlation: &ToolAttemptDispatchCorrelation,
 ) -> bool {
-    let rendered = format!(
-        "{:?} {correlation:?} {} {}",
-        Result::<(), &WebSearchExecutorError>::Ok(()),
-        std::any::type_name::<CorrelatedToolExecutorEvidence>(),
-        std::any::type_name::<signalbox_domain::IssuedExecutorFence>(),
-    );
-    scrubber.contains_case_normalized_credential(&rendered)
+    let mut evidence = ToolExecutorEvidence::CompletedText(String::new());
+    loop {
+        let probe = CorrelatedToolExecutorEvidenceDebugProbe {
+            correlation,
+            evidence: &evidence,
+        };
+        let rendered = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&probe));
+        let check_collision = match bound_diagnostic_check(&evidence) {
+            BoundDiagnosticCheck::AllCredentialVariants => true,
+            BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
+                !scrubber.contains_case_normalized_credential("Failed")
+            }
+        };
+        if check_collision && scrubber.contains_case_normalized_credential(&rendered) {
+            return true;
+        }
+        let Some(next) = next_fixed_bound_evidence_probe(&evidence) else {
+            return false;
+        };
+        evidence = next;
+    }
+}
+
+struct CorrelatedToolExecutorEvidenceDebugProbe<'a> {
+    correlation: &'a ToolAttemptDispatchCorrelation,
+    evidence: &'a ToolExecutorEvidence,
+}
+
+impl fmt::Debug for CorrelatedToolExecutorEvidenceDebugProbe<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorrelatedToolExecutorEvidence")
+            .field(
+                "fence",
+                &IssuedExecutorFenceDebugProbe {
+                    correlation: self.correlation,
+                },
+            )
+            .field("evidence", self.evidence)
+            .finish()
+    }
+}
+
+struct IssuedExecutorFenceDebugProbe<'a> {
+    correlation: &'a ToolAttemptDispatchCorrelation,
+}
+
+impl fmt::Debug for IssuedExecutorFenceDebugProbe<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IssuedExecutorFence")
+            .field("correlation", self.correlation)
+            .finish()
+    }
 }
 
 fn bound_diagnostic_contains_credential(rendered: &str, credential: &str) -> bool {
@@ -2801,6 +2860,7 @@ mod tests {
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const EXECUTOR_OK_WRAPPER_COLLISION_KEY: &str = "ok";
     const EXECUTOR_BOUND_WRAPPER_COLLISION_KEY: &str = "correlated";
+    const EXECUTOR_BOUND_WRAPPER_FIELD_COLLISION_KEY: &str = "{ fence:";
     const TRANSPORT_CASE_NORMALIZED_FAILURE_COLLISION_KEY: &str = "requestfailed";
     const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
     const UNICODE_FULL_FOLD_COLLISION_KEY: &str = "STRASSE";
@@ -4356,6 +4416,20 @@ mod tests {
             &rendered,
             EXECUTOR_BOUND_WRAPPER_COLLISION_KEY,
         ));
+        assert_eq!(searches, 0);
+    }
+
+    /// INV-035: exact field framing introduced by the correlated bound wrapper
+    /// is checked before physical dispatch.
+    #[tokio::test]
+    async fn web_search_exact_bound_wrapper_framing_fails_before_dispatch() {
+        let (failed, searches, rendered) = execute_formatted_raw_credential_through_service(
+            EXECUTOR_BOUND_WRAPPER_FIELD_COLLISION_KEY.as_bytes(),
+        )
+        .await;
+
+        assert!(failed);
+        assert!(!rendered.contains(EXECUTOR_BOUND_WRAPPER_FIELD_COLLISION_KEY));
         assert_eq!(searches, 0);
     }
 
