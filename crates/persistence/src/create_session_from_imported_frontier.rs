@@ -45,7 +45,8 @@ use crate::{
 };
 
 const STORAGE_VERSION: i16 = 3;
-const OWNER_INITIATED: &str = "owner_initiated";
+// Applied migrations freeze this legacy storage spelling.
+const USER_INITIATED: &str = "owner_initiated";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
 const APPLIED: &str = "applied";
 
@@ -443,7 +444,7 @@ async fn insert_prepared(
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(session_id_to_uuid(session.id()))
-    .bind(OWNER_INITIATED)
+    .bind(USER_INITIATED)
     .bind(IMPORTED_ANCESTRY)
     .bind(frontier.conversation().into_uuid())
     .bind(frontier.through_entry().into_uuid())
@@ -520,7 +521,7 @@ async fn insert_prepared(
     .bind(frontier.through_entry().into_uuid())
     .bind(Decimal::from(frontier.through_position().as_u64()))
     .bind(relationship)
-    .bind(OWNER_INITIATED)
+    .bind(USER_INITIATED)
     .bind(IMPORTED_ANCESTRY)
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(command_selection.kind)
@@ -691,7 +692,7 @@ async fn load_creation_from_connection(
     if registry_version != typed_version {
         return Err(ImportedSessionCorruption::Inconsistent("command storage version").into());
     }
-    require_spelling(&row, "command_cause", OWNER_INITIATED)?;
+    require_spelling(&row, "command_cause", USER_INITIATED)?;
     require_spelling(&row, "command_ancestry", IMPORTED_ANCESTRY)?;
     require_spelling(&row, "result_kind", APPLIED)?;
 
@@ -783,7 +784,7 @@ pub(crate) fn reconstitute_bounded_current(
     requested_session: SessionId,
     row: PgRow,
 ) -> Result<Session, ImportedSessionRepositoryError> {
-    require_spelling(&row, "stored_cause", OWNER_INITIATED)?;
+    require_spelling(&row, "stored_cause", USER_INITIATED)?;
     require_spelling(&row, "stored_ancestry", IMPORTED_ANCESTRY)?;
     let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);
     let imported_conversation =
@@ -846,7 +847,7 @@ pub(crate) fn reconstitute_bounded_current(
     BoundedImportedSessionReconstitutionInput::from_stored_imported_parts(
         requested_session,
         stored_session,
-        SessionCreationCause::OwnerInitiated,
+        SessionCreationCause::UserInitiated,
         imported_conversation,
         imported_frontier_entry,
         imported_frontier_position,
@@ -1062,7 +1063,7 @@ fn decode_stored_provenance(
     row: &PgRow,
     conversation: &ImportedConversation,
 ) -> Result<SessionCreationProvenance, ImportedSessionRepositoryError> {
-    require_spelling(row, "stored_cause", OWNER_INITIATED)?;
+    require_spelling(row, "stored_cause", USER_INITIATED)?;
     require_spelling(row, "stored_ancestry", IMPORTED_ANCESTRY)?;
     let frontier = decode_frontier(
         conversation,
@@ -1076,7 +1077,7 @@ fn decode_stored_provenance(
         return Err(ImportedSessionCorruption::Inconsistent("stored imported conversation").into());
     }
     Ok(SessionCreationProvenance::new(
-        SessionCreationCause::OwnerInitiated,
+        SessionCreationCause::UserInitiated,
         TranscriptAncestry::ImportedConversation {
             source_frontier: frontier,
             relationship: decode_relationship(required(row, "stored_relationship_kind")?)?,

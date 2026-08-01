@@ -1,9 +1,9 @@
 # Open questions
 
 This is the inventory of unresolved foundational questions. A "leaning" guides
-exploration but is not a decision. Closing a question requires an owner-accepted
-pull request or, at foundation weight, a foundation specification diff. Accepted
-cross-component and wire contracts live in the
+exploration but is not a decision. Closing a question requires an
+maintainer-accepted pull request or, at foundation weight, a foundation
+specification diff. Accepted cross-component and wire contracts live in the
 [living specification](spec/README.md); scenario identifiers refer to
 [scenarios.md](scenarios.md).
 
@@ -62,7 +62,7 @@ cross-component and wire contracts live in the
   converter version, with synthetic fixtures and persistence round-trip
   coverage. The accepted format-versioned converter seam remains fixed. (S28)
 - **Import operational surfaces beyond explicit file and directory scans.** The
-  owner terminal's explicit-format, one-file and recursive directory-scan
+  user terminal's explicit-format, one-file and recursive directory-scan
   operations are implemented in
   [conversation-import](spec/conversation-import.md#operational-surface), and
   the single-conversation inspection read is implemented in
@@ -106,7 +106,7 @@ cross-component and wire contracts live in the
   own proof and disposition rules. Later scope. (S07)
 - **Ambiguous provider-call recovery.** A restart-recovered unstopped in-flight
   call parks its turn in the awaiting-recovery wait
-  ([model-call-execution](spec/model-call-execution.md)). An owner decision now
+  ([model-call-execution](spec/model-call-execution.md)). A user decision now
   releases the slot by terminalizing the turn over that exact ambiguity
   ([process-protocol](spec/process-protocol.md)), but nothing resolves what the
   provider actually did. The retired design analysis identified adopting a
@@ -283,7 +283,7 @@ output truncation in
 decided question is a contract, and a contract binds only where the implementer
 of that contract reads it; a decision restated on this page would be a second
 authority over prose that already owns it, free to drift from the page it
-paraphrases. Multiple simultaneously enrolled runners and owner-directed
+paraphrases. Multiple simultaneously enrolled runners and user-directed
 relocation of a healthy session are committed functionality that version one
 defers rather than open questions
 ([runner protocol and placement](spec/runner-protocol.md#the-singleton-runner-rule-is-temporary)).
@@ -299,9 +299,8 @@ The questions below remain open.
   backend rather than persistent workstations. Decide what a portable workspace
   is — reprovisioning from durable facts, an explicit transfer, or a shared
   volume the destination binds — before any automated placement across a runner
-  family exists. Not a blocker: owner-directed moves of a workspace-free
-  session, and of a session whose work is pushed, require none of it. (S16,
-  S30–S32)
+  family exists. Not a blocker: user-directed moves of a workspace-free session,
+  and of a session whose work is pushed, require none of it. (S16, S30–S32)
 - **Automatic scheduling, load balancing, and MCP placement.** Placement selects
   a runner by exact identity or capability class and is never rescheduled; no
   policy chooses among several satisfying runners, balances load, or admits an
@@ -391,13 +390,13 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   [fixed serial loop](spec/tool-loop.md#serialized-staged-execution) is a
   deployment, session-default, per-turn, or executor-selection value remains
   undecided. Blocks configurable/concurrent execution.
-- **Model-declared approval expiry.** Pending owner approval currently waits
+- **Model-declared approval expiry.** Pending user approval currently waits
   indefinitely. Whether a model may request an expiry, how it is frozen, and
   what durable resolution expiry creates remain undecided.
 - **LLM-judge approval mechanics.** `JudgeRecommendation` is typed but has no
   producer or storage. Prompt storage, provenance/session tagging, and the
   boundary between recommendation and policy remain undecided; a judge can never
-  claim owner agency (INV-020).
+  claim user agency (INV-020).
 - **Additional high-risk guardrails.** Operations that a future policy must
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
@@ -445,9 +444,9 @@ is decided, specified in
 [configuration-and-credentials](spec/configuration-and-credentials.md); the
 questions below remain open.
 
-- **Owner client authentication and revocation.** Keep the daemon's
-  authorization model single-owner while choosing a remotely safe authentication
-  boundary. Blocks any remote client. (S01, S10, S24, S25)
+- **User client authentication and revocation.** Keep the daemon's authorization
+  model single-user while choosing a remotely safe authentication boundary.
+  Blocks any remote client. (S01, S10, S24, S25)
 - **Runner authentication exchange, rotation, and recovery.** Enrollment,
   runner, and authentication-reference identities plus terminal enrollment
   revocation are fixed by

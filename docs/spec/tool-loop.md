@@ -1,5 +1,8 @@
 # Tool loop
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -81,7 +84,7 @@ resolution: executed, denied, or closed by turn end.
 Every request has an approval state separate from its execution state. The
 implemented decision sources are:
 
-- `OwnerCommand` — one applied owner-global durable decision command;
+- `UserCommand` — one applied user-global durable decision command;
 - `PolicyAuto` — the selected registry or sandbox-profile default supplied
   automatic approval;
 - `SessionBlanket` — the frozen dangerous blanket supplied daemon-local
@@ -90,8 +93,8 @@ implemented decision sources are:
   approval.
 
 `JudgeRecommendation` remains typed additive vocabulary without a storage
-encoding or producer. An automated source never constructs `OwnerCommand` or
-claims owner agency (INV-020).
+encoding or producer. An automated source never constructs `UserCommand` or
+claims user agency (INV-020).
 
 Daemon-local execution keeps this precedence:
 
@@ -112,7 +115,7 @@ The dangerous blanket has no runner rung. The producing-call completion
 transaction resolves policy independently for every proposal after selecting its
 admissible locus and immutable definition snapshot. A frozen automatic choice
 may exist after an earlier confirmation wait without bypassing it; only
-owner-command decisions must form a proposal-order prefix. After each owner
+user-command decisions must form a proposal-order prefix. After each user
 command, the earliest remaining undecided confirmation is the next wait, while
 already frozen automatic decisions require no later command. Why: recording the
 selected source makes unattended operation inspectable without laundering policy
@@ -127,7 +130,7 @@ freezes the posture into `EffectiveConfiguration` alongside model selection;
 steering-derived work inherits the frozen value of its source turn. A later
 defaults replacement never changes queued, active, or completed work (INV-008).
 
-An owner decision is the canonical `DecideToolRequest` command: owner-global
+A user decision is the canonical `DecideToolRequest` command: user-global
 `DurableCommandId`, exact `ToolRequestId`, and either `Approve` or
 `Deny { reason }`. A denial reason is absent or 1–1024 bytes of non-control
 Unicode with no leading/trailing POSIX whitespace; it is therefore safe to
@@ -142,7 +145,7 @@ no identity (INV-012).
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and
-`OwnerCommand` decision, and then either parks on the next undecided request or
+`UserCommand` decision, and then either parks on the next undecided request or
 creates a fresh prepared turn attempt when the batch's approval inventory is
 complete. An approval cannot revive a denied, executed, or turn-closed request.
 A denial creates no tool attempt (INV-027).
@@ -439,7 +442,7 @@ locus snapshot prepared under
 [model-call execution](model-call-execution.md#frontier-rendering). Runner-only
 definitions absent from current selected execution authority are not advertised;
 `RunnerAbandoned` exposes daemon-executable declarations only, and lost
-placement blocks preparation until owner recovery. Initial approval and dispatch
+placement blocks preparation until user recovery. Initial approval and dispatch
 for a proposal are derived from that same frozen snapshot, never from a later
 catalog or registration lookup. A dynamic catalog or runner change while the
 provider call is in flight therefore cannot upgrade permission, introduce an
@@ -754,9 +757,9 @@ It does not leave the already-issued call `InFlight`, persist the inadmissible
 proposal, or partially commit the response. All text and tool proposals produced
 by one model call are coalesced into one assistant message, and the
 proposal-ordered results for that batch are coalesced into the immediately
-following user message. Every provider-visible failure is this compact
+following user-role message. Every provider-visible failure is this compact
 provider-neutral JSON object: `{"error":{"detail":D,"kind":K}}`. `D` is the
-admitted executor detail, admitted owner denial reason, or JSON null; `K` is
+admitted executor detail, admitted user denial reason, or JSON null; `K` is
 exactly `unknown_tool`, `invalid_arguments`, `execution_failed`,
 `result_too_large`, `crash_lost`, `denied`, or `closed_by_turn_end`. Execution
 failures select their stored error kind and detail, denial selects `denied` and
@@ -1066,7 +1069,7 @@ attempts, and approval decisions in one batched query per record family before
 reconstructing provider history in frontier order; it performs no per-entry
 database round trips while holding the scheduler lock.
 
-`DecideToolRequest` joins the owner-global durable-command registry as its own
+`DecideToolRequest` joins the user-global durable-command registry as its own
 typed record family. Adding the dangerous posture originally advanced each
 defaults-bearing command family to kind-scoped storage version 2; version-1
 records reconstitute with `DangerousToolAutoApproval::Disabled`. Later

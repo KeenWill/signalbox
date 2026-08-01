@@ -1405,7 +1405,7 @@ async fn complete_active_text_turn(
     Ok(())
 }
 
-/// S28 / INV-038: the owner-visible operation distinguishes first insertion
+/// S28 / INV-038: the user-visible operation distinguishes first insertion
 /// from exact-snapshot reimport while retaining the winner's identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
@@ -1985,7 +1985,7 @@ async fn inv012_enforces_metadata_command_identity() -> Result<(), Box<dyn Error
     };
     assert_eq!(*session_id, first_session);
     assert_eq!(metadata, &replacement);
-    assert!(matches!(last_writer.actor(), MetadataActor::Owner {}));
+    assert!(matches!(last_writer.actor(), MetadataActor::User {}));
 
     connection
         .request_version(
@@ -2453,7 +2453,7 @@ async fn inv033_reads_current_metadata_projection() -> Result<(), Box<dyn Error>
     };
     assert_eq!(*session_id, first_session);
     assert_eq!(metadata, &replacement);
-    assert!(matches!(last_writer.actor(), MetadataActor::Owner {}));
+    assert!(matches!(last_writer.actor(), MetadataActor::User {}));
 
     drop(connection);
     runtime.stop().await
@@ -2876,7 +2876,7 @@ async fn park_turn_on_ambiguous_model_call(
 }
 
 /// S04 / S07 / INV-029: a turn parked on an ambiguous model call refuses
-/// ordinary input until the owner reconciliation decision releases the slot.
+/// ordinary input until the user reconciliation decision releases the slot.
 ///
 /// The refusal and the release are one contract: proving the release means
 /// nothing unless the same session is demonstrably wedged first, against the
@@ -5388,7 +5388,7 @@ async fn inv012_inv014_inv015_compaction_lifecycle_retries_are_exact() -> Result
     runtime.stop().await
 }
 
-/// INV-012: concurrent reuse of one owner-global command identity elects one
+/// INV-012: concurrent reuse of one user-global command identity elects one
 /// claimant and makes the loser inspect the committed winner exactly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
@@ -5881,7 +5881,7 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
 /// exactly as a colliding call identity already is. Discovering it in
 /// `complete` instead would cost a paid summary and admit no remint, because
 /// the in-flight lifecycle pins the identities by then. The rejected claim
-/// rolls back so the reminting caller can reuse its owner-global command.
+/// rolls back so the reminting caller can reuse its user-global command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s03_inv012_inv015_taken_compaction_result_identities_remint_before_sending()

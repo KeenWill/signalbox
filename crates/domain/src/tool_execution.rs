@@ -312,9 +312,9 @@ impl ToolBatch {
         }
     }
 
-    /// Applies or authoritatively rejects one owner decision against complete
+    /// Applies or authoritatively rejects one user decision against complete
     /// proposal-order state.
-    pub fn prepare_owner_decision(
+    pub fn prepare_user_decision(
         self,
         command: DecideToolRequest,
         continuation_attempt: Option<TurnAttemptId>,
@@ -1443,9 +1443,9 @@ fn reconstitute_batch(
         .iter()
         .position(|request| !approvals.contains_key(&request.id()))
         && requests.iter().skip(first_undecided + 1).any(|request| {
-            approvals.get(&request.id()).is_some_and(|approval| {
-                approval.source() == crate::ToolDecisionSource::OwnerCommand
-            })
+            approvals
+                .get(&request.id())
+                .is_some_and(|approval| approval.source() == crate::ToolDecisionSource::UserCommand)
         })
     {
         return Err(fail(
@@ -1723,9 +1723,9 @@ mod tests {
     }
 
     fn approval(request: ToolRequestId, decision: ToolApprovalDecision) -> ToolApprovalResolution {
-        ToolApprovalResolutionReconstitutionInput::owner_fixture(request, decision)
+        ToolApprovalResolutionReconstitutionInput::user_fixture(request, decision)
             .reconstitute()
-            .expect("owner decisions are implemented")
+            .expect("user decisions are implemented")
     }
 
     fn automatic_approval(request: ToolRequestId) -> ToolApprovalResolution {
@@ -1760,17 +1760,28 @@ mod tests {
         .expect("the first undecided request is exact")
     }
 
-    /// S10 / INV-010 / INV-012 / INV-020: owner decisions advance exactly one
-    /// earliest wait and retain explicit owner provenance.
+    /// S10 / INV-010 / INV-012 / INV-020: user decisions advance exactly one
+    /// earliest wait and retain explicit user provenance.
     #[test]
-    fn s10_inv010_inv012_inv020_owner_decision_advances_to_next_wait() {
+    fn s10_inv010_inv012_inv020_user_decision_advances_to_next_wait() {
+        let batch = awaiting_batch();
+        let current_request = batch
+            .requests()
+            .first()
+            .expect("the fixture has a current approval request")
+            .id();
+        let expected_next_request = batch
+            .requests()
+            .get(1)
+            .expect("the fixture has one following approval request")
+            .id();
         let command = DecideToolRequest::new(
             DurableCommandId::from_uuid(uuid::Uuid::from_u128(20)),
-            tool_request_id(10),
+            current_request,
             ToolApprovalDecision::Approve,
         );
-        let prepared = awaiting_batch()
-            .prepare_owner_decision(command, None)
+        let prepared = batch
+            .prepare_user_decision(command, None)
             .expect("the earliest decision needs no continuation yet");
         let DecideToolRequestResult::Applied(applied) = prepared.prepared_command().result() else {
             panic!("the earliest exact decision applies");
@@ -1778,13 +1789,15 @@ mod tests {
 
         assert_eq!(
             applied.resolution().source(),
-            ToolDecisionSource::OwnerCommand
+            ToolDecisionSource::UserCommand
         );
-        assert!(matches!(
-            prepared.active_phase(),
-            ActiveTurnPhase::AwaitingApproval { request }
-                if *request == tool_request_id(11)
-        ));
+        let ActiveTurnPhase::AwaitingApproval {
+            request: next_request,
+        } = prepared.active_phase()
+        else {
+            panic!("one decision advances to the next approval wait");
+        };
+        assert_eq!(*next_request, expected_next_request);
     }
 
     /// S10 / INV-010: durable approval history is exactly a proposal-order
@@ -1874,10 +1887,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-010: an owner decision is admissible only at the exact
+    /// S10 / INV-010: a user decision is admissible only at the exact
     /// durable approval wait and cannot manufacture a wait from execution.
     #[test]
-    fn s10_inv010_owner_decision_rejects_nonwaiting_batch_unchanged() {
+    fn s10_inv010_user_decision_rejects_nonwaiting_batch_unchanged() {
         let only = request(10, 0);
         let batch = ToolBatchReconstitutionInput::new(
             session_id(1),
@@ -1899,7 +1912,7 @@ mod tests {
             ToolApprovalDecision::Deny { reason: None },
         );
         let error = batch
-            .prepare_owner_decision(command, None)
+            .prepare_user_decision(command, None)
             .expect_err("execution is not an approval decision point");
 
         assert_eq!(
@@ -1915,7 +1928,7 @@ mod tests {
     }
 
     /// S10 / INV-012: one active batch cannot turn an existing request from a
-    /// different aggregate into an owner-global not-found result.
+    /// different aggregate into a user-global not-found result.
     #[test]
     fn s10_inv012_out_of_batch_decision_is_a_correlation_error() {
         let command = DecideToolRequest::new(
@@ -1924,7 +1937,7 @@ mod tests {
             ToolApprovalDecision::Approve,
         );
         let error = awaiting_batch()
-            .prepare_owner_decision(command, None)
+            .prepare_user_decision(command, None)
             .expect_err("batch-local absence cannot establish global absence");
 
         assert_eq!(

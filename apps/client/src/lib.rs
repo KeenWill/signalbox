@@ -1825,7 +1825,7 @@ async fn steer(
     Ok(())
 }
 
-/// Supplies the owner reconciliation decision a turn parked on an ambiguous
+/// Supplies the user reconciliation decision a turn parked on an ambiguous
 /// model call requires, then continues the session with the given content.
 ///
 /// The parked turn terminalizes as reconciliation-required — its ambiguity is
@@ -1996,7 +1996,7 @@ async fn await_and_report_turn(
     }
 }
 
-/// Supplies one owner decision for a pending tool request and validates the
+/// Supplies one user decision for a pending tool request and validates the
 /// exact recorded receipt.
 async fn decide(
     client: &mut ProcessClient,

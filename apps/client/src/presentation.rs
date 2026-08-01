@@ -1955,7 +1955,7 @@ const fn dangerous_tool_auto_approval_label(dangerous_tool_auto_approval: bool) 
 const fn last_writer_actor_label(last_writer: Option<MetadataLastWriter>) -> &'static str {
     match last_writer {
         Some(last_writer) => match last_writer.actor() {
-            MetadataActor::Owner {} => "owner",
+            MetadataActor::User {} => "user",
         },
         None => "none",
     }
@@ -2292,7 +2292,7 @@ mod tests {
                 archived: true,
                 last_writer: Some(MetadataLastWriter::new(
                     CanonicalU64::new(1_753_484_400_000_000),
-                    MetadataActor::Owner {},
+                    MetadataActor::User {},
                 )),
                 tags: &[String::from("daily"), String::from("plan")],
                 title: Some("Active plan"),
@@ -2301,7 +2301,7 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            00000000-0000-0000-0000-000000000001 archived=true defaults_version=2 model=00000000-0000-0000-0000-000000000003 dangerous_tool_auto_approval=approve-all last_writer=owner updated_at_unix_micros=1753484400000000 tags=daily,plan title=Active plan
+            00000000-0000-0000-0000-000000000001 archived=true defaults_version=2 model=00000000-0000-0000-0000-000000000003 dangerous_tool_auto_approval=approve-all last_writer=user updated_at_unix_micros=1753484400000000 tags=daily,plan title=Active plan
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2492,7 +2492,7 @@ mod tests {
                 acceptance_position: CanonicalU64::new(1),
                 state: TurnState::Queued {
                     accepted_input_id,
-                    content: InputContent::new("queued owner text".to_owned()),
+                    content: InputContent::new("queued user text".to_owned()),
                 },
             }],
         )
@@ -2506,7 +2506,7 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         assert!(rendered.contains("state=queued"));
-        assert!(rendered.contains("queued owner text"));
+        assert!(rendered.contains("queued user text"));
         assert!(stderr.is_empty());
     }
 

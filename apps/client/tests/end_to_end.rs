@@ -641,7 +641,7 @@ async fn s25_terminal_client_search_lists_only_sessions_matching_every_filter()
     assert!(listed.contains(&format!(
         "{matching_session} archived=false defaults_version=1 \
          model={SEARCH_FIXTURE_SELECTION} dangerous_tool_auto_approval=disabled \
-         last_writer=owner updated_at_unix_micros="
+         last_writer=user updated_at_unix_micros="
     )));
     assert!(listed.contains(" tags=daily,plan title=Active plan\n"));
     assert!(!listed.contains(&other_title_session));
@@ -1206,7 +1206,7 @@ async fn s28_terminal_client_completes_an_offline_imported_inspection() -> Resul
 
 /// S28: `latest` resolves to the imported conversation's final position,
 /// prints that concrete ordinal, and seeds the created session through it, so
-/// the owner never has to know the count to continue from the end.
+/// the user never has to know the count to continue from the end.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s28_terminal_client_completes_an_offline_latest_position_continuation()

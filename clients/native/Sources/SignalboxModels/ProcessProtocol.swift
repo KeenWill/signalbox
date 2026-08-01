@@ -240,18 +240,18 @@ public struct SignalboxMetadataLastWriter: Codable, Equatable, Sendable {
 }
 
 public enum SignalboxMetadataActor: Codable, Equatable, Sendable {
-  case owner
+  case user
   case unknown(kind: String, payload: [String: SignalboxJSONValue])
 
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
-    self = tagged.kind == "owner" ? .owner : .unknown(kind: tagged.kind, payload: tagged.payload)
+    self = tagged.kind == "user" ? .user : .unknown(kind: tagged.kind, payload: tagged.payload)
   }
 
   public func encode(to encoder: Encoder) throws {
     switch self {
-    case .owner:
-      try ["type": SignalboxJSONValue.string("owner")].encode(to: encoder)
+    case .user:
+      try ["type": SignalboxJSONValue.string("user")].encode(to: encoder)
     case .unknown(let kind, var payload):
       payload["type"] = .string(kind)
       try payload.encode(to: encoder)

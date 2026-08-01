@@ -307,7 +307,7 @@ impl SessionMetadataSnapshot {
 /// The canonical durable command replacing one complete metadata snapshot.
 ///
 /// Structural equality and hashing exclude `command_id` and cover every other
-/// caller-supplied semantic field. Construction admits only the owner boundary
+/// caller-supplied semantic field. Construction admits only the user boundary
 /// and execution of one exact tool request; callers cannot supply an arbitrary
 /// actor.
 #[derive(Clone, Debug)]
@@ -319,7 +319,7 @@ pub struct ReplaceSessionMetadata {
 }
 
 impl ReplaceSessionMetadata {
-    /// Constructs the complete canonical owner payload.
+    /// Constructs the complete canonical user payload.
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
@@ -328,7 +328,7 @@ impl ReplaceSessionMetadata {
         Self {
             command_id,
             session,
-            actor: Actor::Owner,
+            actor: Actor::User,
             replacement,
         }
     }
@@ -349,7 +349,7 @@ impl ReplaceSessionMetadata {
         }
     }
 
-    /// Returns the owner-global durable command identity.
+    /// Returns the user-global durable command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -1001,7 +1001,7 @@ mod tests {
         let content = metadata(true);
         let writer = SessionMetadataLastWriter::new(
             SessionMetadataUpdatedAt::from_unix_micros(17),
-            Actor::Owner,
+            Actor::User,
         );
         let snapshot =
             SessionMetadataSnapshot::from_recorded_write(session, content.clone(), writer);
@@ -1076,17 +1076,17 @@ mod tests {
     }
 
     #[test]
-    fn metadata_command_construction_fixes_owner_actor() {
+    fn metadata_command_construction_fixes_user_actor() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
 
-        assert_eq!(command.actor(), Actor::Owner);
+        assert_eq!(command.actor(), Actor::User);
     }
 
     /// INV-012: tool agency is semantic replay payload rather than an
     /// interchangeable attribution side channel.
     #[test]
     fn inv012_command_equality_includes_tool_actor() {
-        let owner = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
+        let user = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let tool = ReplaceSessionMetadata::new_for_tool(
             command_id(1),
             session_id(2),
@@ -1106,7 +1106,7 @@ mod tests {
             metadata(false),
         );
 
-        assert_ne!(owner, tool);
+        assert_ne!(user, tool);
         assert_eq!(tool, same_tool_another_identity);
         assert_eq!(
             command_hash(&tool),
@@ -1166,7 +1166,7 @@ mod tests {
         assert_eq!(applied.snapshot().content(), command.replacement());
         assert_eq!(
             applied.snapshot().last_writer(),
-            Some(SessionMetadataLastWriter::new(updated_at, Actor::Owner))
+            Some(SessionMetadataLastWriter::new(updated_at, Actor::User))
         );
     }
 
@@ -1247,9 +1247,9 @@ mod tests {
         );
     }
 
-    /// INV-012: a recorded owner command cannot substitute recovery agency.
+    /// INV-012: a recorded user command cannot substitute recovery agency.
     #[test]
-    fn inv012_applied_reconstitution_rejects_recovery_for_owner_command() {
+    fn inv012_applied_reconstitution_rejects_recovery_for_user_command() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let input = ReplaceSessionMetadataReconstitutionInput::applied(
             command.clone(),
@@ -1261,7 +1261,7 @@ mod tests {
         let error = input
             .clone()
             .reconstitute()
-            .expect_err("recovery cannot replace the canonical owner actor");
+            .expect_err("recovery cannot replace the canonical user actor");
 
         assert_eq!(
             error.failure(),
@@ -1271,9 +1271,9 @@ mod tests {
         assert_eq!(error.into_parts().0.command(), &command);
     }
 
-    /// INV-012: a rejected owner command cannot substitute recovery agency.
+    /// INV-012: a rejected user command cannot substitute recovery agency.
     #[test]
-    fn inv012_rejected_reconstitution_rejects_recovery_for_owner_command() {
+    fn inv012_rejected_reconstitution_rejects_recovery_for_user_command() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let error = ReplaceSessionMetadataReconstitutionInput::rejected_session_not_found(
             command.clone(),
@@ -1281,7 +1281,7 @@ mod tests {
             command.session(),
         )
         .reconstitute()
-        .expect_err("recovery cannot replace the canonical owner actor");
+        .expect_err("recovery cannot replace the canonical user actor");
 
         assert_eq!(
             error.failure(),

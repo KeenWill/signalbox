@@ -6929,7 +6929,7 @@ where
 
 /// Reconciles the exact active turn parked on an ambiguous model call.
 ///
-/// The parked turn's terminal disposition is proof-bearing, so the owner
+/// The parked turn's terminal disposition is proof-bearing, so the user
 /// supplies the interrupt authority the accepted lifecycle already defines and
 /// the successor input the session continues with. The narrow precondition read
 /// keeps this verb from becoming a general active-turn cancellation surface;
@@ -7450,7 +7450,7 @@ fn session_defaults_internal_diagnostic(
     }
 }
 
-/// Records one owner tool decision through the canonical decision command.
+/// Records one user tool decision through the canonical decision command.
 ///
 /// A claimed command identity reaches the durable replay boundary
 /// unconditionally (INV-012). Otherwise a narrow read refuses, before any
@@ -8679,7 +8679,7 @@ fn wire_metadata_snapshot(
 
 fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> Option<MetadataLastWriter> {
     let actor = match writer.actor() {
-        Actor::Owner => MetadataActor::Owner {},
+        Actor::User => MetadataActor::User {},
         Actor::Recovery | Actor::Model { .. } | Actor::Tool { .. } => return None,
     };
     Some(MetadataLastWriter::new(

@@ -1,5 +1,8 @@
 # Model-call execution
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
@@ -156,10 +159,10 @@ physical position. Otherwise the complete order is unchanged. Malformed range or
 append provenance fails closed. The resulting order becomes provider-neutral
 messages:
 
-- `OriginAcceptedInput` renders as a user message with its checked accepted
+- `OriginAcceptedInput` renders as a user-role message with its checked accepted
   input content;
-- `SteeringAcceptedInput` renders as a user message with the referenced accepted
-  input's checked content;
+- `SteeringAcceptedInput` renders as a user-role message with the referenced
+  accepted input's checked content;
 - `ModelIdentityChanged` renders as the structured provider-neutral identity
   change retaining the exact selected-model UUID and bound session-defaults
   epoch; the provider bridge later projects it as an injected user-role message
@@ -180,7 +183,7 @@ messages:
   cross-session, or non-successor placement authority fails rendering instead of
   inventing text. The same profile-specific text renders every relocation,
   including a working-directory move on the same runner and a later
-  owner-directed move of a healthy session
+  user-directed move of a healthy session
   ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
   What is genuinely unavailable is authority to execute through the retired
   placement; the old path is no longer the active working directory or writable
@@ -246,12 +249,12 @@ satisfying registration. If none remains, the proposal closes known-failed as
 `ToolUnavailableBeforePin` without creating an attempt or placement, because no
 runner execution was authorized. `RunnerAbandoned` exposes daemon-executable
 tools only. `RunnerLost` and `RunnerLostBeforePin` cannot prepare a new model
-operation while the turn awaits owner recovery. An operation prepared before
-loss retains its frozen snapshot and physical-call disposition, but a
-runner-only proposal from it cannot authorize against the lost locus. A
-combined-locus definition remains executable through its daemon locus when
-runner availability disappears; an already frozen runner selection never
-silently falls back after the provider returns.
+operation while the turn awaits user recovery. An operation prepared before loss
+retains its frozen snapshot and physical-call disposition, but a runner-only
+proposal from it cannot authorize against the lost locus. A combined-locus
+definition remains executable through its daemon locus when runner availability
+disappears; an already frozen runner selection never silently falls back after
+the provider returns.
 
 Each snapshot entry binds the exact model definition, permission/effect policy,
 and selected executable locus used to validate and authorize a returned
@@ -322,7 +325,7 @@ summary entry, and result frontier.
 Preparation also rejects a freshly minted summary-entry, result-frontier, or
 compaction identity that already names a durable record, so the daemon remints
 and retries before any provider interaction exactly as it does for a colliding
-call identity; the rejected claim rolls back, leaving the owner-global command
+call identity; the rejected claim rolls back, leaving the user-global command
 reusable. A uniqueness violation observed later, while applying the completion,
 is a decided fact rather than a retryable database failure: the completion fails
 closed and its in-flight call is left to startup recovery, because the prepared
@@ -343,7 +346,7 @@ operation, and the daemon performs no automatic pre-activation compaction;
 explicit compaction remains available.
 
 The explicit trigger uses the same compaction transaction and provider-call
-lifecycle. An explicit command first resolves its owner-global replay state; an
+lifecycle. An explicit command first resolves its user-global replay state; an
 equal applied command returns its original receipt even when the current
 deployment no longer resolves the original selection or compaction credential.
 Configuration and credential resolution occur only for an unseen command.
@@ -759,7 +762,7 @@ prints the semantic transcript; it is deliberately not the client protocol.
   adapters would have to construct and redact, and is routed through the
   provider provenance schema in
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
-- Unstopped ambiguity recovery is a parked state only: no owner decision,
+- Unstopped ambiguity recovery is a parked state only: no user decision,
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.

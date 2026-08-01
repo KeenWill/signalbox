@@ -9,7 +9,7 @@ use signalbox_domain::{
     ReviewTargetId,
 };
 
-/// One owner-global durable review-workflow command.
+/// One user-global durable review-workflow command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewWorkflowCommand {
     command_id: DurableCommandId,
@@ -31,7 +31,7 @@ impl ReviewWorkflowCommand {
         }
     }
 
-    /// Returns the owner-global durable command identity.
+    /// Returns the user-global durable command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -188,7 +188,7 @@ pub enum ReviewWorkflowCommandResult {
     },
 }
 
-/// Closed outcome of the owner-global durable command claim.
+/// Closed outcome of the user-global durable command claim.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewWorkflowCommandOutcome {
     /// First handling or an equal retry returned the recorded result.
