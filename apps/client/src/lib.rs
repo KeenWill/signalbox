@@ -639,7 +639,7 @@ async fn read_goal_text_argument(argument: GoalTextArgument) -> Result<String, C
 async fn read_goal_text_file(path: &Path) -> Result<String, ClientError> {
     let file = tokio::fs::File::open(path)
         .await
-        .map_err(ClientError::goal_text_file)?;
+        .map_err(|error| ClientError::goal_text_file(path, error))?;
     let read_limit = u64::try_from(MAX_CONTENT_FRAGMENT_BYTES)
         .ok()
         .and_then(|bound| bound.checked_add(1))
@@ -649,7 +649,7 @@ async fn read_goal_text_file(path: &Path) -> Result<String, ClientError> {
     bounded
         .read_to_end(&mut bytes)
         .await
-        .map_err(ClientError::goal_text_file)?;
+        .map_err(|error| ClientError::goal_text_file(path, error))?;
     if bytes.len() > MAX_CONTENT_FRAGMENT_BYTES {
         return Err(ClientError::Input(
             "goal text exceeds the 1 MiB UTF-8 byte limit",
@@ -2801,6 +2801,7 @@ fn terminal_event_state(
         }
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
+        | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. }
@@ -2952,6 +2953,7 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
+        | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. } => None,
@@ -4205,6 +4207,26 @@ mod tests {
         let result = read_goal_text_file(file.path()).await;
 
         assert!(matches!(result, Err(ClientError::Input(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn goal_text_file_error_retains_the_selected_path() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("missing-goal.txt");
+
+        let error = read_goal_text_file(&path)
+            .await
+            .expect_err("the absent goal text file is rejected");
+
+        assert!(error.to_string().contains(&path.display().to_string()));
+        assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
         Ok(())
     }
 

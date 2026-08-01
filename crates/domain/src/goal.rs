@@ -222,7 +222,7 @@ impl GoalReportRef {
         self.turn
     }
 
-    /// Returns the request whose arguments carry the report.
+    /// Returns the request immediately preceded by the report transcript part.
     pub const fn tool_request(self) -> ToolRequestId {
         self.tool_request
     }

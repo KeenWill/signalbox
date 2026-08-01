@@ -411,6 +411,39 @@ pub(crate) async fn continuation_exists(
     .await?)
 }
 
+pub(crate) async fn retired_queued_goal_turn_without_outbox(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<TurnId>, GoalRepositoryError> {
+    let turn = sqlx::query_scalar::<_, Uuid>(
+        "SELECT goal.turn_id
+           FROM goal_turn AS goal
+           JOIN accepted_input AS accepted
+             ON accepted.accepted_input_id = goal.accepted_input_id
+            AND accepted.session_id = goal.session_id
+            AND accepted.origin_turn_id = goal.turn_id
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = goal.session_id
+            AND lifecycle.turn_id = goal.turn_id
+            AND lifecycle.state_kind = 'queued'
+           LEFT JOIN goal_turn_retired_outbox_event AS retired
+             ON retired.session_id = goal.session_id
+            AND retired.turn_id = goal.turn_id
+          WHERE goal.session_id = $1
+            AND retired.turn_id IS NULL
+            AND NOT goal_turn_is_runtime_relevant(
+                goal.session_id,
+                goal.turn_id
+            )
+          ORDER BY accepted.acceptance_position DESC
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(turn.map(crate::mapping::turn_id_from_uuid))
+}
+
 struct EncodedSelection {
     kind: &'static str,
     direct: Option<Uuid>,

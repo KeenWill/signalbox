@@ -19,7 +19,7 @@ use signalbox_domain::{
     CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DeliveryRequest,
     DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockedReasonKind,
     GoalCommandRejection, GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind,
-    GoalModelProvenance, GoalNeed, GoalSchedulerProvenance, GoalState, GoalStatement,
+    GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
     GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest,
     PreparedCreateSession, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
@@ -249,6 +249,7 @@ async fn insert_goal_tool_request(
     request: ToolRequestId,
     tool_name: &str,
     arguments: &str,
+    declaration_text: &str,
 ) -> Result<(), Box<dyn Error>> {
     sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
         .execute(pool)
@@ -267,6 +268,30 @@ async fn insert_goal_tool_request(
     .bind(arguments)
     .execute(pool)
     .await?;
+    let producing_call = Uuid::from_u128(request.into_uuid().as_u128() + 0x1000);
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             assistant_text_value, producing_model_call_id,
+             assistant_response_part_ordinal, assistant_tool_request_id)
+         VALUES ($1, $2, 'assistant_text', $4, $3, 0, NULL),
+                ($1, $5, 'assistant_tool_use', NULL, $3, 1, $6)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(Uuid::from_u128(request.into_uuid().as_u128() + 0x2000))
+    .bind(producing_call)
+    .bind(declaration_text)
+    .bind(Uuid::from_u128(request.into_uuid().as_u128() + 0x3000))
+    .bind(request.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+
     sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
@@ -838,6 +863,49 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
         )
         .await?;
 
+    let retired_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM goal_turn_retired_outbox_event
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(obsolete.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retired_rows, 1);
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+    let mut retired = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                retired = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
+    let retired = retired.expect("the queued goal retirement event was offered");
+    assert_eq!(retired.session(), session(SESSION));
+    assert_eq!(
+        retired.kind(),
+        &DispatchedOutboxEventKind::GoalTurnRetired {
+            turn: obsolete.turn(),
+        }
+    );
+
     assert_eq!(activate_goal_turn(&pool, 0xd31).await?, replacement.turn());
 
     pool.close().await;
@@ -1329,15 +1397,15 @@ async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
     let need_text = "wait for user input";
     let need = GoalNeed::try_new(String::from(need_text)).expect("fixture need is admitted");
     let request = tool_request(0xf91);
-    let declaration_arguments = format!(
-        r#"{{"need":"{need_text}","reason":"user_input_required","transition":"blocked"}}"#
-    );
+    let declaration_arguments =
+        String::from(r#"{"reason":"user_input_required","transition":"blocked"}"#);
     insert_goal_tool_request(
         &pool,
         failed_turn.turn(),
         request,
         "goal_declare",
         &declaration_arguments,
+        need_text,
     )
     .await?;
     assert_applied_transition(
@@ -1400,7 +1468,8 @@ async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
 }
 
 /// INV-048: model goal events bind to the exact `goal_declare` name and
-/// canonical arguments carried by their trusted request identity.
+/// canonical arguments and adjacent declaration text carried by their trusted
+/// request identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
@@ -1426,8 +1495,7 @@ async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
     );
     let need =
         GoalNeed::try_new(String::from("wait for user input")).expect("fixture need is admitted");
-    let matching_arguments =
-        r#"{"need":"wait for user input","reason":"user_input_required","transition":"blocked"}"#;
+    let matching_arguments = r#"{"reason":"user_input_required","transition":"blocked"}"#;
     let wrong_name = tool_request(0xfa1);
     insert_goal_tool_request(
         &pool,
@@ -1435,6 +1503,7 @@ async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
         wrong_name,
         "inspect",
         matching_arguments,
+        "wait for user input",
     )
     .await?;
     let name_error = repository
@@ -1454,19 +1523,102 @@ async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
         attached_turn.turn(),
         wrong_arguments,
         "goal_declare",
-        r#"{"need":"different need","reason":"user_input_required","transition":"blocked"}"#,
+        r#"{"reason":"external_change_required","transition":"blocked"}"#,
+        "wait for user input",
     )
     .await?;
     let arguments_error = repository
         .declare_blocked(
             session(SESSION),
             GoalModelBlockedReasonKind::UserInputRequired,
-            need,
+            need.clone(),
             GoalModelProvenance::new(attached_turn.turn(), wrong_arguments),
         )
         .await
         .expect_err("mismatched canonical arguments cannot source a goal event");
     assert_model_declaration_request_rejected(arguments_error);
+
+    let wrong_text = tool_request(0xfa3);
+    insert_goal_tool_request(
+        &pool,
+        attached_turn.turn(),
+        wrong_text,
+        "goal_declare",
+        matching_arguments,
+        "different need",
+    )
+    .await?;
+    let text_error = repository
+        .declare_blocked(
+            session(SESSION),
+            GoalModelBlockedReasonKind::UserInputRequired,
+            need,
+            GoalModelProvenance::new(attached_turn.turn(), wrong_text),
+        )
+        .await
+        .expect_err("mismatched adjacent declaration text cannot source a goal event");
+    assert_model_declaration_request_rejected(text_error);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: the adjacent transcript representation carries the domain's full
+/// 1 MiB goal-report bound without widening normalized tool arguments.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_model_goal_declaration_carries_full_report_bound() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xbb1);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x9b1),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("carry the full final report")),
+                ),
+                Some(attached_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    let report_text = "r".repeat(1_048_576);
+    let report = GoalReport::try_new(report_text.clone()).expect("the exact bound is admitted");
+    let request = tool_request(0xfb1);
+    insert_goal_tool_request(
+        &pool,
+        attached_turn.turn(),
+        request,
+        "goal_declare",
+        r#"{"transition":"achieved"}"#,
+        &report_text,
+    )
+    .await?;
+
+    assert_eq!(
+        repository
+            .load_model_declaration_text(
+                session(SESSION),
+                GoalModelProvenance::new(attached_turn.turn(), request),
+            )
+            .await?,
+        Some(report_text)
+    );
+    assert_applied_transition(
+        repository
+            .declare_achieved(
+                session(SESSION),
+                report,
+                GoalModelProvenance::new(attached_turn.turn(), request),
+            )
+            .await?,
+    );
 
     pool.close().await;
     drop(container);

@@ -277,6 +277,15 @@ impl ChatTurns {
         false
     }
 
+    fn retired(&mut self, turn_id: CanonicalUuid) -> bool {
+        if self.awaited_turn == Some(turn_id) && self.active_turn.is_none() {
+            self.awaited_turn = None;
+            self.approval_request = None;
+            return true;
+        }
+        false
+    }
+
     fn terminalized(&mut self, turn_id: CanonicalUuid) -> bool {
         if self.active_turn == Some(turn_id) {
             self.active_turn = None;
@@ -1119,6 +1128,13 @@ fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnE
             turns.accepted(*turn_id);
             TurnEventEffect::None
         }
+        SessionEvent::GoalTurnRetired { turn_id } => {
+            if turns.retired(*turn_id) {
+                TurnEventEffect::Ready
+            } else {
+                TurnEventEffect::None
+            }
+        }
         SessionEvent::TurnActivated { turn_id, .. } => {
             if turns.activated(*turn_id) {
                 TurnEventEffect::Activated(*turn_id)
@@ -1483,6 +1499,72 @@ mod tests {
         );
 
         assert_eq!(turns.status(), Some(ChatTurnStatus::Active(turn_id)));
+    }
+
+    #[test]
+    fn retired_queued_goal_turn_admits_the_replacement_activation() {
+        const RETIRED_TURN_IDENTITY: u128 = 61;
+        const RETIRED_INPUT_IDENTITY: u128 = 62;
+        const REPLACEMENT_TURN_IDENTITY: u128 = 63;
+        const REPLACEMENT_INPUT_IDENTITY: u128 = 64;
+        const REPLACEMENT_ATTEMPT_IDENTITY: u128 = 65;
+        let retired_turn = CanonicalUuid::from_uuid(Uuid::from_u128(RETIRED_TURN_IDENTITY));
+        let replacement_turn = CanonicalUuid::from_uuid(Uuid::from_u128(REPLACEMENT_TURN_IDENTITY));
+        let mut turns = ChatTurns::default();
+
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::InputAccepted {
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        RETIRED_INPUT_IDENTITY,
+                    )),
+                    turn_id: retired_turn,
+                    acceptance_position: CanonicalU64::new(1),
+                    content: InputContent::new(String::from("obsolete goal input")),
+                },
+            ),
+            TurnEventEffect::None
+        );
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::GoalTurnRetired {
+                    turn_id: retired_turn,
+                },
+            ),
+            TurnEventEffect::Ready
+        );
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::InputAccepted {
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        REPLACEMENT_INPUT_IDENTITY,
+                    )),
+                    turn_id: replacement_turn,
+                    acceptance_position: CanonicalU64::new(2),
+                    content: InputContent::new(String::from("replacement goal input")),
+                },
+            ),
+            TurnEventEffect::None
+        );
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::TurnActivated {
+                    turn_id: replacement_turn,
+                    current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        REPLACEMENT_ATTEMPT_IDENTITY,
+                    )),
+                },
+            ),
+            TurnEventEffect::Activated(replacement_turn)
+        );
+        assert_eq!(
+            turns.status(),
+            Some(ChatTurnStatus::Active(replacement_turn))
+        );
     }
 
     #[test]

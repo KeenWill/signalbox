@@ -267,6 +267,7 @@ DECLARE
     stored_tool_name text;
     stored_arguments_kind text;
     stored_arguments jsonb;
+    declared_text text;
     expected_arguments jsonb;
 BEGIN
     IF NEW.model_tool_request_id IS NULL THEN
@@ -279,26 +280,40 @@ BEGIN
         CASE
             WHEN request.arguments_kind = 'json'
                 THEN request.arguments_text::jsonb
-        END
-      INTO stored_tool_name, stored_arguments_kind, stored_arguments
+        END,
+        declaration.assistant_text_value
+      INTO stored_tool_name, stored_arguments_kind, stored_arguments,
+           declared_text
       FROM tool_request AS request
-     WHERE request.request_id = NEW.model_tool_request_id;
+      JOIN semantic_transcript_entry AS tool_use
+        ON tool_use.source_session_id = request.session_id
+       AND tool_use.producing_model_call_id = request.producing_model_call_id
+       AND tool_use.payload_kind = 'assistant_tool_use'
+       AND tool_use.assistant_tool_request_id = request.request_id
+      JOIN semantic_transcript_entry AS declaration
+        ON declaration.source_session_id = tool_use.source_session_id
+       AND declaration.producing_model_call_id = tool_use.producing_model_call_id
+       AND declaration.payload_kind = 'assistant_text'
+       AND declaration.assistant_response_part_ordinal + 1 =
+           tool_use.assistant_response_part_ordinal
+     WHERE request.request_id = NEW.model_tool_request_id
+       AND request.session_id = NEW.session_id
+       AND request.turn_id = NEW.model_turn_id;
 
     expected_arguments := CASE NEW.event_kind
         WHEN 'achieved' THEN jsonb_build_object(
-            'transition', 'achieved',
-            'report', NEW.report
+            'transition', 'achieved'
         )
         WHEN 'blocked' THEN jsonb_build_object(
             'transition', 'blocked',
-            'reason', NEW.blocked_reason,
-            'need', NEW.need
+            'reason', NEW.blocked_reason
         )
     END;
 
     IF stored_tool_name IS DISTINCT FROM 'goal_declare'
         OR stored_arguments_kind IS DISTINCT FROM 'json'
         OR stored_arguments IS DISTINCT FROM expected_arguments
+        OR declared_text IS DISTINCT FROM COALESCE(NEW.report, NEW.need)
     THEN
         RAISE EXCEPTION 'goal model event lacks its exact declaration request'
             USING ERRCODE = '23514',
@@ -921,6 +936,175 @@ BEGIN
     END CASE;
     IF matching_records <> 1 THEN
         RAISE EXCEPTION 'durable command % requires exactly one % typed record', NEW.command_id, NEW.command_kind USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+-- A queued goal turn can become intentionally ineligible without entering a
+-- terminal turn-lifecycle state. Publish that exact retirement so a live
+-- follower can discard its stale queued identity before a replacement arrives.
+ALTER TABLE outbox_event
+    DROP CONSTRAINT outbox_event_kind_closed;
+
+ALTER TABLE outbox_event
+    ADD CONSTRAINT outbox_event_kind_closed
+        CHECK (
+            event_kind IN (
+                'session_created',
+                'input_accepted',
+                'goal_turn_retired',
+                'turn_activated',
+                'turn_failed',
+                'model_call_transition',
+                'tool_batch_transition',
+                'context_compacted',
+                'turn_completed',
+                'turn_refused',
+                'turn_cancelled',
+                'turn_reconciliation_required'
+            )
+        );
+
+CREATE TABLE goal_turn_retired_outbox_event (
+    event_sequence numeric(20, 0) PRIMARY KEY,
+    event_kind text NOT NULL,
+    storage_version smallint NOT NULL,
+    session_id uuid NOT NULL,
+    turn_id uuid NOT NULL UNIQUE,
+
+    CONSTRAINT goal_turn_retired_outbox_kind_closed
+        CHECK (event_kind = 'goal_turn_retired'),
+    CONSTRAINT goal_turn_retired_outbox_version_supported
+        CHECK (storage_version = 1),
+    CONSTRAINT goal_turn_retired_outbox_header_fk
+        FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
+        REFERENCES outbox_event (
+            event_sequence,
+            event_kind,
+            storage_version,
+            session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT goal_turn_retired_outbox_goal_turn_fk
+        FOREIGN KEY (session_id, turn_id)
+        REFERENCES goal_turn (session_id, turn_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TRIGGER goal_turn_retired_outbox_event_is_append_only
+BEFORE UPDATE OR DELETE ON goal_turn_retired_outbox_event
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER goal_turn_retired_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON goal_turn_retired_outbox_event
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE FUNCTION require_goal_turn_retired_outbox_state()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM goal_turn AS goal
+          JOIN turn_lifecycle AS lifecycle
+            ON lifecycle.session_id = goal.session_id
+           AND lifecycle.turn_id = goal.turn_id
+         WHERE goal.session_id = NEW.session_id
+           AND goal.turn_id = NEW.turn_id
+           AND lifecycle.state_kind = 'queued'
+           AND NOT goal_turn_is_runtime_relevant(
+               goal.session_id,
+               goal.turn_id
+           )
+    ) THEN
+        RAISE EXCEPTION 'goal turn retirement must name queued ineligible work'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'goal_turn_retired_outbox_state';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER goal_turn_retired_outbox_state
+AFTER INSERT OR UPDATE ON goal_turn_retired_outbox_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_goal_turn_retired_outbox_state();
+
+CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_records bigint;
+BEGIN
+    CASE NEW.event_kind
+        WHEN 'session_created' THEN
+            SELECT count(*) INTO matching_records
+              FROM session_created_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'input_accepted' THEN
+            SELECT count(*) INTO matching_records
+              FROM input_accepted_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'goal_turn_retired' THEN
+            SELECT count(*) INTO matching_records
+              FROM goal_turn_retired_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_activated' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_activated_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_failed' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_failed_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'model_call_transition' THEN
+            SELECT count(*) INTO matching_records
+              FROM model_call_transition_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'tool_batch_transition' THEN
+            SELECT count(*) INTO matching_records
+              FROM tool_batch_transition_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'context_compacted' THEN
+            SELECT count(*) INTO matching_records
+              FROM context_compacted_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_completed' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_completed_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_refused' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_refused_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_cancelled' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_cancelled_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_reconciliation_required' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_reconciliation_required_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        ELSE
+            RAISE EXCEPTION 'unsupported outbox event kind %', NEW.event_kind
+                USING ERRCODE = '23514';
+    END CASE;
+
+    IF matching_records <> 1 THEN
+        RAISE EXCEPTION 'outbox event % requires exactly one % typed record',
+            NEW.event_sequence,
+            NEW.event_kind
+            USING ERRCODE = '23503';
     END IF;
     RETURN NULL;
 END;

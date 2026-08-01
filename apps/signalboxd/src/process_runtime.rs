@@ -422,6 +422,7 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         }
         DispatchedOutboxEventKind::SessionCreated
         | DispatchedOutboxEventKind::InputAccepted { .. }
+        | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. } => {}
     }
@@ -9863,6 +9864,9 @@ enum ProcessUpdateEvent {
         acceptance_position: u64,
         content: String,
     },
+    GoalTurnRetired {
+        turn: signalbox_domain::TurnId,
+    },
     TurnActivated {
         turn: signalbox_domain::TurnId,
         current_attempt: signalbox_domain::TurnAttemptId,
@@ -9927,6 +9931,9 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 acceptance_position: acceptance_position.as_u64(),
                 content: content.clone(),
             },
+            DispatchedOutboxEventKind::GoalTurnRetired { turn } => {
+                Self::GoalTurnRetired { turn: *turn }
+            }
             DispatchedOutboxEventKind::TurnActivated {
                 turn,
                 current_attempt,
@@ -10028,6 +10035,9 @@ impl ProcessUpdateEvent {
                 turn_id: wire_uuid(turn.into_uuid()),
                 acceptance_position: CanonicalU64::new(*acceptance_position),
                 content: InputContent::new(content.clone()),
+            },
+            Self::GoalTurnRetired { turn } => SessionEvent::GoalTurnRetired {
+                turn_id: wire_uuid(turn.into_uuid()),
             },
             Self::TurnActivated {
                 turn,
@@ -11967,6 +11977,19 @@ context_window_tokens = 200000
             )),
             ModelCallState::Terminal {
                 disposition: ModelCallDisposition::Ambiguous
+            }
+        );
+    }
+
+    #[test]
+    fn goal_turn_retirement_projects_to_the_exact_wire_identity() {
+        let turn = TurnId::from_uuid(Uuid::from_u128(7));
+        let update = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::GoalTurnRetired { turn });
+
+        assert_eq!(
+            update.wire(),
+            SessionEvent::GoalTurnRetired {
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
             }
         );
     }

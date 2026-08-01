@@ -23,23 +23,20 @@ use uuid::Uuid;
 use crate::HubModelConfiguration;
 
 pub(crate) const GOAL_DECLARE_NAME: &str = "goal_declare";
-const GOAL_DECLARE_DESCRIPTION: &str =
-    "Declares the current commissioned goal achieved or blocked for the invoking session.";
+const GOAL_DECLARE_DESCRIPTION: &str = "Declares the current commissioned goal achieved or blocked for the invoking session. Write the exact report or need as assistant text immediately before this call.";
 const GOAL_DECLARE_SCHEMA: &str = r#"{
     "oneOf": [
         {
             "additionalProperties": false,
             "properties": {
-                "report": {"minLength": 1, "type": "string"},
                 "transition": {"const": "achieved"}
             },
-            "required": ["transition", "report"],
+            "required": ["transition"],
             "type": "object"
         },
         {
             "additionalProperties": false,
             "properties": {
-                "need": {"minLength": 1, "type": "string"},
                 "reason": {
                     "enum": [
                         "user_input_required",
@@ -49,14 +46,13 @@ const GOAL_DECLARE_SCHEMA: &str = r#"{
                 },
                 "transition": {"const": "blocked"}
             },
-            "required": ["transition", "reason", "need"],
+            "required": ["transition", "reason"],
             "type": "object"
         }
     ],
     "type": "object"
 }"#;
-const GOAL_DECLARE_INVALID_ARGUMENTS: &str =
-    "expected an achieved report or a model-selectable blocked reason and need";
+const GOAL_DECLARE_INVALID_ARGUMENTS: &str = "expected achieved or a model-selectable blocked reason; write the exact report or need as assistant text immediately before the call";
 const GOAL_DECLARE_REJECTED: &str =
     "goal transition rejected for the invoking session and goal turn";
 const GOAL_DECLARE_RESULT: &str = "{\"status\":\"applied\"}";
@@ -149,12 +145,9 @@ impl ToolArgumentValidator for GoalDeclarationArgumentValidator {
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "transition", rename_all = "snake_case", deny_unknown_fields)]
 enum GoalDeclarationArguments {
-    Achieved {
-        report: String,
-    },
+    Achieved {},
     Blocked {
         reason: GoalDeclarationBlockedReason,
-        need: String,
     },
 }
 
@@ -180,11 +173,8 @@ impl From<GoalDeclarationBlockedReason> for GoalModelBlockedReasonKind {
 
 #[derive(Debug)]
 enum CheckedGoalDeclaration {
-    Achieved(GoalReport),
-    Blocked {
-        reason: GoalModelBlockedReasonKind,
-        need: GoalNeed,
-    },
+    Achieved,
+    Blocked { reason: GoalModelBlockedReasonKind },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,15 +186,10 @@ fn decode_goal_declaration(
     let decoded: GoalDeclarationArguments =
         serde_json::from_str(arguments.as_str()).map_err(|_| InvalidGoalDeclaration)?;
     match decoded {
-        GoalDeclarationArguments::Achieved { report } => GoalReport::try_new(report)
-            .map(CheckedGoalDeclaration::Achieved)
-            .map_err(|_| InvalidGoalDeclaration),
-        GoalDeclarationArguments::Blocked { reason, need } => GoalNeed::try_new(need)
-            .map(|need| CheckedGoalDeclaration::Blocked {
-                reason: reason.into(),
-                need,
-            })
-            .map_err(|_| InvalidGoalDeclaration),
+        GoalDeclarationArguments::Achieved {} => Ok(CheckedGoalDeclaration::Achieved),
+        GoalDeclarationArguments::Blocked { reason } => Ok(CheckedGoalDeclaration::Blocked {
+            reason: reason.into(),
+        }),
     }
 }
 
@@ -271,13 +256,33 @@ impl ToolExecutor for GoalDeclarationExecutor {
             .map_err(|_| GoalDeclarationExecutorError::ArgumentValidationDrift)?;
         let correlation = invocation.correlation();
         let provenance = GoalModelProvenance::new(correlation.turn(), correlation.request());
+        let declaration_text = self
+            .repository
+            .load_model_declaration_text(correlation.session(), provenance)
+            .await
+            .map_err(GoalDeclarationExecutorError::Repository)?;
+        let Some(declaration_text) = declaration_text else {
+            return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.rejected.clone()),
+            }));
+        };
         let outcome = match declaration {
-            CheckedGoalDeclaration::Achieved(report) => {
+            CheckedGoalDeclaration::Achieved => {
+                let Ok(report) = GoalReport::try_new(declaration_text) else {
+                    return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                        detail: Some(self.rejected.clone()),
+                    }));
+                };
                 self.repository
                     .declare_achieved(correlation.session(), report, provenance)
                     .await
             }
-            CheckedGoalDeclaration::Blocked { reason, need } => {
+            CheckedGoalDeclaration::Blocked { reason } => {
+                let Ok(need) = GoalNeed::try_new(declaration_text) else {
+                    return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                        detail: Some(self.rejected.clone()),
+                    }));
+                };
                 self.repository
                     .declare_blocked(correlation.session(), reason, need, provenance)
                     .await
@@ -470,8 +475,7 @@ mod tests {
 
     #[test]
     fn goal_declaration_arguments_reject_foreign_session_identity_by_construction() {
-        let foreign_session =
-            arguments(r#"{"transition":"achieved","report":"done","session_id":"foreign"}"#);
+        let foreign_session = arguments(r#"{"transition":"achieved","session_id":"foreign"}"#);
 
         assert_eq!(
             decode_goal_declaration(&foreign_session).expect_err("session identity is not input"),
@@ -482,7 +486,7 @@ mod tests {
     #[test]
     fn goal_declaration_arguments_reject_scheduler_only_execution_failure_reason() {
         let scheduler_reason =
-            arguments(r#"{"transition":"blocked","reason":"execution_failure","need":"retry"}"#);
+            arguments(r#"{"transition":"blocked","reason":"execution_failure"}"#);
 
         assert_eq!(
             decode_goal_declaration(&scheduler_reason)
@@ -492,17 +496,14 @@ mod tests {
     }
 
     #[test]
-    fn goal_declaration_arguments_admit_achievement_without_session_identity() {
-        let report = "final report";
-        let achieved = arguments(r#"{"transition":"achieved","report":"final report"}"#);
+    fn goal_declaration_arguments_admit_achievement_without_identity_or_report_text() {
+        let achieved = arguments(r#"{"transition":"achieved"}"#);
 
-        let CheckedGoalDeclaration::Achieved(decoded) =
+        let CheckedGoalDeclaration::Achieved =
             decode_goal_declaration(&achieved).expect("achievement is admitted")
         else {
             panic!("fixture decodes as achievement");
         };
-
-        assert_eq!(decoded.as_str(), report);
     }
 
     #[test]

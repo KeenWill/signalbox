@@ -700,9 +700,9 @@ and count, replays every event through the admitted lifecycle transitions, and
 checks that the replay derives the declared current projection. Goal text uses
 the ordinary bounded text grammar; the closed lifecycle, event, reason, and
 provenance correlations are owned by [goal mode](goal-mode.md). The daemon
-completes an owner-private temporary-file spool, then releases both the decoded
-goal aggregate and snapshot-reader permit before writing the first history frame
-to the connection.
+completes an effective-user-private temporary-file spool, then releases both the
+decoded goal aggregate and snapshot-reader permit before writing the first
+history frame to the connection.
 
 Review mutations return exactly one stable acknowledgement:
 
@@ -1416,6 +1416,7 @@ closed `event` object. The protocol admits these event shapes:
 | ------------------------------ | ----------------------------------------------------------------------------- |
 | `session_created`              | none                                                                          |
 | `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`          |
+| `goal_turn_retired`            | `turn_id`                                                                     |
 | `turn_activated`               | `turn_id` and `current_attempt_id`                                            |
 | `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                       |
 | `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
@@ -1423,6 +1424,12 @@ closed `event` object. The protocol admits these event shapes:
 | `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
 | `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                |
 | `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+
+A `goal_turn_retired` event clears only the exact queued turn it names; an
+unmatched or already-active identity leaves local turn controls unchanged. A
+superseding transaction publishes this event before its replacement
+`input_accepted`, so a live follower cannot retain the obsolete queued identity
+and ignore the replacement activation.
 
 The protocol additionally admits
 `context_compacted { context_compaction_id, model_call_id, through_position, summary_entry_id, result_frontier_id }`.

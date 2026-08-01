@@ -25,6 +25,7 @@ use crate::{
         GoalTurnInsertion, GoalTurnTerminalState, continuation_exists, current_goal_turn,
         goal_turn_frozen_alias_definition, goal_turn_generation, goal_turn_terminal_state,
         insert_goal_turn, next_goal_turn_acceptance_position,
+        retired_queued_goal_turn_without_outbox,
     },
     mapping::{
         DurableCommandIdMappingError, GoalEventDiscriminator, GoalOperationKind,
@@ -35,6 +36,7 @@ use crate::{
         positive_u64_from_numeric, session_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
+    outbox::{self, OutboxEvent},
     session::SessionCorruption,
 };
 
@@ -285,6 +287,20 @@ impl GoalRepository {
         insert_command(&mut transaction, &command, &result).await?;
         if let GoalCommandResult::Applied(event) = &result {
             insert_event(&mut transaction, command.session(), event).await?;
+            if event_may_retire_queued_turn(event)
+                && let Some(retired) =
+                    retired_queued_goal_turn_without_outbox(&mut transaction, command.session())
+                        .await?
+            {
+                outbox::append(
+                    &mut transaction,
+                    OutboxEvent::GoalTurnRetired {
+                        session: command.session(),
+                        turn: retired,
+                    },
+                )
+                .await?;
+            }
             if event_starts_pursuit(event) {
                 let candidates = candidates.ok_or(GoalCorruption::Missing(
                     "turn candidates for pursuing command",
@@ -309,6 +325,40 @@ impl GoalRepository {
         }
         commit(transaction).await?;
         Ok(GoalCommandHandlingOutcome::Recorded(result))
+    }
+
+    /// Loads the exact assistant-text part immediately preceding a correlated
+    /// `goal_declare` request in the same provider response.
+    pub async fn load_model_declaration_text(
+        &self,
+        session: SessionId,
+        provenance: GoalModelProvenance,
+    ) -> Result<Option<String>, GoalRepositoryError> {
+        let text = sqlx::query_scalar::<_, String>(
+            "SELECT declaration.assistant_text_value
+               FROM tool_request AS request
+               JOIN semantic_transcript_entry AS tool_use
+                 ON tool_use.source_session_id = request.session_id
+                AND tool_use.producing_model_call_id = request.producing_model_call_id
+                AND tool_use.payload_kind = 'assistant_tool_use'
+                AND tool_use.assistant_tool_request_id = request.request_id
+               JOIN semantic_transcript_entry AS declaration
+                 ON declaration.source_session_id = tool_use.source_session_id
+                AND declaration.producing_model_call_id = tool_use.producing_model_call_id
+                AND declaration.payload_kind = 'assistant_text'
+                AND declaration.assistant_response_part_ordinal + 1 =
+                    tool_use.assistant_response_part_ordinal
+              WHERE request.request_id = $1
+                AND request.session_id = $2
+                AND request.turn_id = $3
+                AND request.tool_name = 'goal_declare'",
+        )
+        .bind(tool_request_id_to_uuid(provenance.tool_request()))
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(provenance.turn()))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(text)
     }
 
     /// Loads one complete durable user-command receipt.
@@ -570,6 +620,16 @@ fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
         | GoalEventKind::UserStopped { .. }
         | GoalEventKind::Superseded { .. } => false,
     })
+}
+
+fn event_may_retire_queued_turn(event: &GoalEvent) -> bool {
+    match event.kind() {
+        GoalEventKind::UserStopped { .. } | GoalEventKind::Superseded { .. } => true,
+        GoalEventKind::Commissioned { .. }
+        | GoalEventKind::Blocked { .. }
+        | GoalEventKind::Resumed { .. }
+        | GoalEventKind::Achieved { .. } => false,
+    }
 }
 
 fn event_starts_pursuit(event: &GoalEvent) -> bool {

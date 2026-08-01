@@ -62,13 +62,15 @@ through the session-scoped goal declaration tool. The declaration has no
 caller-supplied session identity. Trusted tool-dispatch correlation supplies the
 invoking session, turn, and tool-request identity, and persistence requires that
 exact triple to name the request. The request must name `goal_declare`, carry
-canonical JSON, and its exact transition, reason, need, or report values must
-match the event it causes. A request from another tool or with different
-arguments cannot commit. Only the current goal turn may declare; an otherwise
-valid request from an older turn returns `NotCurrentGoalTurn` without appending
-an event. A tool-request identity can cause at most one goal declaration event.
-An achieved event stores the exact final report and derives its transcript
-reference from that same invocation.
+canonical transition-and-reason JSON, and be immediately preceded by one
+assistant-text part in the same model response. That text is the exact need or
+report and must match the event the request causes. A request from another tool,
+with different arguments, or without the adjacent matching text cannot commit.
+Only the current goal turn may declare; an otherwise valid request from an older
+turn returns `NotCurrentGoalTurn` without appending an event. A tool-request
+identity can cause at most one goal declaration event. An achieved event stores
+the exact final report and derives its transcript reference from that same
+invocation.
 
 **Implemented behavior.** Model-selectable blocked reasons are
 `user_input_required`, `external_change_required`, and `authorization_required`.
@@ -126,9 +128,12 @@ excluded from queue predecessor selection. When such a retired origin falls
 inside an active turn's accepted-input tail, the runtime projection retains its
 immutable acceptance position with an explicit retired-goal-origin marker while
 omitting it from the process transcript's turn inventory; tail completeness and
-the session acceptance high-water mark therefore remain exact. Durable event and
-input correlation makes retrying command delivery idempotent rather than
-duplicating continuation work.
+the session acceptance high-water mark therefore remain exact. A stop or
+supersede that retires queued goal work appends a durable `goal_turn_retired`
+update before any replacement input acceptance. A live follower clears only that
+exact queued identity, so obsolete work cannot mask a replacement activation.
+Durable event and input correlation makes retrying command delivery idempotent
+rather than duplicating continuation work.
 
 ## Persistence and process surfaces
 
@@ -146,8 +151,9 @@ derives from its exact defaults epoch. Model-declaration requests and
 scheduler-failure turns are single-use; composite foreign keys enforce
 user-command, model-invocation, and scheduler-turn provenance, while a deferred
 constraint binds each model event to the exact `goal_declare` name and canonical
-arguments of its request. Loads replay complete rows through the domain
-aggregate rather than reading a mutable current-state projection (INV-048).
+arguments of its request and the immediately preceding assistant-text part.
+Loads replay complete rows through the domain aggregate rather than reading a
+mutable current-state projection (INV-048).
 
 **Implemented behavior.** The process protocol exposes attach, show, resume,
 stop, and supersede requests. Show returns the current generation and complete

@@ -420,10 +420,10 @@ struct GoalStatementArguments {
     /// Session whose goal lineage is changed.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
     session_id: CanonicalUuid,
-    /// Exact immutable commissioned statement.
+    /// Exact immutable commissioned statement; at most 1 MiB of UTF-8.
     #[arg(long, value_name = "TEXT")]
     statement: Option<String>,
-    /// Read the exact immutable commissioned statement from one file.
+    /// Read the exact immutable commissioned statement from one file; at most 1 MiB of UTF-8.
     #[arg(long, value_name = "FILE")]
     statement_file: Option<PathBuf>,
     /// Reuse an exact non-reserved durable command identity.
@@ -442,10 +442,10 @@ struct GoalResumeArguments {
     /// Session whose blocked goal resumes.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
     session_id: CanonicalUuid,
-    /// Exact guidance delivered as the next goal turn's input.
+    /// Optional exact next-turn guidance; at most 1 MiB of UTF-8. Omit both guidance options to use the immutable statement.
     #[arg(long, value_name = "TEXT")]
     guidance: Option<String>,
-    /// Read the exact next-turn guidance from one file.
+    /// Read optional next-turn guidance from one file; at most 1 MiB of UTF-8. Omit both guidance options to use the immutable statement.
     #[arg(long, value_name = "FILE")]
     guidance_file: Option<PathBuf>,
     /// Reuse an exact non-reserved durable command identity.
@@ -3490,6 +3490,26 @@ mod tests {
         .expect("the explicit supported format and scan directory parse");
 
         assert_codex_scan_import(parsed, Path::new("conversation-directory"));
+    }
+
+    #[test]
+    fn goal_help_states_text_bounds_and_absent_guidance_behavior() {
+        let ParseOutcome::Help(attach_help) =
+            parse(["goal", "attach", "--help"].map(OsString::from))
+                .expect("goal attach help renders")
+        else {
+            panic!("goal attach --help must return help text");
+        };
+        let ParseOutcome::Help(resume_help) =
+            parse(["goal", "resume", "--help"].map(OsString::from))
+                .expect("goal resume help renders")
+        else {
+            panic!("goal resume --help must return help text");
+        };
+
+        assert!(attach_help.contains("at most 1 MiB of UTF-8"));
+        assert!(resume_help.contains("at most 1 MiB of UTF-8"));
+        assert!(resume_help.contains("Omit both guidance options to use the immutable statement"));
     }
 
     #[test]

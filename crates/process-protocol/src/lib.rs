@@ -1912,7 +1912,7 @@ pub enum GoalLifecycleState {
     Achieved {
         /// Turn containing the final-report declaration.
         turn_id: CanonicalUuid,
-        /// Tool request whose arguments carry the final report.
+        /// Tool request immediately preceded by the final-report transcript part.
         tool_request_id: CanonicalUuid,
     },
     /// The user explicitly ended this generation.
@@ -3862,6 +3862,11 @@ pub enum SessionEvent {
         acceptance_position: CanonicalU64,
         /// Exact accepted user text.
         content: InputContent,
+    },
+    /// A queued goal turn became intentionally ineligible.
+    GoalTurnRetired {
+        /// Exact immutable queued turn retired by a goal transition.
+        turn_id: CanonicalUuid,
     },
     /// A queued turn became active.
     TurnActivated {
@@ -8725,6 +8730,31 @@ mod tests {
             request(2)?,
             tool_reconciliation,
         )?;
+        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
+    /// INV-033 / INV-048: queued goal retirement has one exact closed wire
+    /// shape and round-trips its immutable turn identity.
+    #[test]
+    fn inv033_inv048_goal_turn_retired_event_round_trips() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let message = ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(1),
+            session_id: uuid(1),
+            event: SessionEvent::GoalTurnRetired { turn_id: uuid(2) },
+        };
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(3)?, message)?;
+
+        assert_eq!(
+            String::from_utf8(encode_server_line(&frame)?)?,
+            concat!(
+                "{\"version\":1,\"request_id\":\"3\",\"message\":{\"type\":\"session_event\",\"cursor\":\"1\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000001\",",
+                "\"event\":{\"type\":\"goal_turn_retired\",",
+                "\"turn_id\":\"00000000-0000-0000-0000-000000000002\"}}}\n"
+            )
+        );
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
         Ok(())
     }

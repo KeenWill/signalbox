@@ -1082,6 +1082,10 @@ impl<'a> Output<'a> {
                 )?;
                 self.text(content.as_str())
             }
+            SessionEvent::GoalTurnRetired { turn_id } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} goal_turn_retired turn={turn_id}"
+            ),
             SessionEvent::TurnActivated {
                 turn_id,
                 current_attempt_id,
