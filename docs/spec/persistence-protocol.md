@@ -108,11 +108,14 @@ triggers, locks, and races described below against a pinned Postgres image.
 ## Relational representation
 
 Storage is a normalized, purpose-specific relational schema of current-state
-rows and append-only immutable facts. There is no event store: the guarded row
-is the durable statement of record, and no state is rebuilt by replaying events
-(INV-005). Why: the database-level invariants (INV-009, INV-012) are declarative
-constraints over current-state rows; an event log would move them back into
-projection code.
+rows and append-only immutable facts. There is no general-purpose event store:
+outside session plans, the guarded row is the durable statement of record and
+current state is not rebuilt by replaying events (INV-005). Session plans are
+the deliberate exception verified against this PR (`agent/plan-tool`): their
+durable statement of record is the session-local append-only event sequence, and
+the current plan is its checked fold. Why: database-level invariants (INV-009,
+INV-012) stay declarative over current-state rows, while plan history is itself
+retained product evidence rather than an implementation log.
 
 Implemented table families (across the forward-only migrations):
 
@@ -153,6 +156,9 @@ Implemented table families (across the forward-only migrations):
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
+- `session_plan_event`, whose session-local positive ordinal sequence retains
+  entry creation, text revision, and status change with exact trusted
+  tool-dispatch provenance; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
