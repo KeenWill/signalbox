@@ -161,10 +161,10 @@ Implemented table families (across the forward-only migrations):
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
-- `session_plan_event`, whose session-local positive ordinal sequence retains
-  creation, revision, status, and dependency events with exact tool-dispatch
-  provenance, plus trigger-maintained `session_plan_head`, which certifies the
-  complete prefix for bounded current and dependency-readiness reads; and
+- `session_plan_event` retains session-local creation, revision, status, and
+  dependency events with exact tool-dispatch provenance, capped at 32 distinct
+  current dependencies per entry; duplicate edge events stay in history.
+  Trigger-maintained `session_plan_head` certifies the complete prefix; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -551,14 +551,14 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
-- **SessionPlan append**: `next_session_plan_event_ordinal` first locks the
-  session row `FOR NO KEY UPDATE` and reads the trigger-maintained head. The
-  adapter then uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the
-  exact active tool attempt `FOR SHARE` while authenticating its request. The
-  insert trigger reacquires those same locks in session-then-attempt order,
-  validates event/predecessor, rejects cycles under session lock, and advances
-  the head last. A repeatable-read takes no explicit lock and verifies the head
-  is latest while projecting bounded entries, dependencies, and readiness.
+- **SessionPlan append**: ordinal allocation locks the session row
+  `FOR NO KEY UPDATE` before reading the trigger-maintained head. The adapter
+  uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the exact active
+  tool attempt `FOR SHARE` while authenticating its request. The insert trigger
+  reacquires those locks in session-then-attempt order, caps distinct
+  dependencies, rejects cycles by node-deduplicated traversal, and advances the
+  head last. A repeatable-read verifies the head and relevant dependency graph
+  before projecting bounded entries, dependencies, and readiness.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or

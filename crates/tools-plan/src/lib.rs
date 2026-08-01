@@ -31,6 +31,8 @@ pub const PLAN_TOOL_NAMES: [&str; 2] = [PLAN_WRITE_NAME, PLAN_READ_NAME];
 pub const MAX_PLAN_TEXT_CHARS: usize = 4096;
 /// Greatest number of current entries returned by one read.
 pub const MAX_PLAN_READ_ENTRIES: usize = 100;
+/// Greatest number of distinct current dependencies admitted for one entry.
+pub const MAX_PLAN_DEPENDENCIES_PER_ENTRY: usize = 32;
 /// Least number of history events returned when history is requested.
 pub const MIN_PLAN_HISTORY_EVENTS: usize = 1;
 /// Greatest number of history events returned by one read.
@@ -39,6 +41,7 @@ pub const MAX_PLAN_HISTORY_EVENTS: usize = 100;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded plan-tool arguments";
 const ENTRY_NOT_FOUND_DETAIL: &str = "plan entry not found";
 const DEPENDENCY_CYCLE_DETAIL: &str = "plan dependency would create a cycle";
+const DEPENDENCY_LIMIT_DETAIL: &str = "plan entry dependency limit reached";
 
 /// One positive ordinal in a session's append-only plan history.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -461,6 +464,11 @@ pub enum PlanFoldError {
     },
     /// A dependency event closes a directed cycle.
     DependencyCycle(PlanDependencyCycle),
+    /// An entry accumulated more distinct dependencies than the read contract admits.
+    DependencyLimitExceeded {
+        /// Entry whose current dependency set exceeded the bound.
+        entry: PlanEntryId,
+    },
 }
 
 impl fmt::Display for PlanFoldError {
@@ -486,6 +494,11 @@ impl fmt::Display for PlanFoldError {
                 "plan dependency {} -> {} closes a cycle",
                 cycle.entry().as_u64(),
                 cycle.dependency().as_u64()
+            ),
+            Self::DependencyLimitExceeded { entry } => write!(
+                formatter,
+                "plan entry {} exceeds the dependency limit",
+                entry.as_u64()
             ),
         }
     }
@@ -542,6 +555,9 @@ pub fn fold_plan_events(events: &[PlanEvent]) -> Result<FoldedPlan, PlanFoldErro
                     .find(|current| current.id() == *entry)
                     .ok_or(PlanFoldError::UnknownEntry { entry: *entry })?;
                 if !current.dependencies.contains(dependency) {
+                    if current.dependencies.len() >= MAX_PLAN_DEPENDENCIES_PER_ENTRY {
+                        return Err(PlanFoldError::DependencyLimitExceeded { entry: *entry });
+                    }
                     current.dependencies.push(*dependency);
                 }
             }
@@ -643,6 +659,11 @@ pub enum PlanAppendRejection {
     },
     /// The requested dependency would close a directed cycle.
     DependencyCycle(PlanDependencyCycle),
+    /// The target already has the maximum number of distinct dependencies.
+    DependencyLimitReached {
+        /// Entry whose bounded dependency set is full.
+        entry: PlanEntryId,
+    },
 }
 
 /// Result of attempting one atomic append.
@@ -971,6 +992,9 @@ impl<Port> PlanTools<Port> {
         let dependency_cycle_detail =
             ToolExecutionErrorDetail::try_new(DEPENDENCY_CYCLE_DETAIL.to_owned())
                 .map_err(|_| PlanToolConstructionError::ErrorDetail)?;
+        let dependency_limit_detail =
+            ToolExecutionErrorDetail::try_new(DEPENDENCY_LIMIT_DETAIL.to_owned())
+                .map_err(|_| PlanToolConstructionError::ErrorDetail)?;
         let write_definition = compile_contract_definition::<PlanWriteContract>(
             ToolPermissionDefault::Auto,
             ToolEffectClass::ExternalEffect,
@@ -1003,6 +1027,7 @@ impl<Port> PlanTools<Port> {
                 port,
                 entry_not_found_detail,
                 dependency_cycle_detail,
+                dependency_limit_detail,
             },
         })
     }
@@ -1113,6 +1138,7 @@ pub struct PlanExecutor<Port> {
     port: Port,
     entry_not_found_detail: ToolExecutionErrorDetail,
     dependency_cycle_detail: ToolExecutionErrorDetail,
+    dependency_limit_detail: ToolExecutionErrorDetail,
 }
 
 impl<Port> PlanExecutor<Port> {
@@ -1228,6 +1254,15 @@ impl<Port: SessionPlanPort> PlanExecutor<Port> {
                                 Err(PlanExecutorError::PortContract)
                             }
                         }
+                        PlanAppendRejection::DependencyLimitReached { entry } => {
+                            if dependency_limit_matches_request(request.draft(), entry) {
+                                Ok(ToolExecutorEvidence::KnownFailed {
+                                    detail: Some(self.dependency_limit_detail.clone()),
+                                })
+                            } else {
+                                Err(PlanExecutorError::PortContract)
+                            }
+                        }
                     },
                 }
             }
@@ -1337,6 +1372,13 @@ fn dependency_cycle_matches_request(draft: &PlanEventDraft, cycle: &PlanDependen
         && path.last() == Some(entry)
 }
 
+fn dependency_limit_matches_request(draft: &PlanEventDraft, rejected_entry: PlanEntryId) -> bool {
+    matches!(
+        draft,
+        PlanEventDraft::DependsOn { entry, .. } if *entry == rejected_entry
+    )
+}
+
 fn complete_history_matches_current(
     request: PlanReadRequest,
     page: &PlanReadPage,
@@ -1369,6 +1411,17 @@ fn validate_read_page<PortError>(
     let mut previous = request.after_entry();
     for entry in page.entries() {
         if previous.is_some_and(|prior| entry.id() <= prior) {
+            return Err(PlanExecutorError::PortContract);
+        }
+        if entry.dependencies().len() > MAX_PLAN_DEPENDENCIES_PER_ENTRY {
+            return Err(PlanExecutorError::PortContract);
+        }
+        let mut dependencies = HashSet::with_capacity(entry.dependencies().len());
+        if !entry
+            .dependencies()
+            .iter()
+            .all(|dependency| dependencies.insert(*dependency))
+        {
             return Err(PlanExecutorError::PortContract);
         }
         previous = Some(entry.id());

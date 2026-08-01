@@ -112,8 +112,8 @@ use signalbox_persistence::{
 };
 use signalbox_tools_plan::{
     PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanDependencyCycle, PlanEntryId,
-    PlanEvent, PlanEventDraft, PlanEventProvenance, PlanPageCompleteness, PlanReadRequest,
-    PlanReadiness, PlanStatus, PlanText,
+    PlanEvent, PlanEventDraft, PlanEventKind, PlanEventProvenance, PlanPageCompleteness,
+    PlanReadRequest, PlanReadiness, PlanStatus, PlanText,
 };
 use sqlx::{PgConnection, PgPool, Row, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -21030,37 +21030,38 @@ async fn session_plan_append_and_read_round_trip_through_postgres() -> Result<()
     Ok(())
 }
 
-/// Dependency appends expose waiting/ready projection changes, retain history,
-/// and reject a back-edge with a typed deterministic cycle path.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_dependencies_round_trip_and_reject_cycles() -> Result<(), Box<dyn Error>> {
-    const PREREQUISITE_TEXT: &str = "finish the durable base";
-    const DEPENDENT_TEXT: &str = "ship dependent work";
-    const EXPECTED_ENTRY_COUNT: usize = 2;
-    const EXPECTED_HISTORY_EVENT_COUNT: usize = 4;
-    const HISTORY_LIMIT: usize = 10;
+const DEPENDENCY_PREREQUISITE_TEXT: &str = "finish the durable base";
+const DEPENDENCY_DEPENDENT_TEXT: &str = "ship dependent work";
 
-    let (container, pool, _database_url) = migrated_postgres().await?;
+struct DependencyPlanFixture {
+    session: SessionId,
+    batch: AuthorizedPlanWriteBatch,
+    repository: SessionPlanRepository,
+    prerequisite: PlanEntryId,
+    dependent: PlanEntryId,
+}
+
+async fn dependency_plan_fixture(
+    pool: &PgPool,
+    mut trailing_arguments: Vec<String>,
+) -> Result<DependencyPlanFixture, Box<dyn Error>> {
     let prerequisite =
         PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
     let dependent =
         PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
-    let completed_status = PlanStatus::Completed;
-    let arguments = vec![
-        create_plan_arguments(PREREQUISITE_TEXT),
-        create_plan_arguments(DEPENDENT_TEXT),
+    let mut arguments = vec![
+        create_plan_arguments(DEPENDENCY_PREREQUISITE_TEXT),
+        create_plan_arguments(DEPENDENCY_DEPENDENT_TEXT),
         depends_plan_arguments(dependent, prerequisite),
-        status_plan_arguments(prerequisite, completed_status),
-        depends_plan_arguments(prerequisite, dependent),
     ];
-    let (session, mut batch) = authorize_plan_writes(&pool, &arguments).await?;
+    arguments.append(&mut trailing_arguments);
+    let (session, mut batch) = authorize_plan_writes(pool, &arguments).await?;
     let repository = SessionPlanRepository::new(pool.clone());
     append_plan_write(
         &mut batch,
         &repository,
         PlanEventDraft::Create {
-            text: plan_text(PREREQUISITE_TEXT),
+            text: plan_text(DEPENDENCY_PREREQUISITE_TEXT),
         },
     )
     .await?;
@@ -21068,7 +21069,7 @@ async fn session_plan_dependencies_round_trip_and_reject_cycles() -> Result<(), 
         &mut batch,
         &repository,
         PlanEventDraft::Create {
-            text: plan_text(DEPENDENT_TEXT),
+            text: plan_text(DEPENDENCY_DEPENDENT_TEXT),
         },
     )
     .await?;
@@ -21081,36 +21082,24 @@ async fn session_plan_dependencies_round_trip_and_reject_cycles() -> Result<(), 
         },
     )
     .await?;
+    Ok(DependencyPlanFixture {
+        session,
+        batch,
+        repository,
+        prerequisite,
+        dependent,
+    })
+}
 
-    let waiting = repository
-        .read(PlanReadRequest::new(session, None, None))
-        .await?;
-    let waiting_entry = &waiting.entries()[1];
-    let expected_dependencies = vec![prerequisite];
-
-    assert_eq!(waiting.entries().len(), EXPECTED_ENTRY_COUNT);
-    assert_eq!(
-        waiting_entry.dependencies(),
-        expected_dependencies.as_slice()
-    );
-    assert_eq!(waiting_entry.readiness(), PlanReadiness::Waiting);
-
-    append_plan_write(
-        &mut batch,
-        &repository,
-        PlanEventDraft::SetStatus {
-            entry: prerequisite,
-            status: completed_status,
-        },
-    )
-    .await?;
-    let cycle_attempt = batch.authorize_next().await?;
-    let cycle_correlation = cycle_attempt.correlation();
-    let prior_event_ordinal = u64::try_from(EXPECTED_HISTORY_EVENT_COUNT)?;
-    let cycle_event_ordinal = prior_event_ordinal
-        .checked_add(1)
-        .expect("the fixture event ordinal has a successor");
-    let direct_cycle_error = sqlx::query(
+async fn insert_direct_dependency_event(
+    pool: &PgPool,
+    fixture: &DependencyPlanFixture,
+    authorized: &AuthorizedToolAttempt,
+) -> Result<(), sqlx::Error> {
+    const PRIOR_EVENT_ORDINAL: u64 = 3;
+    const EVENT_ORDINAL: u64 = 4;
+    let correlation = authorized.correlation();
+    sqlx::query(
         "INSERT INTO session_plan_event
             (session_id, event_ordinal, prior_event_ordinal,
              event_kind, entry_ordinal, dependency_ordinal,
@@ -21120,56 +21109,250 @@ async fn session_plan_dependencies_round_trip_and_reject_cycles() -> Result<(), 
          VALUES ($1, $2, $3, 'depends_on', $4, $5, NULL, NULL,
                  $6, $7, $8, $9, $10)",
     )
-    .bind(session.into_uuid())
-    .bind(Decimal::from(cycle_event_ordinal))
-    .bind(Decimal::from(prior_event_ordinal))
-    .bind(Decimal::from(prerequisite.as_u64()))
-    .bind(Decimal::from(dependent.as_u64()))
-    .bind(cycle_correlation.turn().into_uuid())
-    .bind(cycle_correlation.issuing_attempt().into_uuid())
-    .bind(cycle_correlation.request().into_uuid())
-    .bind(cycle_correlation.attempt().into_uuid())
-    .bind(Decimal::from(cycle_correlation.generation().as_u64()))
-    .execute(&pool)
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(EVENT_ORDINAL))
+    .bind(Decimal::from(PRIOR_EVENT_ORDINAL))
+    .bind(Decimal::from(fixture.prerequisite.as_u64()))
+    .bind(Decimal::from(fixture.dependent.as_u64()))
+    .bind(correlation.turn().into_uuid())
+    .bind(correlation.issuing_attempt().into_uuid())
+    .bind(correlation.request().into_uuid())
+    .bind(correlation.attempt().into_uuid())
+    .bind(Decimal::from(correlation.generation().as_u64()))
+    .execute(pool)
     .await
-    .expect_err("the schema trigger rejects a dependency cycle");
+    .map(|_| ())
+}
+
+fn dependency_edge(event: &PlanEvent) -> (PlanEntryId, PlanEntryId) {
+    match event.kind() {
+        PlanEventKind::DependsOn { entry, dependency } => (*entry, *dependency),
+        PlanEventKind::Created { .. }
+        | PlanEventKind::TextRevised { .. }
+        | PlanEventKind::StatusChanged { .. } => {
+            panic!("fixture event is not a dependency edge")
+        }
+    }
+}
+
+/// A prerequisite status change recomputes the dependent entry from waiting to
+/// ready without changing its closed plan status.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_dependency_readiness_tracks_completion() -> Result<(), Box<dyn Error>> {
+    const EXPECTED_ENTRY_COUNT: usize = 2;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let completed_status = PlanStatus::Completed;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![status_plan_arguments(prerequisite, completed_status)],
+    )
+    .await?;
+    let expected_dependencies = vec![fixture.prerequisite];
+    let waiting = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await?;
+    let waiting_entry = waiting
+        .entries()
+        .get(1)
+        .expect("the dependent entry is projected");
+
+    assert_eq!(waiting.entries().len(), EXPECTED_ENTRY_COUNT);
+    assert_eq!(
+        waiting_entry.dependencies(),
+        expected_dependencies.as_slice()
+    );
+    assert_eq!(waiting_entry.readiness(), PlanReadiness::Waiting);
+
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::SetStatus {
+            entry: fixture.prerequisite,
+            status: completed_status,
+        },
+    )
+    .await?;
+    let ready = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await?;
+    let ready_entry = ready
+        .entries()
+        .get(1)
+        .expect("the dependent entry remains projected");
+
+    assert_eq!(ready_entry.dependencies(), expected_dependencies.as_slice());
+    assert_eq!(ready_entry.readiness(), PlanReadiness::Ready);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The optional history projection retains the dependency event exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_dependency_event_is_retained_in_history() -> Result<(), Box<dyn Error>> {
+    const HISTORY_LIMIT: usize = 10;
+    const EXPECTED_HISTORY_EVENT_COUNT: usize = 3;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = dependency_plan_fixture(&pool, Vec::new()).await?;
+    let page = fixture
+        .repository
+        .read(PlanReadRequest::new(
+            fixture.session,
+            None,
+            Some(HISTORY_LIMIT),
+        ))
+        .await?;
+    let history = page
+        .history()
+        .expect("the requested dependency history is returned");
+    let dependency_event = history
+        .events()
+        .last()
+        .expect("the dependency event closes the fixture history");
+
+    assert_eq!(history.events().len(), EXPECTED_HISTORY_EVENT_COUNT);
+    assert_eq!(
+        dependency_edge(dependency_event),
+        (fixture.dependent, fixture.prerequisite)
+    );
+    assert_eq!(history.completeness(), PlanPageCompleteness::Complete);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The schema independently rejects a raw dependency back-edge.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_schema_trigger_rejects_a_dependency_cycle() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![depends_plan_arguments(prerequisite, dependent)])
+            .await?;
+    let cycle_attempt = fixture.batch.authorize_next().await?;
+
+    let error = insert_direct_dependency_event(&pool, &fixture, &cycle_attempt)
+        .await
+        .expect_err("the schema trigger rejects a dependency cycle");
 
     assert_eq!(
-        direct_cycle_error
+        error
             .as_database_error()
-            .and_then(|error| error.constraint()),
+            .and_then(|database| database.constraint()),
         Some("session_plan_dependency_cycle")
     );
 
-    let cycle_outcome = repository
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Repository cycle traversal expands each distinct dependency node once even
+/// when repeated physical events retain the same edge in history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_repository_deduplicates_edges_when_rejecting_cycle()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            depends_plan_arguments(dependent, prerequisite),
+            depends_plan_arguments(prerequisite, dependent),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: fixture.dependent,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    let cycle_attempt = fixture.batch.authorize_next().await?;
+    let outcome = fixture
+        .repository
         .append(PlanAppendRequest::new(
             PlanEventProvenance::from_invocation(cycle_attempt.correlation()),
             PlanEventDraft::DependsOn {
-                entry: prerequisite,
-                dependency: dependent,
+                entry: fixture.prerequisite,
+                dependency: fixture.dependent,
             },
         ))
         .await?;
-    let cycle = expect_dependency_cycle(cycle_outcome);
-    let expected_cycle_path = vec![prerequisite, dependent, prerequisite];
+    let cycle = expect_dependency_cycle(outcome);
+    let expected_path = vec![
+        fixture.prerequisite,
+        fixture.dependent,
+        fixture.prerequisite,
+    ];
 
-    assert_eq!(cycle.entry(), prerequisite);
-    assert_eq!(cycle.dependency(), dependent);
-    assert_eq!(cycle.path(), expected_cycle_path.as_slice());
+    assert_eq!(cycle.entry(), fixture.prerequisite);
+    assert_eq!(cycle.dependency(), fixture.dependent);
+    assert_eq!(cycle.path(), expected_path.as_slice());
 
-    let ready = repository
-        .read(PlanReadRequest::new(session, None, Some(HISTORY_LIMIT)))
-        .await?;
-    let ready_entry = &ready.entries()[1];
-    let history = ready
-        .history()
-        .expect("the requested dependency history is returned");
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
-    assert_eq!(ready.entries().len(), EXPECTED_ENTRY_COUNT);
-    assert_eq!(ready_entry.dependencies(), expected_dependencies.as_slice());
-    assert_eq!(ready_entry.readiness(), PlanReadiness::Ready);
-    assert_eq!(history.events().len(), EXPECTED_HISTORY_EVENT_COUNT);
-    assert_eq!(history.completeness(), PlanPageCompleteness::Complete);
+/// A read rejects a cyclic dependency projection even when no history was
+/// requested and the append guard was bypassed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_a_cyclic_dependency_projection() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![depends_plan_arguments(prerequisite, dependent)])
+            .await?;
+    let cycle_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    insert_direct_dependency_event(&pool, &fixture, &cycle_attempt).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(cycle_attempt).await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await
+        .expect_err("the cyclic current projection is corruption");
+
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::InvalidEventSequence
+    );
 
     pool.close().await;
     drop(container);

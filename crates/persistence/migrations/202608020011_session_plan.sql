@@ -241,6 +241,7 @@ DECLARE
     latest_ordinal numeric(20, 0);
     target_kind text;
     closes_cycle boolean;
+    dependency_count bigint;
 BEGIN
     PERFORM 1
       FROM session
@@ -388,24 +389,46 @@ BEGIN
                 'session plan dependency must name a creation event';
         END IF;
 
-        WITH RECURSIVE dependency_path(node, path) AS (
-            SELECT
-                NEW.dependency_ordinal,
-                ARRAY[NEW.dependency_ordinal]::numeric[]
-            UNION ALL
-            SELECT
-                edge.dependency_ordinal,
-                dependency_path.path || edge.dependency_ordinal
-              FROM dependency_path
-              JOIN session_plan_event AS edge
-                ON edge.session_id = NEW.session_id
+        IF NOT EXISTS (
+            SELECT 1
+              FROM session_plan_event AS edge
+             WHERE edge.session_id = NEW.session_id
                AND edge.event_kind = 'depends_on'
-               AND edge.entry_ordinal = dependency_path.node
-             WHERE NOT edge.dependency_ordinal = ANY(dependency_path.path)
+               AND edge.entry_ordinal = NEW.entry_ordinal
+               AND edge.dependency_ordinal = NEW.dependency_ordinal
+        ) THEN
+            SELECT count(DISTINCT edge.dependency_ordinal)
+              INTO dependency_count
+              FROM session_plan_event AS edge
+             WHERE edge.session_id = NEW.session_id
+               AND edge.event_kind = 'depends_on'
+               AND edge.entry_ordinal = NEW.entry_ordinal;
+            IF dependency_count >= 32 THEN
+                RAISE EXCEPTION
+                    'session plan entry dependency limit reached'
+                    USING ERRCODE = '23514',
+                        CONSTRAINT = 'session_plan_dependency_limit';
+            END IF;
+        END IF;
+
+        WITH RECURSIVE dependency_node(node) AS (
+            SELECT NEW.dependency_ordinal
+            UNION
+            SELECT edge.dependency_ordinal
+              FROM dependency_node
+              JOIN (
+                  SELECT DISTINCT
+                      existing.entry_ordinal,
+                      existing.dependency_ordinal
+                    FROM session_plan_event AS existing
+                   WHERE existing.session_id = NEW.session_id
+                     AND existing.event_kind = 'depends_on'
+              ) AS edge
+                ON edge.entry_ordinal = dependency_node.node
         )
         SELECT EXISTS (
             SELECT 1
-              FROM dependency_path
+              FROM dependency_node
              WHERE node = NEW.entry_ordinal
         )
           INTO closes_cycle;

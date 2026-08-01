@@ -65,6 +65,49 @@ fn event(value: u64, provenance: PlanEventProvenance, kind: PlanEventKind) -> Pl
     PlanEvent::new(ordinal(value), provenance, kind)
 }
 
+fn dependency_overflow_history() -> Vec<PlanEvent> {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let maximum = u64::try_from(MAX_PLAN_DEPENDENCIES_PER_ENTRY)
+        .expect("the fixture dependency limit fits u64");
+    let last_dependency = maximum
+        .checked_add(2)
+        .expect("the fixture dependency identities fit u64");
+    let mut events = Vec::new();
+    for creation in 1..=last_dependency {
+        events.push(event(
+            creation,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ));
+    }
+    let first_edge = last_dependency
+        .checked_add(1)
+        .expect("the fixture edge ordinals fit u64");
+    for dependency in 2..=last_dependency {
+        let edge_ordinal = first_edge
+            .checked_add(dependency - 2)
+            .expect("the fixture edge ordinal fits u64");
+        events.push(event(
+            edge_ordinal,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: entry(1),
+                dependency: entry(dependency),
+            },
+        ));
+    }
+    events
+}
+
+fn dependencies_beyond_limit() -> Vec<PlanEntryId> {
+    (2..)
+        .take(MAX_PLAN_DEPENDENCIES_PER_ENTRY + 1)
+        .map(entry)
+        .collect()
+}
+
 fn arguments(value: Value) -> NormalizedToolArguments {
     NormalizedToolArguments::try_from_provider_text(value.to_string())
         .expect("fixture arguments are admitted")
@@ -240,7 +283,8 @@ fn dependency_cycle_from(error: PlanFoldError) -> PlanDependencyCycle {
         PlanFoldError::DependencyCycle(cycle) => cycle,
         PlanFoldError::NoncontiguousOrdinal { .. }
         | PlanFoldError::MixedSessions
-        | PlanFoldError::UnknownEntry { .. } => {
+        | PlanFoldError::UnknownEntry { .. }
+        | PlanFoldError::DependencyLimitExceeded { .. } => {
             panic!("fixture fold failure is a dependency cycle")
         }
     }
@@ -622,9 +666,76 @@ fn write_returns_a_known_failure_for_typed_cycle_evidence() {
 }
 
 #[test]
-fn read_output_exposes_dependencies_and_waiting_readiness() {
+fn fold_rejects_a_dependency_set_above_the_read_bound() {
+    let dependent = entry(1);
+    let events = dependency_overflow_history();
+
+    let error = fold_plan_events(&events).expect_err("the oversized dependency set is rejected");
+
+    assert_eq!(
+        error,
+        PlanFoldError::DependencyLimitExceeded { entry: dependent }
+    );
+}
+
+#[test]
+fn write_returns_a_known_failure_for_the_dependency_limit() {
     let dispatch = correlation(10);
-    let prerequisite = entry(1);
+    let dependent = entry(1);
+    let dependency = entry(2);
+    let port =
+        FakePort::rejecting(PlanAppendRejection::DependencyLimitReached { entry: dependent });
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "kind": "depends_on",
+        "entry_id": dependent.as_u64(),
+        "dependency_id": dependency.as_u64()
+    })))
+    .expect("fixture dependency arguments are valid");
+
+    let evidence = run_ready(executor.execute_operation(dispatch, operation))
+        .expect("typed dependency-limit rejection succeeds");
+
+    assert!(known_failure_has_detail(&evidence));
+}
+
+#[test]
+fn read_rejects_a_dependency_set_above_the_port_bound() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let current = PlanEntry::with_dependencies(
+        dependent,
+        text(INITIAL_TEXT),
+        PlanStatus::Pending,
+        dependencies_beyond_limit(),
+        PlanReadiness::Waiting,
+    );
+    let page = PlanReadPage::new(
+        dispatch.session(),
+        vec![current],
+        PlanPageCompleteness::Complete,
+        None,
+    );
+    let port = FakePort::reading(page);
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("the oversized fake page violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_output_exposes_dependencies_and_waiting_readiness() {
+    const PREREQUISITE_ENTRY_ID: u64 = 1;
+    let dispatch = correlation(10);
+    let prerequisite = entry(PREREQUISITE_ENTRY_ID);
     let dependent = entry(2);
     let dependencies = vec![prerequisite];
     let expected_readiness = PlanReadiness::Waiting;
@@ -656,12 +767,7 @@ fn read_output_exposes_dependencies_and_waiting_readiness() {
     assert_eq!(output["entries"][0]["entry_id"], json!(dependent.as_u64()));
     assert_eq!(
         output["entries"][0]["dependencies"],
-        json!(
-            dependencies
-                .iter()
-                .map(|dependency| dependency.as_u64())
-                .collect::<Vec<_>>()
-        )
+        json!([PREREQUISITE_ENTRY_ID])
     );
     assert_eq!(output["entries"][0]["readiness"], json!(expected_readiness));
 }
