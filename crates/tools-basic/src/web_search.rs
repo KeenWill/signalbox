@@ -54,6 +54,7 @@ const MAX_RESULT_SNIPPET_BYTES: usize = 16 * 1024;
 const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_CREDENTIAL_BYTES: usize = 4 * 1024;
 const MAX_BOUND_EVIDENCE_DEBUG_BYTES: usize = MAX_ERROR_DETAIL_BYTES * 2;
+const MAX_OVERSIZED_CREDENTIAL_INSPECTION_BYTES: usize = MAX_BOUND_EVIDENCE_DEBUG_BYTES;
 const MAX_REVERSIBLE_DECODE_PASSES: usize = 4;
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
@@ -1020,16 +1021,18 @@ fn credential_debug_contains_credential(
 }
 
 fn fixed_success_payload_contains_credential(credential: &str) -> bool {
-    let complete = serde_json::json!({
-        "results": [{"title": "", "url": "", "snippet": ""}],
-        "truncated": false,
-    });
-    let truncated = serde_json::json!({
-        "results": [{"title": "", "url": "", "snippet": ""}],
-        "truncated": true,
-    });
-    text_contains_credential_variant(&complete.to_string(), credential)
-        || text_contains_credential_variant(&truncated.to_string(), credential)
+    (0..=MAX_RETURNED_RESULTS).any(|result_count| {
+        [false, true].into_iter().any(|truncated| {
+            let results = (0..result_count)
+                .map(|_| serde_json::json!({"title": "", "url": "", "snippet": ""}))
+                .collect::<Vec<_>>();
+            let payload = serde_json::json!({
+                "results": results,
+                "truncated": truncated,
+            });
+            text_contains_credential_variant(&payload.to_string(), credential)
+        })
+    })
 }
 
 const fn next_page_completeness_probe(
@@ -1332,10 +1335,23 @@ where
             .then(|| self.credential_unavailable_detail.clone());
             let evidence = ToolExecutorEvidence::KnownFailed { detail };
             if credential_is_oversized && !credential_text.is_empty() {
+                let Some(credential) =
+                    BoundedCredentialVariants::try_from_oversized(credential_text)
+                else {
+                    return WebSearchRequestOutcome::CredentialFreeError(
+                        WebSearchExecutorError::CredentialDiagnosticCollision(
+                            WebSearchCredentialDiagnostic {
+                                rendered: String::new(),
+                                failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                                transport_failure_class: None,
+                            },
+                        ),
+                    );
+                };
                 return WebSearchRequestOutcome::Evidence(
                     WebSearchRequestEvidence::BoundedCredentialVariants {
                         evidence,
-                        credential: BoundedCredentialVariants::from_oversized(credential_text),
+                        credential,
                     },
                 );
             }
@@ -1354,6 +1370,12 @@ where
             };
         };
         let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+        if fixed_populated_failure_detail_collides(&scrubber, &self.credential_unavailable_detail) {
+            return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Credentialed {
+                evidence: ToolExecutorEvidence::KnownFailed { detail: None },
+                credential,
+            });
+        }
         if fixed_bound_evidence_token_collides(&scrubber)
             || fixed_bound_wrapper_token_collides(&scrubber, correlation)
         {
@@ -1486,6 +1508,7 @@ where
 
 enum WebSearchRequestOutcome {
     Evidence(WebSearchRequestEvidence),
+    CredentialFreeError(WebSearchExecutorError),
     Error {
         error: WebSearchExecutorError,
         credential: CredentialValue,
@@ -1497,6 +1520,7 @@ impl WebSearchRequestOutcome {
     fn into_result(self) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
         match self {
             Self::Evidence(evidence) => Ok(evidence.into_evidence()),
+            Self::CredentialFreeError(error) => Err(error),
             Self::Error { error, .. } => Err(error),
         }
     }
@@ -1543,40 +1567,43 @@ struct BoundedCredentialVariants {
 }
 
 impl BoundedCredentialVariants {
-    fn from_oversized(credential: &str) -> Self {
+    fn try_from_oversized(credential: &str) -> Option<Self> {
+        if credential.len() > MAX_OVERSIZED_CREDENTIAL_INSPECTION_BYTES {
+            return None;
+        }
         let mut variants = Vec::new();
         retain_bounded_credential_variant(&mut variants, credential);
         let Some((mut decoded, changed)) = decode_reversible_text_once(credential) else {
-            return Self {
+            return Some(Self {
                 variants,
                 complete: false,
-            };
+            });
         };
         if !changed {
-            return Self {
+            return Some(Self {
                 variants,
                 complete: true,
-            };
+            });
         }
         retain_bounded_credential_variant(&mut variants, &decoded);
         for _ in 1..MAX_REVERSIBLE_DECODE_PASSES {
             let Some((next, changed)) = decode_reversible_text_once(&decoded) else {
-                return Self {
+                return Some(Self {
                     variants,
                     complete: false,
-                };
+                });
             };
             if !changed {
-                return Self {
+                return Some(Self {
                     variants,
                     complete: true,
-                };
+                });
             }
             retain_bounded_credential_variant(&mut variants, &next);
             decoded = next;
         }
         let complete = decode_reversible_text_once(&decoded).is_some_and(|(_, changed)| !changed);
-        Self { variants, complete }
+        Some(Self { variants, complete })
     }
 
     fn collides(&self, rendered: &str, check: BoundDiagnosticCheck) -> bool {
@@ -1623,6 +1650,7 @@ fn bind_request_outcome(
 ) -> Result<CorrelatedToolExecutorEvidence, WebSearchExecutorError> {
     let evidence = match outcome {
         WebSearchRequestOutcome::Evidence(evidence) => evidence,
+        WebSearchRequestOutcome::CredentialFreeError(error) => return Err(error),
         WebSearchRequestOutcome::Error { error, credential } => {
             let credential_text =
                 std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
@@ -2559,6 +2587,18 @@ fn fixed_bound_evidence_token_collides(scrubber: &CredentialScrubber) -> bool {
     }
 }
 
+fn fixed_populated_failure_detail_collides(
+    scrubber: &CredentialScrubber,
+    detail: &ToolExecutionErrorDetail,
+) -> bool {
+    let evidence = ToolExecutorEvidence::KnownFailed {
+        detail: Some(detail.clone()),
+    };
+    let rendered = format!("{evidence:?}");
+    !scrubber.contains_case_normalized_credential("Failed")
+        && scrubber.contains_case_normalized_credential(&rendered)
+}
+
 fn fixed_bound_wrapper_token_collides(
     scrubber: &CredentialScrubber,
     correlation: &ToolAttemptDispatchCorrelation,
@@ -2701,6 +2741,8 @@ mod tests {
     const RESPONSE_DEBUG_COLLISION_KEY: &str = "result_count";
     const SUCCESS_PAYLOAD_COLLISION_KEY: &str = "results";
     const SUCCESS_PAYLOAD_DELIMITER_COLLISION_KEY: &str = "[";
+    const SUCCESS_PAYLOAD_EMPTY_RESULTS_COLLISION_KEY: &str = "[]";
+    const SUCCESS_PAYLOAD_MULTI_RESULT_COLLISION_KEY: &str = "},{";
     const ACCEPT_HEADER_CASE_COLLISION_KEY: &str = "APPLICATION/JSON";
     const PROVIDER_HOST_CASE_COLLISION_KEY: &str = "API.SEARCH.BRAVE.COM";
     const URL_SCHEME_COLLISION_KEY: &str = "https";
@@ -2754,6 +2796,7 @@ mod tests {
     const EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY: &str = "completedtext";
     const EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY: &str = "knownfailed";
     const EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY: &str = "known";
+    const EXECUTOR_POPULATED_FAILURE_COLLISION_KEY: &str = "Some";
     const EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY: &str = "completedtext(";
     const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
     const EXECUTOR_OK_WRAPPER_COLLISION_KEY: &str = "ok";
@@ -3941,6 +3984,60 @@ mod tests {
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
+    /// INV-035: the empty result-list representation is checked before the
+    /// injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_empty_success_payload_before_injected_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: SUCCESS_PAYLOAD_EMPTY_RESULTS_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("empty result-list collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: the delimiter between multiple serialized results is checked
+    /// before the injected transport boundary.
+    #[tokio::test]
+    async fn web_search_rejects_multi_result_payload_before_injected_transport() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: SUCCESS_PAYLOAD_MULTI_RESULT_COLLISION_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("multi-result collision is definitive evidence");
+
+        assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
     /// INV-035: an HTML C1 numeric reference is decoded through its standard
     /// replacement mapping before the injected transport boundary.
     #[tokio::test]
@@ -4368,6 +4465,33 @@ mod tests {
             &rendered,
             EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY,
         ));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
+    }
+
+    /// INV-035: fixed populated-detail framing is checked before dispatch and
+    /// a collision preserves definitive detail-free failure evidence.
+    #[tokio::test]
+    async fn web_search_populated_failure_detail_collision_commits_before_dispatch() {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let credentials = StaticCredentials {
+            value: EXECUTOR_POPULATED_FAILURE_COLLISION_KEY,
+        };
+        let transport = ProviderRejectedTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (_catalog, mut executor) =
+            WebSearchTool::try_new(credentials, transport, configuration())
+                .expect("static web_search tool compiles")
+                .into_parts();
+        let correlation = dispatch_correlation();
+
+        let evidence = executor
+            .execute_request(request(), &correlation)
+            .await
+            .into_result()
+            .expect("populated detail collision is definitive pre-dispatch evidence");
+
+        assert_eq!(known_failure_detail(evidence), None);
         assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
@@ -6129,6 +6253,20 @@ mod tests {
 
         assert!(is_committed_known_failure(&outcome));
         assert_eq!(searches, 0);
+    }
+
+    /// INV-035: a credential beyond the bounded inspection budget fails
+    /// closed before whole-value normalization, decoding, or dispatch.
+    #[tokio::test]
+    async fn oversized_credential_above_inspection_bound_fails_closed() {
+        let credential = vec![b'x'; MAX_OVERSIZED_CREDENTIAL_INSPECTION_BYTES + 1];
+
+        let (failed, searches, rendered) =
+            execute_formatted_raw_credential_through_service(&credential).await;
+
+        assert!(failed);
+        assert_eq!(searches, 0);
+        assert!(!rendered.contains(std::str::from_utf8(&credential).expect("fixture is UTF-8")));
     }
 
     /// INV-035: oversized credential values cannot reach telemetry through a
