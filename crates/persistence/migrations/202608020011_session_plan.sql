@@ -261,6 +261,21 @@ AS $$
     );
 $$;
 
+CREATE FUNCTION session_plan_creation_has_valid_shape(
+    candidate session_plan_event
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT candidate.event_kind = 'created'
+       AND candidate.entry_ordinal = candidate.event_ordinal
+       AND candidate.dependency_ordinal IS NULL
+       AND candidate.entry_text IS NOT NULL
+       AND char_length(candidate.entry_text) BETWEEN 1 AND 4096
+       AND candidate.entry_status IS NULL;
+$$;
+
 CREATE FUNCTION next_session_plan_event_ordinal(target_session_id uuid)
 RETURNS numeric(20, 0)
 LANGUAGE plpgsql
@@ -291,6 +306,8 @@ AS $$
 DECLARE
     latest_ordinal numeric(20, 0);
     target_kind text;
+    target_shape_valid boolean;
+    target_authorized boolean;
     closes_cycle boolean;
     dependency_count bigint;
 BEGIN
@@ -419,25 +436,43 @@ BEGIN
     END IF;
 
     IF NEW.event_kind <> 'created' THEN
-        SELECT event_kind
-          INTO target_kind
-          FROM session_plan_event
-         WHERE session_id = NEW.session_id
-           AND event_ordinal = NEW.entry_ordinal;
+        SELECT target.event_kind,
+               session_plan_creation_has_valid_shape(target),
+               session_plan_event_has_authority(target)
+          INTO target_kind, target_shape_valid, target_authorized
+          FROM session_plan_event AS target
+         WHERE target.session_id = NEW.session_id
+           AND target.event_ordinal = NEW.entry_ordinal;
         IF target_kind IS DISTINCT FROM 'created' THEN
             RAISE EXCEPTION 'session plan mutation must name a creation event';
+        END IF;
+        IF target_shape_valid IS DISTINCT FROM TRUE
+            OR target_authorized IS DISTINCT FROM TRUE
+        THEN
+            RAISE EXCEPTION 'session plan mutation entry lacks certified authority'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_mutation_entry_authority';
         END IF;
     END IF;
 
     IF NEW.event_kind = 'depends_on' THEN
-        SELECT event_kind
-          INTO target_kind
-          FROM session_plan_event
-         WHERE session_id = NEW.session_id
-           AND event_ordinal = NEW.dependency_ordinal;
+        SELECT target.event_kind,
+               session_plan_creation_has_valid_shape(target),
+               session_plan_event_has_authority(target)
+          INTO target_kind, target_shape_valid, target_authorized
+          FROM session_plan_event AS target
+         WHERE target.session_id = NEW.session_id
+           AND target.event_ordinal = NEW.dependency_ordinal;
         IF target_kind IS DISTINCT FROM 'created' THEN
             RAISE EXCEPTION
                 'session plan dependency must name a creation event';
+        END IF;
+        IF target_shape_valid IS DISTINCT FROM TRUE
+            OR target_authorized IS DISTINCT FROM TRUE
+        THEN
+            RAISE EXCEPTION 'session plan dependency lacks certified authority'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_authority';
         END IF;
 
         IF NOT EXISTS (
@@ -498,6 +533,8 @@ DECLARE
     prior_dependency_event_ordinal numeric(20, 0);
     dependency_count bigint;
     target_kind text;
+    target_shape_valid boolean;
+    target_authorized boolean;
     closes_cycle boolean;
     projected boolean := FALSE;
 BEGIN
@@ -520,22 +557,32 @@ BEGIN
                     CONSTRAINT = 'session_plan_dependency_shape';
         END IF;
 
-        SELECT event_kind
-          INTO target_kind
-          FROM session_plan_event
-         WHERE session_id = NEW.session_id
-           AND event_ordinal = NEW.entry_ordinal;
-        IF target_kind IS DISTINCT FROM 'created' THEN
+        SELECT target.event_kind,
+               session_plan_creation_has_valid_shape(target),
+               session_plan_event_has_authority(target)
+          INTO target_kind, target_shape_valid, target_authorized
+          FROM session_plan_event AS target
+         WHERE target.session_id = NEW.session_id
+           AND target.event_ordinal = NEW.entry_ordinal;
+        IF target_kind IS DISTINCT FROM 'created'
+            OR target_shape_valid IS DISTINCT FROM TRUE
+            OR target_authorized IS DISTINCT FROM TRUE
+        THEN
             RAISE EXCEPTION 'session plan dependency entry must be a creation'
                 USING ERRCODE = '23514',
                     CONSTRAINT = 'session_plan_dependency_entry';
         END IF;
-        SELECT event_kind
-          INTO target_kind
-          FROM session_plan_event
-         WHERE session_id = NEW.session_id
-           AND event_ordinal = NEW.dependency_ordinal;
-        IF target_kind IS DISTINCT FROM 'created' THEN
+        SELECT target.event_kind,
+               session_plan_creation_has_valid_shape(target),
+               session_plan_event_has_authority(target)
+          INTO target_kind, target_shape_valid, target_authorized
+          FROM session_plan_event AS target
+         WHERE target.session_id = NEW.session_id
+           AND target.event_ordinal = NEW.dependency_ordinal;
+        IF target_kind IS DISTINCT FROM 'created'
+            OR target_shape_valid IS DISTINCT FROM TRUE
+            OR target_authorized IS DISTINCT FROM TRUE
+        THEN
             RAISE EXCEPTION 'session plan dependency target must be a creation'
                 USING ERRCODE = '23514',
                     CONSTRAINT = 'session_plan_dependency_target';
@@ -686,12 +733,17 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    RAISE EXCEPTION 'session plan current dependencies are append projections';
+    IF TG_OP = 'INSERT' AND pg_trigger_depth() >= 2 THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'session plan current dependencies are append projections'
+        USING ERRCODE = '23514',
+            CONSTRAINT = 'session_plan_current_dependency_maintenance';
 END;
 $$;
 
 CREATE TRIGGER session_plan_current_dependency_immutable
-BEFORE UPDATE OR DELETE ON session_plan_current_dependency
+BEFORE INSERT OR UPDATE OR DELETE ON session_plan_current_dependency
 FOR EACH ROW EXECUTE FUNCTION reject_session_plan_current_dependency_rewrite();
 
 CREATE TRIGGER session_plan_current_dependency_rejects_truncate

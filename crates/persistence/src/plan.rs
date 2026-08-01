@@ -178,6 +178,13 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
    AND dependency.event_kind = 'created'
  ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
 
+const APPEND_TARGET_SQL: &str = "SELECT target.event_kind,
+       session_plan_creation_has_valid_shape(target) AS payload_valid,
+       session_plan_event_has_authority(target) AS authorized
+  FROM session_plan_event AS target
+ WHERE target.session_id = $1
+   AND target.event_ordinal = $2";
+
 const DEPENDENCY_LIMIT_REACHED_SQL: &str = "SELECT
     NOT EXISTS (
         SELECT 1
@@ -495,24 +502,30 @@ impl SessionPlanRepository {
         }
 
         for entry in draft_targets(request.draft()) {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                    SELECT 1
-                      FROM session_plan_event
-                     WHERE session_id = $1
-                       AND event_ordinal = $2
-                       AND event_kind = 'created'
-                )",
-            )
-            .bind(request.session().into_uuid())
-            .bind(Decimal::from(entry.as_u64()))
-            .fetch_one(&mut *transaction)
-            .await?;
-            if !exists {
+            let target = sqlx::query(APPEND_TARGET_SQL)
+                .bind(request.session().into_uuid())
+                .bind(Decimal::from(entry.as_u64()))
+                .fetch_optional(&mut *transaction)
+                .await?;
+            let Some(target) = target else {
                 transaction.rollback().await?;
                 return Ok(PlanAppendOutcome::Rejected(
                     PlanAppendRejection::UnknownEntry { entry },
                 ));
+            };
+            if required::<String>(&target, "event_kind")? != "created" {
+                transaction.rollback().await?;
+                return Ok(PlanAppendOutcome::Rejected(
+                    PlanAppendRejection::UnknownEntry { entry },
+                ));
+            }
+            if !required::<bool>(&target, "payload_valid")? {
+                transaction.rollback().await?;
+                return Err(SessionPlanCorruption::InvalidEventSequence.into());
+            }
+            if !required::<bool>(&target, "authorized")? {
+                transaction.rollback().await?;
+                return Err(SessionPlanCorruption::UntrustedProvenance.into());
             }
         }
 
@@ -1390,8 +1403,8 @@ fn optional_projected_authority(
 #[cfg(test)]
 mod tests {
     use super::{
-        CURRENT_DEPENDENCIES_SQL, INVALID_EVENT_SEQUENCE_SQL, MAX_PLAN_DEPENDENCIES_PER_ENTRY,
-        RELEVANT_DEPENDENCY_GRAPH_SQL,
+        APPEND_TARGET_SQL, CURRENT_DEPENDENCIES_SQL, INVALID_EVENT_SEQUENCE_SQL,
+        MAX_PLAN_DEPENDENCIES_PER_ENTRY, RELEVANT_DEPENDENCY_GRAPH_SQL,
     };
 
     const SESSION_PLAN_MIGRATION: &str =
@@ -1407,6 +1420,12 @@ mod tests {
     fn event_head_certifies_the_latest_projected_dependency() {
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("head.dependency_event_ordinal"));
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("latest_dependency.first_event_ordinal"));
+    }
+
+    #[test]
+    fn append_targets_are_authenticated_before_graph_loading() {
+        assert!(APPEND_TARGET_SQL.contains("session_plan_creation_has_valid_shape"));
+        assert!(APPEND_TARGET_SQL.contains("session_plan_event_has_authority"));
     }
 
     #[test]

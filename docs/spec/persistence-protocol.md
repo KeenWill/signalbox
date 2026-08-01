@@ -161,10 +161,10 @@ Implemented table families (across the forward-only migrations):
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
-- `session_plan_event` retains creation, revision, status, and dependency events
-  with exact provenance; duplicate edges stay in history.
-  `session_plan_current_dependency` stores a predecessor-linked first append per
-  distinct edge (max 32 per entry); `session_plan_head` certifies both tips; and
+- `session_plan_event` retains exact-provenance creation, revision, status, and
+  dependency events, including duplicates. `session_plan_current_dependency` is
+  trigger-only and stores each first distinct edge (max 32 per entry) after
+  authenticating both roots; `session_plan_head` certifies both tips; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:

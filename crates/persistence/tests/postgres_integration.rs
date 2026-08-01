@@ -20749,6 +20749,7 @@ enum PlanRepositoryErrorKind {
     CurrentCreation,
     DependencyStatus,
     EventSequence,
+    UntrustedProvenance,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -20966,6 +20967,9 @@ fn plan_repository_error_kind(error: SessionPlanRepositoryError) -> PlanReposito
         )) => PlanRepositoryErrorKind::DependencyStatus,
         SessionPlanRepositoryError::Corruption(SessionPlanCorruption::InvalidEventSequence) => {
             PlanRepositoryErrorKind::EventSequence
+        }
+        SessionPlanRepositoryError::Corruption(SessionPlanCorruption::UntrustedProvenance) => {
+            PlanRepositoryErrorKind::UntrustedProvenance
         }
         other => panic!("unexpected plan repository error: {other:?}"),
     }
@@ -21506,6 +21510,59 @@ async fn session_plan_dependency_head_prevents_projection_loss() -> Result<(), B
     Ok(())
 }
 
+/// Only the event append projection trigger may populate the current dependency
+/// table, even when a direct row satisfies every relational constraint.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_current_dependency_rejects_direct_insert() -> Result<(), Box<dyn Error>> {
+    const PRIOR_DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const UNRELATED_STATUS_EVENT_ORDINAL: u64 = 4;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![status_plan_arguments(prerequisite, PlanStatus::Completed)],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::SetStatus {
+            entry: prerequisite,
+            status: PlanStatus::Completed,
+        },
+    )
+    .await?;
+
+    let insertion = sqlx::query(
+        "INSERT INTO session_plan_current_dependency (
+             session_id, entry_ordinal, dependency_ordinal,
+             first_event_ordinal, prior_first_event_ordinal
+         )
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(fixture.prerequisite.as_u64()))
+    .bind(Decimal::from(fixture.dependent.as_u64()))
+    .bind(Decimal::from(UNRELATED_STATUS_EVENT_ORDINAL))
+    .bind(Decimal::from(PRIOR_DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await
+    .expect_err("a direct caller cannot populate the current projection");
+
+    assert_eq!(
+        insertion
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_current_dependency_maintenance")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A read rejects an unprojected dependency event even when no history was
 /// requested and both append-time triggers were deliberately bypassed.
 #[tokio::test(flavor = "multi_thread")]
@@ -21594,6 +21651,98 @@ async fn session_plan_projection_rechecks_cycle_after_append_guard_bypass()
             .as_database_error()
             .and_then(|database| database.constraint()),
         Some("session_plan_dependency_cycle")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Dependency append validates both creation roots before graph traversal, and
+/// the projection trigger independently enforces the same authority boundary.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_dependency_append_rejects_an_untrusted_root() -> Result<(), Box<dyn Error>> {
+    const ROOT_EVENT_ORDINAL: u64 = 1;
+    const CORRUPTED_TEXT: &str = "rewritten without durable request authority";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![depends_plan_arguments(dependent, prerequisite)])
+            .await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = sqlx::query(
+        "UPDATE session_plan_event
+            SET entry_text = $1
+          WHERE session_id = $2
+            AND event_ordinal = $3",
+    )
+    .bind(CORRUPTED_TEXT)
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(ROOT_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    assert_eq!(corrupted.rows_affected(), 1);
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+
+    let repository_error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::DependsOn {
+                entry: dependent,
+                dependency: prerequisite,
+            },
+        ))
+        .await
+        .expect_err("the repository rejects the untrusted dependency root");
+
+    assert_eq!(
+        plan_repository_error_kind(repository_error),
+        PlanRepositoryErrorKind::UntrustedProvenance
+    );
+
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let trigger_error = insert_direct_dependency_event_between(
+        &pool,
+        &fixture,
+        &append_attempt,
+        dependent,
+        prerequisite,
+    )
+    .await
+    .expect_err("the projection trigger independently rejects the untrusted root");
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_target")
     );
 
     pool.close().await;
