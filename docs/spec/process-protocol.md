@@ -627,6 +627,9 @@ boundary before application construction or mutation and returns
 JSON escaping when the same accepted content is projected in a queued turn or
 durable update event. This section owns the exact capacity.
 
+The conversation-import transport in this section was verified against
+`agent/import-chunks-protocol` and `agent/import-chunks`.
+
 An import source is an exact byte sequence encoded with RFC 4648
 standard-alphabet padded base64. A noncanonical spelling is a malformed frame.
 The server validates canonical padding and trailing bits in the same decode that
