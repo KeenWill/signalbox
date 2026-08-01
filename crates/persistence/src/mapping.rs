@@ -8,6 +8,7 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, ToolAttemptId,
     ToolRequestId, TurnId,
 };
+use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
 /// Closed durable-command kinds stored by the owner-global registry.
@@ -132,6 +133,27 @@ pub fn dangerous_tool_auto_approval_from_str(value: &str) -> Option<DangerousToo
     match value {
         "disabled" => Some(DangerousToolAutoApproval::Disabled),
         "approve_all" => Some(DangerousToolAutoApproval::ApproveAll),
+        _ => None,
+    }
+}
+
+/// Encodes the closed durable plan-status spelling.
+pub(crate) const fn plan_status_to_str(value: PlanStatus) -> &'static str {
+    match value {
+        PlanStatus::Pending => "pending",
+        PlanStatus::InProgress => "in_progress",
+        PlanStatus::Completed => "completed",
+        PlanStatus::Abandoned => "abandoned",
+    }
+}
+
+/// Decodes the closed durable plan-status spelling.
+pub(crate) fn plan_status_from_str(value: &str) -> Option<PlanStatus> {
+    match value {
+        "pending" => Some(PlanStatus::Pending),
+        "in_progress" => Some(PlanStatus::InProgress),
+        "completed" => Some(PlanStatus::Completed),
+        "abandoned" => Some(PlanStatus::Abandoned),
         _ => None,
     }
 }
