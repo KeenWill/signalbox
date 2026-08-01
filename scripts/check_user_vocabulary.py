@@ -16,9 +16,10 @@ from typing import Mapping
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
 OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
+CROSS_FRAGMENT_OWNER = re.compile(r"(?:Unknown|Known)(?:Error|Rejection)")
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 REVIEWED_ALLOWLIST_SHA256 = (
-    "c104549dca69ce29de6c3ac8b026bc9e58ac67761880bd7079e840713a36e770"
+    "8984981505747a951e89b29a5e8005dc04caed29991e22275c1f850c9aec6a34"
 )
 
 
@@ -26,10 +27,12 @@ def owner_matches(line: str) -> Iterator[re.Match[str]]:
     for identifier in IDENTIFIER.finditer(line):
         token = identifier.group()
         fragments = tuple(OWNER_FRAGMENT.finditer(token))
+        cross_fragments = tuple(CROSS_FRAGMENT_OWNER.finditer(token))
         if any(
-            not (
-                token[fragment.start() : fragment.start() + 3] == "own"
-                and token[fragment.start() + 3].isupper()
+            not any(
+                cross.start() <= fragment.start()
+                and cross.end() >= fragment.end()
+                for cross in cross_fragments
             )
             for fragment in fragments
         ):
@@ -621,8 +624,11 @@ def audit(root: Path) -> tuple[list[str], str]:
                 )
                 for match in matches
             ):
+                previous_line = lines[index - 1] if index > 0 else ""
+                next_line = lines[index + 1] if index + 1 < len(lines) else ""
                 allowed_inventory.extend(
-                    f"{relative}\0{line}\0{match.start()}\0{match.end()}"
+                    f"{relative}\0{number}\0{previous_line}\0{line}\0{next_line}\0"
+                    f"{match.start()}\0{match.end()}"
                     for match in matches
                 )
                 continue

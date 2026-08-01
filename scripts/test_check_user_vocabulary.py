@@ -144,6 +144,8 @@ def main() -> int:
             "session_ownerid = nil",
             "SESSION_OWNERID = nil",
             "The oWnEr approves this tool.",
+            "The ownEr approves this tool.",
+            "The ownER approves this tool.",
         )
         mixed_storage_lines = (
             'const PROCESS_ACTOR: &str = "owner";',
@@ -548,6 +550,21 @@ def main() -> int:
         assert restored.returncode == 0, (
             f"restored inventory failed:\n{restored.stdout}{restored.stderr}"
         )
+        reviewed_author_text = reviewed_author.read_text(encoding="utf-8")
+        reviewed_author.write_text(
+            "let unrelated = true;\n" + reviewed_author_text,
+            encoding="utf-8",
+        )
+        moved = run_checker(
+            root,
+            "--expected-allowlist-sha256",
+            reviewed_inventory,
+        )
+        assert moved.returncode == 1, "moved allowlisted line passed"
+        assert "reviewed owner allowlist inventory changed" in moved.stdout, (
+            f"moved inventory lacked exact diagnostic: {moved.stdout}"
+        )
+        reviewed_author.write_text(reviewed_author_text, encoding="utf-8")
     print("user-vocabulary checker self-test passed")
     return 0
 
