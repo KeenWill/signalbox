@@ -421,7 +421,7 @@ approval cannot silently egress to an arbitrary host. Paths and queries remain
 unrestricted request data at an admitted origin.
 
 Production signalboxd composition requires exactly one mapping for each of the
-four implemented tool families in the same closed-table style as
+four deployment-mapped tool families in the same closed-table style as
 `[[adapter_mappings]]`:
 
 - `code_host` selects adapter `github`, credential profile `github-primary`, and
@@ -861,6 +861,19 @@ Model-provider credentials are daemon-only and cannot be granted or injected to
 a runner. Explicit `ambient` nevertheless retains same-user filesystem powers
 and therefore does not promise those files are unreadable; that access is
 outside the credential-grant channel.
+
+## Always-composed session plan family
+
+This family is verified through PR #387 (`agent/tool-exercise-smoke`) at
+implementation ref `6ca4e31dffcb5b88d9f149cf1c347f8aa34843a3`.
+
+`plan_write` and `plan_read` have no `[[tool_mappings]]` entry. Both the
+compatibility base composition and the complete four-mapping composition
+construct them through the injected `SessionPlanPort`; production injects
+`SessionPlanRepository`. They require no credential profile, egress policy, or
+workspace root, and model arguments cannot select another session or storage
+adapter. Their automatic permission defaults and effect classes are owned by
+[tool-loop](tool-loop.md#session-plan-tools).
 
 ## Redaction and logs
 
