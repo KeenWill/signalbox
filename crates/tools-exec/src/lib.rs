@@ -10,7 +10,7 @@
 //! unsandboxed execution.
 //!
 //! [`UnsandboxedExecTool`] is a separate catalog-composable tool whose fixed
-//! permission default requires owner confirmation. This crate ships the two
+//! permission default requires user confirmation. This crate ships the two
 //! tools independently and does not decide which session catalogs contain
 //! either one.
 //!

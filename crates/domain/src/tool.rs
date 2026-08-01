@@ -519,7 +519,7 @@ pub enum ToolPermissionDefault {
     Auto,
     /// A user decision is required.
     Confirm,
-    /// An owner decision is required even under blanket automatic approval.
+    /// A user decision is required even under blanket automatic approval.
     AlwaysConfirm,
 }
 
