@@ -19,9 +19,8 @@
 //! compiler locations and test outcomes rather than raw terminal output.
 //!
 //! This day-one profile does not fence the network or impose resource limits.
-//! A full profile providing both is a blocking condition before these tools may
-//! execute untrusted code. Shell sessions and PTYs are likewise outside this
-//! crate's contract.
+//! It is therefore not an admissible boundary for executing untrusted code.
+//! Shell sessions and PTYs are likewise outside this crate's contract.
 //!
 //! The real-bubblewrap containment check is mandatory in CI. Unsupported local
 //! hosts skip it unless `SIGNALBOX_RUN_BWRAP_INTEGRATION=1` requests the same

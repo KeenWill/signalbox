@@ -881,8 +881,11 @@ mod linux {
         stop: Option<&AtomicBool>,
         deadline: Option<Instant>,
     ) -> Result<bool, ()> {
+        if descendant_observation_should_stop(stop, deadline) {
+            return Ok(false);
+        }
         let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut changed = retire_exited_or_reused(&mut tracked)?;
+        let mut changed = retire_exited_or_reused(&mut tracked, stop, deadline)?;
         let mut known = tracked.keys().copied().collect::<BTreeSet<_>>();
         loop {
             if descendant_observation_should_stop(stop, deadline) {
@@ -957,9 +960,16 @@ mod linux {
             || deadline.is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    fn retire_exited_or_reused(tracked: &mut BTreeMap<u32, TrackedProcess>) -> Result<bool, ()> {
+    fn retire_exited_or_reused(
+        tracked: &mut BTreeMap<u32, TrackedProcess>,
+        stop: Option<&AtomicBool>,
+        deadline: Option<Instant>,
+    ) -> Result<bool, ()> {
         let mut retired = Vec::new();
         for (raw_pid, process) in tracked.iter() {
+            if descendant_observation_should_stop(stop, deadline) {
+                break;
+            }
             let identity_changed = process_start_time(*raw_pid)? != Some(process.start_time);
             if identity_changed || pidfd_has_exited(&process.pidfd)? {
                 retired.push(*raw_pid);
@@ -1129,7 +1139,7 @@ mod linux {
             let mut tracked = BTreeMap::from([(raw_pid, process)]);
             child.wait()?;
 
-            let changed = retire_exited_or_reused(&mut tracked)
+            let changed = retire_exited_or_reused(&mut tracked, None, None)
                 .map_err(|()| std::io::Error::other("retire process"))?;
 
             assert!(changed);
@@ -1173,6 +1183,24 @@ mod linux {
                 observe_descendants(u32::MAX, u32::MAX, &tracked, Some(&stop), None),
                 Ok(false)
             );
+        }
+
+        #[test]
+        fn descendant_observation_checks_stop_before_retiring_tracked_processes()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let stop = AtomicBool::new(true);
+            let process = pin_process(std::process::id())
+                .map_err(|()| std::io::Error::other("pin current process"))?
+                .ok_or_else(|| std::io::Error::other("current process disappeared"))?;
+            let tracked = Arc::new(Mutex::new(BTreeMap::from([(u32::MAX, process)])));
+
+            let changed = observe_descendants(u32::MAX, u32::MAX, &tracked, Some(&stop), None)
+                .map_err(|()| std::io::Error::other("observe descendants"))?;
+            let tracked = tracked.lock().unwrap_or_else(PoisonError::into_inner);
+
+            assert!(!changed);
+            assert!(tracked.contains_key(&u32::MAX));
+            Ok(())
         }
 
         #[test]
