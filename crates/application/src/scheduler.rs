@@ -266,14 +266,28 @@ where
 {
     fn operator_failure_class(&self) -> crate::OperatorFailureClass {
         match self {
-            Self::Pass { source, .. } => source.operator_failure_class(),
+            Self::Pass {
+                source,
+                blocking: None,
+            } => source.operator_failure_class(),
+            Self::Pass {
+                blocking: Some(error),
+                ..
+            } => error.operator_failure_class(),
             Self::Reconciliation(error) => error.operator_failure_class(),
         }
     }
 
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
-            Self::Pass { source, .. } => source.operator_failure_cause_code(),
+            Self::Pass {
+                source,
+                blocking: None,
+            } => source.operator_failure_cause_code(),
+            Self::Pass {
+                blocking: Some(error),
+                ..
+            } => error.operator_failure_cause_code(),
             Self::Reconciliation(error) => error.operator_failure_cause_code(),
         }
     }
@@ -866,6 +880,7 @@ where
 mod tests {
     use std::{
         collections::VecDeque,
+        fmt,
         future::{Future, pending, ready},
         io::{self, Write},
         num::NonZeroUsize,
@@ -949,6 +964,27 @@ mod tests {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct FakeGoalDispositionError;
+
+    impl fmt::Display for FakeGoalDispositionError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("durable goal disposition failed")
+        }
+    }
+
+    impl std::error::Error for FakeGoalDispositionError {}
+
+    impl ClassifyOperatorFailure for FakeGoalDispositionError {
+        fn operator_failure_class(&self) -> OperatorFailureClass {
+            OperatorFailureClass::FailClosedCorruption
+        }
+
+        fn operator_failure_cause_code(&self) -> &'static str {
+            "goal_disposition_corruption"
         }
     }
 
@@ -1459,6 +1495,20 @@ mod tests {
             error.to_string(),
             "authoritative pass failed; goal execution-failure blocking also failed: durable block failed"
         );
+    }
+
+    #[test]
+    fn goal_pass_error_reports_secondary_blocking_classification() {
+        let blocking = FakeGoalDispositionError;
+        let expected_class = blocking.operator_failure_class();
+        let expected_cause_code = blocking.operator_failure_cause_code();
+        let error = GoalAwareEligibilityPassError::Pass {
+            source: FakeSweepError::Unavailable,
+            blocking: Some(blocking),
+        };
+
+        assert_eq!(error.operator_failure_class(), expected_class);
+        assert_eq!(error.operator_failure_cause_code(), expected_cause_code);
     }
 
     #[tokio::test]

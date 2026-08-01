@@ -9522,10 +9522,10 @@ where
     let loaded = GoalRepository::new(pool.clone())
         .load_goal(SessionId::from_uuid(session_id.into_uuid()))
         .await;
-    drop(snapshot_permit);
     let goal = match loaded {
         Ok(Some(goal)) => goal,
         Ok(None) => {
+            drop(snapshot_permit);
             return write_error(
                 writer,
                 version,
@@ -9535,6 +9535,7 @@ where
             .await;
         }
         Err(error) => {
+            drop(snapshot_permit);
             return write_goal_repository_error(
                 writer,
                 version,
@@ -9545,21 +9546,26 @@ where
             .await;
         }
     };
-    write_goal_snapshot(writer, version, request_id, session_id, &goal).await
+    let spool_result = spool_goal_snapshot(&goal, version, request_id, session_id).await;
+    drop(goal);
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(error) => return write_snapshot_spool_error(writer, version, request_id, error).await,
+    };
+    write_spooled_file(writer, &mut spool).await
 }
 
-async fn write_goal_snapshot<Writer>(
-    writer: &mut Writer,
+async fn spool_goal_snapshot(
+    goal: &Goal,
     version: ProtocolVersion,
     request_id: RequestId,
     session_id: CanonicalUuid,
-    goal: &Goal,
-) -> Result<(), ProcessConnectionError>
-where
-    Writer: AsyncWrite + Unpin,
-{
-    write_message(
-        writer,
+) -> Result<tokio::fs::File, SnapshotSpoolError> {
+    let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
         version,
         request_id,
         ServerMessage::GoalHistoryStart {
@@ -9571,29 +9577,35 @@ where
     )
     .await?;
     for event in goal.events() {
-        write_message(
-            writer,
+        let wire_event = wire_goal_event(event).map_err(SnapshotSpoolError::from_connection)?;
+        write_spool_message(
+            &mut file,
             version,
             request_id,
             ServerMessage::GoalHistoryItem {
                 event_ordinal: CanonicalU64::new(event.ordinal().get()),
                 generation: CanonicalU64::new(event.generation().get()),
-                event: wire_goal_event(event)?,
+                event: wire_event,
             },
         )
         .await?;
     }
     let event_count =
-        u64::try_from(goal.events().len()).map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-    write_message(
-        writer,
+        u64::try_from(goal.events().len()).map_err(|_| SnapshotSpoolError::EncodeInvariant)?;
+    write_spool_message(
+        &mut file,
         version,
         request_id,
         ServerMessage::GoalHistoryEnd {
             event_count: CanonicalU64::new(event_count),
         },
     )
-    .await
+    .await?;
+    file.flush().await.map_err(SnapshotSpoolError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)?;
+    Ok(file)
 }
 
 fn wire_goal_state(state: &GoalState) -> GoalLifecycleState {
@@ -10292,21 +10304,23 @@ mod tests {
 
     use signalbox_application::{ImportConversationError, ImportedConversationConverter};
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-        ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-        ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest, ReviewPass,
-        ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-        ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
-        ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
-        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId, SessionInputPosition,
-        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
+        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId, Goal,
+        GoalStatement, GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest,
+        ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
+        ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence,
+        ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
+        ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId,
+        SessionInputPosition, SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId,
+        TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, FrameEncodeError,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion, RejectionDetail, ReviewFindingInput,
-        ReviewSeverity, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+        GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
+        InputContent, MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion, RejectionDetail,
+        ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage, SessionEvent,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+        decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -10334,7 +10348,8 @@ mod tests {
         internal_protocol_error, map_rejection, observe_outbox_metrics_once,
         operational_import_error, read_frame_line, replacement_model_is_admitted,
         retry_context_compaction_range_database_reads, run_until_shutdown,
-        snapshot_reader_capacity, submit_input_model_execution_diagnostic, wire_model_call_state,
+        snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
+        submit_input_model_execution_diagnostic, wire_goal_event, wire_model_call_state,
         wire_tool_decision, wire_turn_state, wire_uuid, write_content,
         write_context_compaction_repository_error, write_snapshot_spool_error,
         write_transcript_entry,
@@ -11649,6 +11664,56 @@ context_window_tokens = 200000
                 ..
             }
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn goal_history_is_completed_in_spool_before_socket_write() -> Result<(), Box<dyn Error>>
+    {
+        let session = SessionId::from_uuid(Uuid::from_u128(40));
+        let session_id = wire_uuid(session.into_uuid());
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(41));
+        let statement = GoalStatement::try_new(String::from("finish the fixture task"))?;
+        let goal = Goal::commission(session, statement.clone(), GoalUserProvenance::new(command));
+        let request_id = RequestId::try_new(42)?;
+        let mut spool = spool_goal_snapshot(&goal, ProtocolVersion::One, request_id, session_id)
+            .await
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "goal spool fixture failed: {}",
+                    spool_error_display(&error)
+                ))
+            })?;
+        let mut encoded = Vec::new();
+        spool.read_to_end(&mut encoded).await?;
+
+        let mut expected = encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryStart {
+                session_id,
+                current_generation: CanonicalU64::new(goal.current().generation().get()),
+                current_statement: statement.as_str().to_owned(),
+                current_state: GoalLifecycleState::Pursuing {},
+            },
+        )?)?;
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(goal.events()[0].ordinal().get()),
+                generation: CanonicalU64::new(goal.events()[0].generation().get()),
+                event: wire_goal_event(&goal.events()[0])?,
+            },
+        )?)?);
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryEnd {
+                event_count: CanonicalU64::new(
+                    u64::try_from(goal.events().len()).expect("fixture event count fits u64"),
+                ),
+            },
+        )?)?);
+
+        assert_eq!(encoded, expected);
         Ok(())
     }
 

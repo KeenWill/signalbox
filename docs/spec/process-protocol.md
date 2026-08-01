@@ -695,7 +695,10 @@ messages with event ordinal, generation, event, and provenance; then
 commissioning event, `event_count` is the exact number of preceding items. The
 client validates the complete sequence and count before presenting any line.
 Goal text uses the ordinary bounded text grammar; the closed lifecycle, event,
-reason, and provenance correlations are owned by [goal mode](goal-mode.md).
+reason, and provenance correlations are owned by [goal mode](goal-mode.md). The
+daemon completes an owner-private temporary-file spool, then releases both the
+decoded goal aggregate and snapshot-reader permit before writing the first
+history frame to the connection.
 
 Review mutations return exactly one stable acknowledgement:
 
