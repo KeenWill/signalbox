@@ -339,7 +339,7 @@ impl GoalRepository {
     }
 
     /// Loads the exact assistant-text part immediately preceding a correlated
-    /// `goal_declare` request in the same provider response.
+    /// `goal_declare` request when it is the final part of the same provider response.
     pub async fn load_model_declaration_text(
         &self,
         session: SessionId,
