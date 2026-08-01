@@ -364,10 +364,14 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(evidence.modelCallIndex.rawValue, 0)
     XCTAssertEqual(evidence.turnID.rawValue, turnID)
     XCTAssertEqual(evidence.modelCallID.rawValue, ProcessProtocolFixture.modelCallID)
+    XCTAssertEqual(evidence.usageProvenance, .reported)
     XCTAssertEqual(evidence.usage.inputTokens?.rawValue, 10)
     XCTAssertEqual(evidence.usage.outputTokens?.rawValue, 0)
     XCTAssertNil(evidence.usage.cacheCreationInputTokens)
     XCTAssertEqual(evidence.usage.cacheReadInputTokens?.rawValue, 4)
+    XCTAssertEqual(evidence.cost?.amountUSD.rawValue, "0.125")
+    XCTAssertEqual(evidence.cost?.rateVersion.rawValue, "rates-v7")
+    XCTAssertEqual(evidence.cost?.label, .meteredEquivalent)
     XCTAssertEqual(try ProcessProtocolFixture.modelCallCount(in: endFrame.message), 1)
   }
 
@@ -1000,11 +1004,17 @@ private enum ProcessProtocolFixture {
           "model_call_index":"0",
           "turn_id":"\(turnID)",
           "model_call_id":"\(modelCallID)",
+          "usage_provenance":"reported",
           "usage":{
             "input_tokens":"10",
             "output_tokens":"0",
             "cache_creation_input_tokens":null,
             "cache_read_input_tokens":"4"
+          },
+          "cost":{
+            "amount_usd":"0.125",
+            "rate_version":"rates-v7",
+            "label":"metered_equivalent"
           }
         }
       }

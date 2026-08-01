@@ -2733,12 +2733,14 @@ private enum SynchronizationFixture {
         "model_call_index":"\(index)",
         "turn_id":"\(turn)",
         "model_call_id":"\(modelCallID)",
+        "usage_provenance":"reported",
         "usage":{
           "input_tokens":"10",
           "output_tokens":"0",
           "cache_creation_input_tokens":null,
           "cache_read_input_tokens":"4"
-        }
+        },
+        "cost":null
       }
       """
     )
