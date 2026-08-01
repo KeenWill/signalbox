@@ -614,6 +614,11 @@ async fn serve_connection(
             pending_import.is_some(),
             import_limit,
         );
+        let frame_buffer_permit = retain_inbound_frame_permit_during_import_admission(
+            &request,
+            import_requires_permit,
+            frame_buffer_permit,
+        );
         let import_permit = if import_requires_permit {
             let Some(permit) =
                 acquire_import_permit(Arc::clone(&services.import_budget), &mut shutdown).await?
@@ -727,6 +732,17 @@ fn conversation_import_request_requires_permit(
         _ => false,
     }
 }
+fn retain_inbound_frame_permit_during_import_admission(
+    request: &ClientRequest,
+    import_requires_permit: bool,
+    permit: OwnedSemaphorePermit,
+) -> Option<OwnedSemaphorePermit> {
+    if import_requires_permit && matches!(request, ClientRequest::BeginConversationImport { .. }) {
+        None
+    } else {
+        Some(permit)
+    }
+}
 
 async fn acquire_import_permit(
     budget: Arc<Semaphore>,
@@ -770,10 +786,13 @@ impl ReviewCommandAdmission {
 
 async fn acquire_review_command_permit_while_buffered(
     review_admission: ReviewCommandAdmission,
-    frame_buffer_permit: OwnedSemaphorePermit,
+    frame_buffer_permit: Option<OwnedSemaphorePermit>,
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
-) -> Result<Option<(OwnedSemaphorePermit, Option<OwnedSemaphorePermit>)>, ProcessConnectionError> {
+) -> Result<
+    Option<(Option<OwnedSemaphorePermit>, Option<OwnedSemaphorePermit>)>,
+    ProcessConnectionError,
+> {
     let review_command_permit = match review_admission {
         ReviewCommandAdmission::Required => {
             let Some(permit) = acquire_review_command_permit(budget, shutdown).await? else {
@@ -10450,6 +10469,7 @@ mod tests {
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, observe_outbox_metrics_once,
         operational_import_error, read_frame_line, replacement_model_is_admitted,
+        retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, submit_input_model_execution_diagnostic, wire_model_call_state,
         wire_tool_decision, wire_turn_state, wire_uuid, write_content,
@@ -11325,7 +11345,7 @@ context_window_tokens = 200000
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
         let acquire = acquire_review_command_permit_while_buffered(
             ReviewCommandAdmission::Required,
-            frame_permit,
+            Some(frame_permit),
             Arc::clone(&review_budget),
             &mut shutdown_receiver,
         );
@@ -11341,6 +11361,8 @@ context_window_tokens = 200000
         let (held_frame, review_permit) = timeout(Duration::from_secs(1), &mut acquire)
             .await??
             .ok_or_else(|| io::Error::other("the admitted request must retain both permits"))?;
+        let held_frame =
+            held_frame.ok_or_else(|| io::Error::other("the frame permit must remain"))?;
         assert!(review_permit.is_some());
         assert_eq!(frame_budget.available_permits(), 0);
         drop(held_frame);
@@ -11670,6 +11692,42 @@ context_window_tokens = 200000
         assert!(!super::conversation_import_request_requires_permit(
             &admitted, true, 8,
         ));
+    }
+
+    #[tokio::test]
+    async fn waiting_begin_releases_its_inbound_slot_before_import_admission()
+    -> Result<(), Box<dyn Error>> {
+        let capacity = 1;
+        let frame_budget = Arc::new(Semaphore::new(capacity));
+        let import_budget = Arc::new(Semaphore::new(capacity));
+        let occupied_import = Arc::clone(&import_budget).acquire_owned().await?;
+        let frame_permit = Arc::clone(&frame_budget).acquire_owned().await?;
+        let begin = ClientRequest::BeginConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes: CanonicalU64::new(u64::try_from(capacity)?),
+        };
+        let import_requires_permit =
+            super::conversation_import_request_requires_permit(&begin, false, capacity);
+
+        let retained = retain_inbound_frame_permit_during_import_admission(
+            &begin,
+            import_requires_permit,
+            frame_permit,
+        );
+
+        assert!(retained.is_none());
+        assert_eq!(frame_budget.available_permits(), capacity);
+        assert_eq!(import_budget.available_permits(), 0);
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let active_frame = timeout(
+            Duration::from_secs(1),
+            acquire_inbound_frame_permit(Arc::clone(&frame_budget), &mut shutdown_receiver),
+        )
+        .await??
+        .ok_or_else(|| io::Error::other("the active import must retain frame progress"))?;
+        assert_eq!(active_frame.num_permits(), capacity);
+        drop(occupied_import);
+        Ok(())
     }
 
     #[tokio::test]
