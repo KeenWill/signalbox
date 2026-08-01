@@ -2999,20 +2999,60 @@ fn canonicalized_ipv4_fragment(host: &str, positions: std::ops::Range<usize>) ->
 }
 
 fn canonicalized_ipv6_fragments(value: &str) -> Vec<Vec<u16>> {
-    let component_count = value.split(':').count();
-    if component_count > 8 || value.split(':').any(str::is_empty) {
+    let has_compression = value.contains("::");
+    let explicit_component_count = value
+        .split(':')
+        .filter(|component| !component.is_empty())
+        .count();
+    if explicit_component_count > 8
+        || (!has_compression && value.split(':').any(str::is_empty))
+        || (has_compression && explicit_component_count >= 8)
+    {
         return Vec::new();
     }
+    let minimum_component_count = explicit_component_count + usize::from(has_compression);
+    let maximum_component_count = if has_compression {
+        8
+    } else {
+        minimum_component_count
+    };
     let mut fragments = Vec::new();
-    for start in 0..=8 - component_count {
-        let prefix = "0:".repeat(start);
-        let suffix = ":0".repeat(8 - start - component_count);
-        let host = format!("{prefix}{value}{suffix}");
-        if let Some(fragment) = canonicalized_ipv6_fragment(&host, start..start + component_count) {
-            fragments.push(fragment);
+    for component_count in minimum_component_count..=maximum_component_count {
+        for start in 0..=8 - component_count {
+            let host = embedded_ipv6_fragment_candidate(value, start, 8 - start - component_count);
+            if let Some(fragment) =
+                canonicalized_ipv6_fragment(&host, start..start + component_count)
+            {
+                fragments.push(fragment);
+            }
         }
     }
     fragments
+}
+
+fn embedded_ipv6_fragment_candidate(
+    value: &str,
+    leading_components: usize,
+    trailing_components: usize,
+) -> String {
+    let mut host = String::new();
+    for _ in 0..leading_components {
+        if !host.is_empty() {
+            host.push(':');
+        }
+        host.push('0');
+    }
+    if !host.is_empty() && !value.starts_with(':') {
+        host.push(':');
+    }
+    host.push_str(value);
+    for _ in 0..trailing_components {
+        if !host.ends_with(':') {
+            host.push(':');
+        }
+        host.push('0');
+    }
+    host
 }
 
 fn canonicalized_ipv6_fragment(host: &str, positions: std::ops::Range<usize>) -> Option<Vec<u16>> {
@@ -3206,6 +3246,7 @@ mod tests {
     const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
     const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
     const URL_IPV6_MULTI_HEXTET_COLLISION_KEY: &str = "0db8:0000";
+    const URL_IPV6_COMPRESSED_FRAGMENT_COLLISION_KEY: &str = "0db8::1";
     const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
     const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
@@ -6382,6 +6423,31 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_IPV6_MULTI_HEXTET_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: a compressed IPv6 credential fragment is expanded at every
+    /// legal length and position before comparison with a result host.
+    #[test]
+    fn web_search_rejects_canonicalized_compressed_ipv6_credential_fragment() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("compressed-fragment fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_IPV6_COMPRESSED_FRAGMENT_COLLISION_KEY
+                .as_bytes()
+                .to_vec(),
         ))
         .expect("fixture credential is usable");
 
