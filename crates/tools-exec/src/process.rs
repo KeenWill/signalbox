@@ -714,6 +714,16 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         capture_bytes: usize,
     ) -> ExecResult {
         let requested_timeout = Duration::from_secs(arguments.timeout_seconds);
+        self.run_with_capture_timeout(arguments, requested_timeout, capture_bytes)
+            .await
+    }
+
+    pub(crate) async fn run_with_capture_timeout(
+        &mut self,
+        arguments: ExecArguments,
+        requested_timeout: Duration,
+        capture_bytes: usize,
+    ) -> ExecResult {
         let deadline = tokio::time::Instant::now() + requested_timeout;
         #[cfg(target_os = "linux")]
         if !self.workspace_identity.matches(&self.workspace_root) {

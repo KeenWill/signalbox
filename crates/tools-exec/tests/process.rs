@@ -34,7 +34,7 @@ const INHERITED_STDOUT_FIXTURE_NAME: &str = "inherited_subprocess_stdout_fixture
 const INHERITED_FORGED_TEST_NAME: &str = "inherited::forged";
 
 #[test]
-fn cargo_test_runner_rejects_inherited_subprocess_stdout_end_to_end()
+fn cargo_test_runner_marks_interleaved_subprocess_stdout_incomplete()
 -> Result<(), Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))
@@ -44,11 +44,6 @@ fn cargo_test_runner_rejects_inherited_subprocess_stdout_end_to_end()
         .output()?;
     let stdout = String::from_utf8(output.stdout)?;
     let mut frames = stdout.lines();
-    let actual: serde_json::Value = serde_json::from_str(
-        frames
-            .next()
-            .expect("the runner emits the observed test result first"),
-    )?;
     let truncated: serde_json::Value = serde_json::from_str(
         frames
             .next()
@@ -59,15 +54,7 @@ fn cargo_test_runner_rejects_inherited_subprocess_stdout_end_to_end()
             .next()
             .expect("the runner completes this executable last"),
     )?;
-    let expected = serde_json::json!({
-        "reason": "signalbox-test-result",
-        "executable": executable.to_string_lossy(),
-        "name": INHERITED_STDOUT_FIXTURE_NAME,
-        "outcome": "passed",
-    });
-
     assert!(output.status.success());
-    assert_eq!(actual, expected);
     assert_eq!(
         truncated,
         serde_json::json!({

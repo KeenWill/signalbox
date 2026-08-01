@@ -321,7 +321,7 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
     }
 
     async fn run_test(&mut self, timeout_seconds: u64) -> CargoDiagnosticsResult {
-        let started = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
         let host_result = self
             .command_runner
             .run_with_capture(
@@ -339,15 +339,8 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
                 Some(CargoDiagnosticsPreparationFailure::CargoHostUnavailable);
             return result;
         };
-        let Some(remaining_seconds) = Duration::from_secs(timeout_seconds)
-            .checked_sub(started.elapsed())
-            .map(|remaining| {
-                remaining
-                    .as_secs()
-                    .saturating_add(u64::from(remaining.subsec_nanos() != 0))
-            })
-            .filter(|remaining| *remaining > 0)
-        else {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             let mut timed_out = host_result;
             timed_out.outcome = ProcessOutcome::TimedOut;
             return structured_result_with_test_helper(
@@ -355,25 +348,23 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
                 timed_out,
                 false,
             );
-        };
-        let preserve_native_test_runner = workspace_configures_native_runner(
-            self.command_runner.pinned_workspace_root(),
-            &cargo_host,
-        );
+        }
+        let runner_plan =
+            workspace_test_runner_plan(self.command_runner.pinned_workspace_root(), &cargo_host);
         let exec_arguments = cargo_arguments(
             CargoDiagnosticsCommand::Test,
-            remaining_seconds,
-            preserve_native_test_runner,
-            &cargo_host,
+            timeout_seconds,
+            runner_plan.preserve_configured_runner,
+            &runner_plan.selected_target,
         );
         let result = self
             .command_runner
-            .run_with_capture(exec_arguments, DIAGNOSTICS_CAPTURE_BYTES)
+            .run_with_capture_timeout(exec_arguments, remaining, DIAGNOSTICS_CAPTURE_BYTES)
             .await;
         structured_result_with_test_helper(
             CargoDiagnosticsCommand::Test,
             result,
-            !preserve_native_test_runner,
+            !runner_plan.preserve_configured_runner,
         )
     }
 }
@@ -469,22 +460,96 @@ fn cargo_test_arguments(preserve_native_runner: bool, native_target: &str) -> Ve
     arguments
 }
 
-fn workspace_configures_native_runner(workspace_root: &Path, native_target: &str) -> bool {
-    ["config.toml", "config"].iter().any(|name| {
-        cargo_config_defines_native_runner(&workspace_root.join(".cargo").join(name), native_target)
-    })
+#[derive(Debug, Eq, PartialEq)]
+struct CargoTestRunnerPlan {
+    selected_target: String,
+    preserve_configured_runner: bool,
 }
 
-fn cargo_config_defines_native_runner(path: &Path, native_target: &str) -> bool {
-    let Ok(metadata) = path.symlink_metadata() else {
-        return false;
-    };
-    if !metadata.file_type().is_file() || metadata.len() > MAX_CARGO_CONFIG_BYTES {
-        return true;
+enum CargoConfigRead {
+    Absent,
+    Contents(String),
+    Opaque,
+}
+
+fn workspace_test_runner_plan(workspace_root: &Path, cargo_host: &str) -> CargoTestRunnerPlan {
+    match read_workspace_cargo_config(workspace_root) {
+        CargoConfigRead::Absent => CargoTestRunnerPlan {
+            selected_target: String::from(cargo_host),
+            preserve_configured_runner: false,
+        },
+        CargoConfigRead::Contents(contents) => config_text_test_runner_plan(&contents, cargo_host)
+            .unwrap_or_else(|| CargoTestRunnerPlan {
+                selected_target: String::from(cargo_host),
+                preserve_configured_runner: true,
+            }),
+        CargoConfigRead::Opaque => CargoTestRunnerPlan {
+            selected_target: String::from(cargo_host),
+            preserve_configured_runner: true,
+        },
     }
-    let Ok(file) = File::open(path) else {
-        return true;
+}
+
+#[cfg(target_os = "linux")]
+fn read_workspace_cargo_config(workspace_root: &Path) -> CargoConfigRead {
+    let root = match rustix::fs::open(
+        workspace_root,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(root) => root,
+        Err(_) => return CargoConfigRead::Opaque,
     };
+    let cargo_directory = match rustix::fs::openat(
+        &root,
+        ".cargo",
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(directory) => directory,
+        Err(rustix::io::Errno::NOENT) => return CargoConfigRead::Absent,
+        Err(_) => return CargoConfigRead::Opaque,
+    };
+    match read_cargo_config_file(&cargo_directory, "config") {
+        CargoConfigRead::Absent => read_cargo_config_file(&cargo_directory, "config.toml"),
+        selected => selected,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_cargo_config_file(cargo_directory: &rustix::fd::OwnedFd, name: &str) -> CargoConfigRead {
+    let descriptor = match rustix::fs::openat(
+        cargo_directory,
+        name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return CargoConfigRead::Absent,
+        Err(_) => return CargoConfigRead::Opaque,
+    };
+    let metadata = match rustix::fs::fstat(&descriptor) {
+        Ok(metadata) => metadata,
+        Err(_) => return CargoConfigRead::Opaque,
+    };
+    if rustix::fs::FileType::from_raw_mode(metadata.st_mode) != rustix::fs::FileType::RegularFile
+        || metadata.st_size < 0
+        || metadata.st_size as u64 > MAX_CARGO_CONFIG_BYTES
+    {
+        return CargoConfigRead::Opaque;
+    }
+    read_cargo_config_contents(File::from(descriptor))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_workspace_cargo_config(_workspace_root: &Path) -> CargoConfigRead {
+    CargoConfigRead::Opaque
+}
+
+fn read_cargo_config_contents(file: File) -> CargoConfigRead {
     let mut contents = String::new();
     if file
         .take(MAX_CARGO_CONFIG_BYTES + 1)
@@ -492,27 +557,41 @@ fn cargo_config_defines_native_runner(path: &Path, native_target: &str) -> bool 
         .is_err()
         || contents.len() as u64 > MAX_CARGO_CONFIG_BYTES
     {
-        return true;
+        return CargoConfigRead::Opaque;
     }
-    config_text_defines_native_runner(&contents, native_target)
+    CargoConfigRead::Contents(contents)
 }
 
-fn config_text_defines_native_runner(contents: &str, native_target: &str) -> bool {
-    let Ok(config) = toml::from_str::<toml::Value>(contents) else {
-        return true;
-    };
+fn config_text_test_runner_plan(contents: &str, cargo_host: &str) -> Option<CargoTestRunnerPlan> {
+    let config = toml::from_str::<toml::Value>(contents).ok()?;
     if config.get("include").is_some() {
-        return true;
+        return None;
     }
-    config
+    let selected_target = match config.get("build").and_then(|build| build.get("target")) {
+        Some(target) => target.as_str()?.to_owned(),
+        None => String::from(cargo_host),
+    };
+    if selected_target.is_empty()
+        || selected_target.len() > MAX_CARGO_HOST_BYTES
+        || !selected_target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    let preserve_configured_runner = config
         .get("target")
         .and_then(toml::Value::as_table)
         .is_some_and(|targets| {
             targets.iter().any(|(selector, settings)| {
-                (selector == native_target || selector.starts_with("cfg("))
+                (selector == &selected_target || selector.starts_with("cfg("))
                     && settings.get("runner").is_some()
             })
-        })
+        });
+    Some(CargoTestRunnerPlan {
+        selected_target,
+        preserve_configured_runner,
+    })
 }
 
 fn cargo_test_runner_config(native_target: &str) -> String {
@@ -673,6 +752,12 @@ struct CargoTestSourceTruncated {
 }
 
 #[derive(serde::Deserialize)]
+struct CargoTestLimitReached {
+    reason: String,
+    executable: String,
+}
+
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CargoTestSourceComplete {
     reason: String,
@@ -807,6 +892,7 @@ fn cargo_failure_detail(
     }
     let (message, field_completeness) = bounded_text(message, MAX_CARGO_FAILURE_BYTES);
     let message_completeness = if result.stderr.completeness == CaptureCompleteness::Truncated
+        || result.stderr.encoding == OutputEncoding::LossyUtf8
         || field_completeness == CaptureCompleteness::Truncated
     {
         CaptureCompleteness::Truncated
@@ -854,6 +940,7 @@ fn parse_stream(
     test_source_evidence: TestSourceEvidence<'_>,
 ) -> bool {
     let mut build_finished = false;
+    let mut build_succeeded = false;
     for line in text.lines() {
         if command == CargoDiagnosticsCommand::Test
             && !build_finished
@@ -871,8 +958,11 @@ fn parse_stream(
                 diagnostic_limit_reached,
             );
         }
-        if command == CargoDiagnosticsCommand::Test && cargo_build_finished(line) {
+        if command == CargoDiagnosticsCommand::Test
+            && let Some(success) = cargo_build_finished(line)
+        {
             build_finished = true;
+            build_succeeded = success;
         }
         if command == CargoDiagnosticsCommand::Test
             && build_finished
@@ -880,6 +970,8 @@ fn parse_stream(
         {
             if parse_test_source_truncated(line).is_some() {
                 *test_source_evidence.truncated = true;
+            } else if parse_test_limit_reached(line).is_some() {
+                *test_limit_reached = true;
             } else if let Some(executable) = parse_test_source_complete(line) {
                 test_source_evidence
                     .completed_executables
@@ -889,7 +981,7 @@ fn parse_stream(
             }
         }
     }
-    build_finished
+    build_finished && build_succeeded
 }
 
 struct TestSourceEvidence<'a> {
@@ -899,9 +991,11 @@ struct TestSourceEvidence<'a> {
     helper_installed: bool,
 }
 
-fn cargo_build_finished(line: &str) -> bool {
+fn cargo_build_finished(line: &str) -> Option<bool> {
     serde_json::from_str::<CargoReason>(line)
-        .is_ok_and(|message| message.reason == "build-finished")
+        .ok()
+        .filter(|message| message.reason == "build-finished")
+        .map(|message| message.success)
 }
 
 fn cargo_test_artifact(line: &str) -> Option<String> {
@@ -919,6 +1013,7 @@ fn parse_test_source_complete(line: &str) -> Option<String> {
 #[derive(serde::Deserialize)]
 struct CargoReason {
     reason: String,
+    success: bool,
 }
 
 fn push_bounded<T>(values: &mut Vec<T>, value: T, limit: usize, limit_reached: &mut bool) {
@@ -990,6 +1085,11 @@ fn parse_test_source_truncated(line: &str) -> Option<String> {
     (event.reason == "signalbox-test-source-truncated").then_some(event.executable)
 }
 
+fn parse_test_limit_reached(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<CargoTestLimitReached>(line).ok()?;
+    (event.reason == "signalbox-test-limit-reached").then_some(event.executable)
+}
+
 fn bounded_text(value: &str, max_bytes: usize) -> (String, CaptureCompleteness) {
     let contains_null = value.contains('\0');
     let sanitized = value.replace('\0', "\u{fffd}");
@@ -1048,12 +1148,59 @@ mod tests {
     const BOUNDED_TEXT_FIXTURE: &str = "abcé";
     const BOUNDED_TEXT_LIMIT: usize = 4;
     const TEST_NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
+    const FOREIGN_TARGET: &str = "aarch64-unknown-linux-gnu";
+
+    struct CargoConfigFixture {
+        root: PathBuf,
+        external: PathBuf,
+    }
+
+    impl CargoConfigFixture {
+        fn new() -> Result<Self, Box<dyn Error>> {
+            let identity = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "signalbox-diagnostics-config-{}-{identity}",
+                std::process::id()
+            ));
+            let external = root.with_extension("external");
+            std::fs::create_dir(&root)?;
+            std::fs::create_dir(&external)?;
+            Ok(Self { root, external })
+        }
+
+        fn create_cargo_directory(&self) -> Result<(), Box<dyn Error>> {
+            std::fs::create_dir(self.root.join(".cargo"))?;
+            Ok(())
+        }
+
+        fn write_config(&self, name: &str, contents: &str) -> Result<(), Box<dyn Error>> {
+            std::fs::write(self.root.join(".cargo").join(name), contents)?;
+            Ok(())
+        }
+
+        #[cfg(target_os = "linux")]
+        fn symlink_external_cargo(&self, contents: &str) -> Result<(), Box<dyn Error>> {
+            std::fs::write(self.external.join("config"), contents)?;
+            std::os::unix::fs::symlink(&self.external, self.root.join(".cargo"))?;
+            Ok(())
+        }
+    }
+
+    impl Drop for CargoConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+            let _ = std::fs::remove_dir_all(&self.external);
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct FakeRunner {
         requests: Arc<Mutex<Vec<ProcessRequest>>>,
         result: ProcessRunResult,
         host_result: ProcessRunResult,
+        host_delay: Duration,
     }
 
     impl FakeRunner {
@@ -1066,6 +1213,7 @@ mod tests {
                     &format!("cargo 1.0.0\nhost: {TEST_NATIVE_TARGET}\n"),
                     CaptureCompleteness::Complete,
                 ),
+                host_delay: Duration::ZERO,
             }
         }
 
@@ -1074,7 +1222,13 @@ mod tests {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 result,
                 host_result,
+                host_delay: Duration::ZERO,
             }
+        }
+
+        fn with_host_delay(mut self, host_delay: Duration) -> Self {
+            self.host_delay = host_delay;
+            self
         }
 
         fn requests(&self) -> Vec<ProcessRequest> {
@@ -1101,6 +1255,7 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(request);
             if is_cargo_host_query {
+                tokio::time::sleep(self.host_delay).await;
                 self.host_result.clone()
             } else {
                 self.result.clone()
@@ -1190,6 +1345,14 @@ mod tests {
             "executable": executable,
         }))
         .expect("static completion event is serializable")
+    }
+
+    fn test_limit_reached_event(executable: &str) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "reason": "signalbox-test-limit-reached",
+            "executable": executable,
+        }))
+        .expect("static limit event is serializable")
     }
 
     fn exited_exec_result(stdout: String) -> ExecResult {
@@ -1593,6 +1756,24 @@ mod tests {
     }
 
     #[test]
+    fn lossy_cargo_failure_text_is_incomplete() {
+        let mut execution = exited_exec_result(String::new());
+        execution.outcome = ProcessOutcome::Exited { code: Some(101) };
+        execution.stderr.text = String::from(CARGO_FAILURE_MESSAGE);
+        execution.stderr.encoding = OutputEncoding::LossyUtf8;
+
+        let result = structured_result(CargoDiagnosticsCommand::Check, execution);
+        let failure = result
+            .execution
+            .cargo_failure
+            .as_ref()
+            .expect("failed Cargo invocation retains its lossy explanation");
+
+        assert_eq!(failure.message, CARGO_FAILURE_MESSAGE);
+        assert_eq!(failure.message_completeness, CaptureCompleteness::Truncated);
+    }
+
+    #[test]
     fn test_events_reject_raw_output_and_retain_target_identity() {
         let stdout = format!(
             "{}\n{}\n{}\n{}\ntest {FORGED_TEST} ... ok\n{}\n{}\n{}\n{}\n",
@@ -1664,6 +1845,34 @@ mod tests {
 
         assert!(one_completion.tests.source_truncated);
         assert!(!every_completion.tests.source_truncated);
+    }
+
+    #[test]
+    fn unsuccessful_build_marks_test_evidence_incomplete() {
+        let result = structured_result(
+            CargoDiagnosticsCommand::Test,
+            exited_exec_result(String::from(
+                r#"{"reason":"build-finished","success":false}"#,
+            )),
+        );
+
+        assert!(result.tests.source_truncated);
+        assert_eq!(result.tests.values, Vec::new());
+    }
+
+    #[test]
+    fn helper_limit_frame_marks_the_test_collection() {
+        let stdout = format!(
+            "{}\n{}\n{}\n{}",
+            test_artifact_event(TEST_EXECUTABLE),
+            build_finished_message(),
+            test_limit_reached_event(TEST_EXECUTABLE),
+            test_source_complete_event(TEST_EXECUTABLE),
+        );
+
+        let result = structured_result(CargoDiagnosticsCommand::Test, exited_exec_result(stdout));
+
+        assert!(result.tests.limit_reached);
     }
 
     #[test]
@@ -1787,7 +1996,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_config_runner_detection_distinguishes_native_foreign_and_cfg_tables() {
+    fn cargo_config_runner_detection_distinguishes_selected_foreign_and_cfg_tables() {
         let native_target = TEST_NATIVE_TARGET;
         let native = format!("[target.'{native_target}']\nrunner = 'native-wrapper'\n");
         let quoted_runner = format!("[target.'{native_target}']\n\"runner\" = 'quoted-wrapper'\n");
@@ -1795,17 +2004,61 @@ mod tests {
         let foreign = "[target.'aarch64-unknown-linux-gnu']\nrunner = 'qemu-aarch64'\n";
         let configured = "[target.'cfg(target_os = \"linux\")']\nrunner = 'linux-wrapper'\n";
 
-        assert!(config_text_defines_native_runner(&native, native_target));
-        assert!(config_text_defines_native_runner(
-            &quoted_runner,
-            native_target
-        ));
-        assert!(config_text_defines_native_runner(
-            &dotted_runner,
-            native_target
-        ));
-        assert!(!config_text_defines_native_runner(foreign, native_target));
-        assert!(config_text_defines_native_runner(configured, native_target));
+        let native_plan = config_text_test_runner_plan(&native, native_target);
+        let quoted_plan = config_text_test_runner_plan(&quoted_runner, native_target);
+        let dotted_plan = config_text_test_runner_plan(&dotted_runner, native_target);
+        let foreign_plan = config_text_test_runner_plan(foreign, native_target);
+        let configured_plan = config_text_test_runner_plan(configured, native_target);
+
+        assert!(native_plan.is_some_and(|plan| plan.preserve_configured_runner));
+        assert!(quoted_plan.is_some_and(|plan| plan.preserve_configured_runner));
+        assert!(dotted_plan.is_some_and(|plan| plan.preserve_configured_runner));
+        assert!(foreign_plan.is_some_and(|plan| !plan.preserve_configured_runner));
+        assert!(configured_plan.is_some_and(|plan| plan.preserve_configured_runner));
+    }
+
+    #[test]
+    fn configured_build_target_selects_that_targets_runner() {
+        let config = format!(
+            "[build]\ntarget = '{FOREIGN_TARGET}'\n[target.'{FOREIGN_TARGET}']\nrunner = 'qemu-aarch64'\n"
+        );
+
+        let plan = config_text_test_runner_plan(&config, TEST_NATIVE_TARGET)
+            .expect("bounded static Cargo config");
+
+        assert_eq!(plan.selected_target, FOREIGN_TARGET);
+        assert!(plan.preserve_configured_runner);
+    }
+
+    #[test]
+    fn extensionless_cargo_config_wins_over_config_toml() -> Result<(), Box<dyn Error>> {
+        let fixture = CargoConfigFixture::new()?;
+        fixture.create_cargo_directory()?;
+        fixture.write_config("config", "")?;
+        fixture.write_config(
+            "config.toml",
+            &format!("[target.'{TEST_NATIVE_TARGET}']\nrunner = 'ignored-wrapper'\n"),
+        )?;
+
+        let plan = workspace_test_runner_plan(&fixture.root, TEST_NATIVE_TARGET);
+
+        assert_eq!(plan.selected_target, TEST_NATIVE_TARGET);
+        assert!(!plan.preserve_configured_runner);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symlinked_cargo_directory_is_opaque_without_reading_its_target() -> Result<(), Box<dyn Error>>
+    {
+        let fixture = CargoConfigFixture::new()?;
+        fixture.symlink_external_cargo("")?;
+
+        let plan = workspace_test_runner_plan(&fixture.root, TEST_NATIVE_TARGET);
+
+        assert_eq!(plan.selected_target, TEST_NATIVE_TARGET);
+        assert!(plan.preserve_configured_runner);
+        Ok(())
     }
 
     #[test]
@@ -1826,7 +2079,8 @@ mod tests {
             ProcessOutcome::Exited { code: Some(0) },
             &test_output(),
             CaptureCompleteness::Complete,
-        ));
+        ))
+        .with_host_delay(Duration::from_millis(20));
         let observation = fake.clone();
         let mut runner = CargoDiagnosticsRunner::try_new(fake, std::env::current_dir()?)?;
 
@@ -1847,7 +2101,7 @@ mod tests {
         );
         assert!(test_request.arguments.contains(&OsString::from("test")));
         assert!(!test_request.timeout.is_zero());
-        assert!(test_request.timeout <= Duration::from_secs(1));
+        assert!(test_request.timeout < Duration::from_secs(1));
         Ok(())
     }
 

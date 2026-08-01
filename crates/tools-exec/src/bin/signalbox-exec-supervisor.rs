@@ -7,7 +7,6 @@ mod linux {
         ffi::OsString,
         fs::{File, OpenOptions},
         io::{Read, Seek, SeekFrom, Write},
-        os::fd::AsRawFd,
         os::unix::process::CommandExt,
         process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
@@ -43,8 +42,6 @@ mod linux {
     const STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:";
     const MAX_TEST_OUTPUT_LINE_BYTES: usize = 16 * 1024;
     const MAX_CARGO_TEST_EVENTS: usize = 512;
-    const MAX_TEST_BINARY_SCAN_BYTES: usize = 64 * 1024 * 1024;
-    const LIBTEST_LOGFILE_MARKER: &[u8] = b"Write logs to the specified file (deprecated)";
 
     enum TargetFailure {
         Spawn(std::io::Error),
@@ -294,9 +291,20 @@ mod linux {
         executable: String,
     }
 
+    #[derive(serde::Serialize)]
+    struct CargoTestLimitReached {
+        reason: &'static str,
+        executable: String,
+    }
+
     struct ObservedCargoTestEvent {
         name: String,
         outcome: CargoTestEventOutcome,
+    }
+
+    struct CargoTestOutput {
+        events: Vec<ObservedCargoTestEvent>,
+        limit_reached: bool,
     }
 
     fn parse_libtest_log_status(line: &str) -> Option<ObservedCargoTestEvent> {
@@ -323,21 +331,17 @@ mod linux {
         }
         let program = arguments.remove(0);
         let executable = program.to_string_lossy().into_owned();
-        let mut test_log = if program_supports_libtest_log(&program) {
-            let Ok((log, path)) = create_cargo_test_log() else {
-                return ExitCode::FAILURE;
-            };
-            arguments.push(OsString::from("--logfile"));
-            arguments.push(path);
-            Some(log)
-        } else {
-            None
+        let Ok(mut test_log) = create_cargo_test_log() else {
+            return ExitCode::FAILURE;
+        };
+        let Ok(test_stdout) = test_log.try_clone() else {
+            return ExitCode::FAILURE;
         };
         let mut command = Command::new(program);
         command
             .args(arguments)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(test_stdout))
             .stderr(Stdio::inherit());
         let Ok(mut child) = command.spawn() else {
             return ExitCode::FAILURE;
@@ -349,19 +353,14 @@ mod linux {
                 return ExitCode::FAILURE;
             }
         };
-        let events = match test_log.as_mut() {
-            Some(log) => {
-                if log.seek(SeekFrom::Start(0)).is_err() {
-                    return ExitCode::FAILURE;
-                }
-                match read_cargo_test_output(log) {
-                    Ok(events) => events,
-                    Err(_) => return ExitCode::FAILURE,
-                }
-            }
-            None => Vec::new(),
+        if test_log.seek(SeekFrom::Start(0)).is_err() {
+            return ExitCode::FAILURE;
         };
-        if emit_cargo_test_events(&events, &executable, &mut std::io::stdout().lock()).is_err() {
+        let output = match read_cargo_test_output(&mut test_log) {
+            Ok(output) => output,
+            Err(_) => return ExitCode::FAILURE,
+        };
+        if emit_cargo_test_events(&output, &executable, &mut std::io::stdout().lock()).is_err() {
             return ExitCode::FAILURE;
         }
         exit_code(status)
@@ -379,41 +378,7 @@ mod linux {
         }
     }
 
-    fn program_supports_libtest_log(program: &OsString) -> bool {
-        File::open(std::path::Path::new(program)).is_ok_and(|mut program| {
-            bounded_stream_contains(&mut program, LIBTEST_LOGFILE_MARKER).unwrap_or(false)
-        })
-    }
-
-    fn bounded_stream_contains<Source: Read>(
-        source: &mut Source,
-        needle: &[u8],
-    ) -> std::io::Result<bool> {
-        let mut total = 0_usize;
-        let mut read_buffer = [0_u8; 8 * 1024];
-        let mut window = Vec::new();
-        while total < MAX_TEST_BINARY_SCAN_BYTES {
-            let remaining = MAX_TEST_BINARY_SCAN_BYTES - total;
-            let read_capacity = remaining.min(read_buffer.len());
-            let read = source.read(&mut read_buffer[..read_capacity])?;
-            if read == 0 {
-                return Ok(false);
-            }
-            total += read;
-            window.extend_from_slice(&read_buffer[..read]);
-            if window
-                .windows(needle.len())
-                .any(|candidate| candidate == needle)
-            {
-                return Ok(true);
-            }
-            let retained = needle.len().saturating_sub(1).min(window.len());
-            window.drain(..window.len() - retained);
-        }
-        Ok(false)
-    }
-
-    fn create_cargo_test_log() -> std::io::Result<(File, OsString)> {
+    fn create_cargo_test_log() -> std::io::Result<File> {
         let identity = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(std::io::Error::other)?
@@ -428,39 +393,32 @@ mod linux {
             .create_new(true)
             .open(&path)?;
         std::fs::remove_file(path)?;
-        let descriptor_path = OsString::from(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            log.as_raw_fd()
-        ));
-        Ok((log, descriptor_path))
+        Ok(log)
     }
 
     fn read_cargo_test_output<Source: Read>(
         source: &mut Source,
-    ) -> std::io::Result<Vec<ObservedCargoTestEvent>> {
+    ) -> std::io::Result<CargoTestOutput> {
         let mut events = Vec::new();
+        let mut limit_reached = false;
         let mut read_buffer = [0_u8; 8 * 1024];
         let mut line = Vec::new();
         let mut discarding = false;
         loop {
             let read = source.read(&mut read_buffer)?;
             if read == 0 {
-                if !discarding
-                    && let Some(event) = parse_libtest_log_line(&line)
-                    && events.len() < MAX_CARGO_TEST_EVENTS
-                {
-                    events.push(event);
+                if !discarding && let Some(event) = parse_libtest_log_line(&line) {
+                    push_cargo_test_event(&mut events, event, &mut limit_reached);
                 }
-                return Ok(events);
+                return Ok(CargoTestOutput {
+                    events,
+                    limit_reached,
+                });
             }
             for byte in &read_buffer[..read] {
                 if *byte == b'\n' {
-                    if !discarding
-                        && let Some(event) = parse_libtest_log_line(&line)
-                        && events.len() < MAX_CARGO_TEST_EVENTS
-                    {
-                        events.push(event);
+                    if !discarding && let Some(event) = parse_libtest_log_line(&line) {
+                        push_cargo_test_event(&mut events, event, &mut limit_reached);
                     }
                     line.clear();
                     discarding = false;
@@ -474,24 +432,76 @@ mod linux {
         }
     }
 
+    fn push_cargo_test_event(
+        events: &mut Vec<ObservedCargoTestEvent>,
+        event: ObservedCargoTestEvent,
+        limit_reached: &mut bool,
+    ) {
+        if events.len() < MAX_CARGO_TEST_EVENTS {
+            events.push(event);
+        } else {
+            *limit_reached = true;
+        }
+    }
+
     fn parse_libtest_log_line(line: &[u8]) -> Option<ObservedCargoTestEvent> {
         let line = std::str::from_utf8(line).ok()?;
         let line = line.strip_suffix('\r').unwrap_or(line);
-        parse_libtest_log_status(line)
+        parse_libtest_log_status(line).or_else(|| parse_libtest_human_status(line))
+    }
+
+    fn parse_libtest_human_status(line: &str) -> Option<ObservedCargoTestEvent> {
+        let status = line.strip_prefix("test ")?;
+        let (name, status) = status.split_once(" ... ")?;
+        if status.contains(" ... ") {
+            return None;
+        }
+        let outcome = if status == "ok" {
+            CargoTestEventOutcome::Passed
+        } else if status == "FAILED" {
+            CargoTestEventOutcome::Failed
+        } else if status.starts_with("ignored") {
+            CargoTestEventOutcome::Ignored
+        } else {
+            return None;
+        };
+        Some(ObservedCargoTestEvent {
+            name: String::from(name),
+            outcome,
+        })
     }
 
     fn emit_cargo_test_events<Target: Write>(
-        events: &[ObservedCargoTestEvent],
+        output: &CargoTestOutput,
         executable: &str,
         target: &mut Target,
     ) -> std::io::Result<()> {
-        for event in events {
+        for event in &output.events {
             emit_cargo_test_event(event, executable, target)?;
         }
-        // Libtest and each test body share one process, so the logfile cannot
-        // authenticate which code wrote an observed record.
+        if output.limit_reached {
+            emit_cargo_test_limit_reached(executable, target)?;
+        }
+        // Libtest and each test body share one process, so captured stdout
+        // cannot authenticate which code wrote an observed record.
         emit_cargo_test_source_truncated(executable, target)?;
         emit_cargo_test_source_complete(executable, target)
+    }
+
+    fn emit_cargo_test_limit_reached<Target: Write>(
+        executable: &str,
+        target: &mut Target,
+    ) -> std::io::Result<()> {
+        serde_json::to_writer(
+            &mut *target,
+            &CargoTestLimitReached {
+                reason: "signalbox-test-limit-reached",
+                executable: String::from(executable),
+            },
+        )
+        .map_err(std::io::Error::other)?;
+        target.write_all(b"\n")?;
+        target.flush()
     }
 
     fn emit_cargo_test_event<Target: Write>(
@@ -1638,7 +1648,7 @@ mod linux {
                 let program = root.join("custom-harness");
                 std::fs::write(
                     &program,
-                    b"#!/bin/sh\ntest \"$#\" -eq 0 || exit 1\ntest ! -e \"$0.ran\" || exit 1\n: > \"$0.ran\"\n",
+                    b"#!/bin/sh\n# Write logs to the specified file (deprecated)\ntest \"$#\" -eq 0 || exit 1\ntest ! -e \"$0.ran\" || exit 1\n: > \"$0.ran\"\n",
                 )?;
                 std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
                 Ok(Self {
@@ -1708,7 +1718,22 @@ mod linux {
             let log_bytes = format!("ok {CARGO_PASSING_TEST}\n").into_bytes();
             let mut log = log_bytes.as_slice();
 
-            assert_eq!(read_cargo_test_output(&mut log)?.len(), 1);
+            assert_eq!(read_cargo_test_output(&mut log)?.events.len(), 1);
+            Ok(())
+        }
+
+        #[test]
+        fn cargo_test_runner_reports_its_event_cap() -> Result<(), Box<dyn std::error::Error>> {
+            let log_bytes = format!("ok {CARGO_PASSING_TEST}\n").repeat(MAX_CARGO_TEST_EVENTS + 1);
+            let mut log = log_bytes.as_bytes();
+            let output = read_cargo_test_output(&mut log)?;
+            let mut framed = Vec::new();
+
+            emit_cargo_test_events(&output, CARGO_TEST_EXECUTABLE, &mut framed)?;
+
+            assert_eq!(output.events.len(), MAX_CARGO_TEST_EVENTS);
+            assert!(output.limit_reached);
+            assert!(String::from_utf8(framed)?.contains("signalbox-test-limit-reached"));
             Ok(())
         }
 
