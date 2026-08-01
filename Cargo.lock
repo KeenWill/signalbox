@@ -3207,6 +3207,7 @@ name = "signalbox-tools-git"
 version = "0.0.0"
 dependencies = [
  "git2",
+ "rustix",
  "schemars 1.2.1",
  "serde",
  "serde_json",
