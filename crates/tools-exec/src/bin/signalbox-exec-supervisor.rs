@@ -9,7 +9,7 @@ mod linux {
         os::unix::process::CommandExt,
         process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
-            Arc, Mutex, PoisonError,
+            Arc, Mutex, MutexGuard, PoisonError, TryLockError,
             atomic::{AtomicBool, Ordering},
         },
         thread::JoinHandle,
@@ -53,6 +53,11 @@ mod linux {
     struct LauncherRead {
         tail: Vec<u8>,
         parsed: Option<(usize, LauncherStatus)>,
+    }
+
+    struct LauncherReader {
+        stop: Arc<AtomicBool>,
+        handle: JoinHandle<std::io::Result<LauncherRead>>,
     }
 
     #[derive(Clone, Copy)]
@@ -477,11 +482,16 @@ mod linux {
                 stage: SupervisorFailureStage::Cleanup,
             };
         };
+        let launcher_reader_stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&launcher_reader_stop);
         let launcher_reader =
             match spawn_helper_thread("signalbox-exec-launcher-stdout", move || {
-                read_launcher_stdout(launcher_stdout)
+                read_launcher_stdout(launcher_stdout, &reader_stop)
             }) {
-                Ok(reader) => reader,
+                Ok(handle) => LauncherReader {
+                    stop: launcher_reader_stop,
+                    handle,
+                },
                 Err(()) => {
                     terminate_child(&mut child);
                     cleanup_untracked_children(std::process::id());
@@ -498,6 +508,7 @@ mod linux {
                 let _ = emit_launcher_stdout(
                     launcher_reader,
                     LauncherOutputTrust::UntrustedTargetBytes,
+                    LauncherReaderDisposition::Stop,
                 );
                 return SupervisorStatus::SupervisionFailed {
                     stage: SupervisorFailureStage::Cleanup,
@@ -506,8 +517,17 @@ mod linux {
         };
         if read_control_byte().is_err() || launcher_control.write_all(&[1]).is_err() {
             let cleanup = tree.finish(&mut child);
-            let _ =
-                emit_launcher_stdout(launcher_reader, LauncherOutputTrust::UntrustedTargetBytes);
+            let reader_disposition = match cleanup {
+                CleanupStatus::Complete { .. } => LauncherReaderDisposition::DrainToEof,
+                CleanupStatus::ProcessTreeUnsupported { .. } | CleanupStatus::Failed { .. } => {
+                    LauncherReaderDisposition::Stop
+                }
+            };
+            let _ = emit_launcher_stdout(
+                launcher_reader,
+                LauncherOutputTrust::UntrustedTargetBytes,
+                reader_disposition,
+            );
             return match cleanup {
                 CleanupStatus::Complete { .. } => SupervisorStatus::Cancelled,
                 CleanupStatus::ProcessTreeUnsupported { .. } | CleanupStatus::Failed { .. } => {
@@ -522,10 +542,17 @@ mod linux {
         let cancelled = match cancellation_signal() {
             Ok(cancelled) => cancelled,
             Err(()) => {
-                let _ = tree.finish(&mut child);
+                let cleanup = tree.finish(&mut child);
+                let reader_disposition = match cleanup {
+                    CleanupStatus::Complete { .. } => LauncherReaderDisposition::DrainToEof,
+                    CleanupStatus::ProcessTreeUnsupported { .. } | CleanupStatus::Failed { .. } => {
+                        LauncherReaderDisposition::Stop
+                    }
+                };
                 let _ = emit_launcher_stdout(
                     launcher_reader,
                     LauncherOutputTrust::UntrustedTargetBytes,
+                    reader_disposition,
                 );
                 return SupervisorStatus::SupervisionFailed {
                     stage: SupervisorFailureStage::Cleanup,
@@ -576,7 +603,11 @@ mod linux {
                 } else {
                     LauncherOutputTrust::UntrustedTargetBytes
                 };
-                let launcher_status = emit_launcher_stdout(launcher_reader, output_trust);
+                let launcher_status = emit_launcher_stdout(
+                    launcher_reader,
+                    output_trust,
+                    LauncherReaderDisposition::DrainToEof,
+                );
                 match status {
                     SupervisionCompletion::LauncherExited { success: true } => launcher_status
                         .ok()
@@ -603,7 +634,11 @@ mod linux {
                 } else {
                     LauncherOutputTrust::UntrustedTargetBytes
                 };
-                let _ = emit_launcher_stdout(launcher_reader, output_trust);
+                let _ = emit_launcher_stdout(
+                    launcher_reader,
+                    output_trust,
+                    LauncherReaderDisposition::Stop,
+                );
                 SupervisorStatus::SupervisionFailed {
                     stage: SupervisorFailureStage::Cleanup,
                 }
@@ -612,22 +647,33 @@ mod linux {
     }
 
     fn read_launcher_stdout(
-        mut source: std::process::ChildStdout,
+        mut source: impl Read + rustix::fd::AsFd,
+        stop: &AtomicBool,
     ) -> std::io::Result<LauncherRead> {
+        let flags = rustix::fs::fcntl_getfl(&source)?;
+        rustix::fs::fcntl_setfl(&source, flags | rustix::fs::OFlags::NONBLOCK)?;
         let mut target = std::io::stdout().lock();
         let mut tail = Vec::with_capacity(LAUNCH_STATUS_TAIL_BYTES);
         let mut buffer = [0_u8; 8 * 1024];
         loop {
-            let read = source.read(&mut buffer)?;
-            if read == 0 {
+            if stop.load(Ordering::Acquire) {
                 break;
             }
-            tail.extend_from_slice(&buffer[..read]);
-            if tail.len() > LAUNCH_STATUS_TAIL_BYTES {
-                let flush_bytes = tail.len() - LAUNCH_STATUS_TAIL_BYTES;
-                target.write_all(&tail[..flush_bytes])?;
-                target.flush()?;
-                tail.drain(..flush_bytes);
+            match source.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    tail.extend_from_slice(&buffer[..read]);
+                    if tail.len() > LAUNCH_STATUS_TAIL_BYTES {
+                        let flush_bytes = tail.len() - LAUNCH_STATUS_TAIL_BYTES;
+                        target.write_all(&tail[..flush_bytes])?;
+                        target.flush()?;
+                        tail.drain(..flush_bytes);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(MINIMUM_POLL_INTERVAL);
+                }
+                Err(error) => return Err(error),
             }
         }
         let parsed = parse_launcher_status(&tail);
@@ -653,11 +699,21 @@ mod linux {
         TrustedSupervisorTrailer,
     }
 
+    #[derive(Clone, Copy)]
+    enum LauncherReaderDisposition {
+        DrainToEof,
+        Stop,
+    }
+
     fn emit_launcher_stdout(
-        reader: JoinHandle<std::io::Result<LauncherRead>>,
+        reader: LauncherReader,
         trust: LauncherOutputTrust,
+        disposition: LauncherReaderDisposition,
     ) -> Result<Option<LauncherStatus>, ()> {
-        let read = reader.join().map_err(|_| ())?.map_err(|_| ())?;
+        if matches!(disposition, LauncherReaderDisposition::Stop) {
+            reader.stop.store(true, Ordering::Release);
+        }
+        let read = reader.handle.join().map_err(|_| ())?.map_err(|_| ())?;
         let (output_bytes, status) = match trust {
             LauncherOutputTrust::UntrustedTargetBytes => (read.tail.as_slice(), None),
             LauncherOutputTrust::TrustedSupervisorTrailer => {
@@ -778,6 +834,7 @@ mod linux {
         armed: bool,
     }
 
+    #[derive(Clone, Copy)]
     enum CleanupStatus {
         Complete { root_success: bool },
         ProcessTreeUnsupported { root_success: bool },
@@ -878,14 +935,26 @@ mod linux {
                         .flatten()
                         .map(|status| status.success());
                 }
-                reap_available_children_except(self.supervisor, self.root);
-                let children_empty = match process_children(self.supervisor) {
-                    Ok(children) => children.is_empty(),
-                    Err(_) => {
-                        process_tree_supported = false;
-                        false
-                    }
-                };
+                if reap_available_children_except_until(self.supervisor, self.root, deadline)
+                    .is_err()
+                {
+                    self.kill_root();
+                    let _ = child.kill();
+                    let root_success =
+                        wait_for_root_until(child, root_success, deadline).unwrap_or(false);
+                    reap_all_children_until(deadline);
+                    self.armed = false;
+                    return CleanupStatus::Failed { root_success };
+                }
+                let children_empty =
+                    match process_children_until(self.supervisor, None, Some(deadline)) {
+                        Ok(children) => children.is_empty(),
+                        Err(ProcessChildrenError::Interrupted) => false,
+                        Err(ProcessChildrenError::Gone | ProcessChildrenError::Unsupported) => {
+                            process_tree_supported = false;
+                            false
+                        }
+                    };
                 if children_empty {
                     break;
                 }
@@ -1025,7 +1094,9 @@ mod linux {
         if descendant_observation_should_stop(stop, deadline) {
             return Ok(false);
         }
-        let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(mut tracked) = descendants_lock_until(descendants, stop, deadline) else {
+            return Ok(false);
+        };
         let mut changed = retire_exited_or_reused(&mut tracked, stop, deadline)?;
         let mut known = tracked.keys().copied().collect::<BTreeSet<_>>();
         loop {
@@ -1268,8 +1339,39 @@ mod linux {
         }
     }
 
-    fn reap_available_children_except(supervisor: u32, retained: u32) {
-        for raw_pid in process_children(supervisor).unwrap_or_default() {
+    fn descendants_lock_until<'a>(
+        descendants: &'a Mutex<BTreeMap<u32, TrackedProcess>>,
+        stop: Option<&AtomicBool>,
+        deadline: Option<Instant>,
+    ) -> Option<MutexGuard<'a, BTreeMap<u32, TrackedProcess>>> {
+        loop {
+            if descendant_observation_should_stop(stop, deadline) {
+                return None;
+            }
+            match descendants.try_lock() {
+                Ok(tracked) => return Some(tracked),
+                Err(TryLockError::Poisoned(error)) => return Some(error.into_inner()),
+                Err(TryLockError::WouldBlock) => std::thread::sleep(MINIMUM_POLL_INTERVAL),
+            }
+        }
+    }
+
+    fn reap_available_children_except_until(
+        supervisor: u32,
+        retained: u32,
+        deadline: Instant,
+    ) -> Result<(), ()> {
+        let children = match process_children_until(supervisor, None, Some(deadline)) {
+            Ok(children) => children,
+            Err(ProcessChildrenError::Gone) => Vec::new(),
+            Err(ProcessChildrenError::Interrupted | ProcessChildrenError::Unsupported) => {
+                return Err(());
+            }
+        };
+        for raw_pid in children {
+            if Instant::now() >= deadline {
+                return Err(());
+            }
             if raw_pid == retained {
                 continue;
             }
@@ -1277,6 +1379,7 @@ mod linux {
                 let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
             }
         }
+        (Instant::now() < deadline).then_some(()).ok_or(())
     }
 
     fn wait_for_root_until(
@@ -1448,6 +1551,41 @@ mod linux {
             assert_eq!(
                 observe_descendants(u32::MAX, u32::MAX, &tracked, None, Some(Instant::now())),
                 Ok(false)
+            );
+        }
+
+        #[test]
+        fn foreground_observation_does_not_wait_past_its_lock_deadline() {
+            let tracked = Mutex::new(BTreeMap::new());
+            let _held = tracked.lock().unwrap_or_else(PoisonError::into_inner);
+
+            let acquired = descendants_lock_until(
+                &tracked,
+                None,
+                Some(Instant::now() + Duration::from_millis(10)),
+            );
+
+            assert!(acquired.is_none());
+        }
+
+        #[test]
+        fn launcher_reader_stop_does_not_wait_for_a_held_pipe()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let (reader, _held_writer) = std::os::unix::net::UnixStream::pair()?;
+            let stop = AtomicBool::new(true);
+
+            let result = read_launcher_stdout(reader, &stop)?;
+
+            assert!(result.tail.is_empty());
+            assert!(result.parsed.is_none());
+            Ok(())
+        }
+
+        #[test]
+        fn final_inner_reaping_honors_an_elapsed_cleanup_deadline() {
+            assert_eq!(
+                reap_available_children_except_until(std::process::id(), u32::MAX, Instant::now()),
+                Err(())
             );
         }
 

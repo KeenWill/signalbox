@@ -56,6 +56,7 @@ const MAX_TOTAL_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_WORKING_DIRECTORY_CHARACTERS: usize = 4096;
 const MAX_WORKING_DIRECTORY_BYTES: usize = MAX_WORKING_DIRECTORY_CHARACTERS * 4;
 pub(crate) const EXEC_CAPTURE_BYTES: usize = 64 * 1024;
+const PROCESS_CAPTURE_BYTES_LIMIT: usize = 1024 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
 const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
@@ -452,7 +453,7 @@ pub struct ProcessRequest {
     pub working_directory: PathBuf,
     /// Whole-process deadline.
     pub timeout: Duration,
-    /// Per-stream retained byte limit.
+    /// Per-stream retained byte limit, rejected above one MiB before spawn.
     pub capture_bytes: usize,
     /// Exact environment additions or overrides.
     pub environment: BTreeMap<OsString, OsString>,
@@ -771,6 +772,17 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         let probe_program = sandbox_shell(&self.workspace_root)
             .to_string_lossy()
             .into_owned();
+        let probe_timeout = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .min(Duration::from_secs(5));
+        if probe_timeout.is_zero() {
+            return ExecResult {
+                confinement: ExecutionConfinement::SandboxSetupFailed,
+                outcome: ProcessOutcome::TimedOut,
+                stdout: OutputCapture::empty(),
+                stderr: OutputCapture::empty(),
+            };
+        }
         let probe = bwrap_request(
             SandboxLaunchContext {
                 workspace_root: &self.workspace_root,
@@ -794,7 +806,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             &probe_program,
             &[String::from("-c"), String::from("exit 0")],
             ".",
-            requested_timeout.min(Duration::from_secs(5)),
+            probe_timeout,
             8 * 1024,
         );
         let availability = self.runner.bwrap_availability(probe).await;
@@ -1354,28 +1366,31 @@ fn sandbox_shell(workspace_root: &Path) -> PathBuf {
 }
 
 fn executable_sandbox_shell(path: &std::ffi::OsStr) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .map(|directory| directory.join("sh"))
-        .find(|candidate| sandbox_program_is_executable(candidate))
+    std::env::split_paths(path).find_map(|directory| {
+        let candidate = directory.join("sh");
+        sandbox_program_is_executable(&candidate, &directory).then_some(candidate)
+    })
 }
 
-fn sandbox_program_is_executable(candidate: &Path) -> bool {
+fn sandbox_program_is_executable(candidate: &Path, visible_directory: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
-        candidate
-            .metadata()
-            .is_ok_and(|metadata| metadata.is_file())
-            && rustix::fs::accessat(
-                rustix::fs::CWD,
-                candidate,
-                rustix::fs::Access::EXEC_OK,
-                rustix::fs::AtFlags::EACCESS,
-            )
-            .is_ok()
+        candidate.canonicalize().is_ok_and(|resolved| {
+            resolved.starts_with(visible_directory)
+                && resolved.metadata().is_ok_and(|metadata| metadata.is_file())
+        }) && rustix::fs::accessat(
+            rustix::fs::CWD,
+            candidate,
+            rustix::fs::Access::EXEC_OK,
+            rustix::fs::AtFlags::EACCESS,
+        )
+        .is_ok()
     }
     #[cfg(not(target_os = "linux"))]
     {
-        candidate.is_file()
+        candidate
+            .canonicalize()
+            .is_ok_and(|resolved| resolved.starts_with(visible_directory) && resolved.is_file())
     }
 }
 
@@ -1608,7 +1623,7 @@ async fn read_bounded(
     mut reader: impl tokio::io::AsyncRead + Unpin,
     limit: usize,
 ) -> std::io::Result<BoundedBytes> {
-    let mut retained = Vec::with_capacity(limit);
+    let mut retained = Vec::new();
     let mut buffer = [0_u8; 8192];
     let mut completeness = CaptureCompleteness::Complete;
     loop {
@@ -1985,6 +2000,10 @@ fn outer_observe_descendants(
                 continue;
             }
             for raw_pid in children {
+                if outer_observation_should_stop(stop, deadline) {
+                    interrupted = true;
+                    break;
+                }
                 if known.contains_key(&raw_pid) {
                     continue;
                 }
@@ -2244,7 +2263,16 @@ async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> Proc
 
 #[cfg(target_os = "linux")]
 async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
-    let request_deadline = Instant::now() + request.timeout;
+    if request.capture_bytes > PROCESS_CAPTURE_BYTES_LIMIT {
+        return empty_process_result(ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::Other,
+        });
+    }
+    let Some(request_deadline) = Instant::now().checked_add(request.timeout) else {
+        return empty_process_result(ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::Other,
+        });
+    };
     let asynchronous_request_deadline = tokio::time::Instant::from_std(request_deadline);
     let status_protocol = request.status_protocol;
     let outer_reservation = match preflight_outer_process_tree(request_deadline) {
@@ -2678,6 +2706,7 @@ mod tests {
     const ROOT_WORKSPACE_BIND_COUNT: usize = 1;
     const TEST_SANDBOX_LAUNCHER_DESCRIPTOR: i32 = 91;
     const SLOW_PROBE_DELAY: Duration = Duration::from_millis(1_100);
+    const OVERSIZED_CAPTURE_BYTES: usize = PROCESS_CAPTURE_BYTES_LIMIT + 1;
     const TEST_SANDBOX_LAUNCHER: &str = "/fixture/signalbox-exec-supervisor";
 
     #[cfg(target_os = "linux")]
@@ -2800,6 +2829,58 @@ mod tests {
         assert!(preflight_outer_process_tree(Instant::now()).is_err());
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn process_runner_rejects_an_unrepresentable_deadline_before_spawn() {
+        let result = run_process_linux(
+            Path::new("/definitely-missing-supervisor"),
+            ProcessRequest {
+                program: OsString::from("true"),
+                arguments: Vec::new(),
+                working_directory: PathBuf::from("/"),
+                timeout: Duration::MAX,
+                capture_bytes: EXEC_CAPTURE_BYTES,
+                environment: BTreeMap::new(),
+                environment_inheritance: ProcessEnvironment::Clear,
+                status_protocol: ProcessStatusProtocol::Direct,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::Other,
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn process_runner_rejects_an_oversized_capture_before_spawn() {
+        let result = run_process_linux(
+            Path::new("/definitely-missing-supervisor"),
+            ProcessRequest {
+                program: OsString::from("true"),
+                arguments: Vec::new(),
+                working_directory: PathBuf::from("/"),
+                timeout: Duration::from_secs(REQUEST_TIMEOUT_SECONDS),
+                capture_bytes: OVERSIZED_CAPTURE_BYTES,
+                environment: BTreeMap::new(),
+                environment_inheritance: ProcessEnvironment::Clear,
+                status_protocol: ProcessStatusProtocol::Direct,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::Other,
+            }
+        );
+    }
+
     struct ReplacementWorkspace {
         path: PathBuf,
         retired: PathBuf,
@@ -2829,16 +2910,25 @@ mod tests {
                 std::process::id()
             ));
             let blocked_directory = root.join("blocked");
+            let escaped_directory = root.join("escaped");
+            let outside_directory = root.join("outside");
             let executable_directory = root.join("executable");
             std::fs::create_dir_all(&blocked_directory)?;
+            std::fs::create_dir_all(&escaped_directory)?;
+            std::fs::create_dir_all(&outside_directory)?;
             std::fs::create_dir_all(&executable_directory)?;
             let blocked_shell = blocked_directory.join("sh");
+            let outside_shell = outside_directory.join("sh");
             let expected_shell = executable_directory.join("sh");
             std::fs::write(&blocked_shell, b"blocked")?;
+            std::fs::write(&outside_shell, b"outside")?;
             std::fs::write(&expected_shell, b"executable")?;
-            std::fs::set_permissions(&blocked_shell, std::fs::Permissions::from_mode(0o001))?;
+            std::fs::set_permissions(&blocked_shell, std::fs::Permissions::from_mode(0o000))?;
+            std::fs::set_permissions(&outside_shell, std::fs::Permissions::from_mode(0o700))?;
             std::fs::set_permissions(&expected_shell, std::fs::Permissions::from_mode(0o700))?;
-            let search_path = std::env::join_paths([blocked_directory, executable_directory])?;
+            symlink(&outside_shell, escaped_directory.join("sh"))?;
+            let search_path =
+                std::env::join_paths([blocked_directory, escaped_directory, executable_directory])?;
             Ok(Self {
                 root,
                 search_path,
@@ -3933,7 +4023,8 @@ mod tests {
             .first()
             .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
 
-        assert_eq!(probe.timeout, Duration::from_secs(REQUEST_TIMEOUT_SECONDS));
+        assert!(probe.timeout > Duration::ZERO);
+        assert!(probe.timeout < Duration::from_secs(REQUEST_TIMEOUT_SECONDS));
         assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
         assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         assert!(observation.recorded_requests().is_empty());
