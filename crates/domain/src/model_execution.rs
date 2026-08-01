@@ -1827,6 +1827,7 @@ fn apply_terminal_observation(
                     response,
                     proof,
                     identities,
+                    dangerous_tool_auto_approval,
                     reclassified_pending_steering,
                 )
                 .map(ModelCallTerminalOutcome::CancelledWithToolResponse);
@@ -3837,20 +3838,7 @@ fn assemble_tool_round(
                 if !used_entries.insert(entry) || !used_requests.insert(request) {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
-                let approval_matches = match dangerous_tool_auto_approval {
-                    DangerousToolAutoApproval::ApproveAll => {
-                        matches!(
-                            approval,
-                            InitialToolApproval::SessionBlanket
-                                | InitialToolApproval::Human
-                                | InitialToolApproval::Delegated
-                        )
-                    }
-                    DangerousToolAutoApproval::Disabled => {
-                        approval != InitialToolApproval::SessionBlanket
-                    }
-                };
-                if !approval_matches {
+                if !initial_approval_matches_session(approval, dangerous_tool_auto_approval) {
                     return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
                 let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
@@ -3925,6 +3913,22 @@ fn assemble_tool_round(
     })
 }
 
+fn initial_approval_matches_session(
+    approval: InitialToolApproval,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
+) -> bool {
+    match dangerous_tool_auto_approval {
+        DangerousToolAutoApproval::ApproveAll => matches!(
+            approval,
+            InitialToolApproval::SessionBlanket
+                | InitialToolApproval::PolicyAuto
+                | InitialToolApproval::Human
+                | InitialToolApproval::Delegated
+        ),
+        DangerousToolAutoApproval::Disabled => approval != InitialToolApproval::SessionBlanket,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assemble_stopped_tool_round(
     scope: ModelCallTurnScope,
@@ -3934,6 +3938,7 @@ fn assemble_stopped_tool_round(
     response: ToolUsingAssistantResponse,
     proof: AppliedInterruptProof,
     identities: StoppedToolRoundModelCallIdentities,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 ) -> Result<CancelledToolRoundModelCallTurn, ModelCallClosureError> {
     let ModelCallTurnScope { session, turn } = scope;
@@ -3991,6 +3996,9 @@ fn assemble_stopped_tool_round(
                     || !used_requests.insert(request)
                 {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                if !initial_approval_matches_session(approval, dangerous_tool_auto_approval) {
+                    return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
                 let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
                     .ok_or(ModelCallClosureError::ToolRequestOrdinalOverflow)?;
@@ -6908,6 +6916,18 @@ mod tests {
         .expect_err("immutable request identity cannot be reused");
 
         assert_eq!(error, ModelCallClosureError::FrontierDerivationFailed);
+    }
+
+    #[test]
+    fn initial_posture_correlation_admits_explicit_auto_but_not_false_blanket() {
+        assert!(initial_approval_matches_session(
+            InitialToolApproval::PolicyAuto,
+            DangerousToolAutoApproval::ApproveAll
+        ));
+        assert!(!initial_approval_matches_session(
+            InitialToolApproval::SessionBlanket,
+            DangerousToolAutoApproval::Disabled
+        ));
     }
 
     /// S02 / S15 / INV-006 / INV-009: an all-auto batch creates one fresh

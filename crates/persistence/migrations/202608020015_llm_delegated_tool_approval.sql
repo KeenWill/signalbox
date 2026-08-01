@@ -81,12 +81,12 @@ CREATE TABLE tool_approval_judge_model_call (
         ),
     CONSTRAINT tool_approval_judge_call_credential_nonempty
         CHECK (char_length(credential_reference) > 0),
-    CONSTRAINT tool_approval_judge_call_usage_nonnegative
+    CONSTRAINT tool_approval_judge_call_usage_u64_range
         CHECK (
-            (input_tokens IS NULL OR input_tokens >= 0)
-            AND (output_tokens IS NULL OR output_tokens >= 0)
-            AND (cache_read_input_tokens IS NULL OR cache_read_input_tokens >= 0)
-            AND (cache_creation_input_tokens IS NULL OR cache_creation_input_tokens >= 0)
+            (input_tokens IS NULL OR input_tokens BETWEEN 0 AND 18446744073709551615)
+            AND (output_tokens IS NULL OR output_tokens BETWEEN 0 AND 18446744073709551615)
+            AND (cache_read_input_tokens IS NULL OR cache_read_input_tokens BETWEEN 0 AND 18446744073709551615)
+            AND (cache_creation_input_tokens IS NULL OR cache_creation_input_tokens BETWEEN 0 AND 18446744073709551615)
         ),
     CONSTRAINT tool_approval_judge_call_session_key
         UNIQUE (model_call_id, session_id),
@@ -99,6 +99,10 @@ CREATE TABLE tool_approval_judge_model_call (
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
+CREATE INDEX tool_approval_judge_usage_by_session_state_turn_call
+    ON tool_approval_judge_model_call
+       (session_id, state_kind, turn_id, model_call_id);
+
 CREATE TRIGGER tool_approval_judge_call_reserves_global_identity
 BEFORE INSERT ON tool_approval_judge_model_call
 FOR EACH ROW
@@ -108,6 +112,8 @@ CREATE FUNCTION reject_tool_approval_judge_call_invalid_change()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    request_posture text;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.state_kind <> 'prepared'
@@ -168,6 +174,20 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'approval judge usage is terminal evidence'
             USING ERRCODE = '23514';
+    END IF;
+    IF NEW.state_kind = 'terminal'
+       AND NEW.terminal_disposition_kind = 'completed'
+    THEN
+        SELECT approval_posture INTO request_posture
+          FROM tool_request WHERE request_id = NEW.request_id;
+        IF request_posture = 'auto'
+           OR (request_posture = 'human'
+               AND NEW.recommendation_kind <> 'escalate_to_human')
+        THEN
+            RAISE EXCEPTION 'approval judge recommendation exceeds frozen posture'
+                USING ERRCODE = '23514',
+                      CONSTRAINT = 'tool_approval_judge_recommendation_within_posture';
+        END IF;
     END IF;
     RETURN NEW;
 END;
@@ -245,13 +265,25 @@ ALTER TABLE tool_approval_decision
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
-CREATE FUNCTION require_delegate_approval_provenance()
+CREATE FUNCTION require_tool_approval_decision_authority()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
     matched bigint;
 BEGIN
+    IF NEW.decision_source IN ('policy_auto', 'session_blanket') THEN
+        SELECT count(*) INTO matched
+          FROM tool_request
+         WHERE request_id = NEW.request_id
+           AND approval_posture = 'auto';
+        IF matched <> 1 THEN
+            RAISE EXCEPTION 'automatic decision exceeds frozen posture'
+                USING ERRCODE = '23514',
+                      CONSTRAINT = 'tool_approval_automatic_requires_auto_posture';
+        END IF;
+        RETURN NULL;
+    END IF;
     IF NEW.decision_source <> 'delegate' THEN
         RETURN NULL;
     END IF;
@@ -266,7 +298,15 @@ BEGIN
        AND judge.state_kind = 'terminal'
        AND judge.terminal_disposition_kind = 'completed'
        AND judge.recommendation_kind = NEW.decision_kind
-       AND judge.rationale = NEW.rationale;
+       AND judge.rationale = NEW.rationale
+       AND NOT EXISTS (
+            SELECT 1 FROM tool_request AS earlier
+            LEFT JOIN tool_approval_decision AS earlier_decision
+              ON earlier_decision.request_id = earlier.request_id
+           WHERE earlier.producing_model_call_id = request.producing_model_call_id
+             AND earlier.request_ordinal < request.request_ordinal
+             AND earlier_decision.request_id IS NULL
+       );
     IF matched <> 1 THEN
         RAISE EXCEPTION 'delegate decision lacks matching delegated authority'
             USING ERRCODE = '23514',
@@ -276,11 +316,11 @@ BEGIN
 END;
 $$;
 
-CREATE CONSTRAINT TRIGGER tool_approval_delegate_provenance
+CREATE CONSTRAINT TRIGGER tool_approval_decision_authority
 AFTER INSERT OR UPDATE ON tool_approval_decision
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
-EXECUTE FUNCTION require_delegate_approval_provenance();
+EXECUTE FUNCTION require_tool_approval_decision_authority();
 
 ALTER TABLE outbox_event
     DROP CONSTRAINT outbox_event_kind_closed,
@@ -324,6 +364,30 @@ CREATE TABLE tool_approval_decided_outbox_event (
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
 );
+
+CREATE FUNCTION require_explicit_tool_approval_decided_outbox()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM tool_approval_decision
+         WHERE request_id = NEW.request_id
+           AND decision_source IN ('owner_command', 'delegate')
+    ) THEN
+        RAISE EXCEPTION 'tool approval decided event requires explicit provenance'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'tool_approval_decided_requires_explicit_source';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER tool_approval_decided_requires_explicit_source
+AFTER INSERT ON tool_approval_decided_outbox_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_explicit_tool_approval_decided_outbox();
 
 CREATE TRIGGER tool_approval_decided_outbox_event_is_append_only
 BEFORE UPDATE OR DELETE ON tool_approval_decided_outbox_event

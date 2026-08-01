@@ -1617,9 +1617,12 @@ fn reconstitute_batch(
         .iter()
         .position(|request| !approvals.contains_key(&request.id()))
         && requests.iter().skip(first_undecided + 1).any(|request| {
-            approvals
-                .get(&request.id())
-                .is_some_and(|approval| approval.source() == crate::ToolDecisionSource::UserCommand)
+            approvals.get(&request.id()).is_some_and(|approval| {
+                matches!(
+                    approval.source(),
+                    crate::ToolDecisionSource::UserCommand | crate::ToolDecisionSource::Delegate
+                )
+            })
         })
     {
         return Err(fail(

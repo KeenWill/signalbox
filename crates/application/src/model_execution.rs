@@ -1760,6 +1760,7 @@ where
                         }
                     }
                 }
+                debug_assert_eq!(stopped_approval_index, tool_approvals.len());
                 return ModelCallTerminalIdentityCandidates::ToolRound {
                     continuing: ToolRoundModelCallIdentities::new(
                         continuing,
