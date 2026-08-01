@@ -64,7 +64,7 @@ Identities fall into three supply classes:
   Postgres B-tree keys without changing the 128-bit storage shape; no
   index-level artifact measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
-  Callers supply them inside command payloads to name user-configured model
+  Callers supply them inside command payloads to name operator-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
   `model_alias_id`), and alias meaning resolves through a definition lookup at
   domain preparation, so an unknown alias becomes a recorded rejection, not an
@@ -73,7 +73,7 @@ Identities fall into three supply classes:
 `ProviderModelIdentity` names the daemon's normalized provider/model value
 space. It is persisted (`turn_lifecycle.pinned_provider_model_identity_id`,
 `model_call.resolved_provider_model_identity_id`) and supplied as an
-user-configured key from signalboxd's model-configuration file; how
+operator-configured key from signalboxd's model-configuration file; how
 provider-reported data normalizes into it remains open (see Open edges).
 
 UUID contents are never semantic. No code derives acceptance order, queue order,

@@ -2896,7 +2896,7 @@ mod tests {
             .collect()
     }
 
-    /// The user-selected rendering decision: origin input becomes a user
+    /// The user-selected rendering decision: origin input becomes a user-role
     /// message carrying the semantic entry's source, in frontier order.
     #[test]
     fn s02_inv015_frontier_rendering_preserves_user_role_order_and_source() {
