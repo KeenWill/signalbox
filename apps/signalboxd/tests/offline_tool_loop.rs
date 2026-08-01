@@ -908,6 +908,23 @@ impl ConversationIntrospectionPort for UnusedConversationPort {
         Ok(None)
     }
 }
+impl signalbox_tools_plan::SessionPlanPort for UnusedConversationPort {
+    type Error = UnusedSessionStatusWriterError;
+
+    async fn append_plan_event(
+        &mut self,
+        _request: signalbox_tools_plan::PlanAppendRequest,
+    ) -> Result<signalbox_tools_plan::PlanAppendOutcome, Self::Error> {
+        Err(UnusedSessionStatusWriterError)
+    }
+
+    async fn read_plan(
+        &mut self,
+        _request: signalbox_tools_plan::PlanReadRequest,
+    ) -> Result<signalbox_tools_plan::PlanReadPage, Self::Error> {
+        Err(UnusedSessionStatusWriterError)
+    }
+}
 
 type OfflineDaemonTools<Writer, HostTransport> = DaemonTools<
     fn() -> SystemTime,
@@ -917,6 +934,7 @@ type OfflineDaemonTools<Writer, HostTransport> = DaemonTools<
     HostTransport,
     UnusedGitHubTransport,
     LocalWorkspaceFileSystem,
+    UnusedConversationPort,
     UnusedConversationPort,
 >;
 
@@ -942,6 +960,7 @@ fn offline_daemon_tools<Writer, HostTransport>(
         GitHubEgressPolicy::github_api_only(),
         LocalWorkspaceFileSystem,
         workspace.path(),
+        UnusedConversationPort,
         UnusedConversationPort,
         web_fetch_egress_policy,
     )
@@ -1019,6 +1038,7 @@ type CommissionedDaemonTools<HostTransport, GitHubTransportType> = DaemonTools<
     GitHubTransportType,
     LocalWorkspaceFileSystem,
     PostgresConversationIntrospection,
+    signalbox_persistence::plan::SessionPlanRepository,
 >;
 
 fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
@@ -1044,6 +1064,7 @@ fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
         LocalWorkspaceFileSystem,
         workspace_root,
         PostgresConversationIntrospection::new(pool.clone()),
+        signalbox_persistence::plan::SessionPlanRepository::new(pool.clone()),
         WebFetchEgressPolicy::deny_all(),
     )
 }
