@@ -51,7 +51,7 @@ pub(super) fn success_evidence(
         "truncated": truncated,
     }))
     .map_err(|_| WebSearchExecutorError::EvidenceEncoding)?;
-    if scrubber.contains_case_normalized_credential(&content) {
+    if scrubber.contains_credential(&content) {
         return Err(WebSearchExecutorError::EvidenceEncoding);
     }
     completed_text_evidence(content)
@@ -69,7 +69,7 @@ pub(super) fn known_failure_evidence(
     detail: ToolExecutionErrorDetail,
     scrubber: &CredentialScrubber,
 ) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
-    let detail = (!scrubber.contains_case_normalized_credential(detail.as_str())).then_some(detail);
+    let detail = (!scrubber.contains_credential(detail.as_str())).then_some(detail);
     Ok(ToolExecutorEvidence::KnownFailed { detail })
 }
 
@@ -105,7 +105,7 @@ pub(super) fn provider_error_detail(
         )
     };
     let bounded = detail_after_redaction(detail)?;
-    if scrubber.contains_case_normalized_credential(bounded.as_str()) {
+    if scrubber.contains_credential(bounded.as_str()) {
         return Ok(None);
     }
     Ok(Some(bounded))

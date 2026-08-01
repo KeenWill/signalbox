@@ -33,7 +33,8 @@ fn web_search_final_success_payload_rejects_credential_collision() {
 /// before the body can enter durable failure evidence.
 #[test]
 fn web_search_error_body_redacts_json_escaped_credential() {
-    let body = br#"{"error":{"detail":"fixture-search-\u006bey"}}"#.to_vec();
+    let escaped = ascii_json_unicode_escape(SYNTHETIC_KEY);
+    let body = format!(r#"{{"error":{{"detail":"{escaped}"}}}}"#).into_bytes();
     let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
         .expect("fixture error body is bounded");
     let detail = provider_error_detail(error, &scrubber())

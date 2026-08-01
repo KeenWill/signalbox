@@ -11,6 +11,8 @@ use super::{diagnostic::*, evidence::*, redaction::*, result::*, test_support::*
 const PROPERTY_CASES: u32 = 512;
 const GRAMMAR_CREDENTIAL_ATOM: &str = "fixturegrammar";
 const GRAMMAR_PERCENT_REFLECTION: &str = "%66%69%78%74%75%72%65%67%72%61%6D%6D%61%72";
+const GRAMMAR_JSON_REFLECTION: &str =
+    r"\u0066\u0069\u0078\u0074\u0075\u0072\u0065\u0067\u0072\u0061\u006d\u006d\u0061\u0072";
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum CredentialGrammar {
@@ -298,7 +300,7 @@ fn assert_safe_evidence(
 ) -> TestCaseResult {
     match evidence {
         Ok(signalbox_application::ToolExecutorEvidence::CompletedText(content)) => {
-            prop_assert!(!scrubber.contains_case_normalized_credential(&content));
+            prop_assert!(!scrubber.contains_credential(&content));
             Ok(())
         }
         Ok(signalbox_application::ToolExecutorEvidence::KnownFailed { .. })
@@ -321,8 +323,8 @@ fn percent_encode(value: &str) -> String {
 
 fn json_unicode_escape(value: &str) -> String {
     value
-        .chars()
-        .map(|character| format!(r"\u{{{:x}}}", character as u32))
+        .encode_utf16()
+        .map(|code_unit| format!(r"\u{code_unit:04x}"))
         .collect::<String>()
 }
 
@@ -344,6 +346,19 @@ fn credential_grammar_percent_branch_is_reversible() {
 
     assert_eq!(case.credential, GRAMMAR_CREDENTIAL_ATOM);
     assert_eq!(case.reflection, GRAMMAR_PERCENT_REFLECTION);
+}
+
+/// The credential grammar's JSON branch emits four-digit escapes that match
+/// the scrubber's JSON-escaped credential variant.
+#[test]
+fn credential_grammar_json_branch_matches_json_escape_form() {
+    let case = credential_reflection(
+        GRAMMAR_CREDENTIAL_ATOM,
+        CredentialGrammar::JsonEscapedReflection,
+    );
+
+    assert_eq!(case.credential, GRAMMAR_CREDENTIAL_ATOM);
+    assert_eq!(case.reflection, GRAMMAR_JSON_REFLECTION);
 }
 
 /// The structural URL grammar places generated text in user information while

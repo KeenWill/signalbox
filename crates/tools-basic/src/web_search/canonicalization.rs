@@ -67,10 +67,18 @@ pub(super) fn parse_ip_literal(value: &str) -> Option<std::net::IpAddr> {
 
 pub(super) fn url_preprocessed_credential_variant(value: &str) -> Option<String> {
     let normalized = value
+        .trim_matches(|character: char| character <= '\u{1f}' || character == ' ')
         .chars()
         .filter(|character| !matches!(character, '\t' | '\n' | '\r'))
         .collect::<String>();
     (normalized != value && !normalized.is_empty()).then_some(normalized)
+}
+
+pub(super) fn idna_mapped_unicode_variant(value: &str) -> Option<String> {
+    let ascii = idna::domain_to_ascii(value).ok()?;
+    let (unicode, decoding) = idna::domain_to_unicode(&ascii);
+    decoding.ok()?;
+    (!unicode.is_empty() && unicode != value).then_some(unicode)
 }
 
 pub(super) fn canonicalized_ipv4_component_fragments(value: &str) -> impl Iterator<Item = Vec<u8>> {

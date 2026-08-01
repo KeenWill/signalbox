@@ -204,7 +204,6 @@ pub enum WebSearchPageCompleteness {
 impl fmt::Debug for WebSearchResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         WebSearchResponseDebug {
-            result_count: self.results.len(),
             completeness: self.completeness,
         }
         .fmt(formatter)
@@ -213,7 +212,6 @@ impl fmt::Debug for WebSearchResponse {
 
 #[derive(Clone, Copy)]
 pub(super) struct WebSearchResponseDebug {
-    pub(super) result_count: usize,
     pub(super) completeness: WebSearchPageCompleteness,
 }
 
@@ -221,7 +219,6 @@ impl fmt::Debug for WebSearchResponseDebug {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WebSearchResponse")
-            .field("result_count", &self.result_count)
             .field("completeness", &self.completeness)
             .finish()
     }

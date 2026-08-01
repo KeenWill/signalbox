@@ -188,6 +188,29 @@ fn web_search_rejects_tab_preprocessed_credential_in_result_url() {
     );
 }
 
+/// INV-035: URL preprocessing of a reversibly decoded leading C0 control
+/// cannot conceal a credential in completed provider result evidence.
+#[test]
+fn web_search_rejects_c0_preprocessed_decoded_credential_in_result_url() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_C0_PREPROCESSED_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("C0-preprocessed fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_C0_PREPROCESSED_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: URL backslash normalization is composed with reversible
 /// credential decoding before completed evidence is retained.
 #[test]
@@ -319,6 +342,29 @@ fn web_search_rejects_embedded_idna_mapped_credential_in_result_host() {
         URL_IDNA_REMOVED_CODE_POINT_COLLISION_KEY
             .as_bytes()
             .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: an IDNA compatibility mapping remains detectable when the
+/// credential is embedded inside a larger provider result host label.
+#[test]
+fn web_search_rejects_embedded_idna_compatibility_credential_in_result_host() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_IDNA_COMPATIBILITY_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("IDNA compatibility fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IDNA_COMPATIBILITY_COLLISION_KEY.as_bytes().to_vec(),
     ))
     .expect("fixture credential is usable");
 

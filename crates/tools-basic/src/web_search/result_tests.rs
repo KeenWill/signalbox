@@ -1,6 +1,7 @@
 use reqwest::StatusCode;
+use signalbox_model_runtime::CredentialValue;
 
-use super::{evidence::*, result::*, test_support::*};
+use super::{evidence::*, redaction::*, result::*, test_support::*};
 
 /// The structured output retains ten results and reports that the
 /// provider returned an omitted eleventh result.
@@ -154,6 +155,19 @@ fn web_search_debug_output_omits_reflected_credential() {
     assert!(!fields_debug.contains(SYNTHETIC_KEY));
     assert!(!format!("{response:?}").contains(SYNTHETIC_KEY));
     assert!(!format!("{error:?}").contains(SYNTHETIC_KEY));
+}
+
+/// INV-035: response diagnostics do not render a result count that can equal
+/// a valid request credential.
+#[test]
+fn web_search_response_debug_omits_credential_shaped_result_count() {
+    let collision_key = debug_result_count_collision_key();
+    let credential = CredentialValue::new(collision_key.as_bytes().to_vec());
+    let response = response_with_result_count(DEBUG_RESULT_COUNT_COLLISION_COUNT);
+    let rendered = format!("{response:?}");
+
+    assert!(CredentialScrubber::try_new(&credential).is_some());
+    assert!(!rendered.contains(&collision_key));
 }
 
 #[test]

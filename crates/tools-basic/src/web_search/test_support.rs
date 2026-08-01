@@ -34,6 +34,10 @@ pub(super) const FIXTURE_UNICODE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-bü
 pub(super) const FIXTURE_IDNA_REMOVED_CODE_POINT_RESULT_URL: &str =
     "https://x-ab\u{00ad}cd.example/result";
 
+pub(super) const FIXTURE_IDNA_COMPATIBILITY_RESULT_URL: &str = "https://x-a¼b-y.example/result";
+
+pub(super) const FIXTURE_C0_PREPROCESSED_RESULT_URL: &str = "https://example.com/abc";
+
 pub(super) const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
 
 pub(super) const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
@@ -116,6 +120,8 @@ pub(super) const URL_SEPARATOR_ONLY_IPV6_TAIL_COLLISION_KEY: &str = ":192.168";
 
 pub(super) const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
 
+pub(super) const URL_C0_PREPROCESSED_COLLISION_KEY: &str = "%00abc";
+
 pub(super) const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
 
 pub(super) const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
@@ -127,6 +133,8 @@ pub(super) const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
 pub(super) const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
 
 pub(super) const URL_IDNA_REMOVED_CODE_POINT_COLLISION_KEY: &str = "ab\u{00ad}cd";
+
+pub(super) const URL_IDNA_COMPATIBILITY_COLLISION_KEY: &str = "a¼b";
 
 pub(super) const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
 
@@ -196,6 +204,8 @@ pub(super) const PROVIDER_ERROR_DEBUG_COLLISION_KEY: &str = "WebSearchProviderEr
 
 pub(super) const PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY: &str = "[provider-controlled]";
 
+pub(super) const DEBUG_RESULT_COUNT_COLLISION_COUNT: usize = 1;
+
 pub(super) const FIXTURE_UNPARSED_PROVIDER_ERROR: &str =
     "synthetic provider-private response bytes";
 
@@ -223,6 +233,22 @@ pub(super) fn response_with_result_count(count: usize) -> WebSearchResponse {
 pub(super) fn scrubber() -> CredentialScrubber {
     CredentialScrubber::try_new(&CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec()))
         .expect("fixture credential is usable")
+}
+
+pub(super) fn ascii_json_unicode_escape(value: &str) -> String {
+    assert!(value.is_ascii(), "fixture must be ASCII");
+    value
+        .encode_utf16()
+        .map(|code_unit| format!(r"\u{code_unit:04x}"))
+        .collect()
+}
+
+pub(super) fn debug_result_count_collision_key() -> String {
+    DEBUG_RESULT_COUNT_COLLISION_COUNT.to_string()
+}
+
+pub(super) fn fixture_result_url_with_path_segment(segment: &str) -> String {
+    format!("{FIXTURE_ORIGIN_ONLY_RESULT_URL}/{segment}")
 }
 
 pub(super) fn completed_text(evidence: ToolExecutorEvidence) -> String {

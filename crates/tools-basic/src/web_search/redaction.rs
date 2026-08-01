@@ -66,10 +66,6 @@ impl CredentialScrubber {
             || encoded_contains_credential(text, &self.json_escaped)
     }
 
-    pub(super) fn contains_case_normalized_credential(&self, text: &str) -> bool {
-        self.contains_credential(text)
-    }
-
     pub(super) fn reversible_variants(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.exact.as_str()).chain(self.decoded_variants.iter().map(String::as_str))
     }
@@ -81,12 +77,10 @@ impl CredentialScrubber {
     }
 
     pub(super) fn url_contains_encoded_credential(&self, text: &str) -> bool {
-        if self.contains_encoded_credential(text)
-            || self.decoded_variants.iter().any(|variant| {
-                unicode_case_insensitive_contains(text, variant)
-                    || encoded_contains_credential(text, variant)
-            })
-        {
+        if self.output_collision_variants().any(|variant| {
+            unicode_case_insensitive_contains(text, variant)
+                || encoded_contains_credential(text, variant)
+        }) {
             return true;
         }
         if self.reversible_variants().any(|variant| {
@@ -208,10 +202,16 @@ impl CredentialScrubber {
             return true;
         }
         let (unicode_host, decoding) = idna::domain_to_unicode(host);
-        decoding.is_err()
-            || unicode_case_insensitive_contains(&unicode_host, &self.exact)
+        if decoding.is_err() {
+            return true;
+        }
+        unicode_case_insensitive_contains(&unicode_host, &self.exact)
             || unicode_case_insensitive_contains(&unicode_host, &self.json_escaped)
             || self.contains_credential(&unicode_host)
+            || self.reversible_variants().any(|variant| {
+                idna_mapped_unicode_variant(variant)
+                    .is_some_and(|mapped| unicode_case_insensitive_contains(&unicode_host, &mapped))
+            })
     }
 }
 

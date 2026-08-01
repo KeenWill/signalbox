@@ -22,6 +22,25 @@ fn web_search_success_evidence_redacts_reflected_credential() {
     assert!(!content.contains(SYNTHETIC_KEY));
 }
 
+/// INV-035: the URL-specific credential gate detects an exact credential in
+/// an admitted result path before completed evidence is constructed.
+#[test]
+fn web_search_rejects_plain_credential_in_result_url_path() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: fixture_result_url_with_path_segment(SYNTHETIC_KEY),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("credential-bearing path fixture is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+
+    assert_eq!(
+        success_evidence(response, &scrubber()),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: credentials colliding with fixed provider-result diagnostics are
 /// rejected before any provider response or error can be formatted.
 #[test]
@@ -304,10 +323,10 @@ fn web_search_redacts_html_encoded_credential_in_result_text() {
     assert!(!content.contains(HTML_ENTITY_COLLISION_VALUE));
 }
 
-/// INV-035: an over-window numeric HTML reference fails closed before
+/// INV-035: an over-window numeric HTML reference is redacted before
 /// provider-controlled evidence is retained.
 #[test]
-fn web_search_rejects_over_window_numeric_reference_in_result_text() {
+fn web_search_redacts_over_window_numeric_reference_in_result_text() {
     let reflection = over_window_numeric_html_reflection();
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: reflection.clone(),
