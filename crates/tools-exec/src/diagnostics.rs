@@ -35,8 +35,7 @@ const MAX_MESSAGE_BYTES: usize = 4096;
 const MAX_TEST_NAME_BYTES: usize = 1024;
 const MAX_CARGO_FAILURE_BYTES: usize = 8192;
 const MAX_TEST_EXECUTABLE_BYTES: usize = 4096;
-const CARGO_TEST_RUNNER_CONFIG: &str =
-    "target.'cfg(all())'.runner=['/signalbox-exec-dispatch','--cargo-test-runner']";
+const CARGO_TEST_RUNNER: &str = "['/signalbox-exec-dispatch','--cargo-test-runner']";
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded cargo-diagnostics arguments";
 
 fn default_timeout_seconds() -> u64 {
@@ -308,14 +307,16 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
 
 fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> ExecArguments {
     let arguments = match command {
-        CargoDiagnosticsCommand::Check => vec![
+        CargoDiagnosticsCommand::Check => [
             "check",
             "--workspace",
             "--all-targets",
             "--all-features",
             "--message-format=json",
-        ],
-        CargoDiagnosticsCommand::Clippy => vec![
+        ]
+        .map(String::from)
+        .to_vec(),
+        CargoDiagnosticsCommand::Clippy => [
             "clippy",
             "--workspace",
             "--all-targets",
@@ -324,29 +325,35 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
             "--",
             "-D",
             "warnings",
-        ],
+        ]
+        .map(String::from)
+        .to_vec(),
         CargoDiagnosticsCommand::Test => vec![
-            "test",
-            "--config",
-            "term.quiet=false",
-            "--config",
-            CARGO_TEST_RUNNER_CONFIG,
-            "--no-fail-fast",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-            "--message-format=json",
+            String::from("test"),
+            String::from("--config"),
+            String::from("term.quiet=false"),
+            String::from("--config"),
+            cargo_test_runner_config(),
+            String::from("--no-fail-fast"),
+            String::from("--workspace"),
+            String::from("--all-targets"),
+            String::from("--all-features"),
+            String::from("--message-format=json"),
         ],
-    }
-    .into_iter()
-    .map(String::from)
-    .collect();
+    };
     ExecArguments {
         program: String::from("cargo"),
         arguments,
         working_directory: String::from("."),
         timeout_seconds,
     }
+}
+
+fn cargo_test_runner_config() -> String {
+    format!(
+        "target.'{}'.runner={CARGO_TEST_RUNNER}",
+        env!("SIGNALBOX_EXECUTION_TARGET")
+    )
 }
 
 /// Structured, bounded result from one Cargo diagnostic pass.
@@ -524,6 +531,7 @@ fn structured_result(
     let mut tests = Vec::new();
     let mut diagnostic_limit_reached = false;
     let mut test_limit_reached = false;
+    let mut test_source_complete = false;
     parse_stream(
         &result.stdout.text,
         command,
@@ -531,9 +539,18 @@ fn structured_result(
         &mut diagnostic_limit_reached,
         &mut tests,
         &mut test_limit_reached,
-        &mut test_source_truncated,
+        TestSourceEvidence {
+            truncated: &mut test_source_truncated,
+            complete: &mut test_source_complete,
+        },
     );
-    let cargo_failure = cargo_failure_detail(&result, diagnostics.is_empty());
+    if command == CargoDiagnosticsCommand::Test && !test_source_complete {
+        test_source_truncated = true;
+    }
+    let has_error_diagnostic = diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.level == "error");
+    let cargo_failure = cargo_failure_detail(&result, has_error_diagnostic);
     CargoDiagnosticsResult {
         command,
         execution: CargoDiagnosticsExecution {
@@ -564,7 +581,7 @@ fn structured_result(
 
 fn cargo_failure_detail(
     result: &ExecResult,
-    diagnostics_empty: bool,
+    has_error_diagnostic: bool,
 ) -> Option<CargoFailureDetail> {
     let cargo_exited_unsuccessfully = matches!(
         result.outcome,
@@ -573,7 +590,7 @@ fn cargo_failure_detail(
     let message = result.stderr.text.trim();
     if result.confinement != ExecutionConfinement::FilesystemConfined
         || !cargo_exited_unsuccessfully
-        || !diagnostics_empty
+        || has_error_diagnostic
         || message.is_empty()
     {
         return None;
@@ -624,10 +641,13 @@ fn parse_stream(
     diagnostic_limit_reached: &mut bool,
     tests: &mut Vec<CargoTestResult>,
     test_limit_reached: &mut bool,
-    test_source_truncated: &mut bool,
+    test_source_evidence: TestSourceEvidence<'_>,
 ) {
+    let mut build_finished = false;
     for line in text.lines() {
-        if let Some(diagnostic) = parse_diagnostic(line) {
+        if (command != CargoDiagnosticsCommand::Test || !build_finished)
+            && let Some(diagnostic) = parse_diagnostic(line)
+        {
             push_bounded(
                 diagnostics,
                 diagnostic,
@@ -635,14 +655,39 @@ fn parse_stream(
                 diagnostic_limit_reached,
             );
         }
+        if command == CargoDiagnosticsCommand::Test && cargo_build_finished(line) {
+            build_finished = true;
+        }
         if command == CargoDiagnosticsCommand::Test {
             if parse_test_source_truncated(line) {
-                *test_source_truncated = true;
+                *test_source_evidence.truncated = true;
+            } else if parse_test_source_complete(line) {
+                *test_source_evidence.complete = true;
             } else if let Some(test) = parse_test_event(line) {
                 push_bounded(tests, test, MAX_TESTS, test_limit_reached);
             }
         }
     }
+}
+
+struct TestSourceEvidence<'a> {
+    truncated: &'a mut bool,
+    complete: &'a mut bool,
+}
+
+fn cargo_build_finished(line: &str) -> bool {
+    serde_json::from_str::<CargoReason>(line)
+        .is_ok_and(|message| message.reason == "build-finished")
+}
+
+fn parse_test_source_complete(line: &str) -> bool {
+    serde_json::from_str::<CargoReason>(line)
+        .is_ok_and(|event| event.reason == "signalbox-test-source-complete")
+}
+
+#[derive(serde::Deserialize)]
+struct CargoReason {
+    reason: String,
 }
 
 fn push_bounded<T>(values: &mut Vec<T>, value: T, limit: usize, limit_reached: &mut bool) {
@@ -743,6 +788,7 @@ mod tests {
 
     const DIAGNOSTIC_FILE: &str = "src/lib.rs";
     const DIAGNOSTIC_LEVEL: &str = "error";
+    const WARNING_LEVEL: &str = "warning";
     const DIAGNOSTIC_MESSAGE: &str = "mismatched types";
     const DIAGNOSTIC_LINE: u64 = 7;
     const DIAGNOSTIC_COLUMN_START: u64 = 9;
@@ -818,9 +864,17 @@ mod tests {
     }
 
     fn compiler_message() -> String {
+        compiler_message_at_level(DIAGNOSTIC_LEVEL)
+    }
+
+    fn compiler_message_at_level(level: &str) -> String {
         format!(
-            r#"{{"reason":"compiler-message","message":{{"level":"{DIAGNOSTIC_LEVEL}","message":"{DIAGNOSTIC_MESSAGE}","spans":[{{"file_name":"{DIAGNOSTIC_FILE}","line_start":{DIAGNOSTIC_LINE},"line_end":{DIAGNOSTIC_LINE},"column_start":{DIAGNOSTIC_COLUMN_START},"column_end":{DIAGNOSTIC_COLUMN_END},"is_primary":true}}]}}}}"#
+            r#"{{"reason":"compiler-message","message":{{"level":"{level}","message":"{DIAGNOSTIC_MESSAGE}","spans":[{{"file_name":"{DIAGNOSTIC_FILE}","line_start":{DIAGNOSTIC_LINE},"line_end":{DIAGNOSTIC_LINE},"column_start":{DIAGNOSTIC_COLUMN_START},"column_end":{DIAGNOSTIC_COLUMN_END},"is_primary":true}}]}}}}"#
         )
+    }
+
+    fn build_finished_message() -> &'static str {
+        r#"{"reason":"build-finished","success":true}"#
     }
 
     fn repeated_compiler_messages(count: usize) -> String {
@@ -829,10 +883,11 @@ mod tests {
 
     fn test_output() -> String {
         format!(
-            "{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\n",
             test_event(TEST_EXECUTABLE, PASSING_TEST, CargoTestOutcome::Passed),
             test_event(TEST_EXECUTABLE, FAILING_TEST, CargoTestOutcome::Failed),
             test_event(TEST_EXECUTABLE, IGNORED_TEST, CargoTestOutcome::Ignored),
+            test_source_complete_event(),
         )
     }
 
@@ -851,6 +906,30 @@ mod tests {
             "reason": "signalbox-test-source-truncated",
         }))
         .expect("static truncation event is serializable")
+    }
+
+    fn test_source_complete_event() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "reason": "signalbox-test-source-complete",
+        }))
+        .expect("static completion event is serializable")
+    }
+
+    fn exited_exec_result(stdout: String) -> ExecResult {
+        ExecResult {
+            confinement: ExecutionConfinement::FilesystemConfined,
+            outcome: ProcessOutcome::Exited { code: Some(0) },
+            stdout: crate::OutputCapture {
+                text: stdout,
+                completeness: CaptureCompleteness::Complete,
+                encoding: OutputEncoding::Utf8,
+            },
+            stderr: crate::OutputCapture {
+                text: String::new(),
+                completeness: CaptureCompleteness::Complete,
+                encoding: OutputEncoding::Utf8,
+            },
+        }
     }
 
     fn maximal_result() -> CargoDiagnosticsResult {
@@ -1086,6 +1165,35 @@ mod tests {
     }
 
     #[test]
+    fn test_program_output_cannot_forge_a_post_build_compiler_diagnostic() {
+        let stdout = format!(
+            "{}\n{}\n{}\n",
+            compiler_message(),
+            build_finished_message(),
+            compiler_message()
+        );
+        let result = structured_result(
+            CargoDiagnosticsCommand::Test,
+            ExecResult {
+                confinement: ExecutionConfinement::FilesystemConfined,
+                outcome: ProcessOutcome::Exited { code: Some(0) },
+                stdout: crate::OutputCapture {
+                    text: stdout,
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+                stderr: crate::OutputCapture {
+                    text: String::new(),
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+            },
+        );
+
+        assert_eq!(result.diagnostics.values.len(), 1);
+    }
+
+    #[test]
     fn cargo_failure_is_bounded_without_tainting_stdout_collections() {
         let result = structured_result(
             CargoDiagnosticsCommand::Check,
@@ -1117,9 +1225,38 @@ mod tests {
     }
 
     #[test]
+    fn cargo_failure_is_retained_when_only_unrelated_warnings_were_structured() {
+        let result = structured_result(
+            CargoDiagnosticsCommand::Check,
+            ExecResult {
+                confinement: ExecutionConfinement::FilesystemConfined,
+                outcome: ProcessOutcome::Exited { code: Some(101) },
+                stdout: crate::OutputCapture {
+                    text: compiler_message_at_level(WARNING_LEVEL),
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+                stderr: crate::OutputCapture {
+                    text: String::from(CARGO_FAILURE_MESSAGE),
+                    completeness: CaptureCompleteness::Complete,
+                    encoding: OutputEncoding::Utf8,
+                },
+            },
+        );
+        let failure = result
+            .execution
+            .cargo_failure
+            .as_ref()
+            .expect("an unrelated warning does not explain Cargo failure");
+
+        assert_eq!(result.diagnostics.values[0].level, WARNING_LEVEL);
+        assert_eq!(failure.message, CARGO_FAILURE_MESSAGE);
+    }
+
+    #[test]
     fn test_events_reject_raw_output_and_retain_target_identity() {
         let stdout = format!(
-            "{}\ntest {FORGED_TEST} ... ok\n{}\n{}\n",
+            "{}\ntest {FORGED_TEST} ... ok\n{}\n{}\n{}\n",
             test_event(TEST_EXECUTABLE, PASSING_TEST, CargoTestOutcome::Passed),
             test_source_truncated_event(),
             test_event(
@@ -1127,6 +1264,7 @@ mod tests {
                 PASSING_TEST,
                 CargoTestOutcome::Failed
             ),
+            test_source_complete_event(),
         );
         let result = structured_result(
             CargoDiagnosticsCommand::Test,
@@ -1154,6 +1292,22 @@ mod tests {
         assert_eq!(result.tests.values[1].name, PASSING_TEST);
         assert_eq!(result.tests.values[1].executable, SECOND_TEST_EXECUTABLE);
         assert_eq!(result.tests.values[1].outcome, CargoTestOutcome::Failed);
+    }
+
+    #[test]
+    fn test_results_require_a_trusted_source_completion_frame() {
+        let event = test_event(TEST_EXECUTABLE, PASSING_TEST, CargoTestOutcome::Passed);
+        let without_completion = structured_result(
+            CargoDiagnosticsCommand::Test,
+            exited_exec_result(event.clone()),
+        );
+        let with_completion = structured_result(
+            CargoDiagnosticsCommand::Test,
+            exited_exec_result(format!("{event}\n{}", test_source_complete_event())),
+        );
+
+        assert!(without_completion.tests.source_truncated);
+        assert!(!with_completion.tests.source_truncated);
     }
 
     #[test]
@@ -1191,6 +1345,7 @@ mod tests {
     #[test]
     fn cargo_test_arguments_keep_no_fail_fast_before_workspace_flags() {
         let arguments = cargo_arguments(CargoDiagnosticsCommand::Test, 300);
+        let runner_config = cargo_test_runner_config();
 
         assert_eq!(
             arguments.arguments,
@@ -1199,7 +1354,7 @@ mod tests {
                 "--config",
                 "term.quiet=false",
                 "--config",
-                CARGO_TEST_RUNNER_CONFIG,
+                runner_config.as_str(),
                 "--no-fail-fast",
                 "--workspace",
                 "--all-targets",
@@ -1208,6 +1363,8 @@ mod tests {
             ]
             .map(String::from)
         );
+        assert!(runner_config.contains(env!("SIGNALBOX_EXECUTION_TARGET")));
+        assert!(!runner_config.contains("cfg(all())"));
         assert_eq!(arguments.working_directory, ".");
     }
 }

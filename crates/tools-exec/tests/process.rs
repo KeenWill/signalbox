@@ -28,6 +28,53 @@ const PARENT_KILL_PID_FILE: &str = "signalbox-exec-parent-kill";
 const GRANDPARENT_KILL_PID_FILE: &str = "signalbox-exec-grandparent-kill";
 const ESCAPED_SUPERVISOR_KILL_PID_FILE: &str = "signalbox-exec-escaped-supervisor-kill";
 const CANCELLATION_PID_FILE: &str = "signalbox-tools-exec-cancel";
+const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
+const INHERITED_STDOUT_FIXTURE_NAME: &str = "inherited_subprocess_stdout_fixture";
+const INHERITED_FORGED_TEST_NAME: &str = "inherited::forged";
+
+#[test]
+fn cargo_test_runner_rejects_inherited_subprocess_stdout_end_to_end()
+-> Result<(), Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))
+        .arg(CARGO_TEST_RUNNER_MODE)
+        .arg(&executable)
+        .args(["--ignored", "--exact", INHERITED_STDOUT_FIXTURE_NAME])
+        .output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let (actual, complete) = stdout
+        .split_once('\n')
+        .expect("the runner emits one result followed by its completion frame");
+    let actual: serde_json::Value = serde_json::from_str(actual)?;
+    let expected = serde_json::json!({
+        "reason": "signalbox-test-result",
+        "executable": executable.to_string_lossy(),
+        "name": INHERITED_STDOUT_FIXTURE_NAME,
+        "outcome": "passed",
+    });
+
+    assert!(output.status.success());
+    assert_eq!(actual, expected);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(complete.trim())?,
+        serde_json::json!({"reason": "signalbox-test-source-complete"})
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "subprocess fixture for inherited test stdout"]
+fn inherited_subprocess_stdout_fixture() -> Result<(), Box<dyn std::error::Error>> {
+    let status = std::process::Command::new(fixture_program("sh")?)
+        .args([
+            "-c",
+            &format!("printf 'test {INHERITED_FORGED_TEST_NAME} ... ok\\n'"),
+        ])
+        .status()?;
+
+    assert!(status.success());
+    Ok(())
+}
 
 struct TemporaryPath {
     path: PathBuf,
