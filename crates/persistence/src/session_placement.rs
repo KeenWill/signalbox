@@ -407,6 +407,14 @@ fn decode_record(
         )?),
         None => None,
     };
+    let result_version: Option<Decimal> = row.try_get("result_version")?;
+    let result_current_version: Option<Decimal> = row.try_get("result_current_version")?;
+    validate_terminal_field_shape(
+        result_kind,
+        rejection,
+        result_version.is_some(),
+        result_current_version.is_some(),
+    )?;
     let result = match (result_kind, rejection) {
         (SessionPlacementResultStorageKind::Applied, None) => {
             let event_kind = session_placement_event_kind_from_str(
@@ -441,7 +449,9 @@ fn decode_record(
                     "applied replacement",
                 ));
             }
-            let recorded_result_version = decode_version(required(&row, "result_version")?)?;
+            let recorded_result_version = decode_version(result_version.ok_or(
+                SessionPlacementRepositoryError::Corruption("result version"),
+            )?)?;
             let event_result_version = decode_version(required(&row, "result_event_version")?)?;
             if recorded_result_version != event_result_version {
                 return Err(SessionPlacementRepositoryError::Corruption(
@@ -469,7 +479,9 @@ fn decode_record(
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch),
         ) => {
-            let current = decode_version(required(&row, "result_current_version")?)?;
+            let current = decode_version(result_current_version.ok_or(
+                SessionPlacementRepositoryError::Corruption("result current version"),
+            )?)?;
             if current == expected {
                 return Err(SessionPlacementRepositoryError::Corruption(
                     "mismatch rejection version",
@@ -487,7 +499,9 @@ fn decode_record(
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::VersionExhausted),
         ) => {
-            let current = decode_version(required(&row, "result_current_version")?)?;
+            let current = decode_version(result_current_version.ok_or(
+                SessionPlacementRepositoryError::Corruption("result current version"),
+            )?)?;
             if expected.as_u64() != u64::MAX || current.as_u64() != u64::MAX {
                 return Err(SessionPlacementRepositoryError::Corruption(
                     "version exhaustion ordinal",
@@ -504,6 +518,38 @@ fn decode_record(
         }
     };
     Ok((command, result))
+}
+
+fn validate_terminal_field_shape(
+    result_kind: SessionPlacementResultStorageKind,
+    rejection: Option<SessionPlacementRejectionStorageKind>,
+    has_result_version: bool,
+    has_current_version: bool,
+) -> Result<(), SessionPlacementRepositoryError> {
+    let valid = match (result_kind, rejection) {
+        (SessionPlacementResultStorageKind::Applied, None) => {
+            has_result_version && !has_current_version
+        }
+        (
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+        ) => !has_result_version && !has_current_version,
+        (
+            SessionPlacementResultStorageKind::Rejected,
+            Some(
+                SessionPlacementRejectionStorageKind::CurrentVersionMismatch
+                | SessionPlacementRejectionStorageKind::VersionExhausted,
+            ),
+        ) => !has_result_version && has_current_version,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SessionPlacementRepositoryError::Corruption(
+            "terminal result fields",
+        ))
+    }
 }
 
 pub(crate) fn encode_placement(placement: &SessionPlacement) -> (Option<&str>, bool) {
@@ -594,4 +640,44 @@ async fn inspect_registry(
                 SessionPlacementRepositoryError::Corruption("registry record conflict")
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_terminal_field_corruption(result: Result<(), SessionPlacementRepositoryError>) {
+        let Err(SessionPlacementRepositoryError::Corruption(reason)) = result else {
+            panic!("fixture shape must fail with typed corruption")
+        };
+        assert_eq!(reason, "terminal result fields");
+    }
+
+    #[test]
+    fn replay_terminal_shapes_reject_every_stray_result_field() {
+        assert_terminal_field_corruption(validate_terminal_field_shape(
+            SessionPlacementResultStorageKind::Applied,
+            None,
+            true,
+            true,
+        ));
+        assert_terminal_field_corruption(validate_terminal_field_shape(
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+            true,
+            false,
+        ));
+        assert_terminal_field_corruption(validate_terminal_field_shape(
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch),
+            true,
+            true,
+        ));
+        assert_terminal_field_corruption(validate_terminal_field_shape(
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::VersionExhausted),
+            true,
+            true,
+        ));
+    }
 }

@@ -19,7 +19,7 @@ use signalbox_persistence::{
         CreateSessionCorruption, CreateSessionRepository, CreateSessionRepositoryError,
     },
     local_test_connection_options, migrate,
-    session::SessionRepository,
+    session::{SessionCorruption, SessionRepository, SessionRepositoryError},
     session_placement::{
         SessionPlacementRepository, SessionPlacementRepositoryError,
         SessionPlacementRepositoryOutcome,
@@ -520,6 +520,56 @@ async fn s36_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Er
         panic!("cross-wired receipt fails with typed corruption")
     };
     assert_eq!(reason, "applied event provenance");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_current_session_load_authenticates_the_placement_update_receipt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(0x20a);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x116),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    SessionPlacementRepository::new(pool.clone())
+        .handle(UpdateSessionPlacement::new(
+            command(0x117),
+            session_id,
+            SessionPlacementVersion::INITIAL,
+            scoped("projects.foo.recorded"),
+        ))
+        .await?;
+    sqlx::query("ALTER TABLE session_placement_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_placement_event
+            SET placement_path = 'projects.foo.forged'
+          WHERE session_id = $1 AND version = 2",
+    )
+    .bind(*session_id.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_placement_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let error = SessionRepository::new(pool.clone())
+        .load_session(session_id)
+        .await
+        .expect_err("current placement must agree with its provenance receipt");
+    let SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(reason)) = error else {
+        panic!("cross-wired current placement fails with typed session corruption")
+    };
+    assert_eq!(reason, "current placement provenance receipt");
 
     pool.close().await;
     drop(container);
