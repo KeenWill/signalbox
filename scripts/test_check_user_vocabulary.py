@@ -35,11 +35,26 @@ def main() -> int:
         mixed_storage_path = (
             root / "apps" / "signalboxd" / "tests" / "offline_tool_loop.rs"
         )
+        frozen_migration = (
+            root
+            / "crates"
+            / "persistence"
+            / "migrations"
+            / "202607180001_create_session.sql"
+        )
+        future_migration = (
+            root
+            / "crates"
+            / "persistence"
+            / "migrations"
+            / "202608020009_user_vocabulary.sql"
+        )
         violation = root / "docs" / "spec" / "example.md"
         reviewed_unix_path = root / "docs" / "spec" / "process-protocol.md"
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
         mixed_storage_path.parent.mkdir(parents=True)
+        frozen_migration.parent.mkdir(parents=True)
         violation.parent.mkdir(parents=True)
         allowed.write_text(
             'const REPOSITORY: &str = "owner/repository";\n', encoding="utf-8"
@@ -66,12 +81,22 @@ def main() -> int:
             "sessionowner = []\n"
             "ownerid = nil\n"
             "Sessionowner = []\n"
-            "ownerId = nil\n",
+            "ownerId = nil\n"
+            "SESSIONOWNER = []\n"
+            "OWNERID = nil\n"
+            "Ownerid = nil\n",
             encoding="utf-8",
         )
         mixed_storage_path.write_text(
             'const PROCESS_ACTOR: &str = "owner";\n'
             'const DECISION_SOURCE: &str = "owner_command";\n',
+            encoding="utf-8",
+        )
+        frozen_migration.write_text(
+            "CHECK (cause = 'owner_initiated');\n", encoding="utf-8"
+        )
+        future_migration.write_text(
+            "-- New owner actor\nCHECK (actor_kind = 'owner');\n",
             encoding="utf-8",
         )
         reviewed_unix_path.write_text(
@@ -97,6 +122,8 @@ def main() -> int:
             "crates/domain/src/imported_conversation.rs",
             "crates/tools-github/src/lib.rs",
             "apps/signalboxd/tests/offline_tool_loop.rs",
+            "crates/persistence/migrations/202607180001_create_session.sql",
+            "crates/persistence/migrations/202608020009_user_vocabulary.sql",
             "docs/spec/example.md",
             "docs/spec/process-protocol.md",
         )
@@ -143,6 +170,9 @@ def main() -> int:
         lowercase_prefix = "docs/spec/example.md:20: ownerid = nil"
         mixed_case_suffix = "docs/spec/example.md:21: Sessionowner = []"
         mixed_case_prefix = "docs/spec/example.md:22: ownerId = nil"
+        uppercase_suffix = "docs/spec/example.md:23: SESSIONOWNER = []"
+        uppercase_prefix = "docs/spec/example.md:24: OWNERID = nil"
+        capitalized_prefix = "docs/spec/example.md:25: Ownerid = nil"
         unix_role_inside_reviewed_path = (
             "docs/spec/process-protocol.md:1: The wrong owner approves this tool."
         )
@@ -153,6 +183,14 @@ def main() -> int:
         stale_actor_in_mixed_storage_path = (
             "apps/signalboxd/tests/offline_tool_loop.rs:1: "
             'const PROCESS_ACTOR: &str = "owner";'
+        )
+        future_migration_prose = (
+            "crates/persistence/migrations/202608020009_user_vocabulary.sql:1: "
+            "-- New owner actor"
+        )
+        future_migration_encoding = (
+            "crates/persistence/migrations/202608020009_user_vocabulary.sql:2: "
+            "CHECK (actor_kind = 'owner');"
         )
         assert expected in rejected.stdout, (
             f"singular violation missing:\n{rejected.stdout}"
@@ -220,6 +258,15 @@ def main() -> int:
         assert mixed_case_prefix in rejected.stdout, (
             f"mixed-case prefix violation missing:\n{rejected.stdout}"
         )
+        assert uppercase_suffix in rejected.stdout, (
+            f"uppercase suffix violation missing:\n{rejected.stdout}"
+        )
+        assert uppercase_prefix in rejected.stdout, (
+            f"uppercase prefix violation missing:\n{rejected.stdout}"
+        )
+        assert capitalized_prefix in rejected.stdout, (
+            f"capitalized prefix violation missing:\n{rejected.stdout}"
+        )
         assert unix_role_inside_reviewed_path in rejected.stdout, (
             f"reviewed-path Unix-role violation missing:\n{rejected.stdout}"
         )
@@ -228,6 +275,12 @@ def main() -> int:
         )
         assert stale_actor_in_mixed_storage_path in rejected.stdout, (
             f"mixed storage-path actor violation missing:\n{rejected.stdout}"
+        )
+        assert future_migration_prose in rejected.stdout, (
+            f"future migration prose violation missing:\n{rejected.stdout}"
+        )
+        assert future_migration_encoding in rejected.stdout, (
+            f"future migration encoding violation missing:\n{rejected.stdout}"
         )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
         reviewed_unix_path.write_text(
@@ -249,6 +302,10 @@ def main() -> int:
         mixed_storage_path.write_text(
             'const PROCESS_ACTOR: &str = "user";\n'
             'const DECISION_SOURCE: &str = "owner_command";\n',
+            encoding="utf-8",
+        )
+        future_migration.write_text(
+            "-- New user actor\nCHECK (actor_kind = 'user');\n",
             encoding="utf-8",
         )
         accepted = run_checker(root)

@@ -12,8 +12,8 @@ from pathlib import Path
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
-    r"\b(?![A-Za-z0-9]*ownership[A-Za-z0-9]*\b)"
-    r"[A-Za-z0-9]*owner[A-Za-z0-9]*\b|"
+    r"\b(?![A-Za-z0-9]*(?:ownership|OWNERSHIP|Ownership)[A-Za-z0-9]*\b)"
+    r"[A-Za-z0-9]*(?:owner|OWNER|Owner)[A-Za-z0-9]*\b|"
     r"(?i:\bowners?\d*(?:\b|[_-])|owners?[_-]|(?<=[_-])owners?\d*(?:\b|[_-]))|"
     r"\b[Oo]wners?\d+[A-Z][A-Za-z0-9_]*|"
     r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
@@ -102,7 +102,29 @@ ALLOWLIST = (
     ),
     Allowance(
         "immutable applied migration vocabulary",
-        re.compile(r"^crates/persistence/migrations/"),
+        re.compile(
+            r"^crates/persistence/migrations/(?:"
+            r"202607180001_create_session|"
+            r"202607180002_replace_session_defaults|"
+            r"202607180003_submit_input|"
+            r"202607180004_turn_lifecycle_storage|"
+            r"202607200001_bounded_user_content|"
+            r"202607220001_model_call_execution|"
+            r"202607220005_stop_requests|"
+            r"202607240001_conversation_import|"
+            r"202607240002_imported_session_seed|"
+            r"202607250001_tool_loop|"
+            r"202607260101_session_metadata|"
+            r"202607280002_review_workflow|"
+            r"202607280202_metadata_command_issuer|"
+            r"202607280302_review_workflow_commands|"
+            r"202607280303_session_system_prompt|"
+            r"202607280401_runner_protocol|"
+            r"202608020001_review_orchestration|"
+            r"202608020002_review_orchestration_command_recovery|"
+            r"202608020003_runner_wire_contract"
+            r")[.]sql$"
+        ),
         re.compile(r"[A-Za-z0-9_]*owner[A-Za-z0-9_]*", re.IGNORECASE),
     ),
     Allowance(
