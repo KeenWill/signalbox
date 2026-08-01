@@ -52,6 +52,7 @@ const MAX_RESULT_TITLE_BYTES: usize = 2 * 1024;
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
 const MAX_RESULT_SNIPPET_BYTES: usize = 16 * 1024;
 const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
+const MAX_CREDENTIAL_BYTES: usize = 4 * 1024;
 const MAX_REVERSIBLE_DECODE_PASSES: usize = 4;
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
@@ -1231,13 +1232,27 @@ where
             let _reporting = report_credential_value_failure(correlation, &credential);
             let credential_text =
                 std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-            let detail = (!fixed_outer_error_debug_may_contain(credential_text))
-                .then(|| self.credential_unavailable_detail.clone());
+            let credential_is_oversized = credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES;
+            let detail = (credential_is_oversized
+                || !fixed_outer_error_debug_may_contain(credential_text))
+            .then(|| self.credential_unavailable_detail.clone());
             return WebSearchRequestOutcome::Evidence(WebSearchRequestEvidence::Uncredentialed(
                 ToolExecutorEvidence::KnownFailed { detail },
             ));
         };
         let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+        if fixed_bound_evidence_token_collides(&scrubber) {
+            return WebSearchRequestOutcome::Error {
+                error: WebSearchExecutorError::CredentialDiagnosticCollision(
+                    WebSearchCredentialDiagnostic {
+                        rendered: safe_collision_diagnostic(credential_text),
+                        failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                        transport_failure_class: None,
+                    },
+                ),
+                credential,
+            };
+        }
         if query_contains_credential(request.query(), credential_text) {
             let outcome = known_failure_evidence(self.request_failed_detail.clone(), &scrubber);
             return match outcome {
@@ -1447,14 +1462,7 @@ fn bind_request_outcome(
             credential,
         } => (evidence, Some(credential)),
     };
-    let bound_diagnostic_check = match &evidence {
-        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => {
-            BoundDiagnosticCheck::AllCredentialVariants
-        }
-        ToolExecutorEvidence::KnownFailed { .. } => {
-            BoundDiagnosticCheck::PreserveDefinitiveFailureWord
-        }
-    };
+    let bound_diagnostic_check = bound_diagnostic_check(&evidence);
     let bound = invocation.bind(evidence);
     let Some(credential) = credential else {
         return Ok(bound);
@@ -1480,6 +1488,17 @@ fn bind_request_outcome(
         ));
     }
     Ok(bound)
+}
+
+fn bound_diagnostic_check(evidence: &ToolExecutorEvidence) -> BoundDiagnosticCheck {
+    match evidence {
+        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => {
+            BoundDiagnosticCheck::AllCredentialVariants
+        }
+        ToolExecutorEvidence::KnownFailed { .. } => {
+            BoundDiagnosticCheck::PreserveDefinitiveFailureWord
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1532,6 +1551,16 @@ fn report_credential_value_failure(
     correlation: &ToolAttemptDispatchCorrelation,
     credential: &CredentialValue,
 ) -> Result<(), WebSearchExecutorError> {
+    if credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES {
+        tracing::warn!(
+            target: "signalbox_tools_basic_web_search",
+            failure = ?CredentialValueFailure::Unusable,
+            session_id = %correlation.session().as_uuid(),
+            turn_id = %correlation.turn().as_uuid(),
+            "web search credential value was unusable"
+        );
+        return Ok(());
+    }
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let controlled_event = format!(
         "WARN signalbox_tools_basic_web_search: web search credential value was unusable failure={:?} session_id={} turn_id={}",
@@ -1829,6 +1858,9 @@ struct CredentialScrubber {
 
 impl CredentialScrubber {
     fn try_new(credential: &CredentialValue) -> Option<Self> {
+        if credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES {
+            return None;
+        }
         if has_http_header_boundary_whitespace(credential.expose_bytes()) {
             return None;
         }
@@ -2136,6 +2168,38 @@ fn fixed_outer_error_debug_may_contain(credential: &str) -> bool {
     text_contains_credential_variant("Err()", credential)
 }
 
+fn fixed_bound_evidence_token_collides(scrubber: &CredentialScrubber) -> bool {
+    let mut probe = ToolExecutorEvidence::CompletedText(String::new());
+    loop {
+        let rendered = format!("{probe:?}");
+        let check_collision = match bound_diagnostic_check(&probe) {
+            BoundDiagnosticCheck::AllCredentialVariants => true,
+            BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
+                !scrubber.contains_case_normalized_credential("Failed")
+            }
+        };
+        if check_collision && scrubber.contains_case_normalized_credential(&rendered) {
+            return true;
+        }
+        let Some(next) = next_fixed_bound_evidence_probe(&probe) else {
+            return false;
+        };
+        probe = next;
+    }
+}
+
+fn next_fixed_bound_evidence_probe(
+    evidence: &ToolExecutorEvidence,
+) -> Option<ToolExecutorEvidence> {
+    match evidence {
+        ToolExecutorEvidence::CompletedText(_) => {
+            Some(ToolExecutorEvidence::KnownFailed { detail: None })
+        }
+        ToolExecutorEvidence::KnownFailed { .. } => Some(ToolExecutorEvidence::Ambiguous),
+        ToolExecutorEvidence::Ambiguous => None,
+    }
+}
+
 fn canonicalized_url_host(value: &str) -> Option<String> {
     let candidate = format!("http://{value}/");
     let url = Url::parse(&candidate).ok()?;
@@ -2347,7 +2411,7 @@ mod tests {
     }
 
     struct RawCredentials {
-        value: &'static [u8],
+        value: Vec<u8>,
     }
 
     impl CredentialAccess for RawCredentials {
@@ -2355,7 +2419,7 @@ mod tests {
             &self,
             _reference: &CredentialReference,
         ) -> Result<CredentialValue, CredentialAccessError> {
-            Ok(CredentialValue::new(self.value.to_vec()))
+            Ok(CredentialValue::new(self.value.clone()))
         }
     }
 
@@ -2668,10 +2732,12 @@ mod tests {
     }
 
     async fn execute_raw_credential_through_service(
-        value: &'static [u8],
+        value: &[u8],
     ) -> (ToolExecutionServiceOutcome, usize) {
         let searches = Arc::new(AtomicUsize::new(0));
-        let credentials = RawCredentials { value };
+        let credentials = RawCredentials {
+            value: value.to_vec(),
+        };
         let transport = CountingTransport {
             searches: Arc::clone(&searches),
         };
@@ -2757,6 +2823,14 @@ mod tests {
                     ended.end(),
                     signalbox_domain::ToolAttemptEnd::KnownFailed { .. }
                 )
+        )
+    }
+
+    fn is_committed_completed(outcome: &ToolExecutionServiceOutcome) -> bool {
+        matches!(
+            outcome,
+            ToolExecutionServiceOutcome::ObservationCommitted(ended)
+                if matches!(ended.end(), signalbox_domain::ToolAttemptEnd::Completed { .. })
         )
     }
 
@@ -3277,7 +3351,9 @@ mod tests {
         let credentials = StaticCredentials {
             value: EXECUTOR_OUTCOME_COLLISION_KEY,
         };
-        let transport = CountingTransport { searches };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
         let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
             .expect("static web_search tool compiles")
             .into_parts();
@@ -3304,6 +3380,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!rendered.contains(EXECUTOR_OUTCOME_COLLISION_KEY));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
     /// INV-035: case normalization of fixed bound-evidence Debug tokens cannot
@@ -3316,7 +3393,9 @@ mod tests {
         let credentials = StaticCredentials {
             value: EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY,
         };
-        let transport = CountingTransport { searches };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
         let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
             .expect("static web_search tool compiles")
             .into_parts();
@@ -3346,10 +3425,11 @@ mod tests {
             &rendered,
             EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY
         ));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
     /// INV-035: a credential matching the fixed `KnownFailed` Debug token is
-    /// omitted from the complete public executor result.
+    /// rejected before dispatch and omitted from the public executor result.
     #[tokio::test]
     async fn web_search_bound_known_failure_token_omits_case_folded_credential_collision() {
         let diagnostic = Arc::new(Mutex::new(String::new()));
@@ -3390,11 +3470,12 @@ mod tests {
             &rendered,
             EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY,
         ));
-        assert_eq!(searches.load(Ordering::Relaxed), 1);
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
     /// INV-035: a credential matching a substring of the fixed `KnownFailed`
-    /// Debug token is omitted from the complete public executor result.
+    /// Debug token is rejected before dispatch and omitted from the public
+    /// executor result.
     #[tokio::test]
     async fn web_search_bound_known_failure_token_omits_credential_substring_collision() {
         let diagnostic = Arc::new(Mutex::new(String::new()));
@@ -3435,7 +3516,7 @@ mod tests {
             &rendered,
             EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY,
         ));
-        assert_eq!(searches.load(Ordering::Relaxed), 1);
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
     /// INV-035: the outer `Ok` wrapper is included in case-normalized checks
@@ -3493,7 +3574,9 @@ mod tests {
         let credentials = StaticCredentials {
             value: EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY,
         };
-        let transport = CountingTransport { searches };
+        let transport = CountingTransport {
+            searches: Arc::clone(&searches),
+        };
         let (catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
             .expect("static web_search tool compiles")
             .into_parts();
@@ -3523,6 +3606,7 @@ mod tests {
             &rendered,
             EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY
         ));
+        assert_eq!(searches.load(Ordering::Relaxed), 0);
     }
 
     /// INV-035: a credential that can collide with the fixed outer `Err`
@@ -5010,6 +5094,29 @@ mod tests {
     async fn interior_newline_credential_commits_without_dispatch() {
         let (outcome, searches) =
             execute_raw_credential_through_service(INTERIOR_NEWLINE_CREDENTIAL_VALUE).await;
+
+        assert!(is_committed_known_failure(&outcome));
+        assert_eq!(searches, 0);
+    }
+
+    /// A resolved credential at the application byte bound remains usable.
+    #[tokio::test]
+    async fn credential_at_byte_bound_may_reach_transport() {
+        let credential = vec![b'x'; MAX_CREDENTIAL_BYTES];
+
+        let (outcome, searches) = execute_raw_credential_through_service(&credential).await;
+
+        assert!(is_committed_completed(&outcome));
+        assert_eq!(searches, 1);
+    }
+
+    /// INV-035: an oversized resolved credential is a definitive pre-dispatch
+    /// failure and is never expanded by the scrubber or sent to transport.
+    #[tokio::test]
+    async fn oversized_credential_commits_without_dispatch() {
+        let credential = vec![b'x'; MAX_CREDENTIAL_BYTES + 1];
+
+        let (outcome, searches) = execute_raw_credential_through_service(&credential).await;
 
         assert!(is_committed_known_failure(&outcome));
         assert_eq!(searches, 0);
