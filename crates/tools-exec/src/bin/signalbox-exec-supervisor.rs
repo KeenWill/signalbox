@@ -63,6 +63,13 @@ mod linux {
         Status(SupervisorStatus),
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum OuterStartupState {
+        Ready,
+        Waiting,
+        Failed,
+    }
+
     pub(super) fn entrypoint() -> ExitCode {
         let mut arguments = std::env::args_os().skip(1);
         let Some(mode_or_timeout) = arguments.next() else {
@@ -154,10 +161,14 @@ mod linux {
         control.write_all(&[1]).map_err(|_| ())?;
         let cancelled = cancellation_signal();
         loop {
-            match tree.live_descendant_beyond_root() {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(()) => return Err(()),
+            match outer_startup_state(child.try_wait(), tree.live_descendant_beyond_root()) {
+                OuterStartupState::Ready => break,
+                OuterStartupState::Waiting => {}
+                OuterStartupState::Failed => {
+                    drop(control);
+                    let _ = tree.finish(&mut child);
+                    return Err(());
+                }
             }
             if cancelled.load(Ordering::Acquire)
                 || started.elapsed() >= Duration::from_millis(timeout_milliseconds)
@@ -208,6 +219,17 @@ mod linux {
             CleanupStatus::Complete { .. }
             | CleanupStatus::ProcessTreeUnsupported { .. }
             | CleanupStatus::Failed { .. } => Err(()),
+        }
+    }
+
+    fn outer_startup_state(
+        child_wait: std::io::Result<Option<ExitStatus>>,
+        descendant: Result<bool, ()>,
+    ) -> OuterStartupState {
+        match (child_wait, descendant) {
+            (Ok(None), Ok(true)) => OuterStartupState::Ready,
+            (Ok(None), Ok(false)) => OuterStartupState::Waiting,
+            (Ok(Some(_)) | Err(_), _) | (Ok(None), Err(())) => OuterStartupState::Failed,
         }
     }
 
@@ -1302,6 +1324,8 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
+        use std::os::unix::process::ExitStatusExt;
+
         use super::*;
 
         const CHILD_FIXTURE_NAME: &str = "linux::tests::child_fixture";
@@ -1393,6 +1417,16 @@ mod linux {
             let error = std::io::Error::from_raw_os_error(rustix::io::Errno::SRCH.raw_os_error());
 
             assert!(process_gone(&error));
+        }
+
+        #[test]
+        fn outer_startup_fails_when_the_inner_supervisor_has_exited() {
+            let exited = ExitStatus::from_raw(1 << 8);
+
+            assert_eq!(
+                outer_startup_state(Ok(Some(exited)), Ok(false)),
+                OuterStartupState::Failed
+            );
         }
 
         #[test]
