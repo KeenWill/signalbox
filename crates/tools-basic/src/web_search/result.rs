@@ -41,7 +41,7 @@ pub struct WebSearchResult {
 }
 
 /// Named fields for one provider result.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct WebSearchResultFields {
     /// Result title.
     pub title: String,
@@ -49,6 +49,17 @@ pub struct WebSearchResultFields {
     pub url: String,
     /// Provider-supplied result snippet.
     pub snippet: String,
+}
+
+impl fmt::Debug for WebSearchResultFields {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebSearchResultFields")
+            .field("title", &"[provider-controlled]")
+            .field("url", &"[provider-controlled]")
+            .field("snippet", &"[provider-controlled]")
+            .finish()
+    }
 }
 
 impl fmt::Debug for WebSearchResult {

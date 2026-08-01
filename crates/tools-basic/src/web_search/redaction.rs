@@ -226,33 +226,36 @@ pub(super) fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {
 pub(super) fn encoded_contains_credential(text: &str, credential: &str) -> bool {
     let mut decoded = String::from(text);
     for _ in 0..MAX_REVERSIBLE_DECODE_PASSES {
-        let Some((next, changed)) = decode_reversible_text_once(&decoded) else {
+        let Some(next) = decode_reversible_text_once(&decoded) else {
             return true;
         };
-        if changed && unicode_case_insensitive_contains(&next, credential) {
+        if next.change == ReversibleTextChange::Changed
+            && unicode_case_insensitive_contains(&next.text, credential)
+        {
             return true;
         }
-        if !changed {
+        if next.change == ReversibleTextChange::Unchanged {
             return false;
         }
-        decoded = next;
+        decoded = next.text;
     }
-    decode_reversible_text_once(&decoded).is_none_or(|(_, changed)| changed)
+    decode_reversible_text_once(&decoded)
+        .is_none_or(|decoded| decoded.change == ReversibleTextChange::Changed)
 }
 
 pub(super) fn decoded_credential_variants(credential: &str) -> Option<Vec<String>> {
     let mut decoded = String::from(credential);
     let mut variants = Vec::new();
     for _ in 0..MAX_REVERSIBLE_DECODE_PASSES {
-        let (next, changed) = decode_reversible_text_once(&decoded)?;
-        if !changed {
+        let next = decode_reversible_text_once(&decoded)?;
+        if next.change == ReversibleTextChange::Unchanged {
             return Some(variants);
         }
-        variants.push(next.clone());
-        decoded = next;
+        variants.push(next.text.clone());
+        decoded = next.text;
     }
-    let (_, changed) = decode_reversible_text_once(&decoded)?;
-    (!changed).then_some(variants)
+    let decoded = decode_reversible_text_once(&decoded)?;
+    (decoded.change == ReversibleTextChange::Unchanged).then_some(variants)
 }
 
 pub(super) fn text_contains_credential_variant(text: &str, credential: &str) -> bool {

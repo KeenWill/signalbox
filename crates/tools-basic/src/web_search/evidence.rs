@@ -1,9 +1,7 @@
 use signalbox_application::ToolExecutorEvidence;
-use signalbox_domain::{ToolExecutionErrorDetail, ToolResultText};
+use signalbox_domain::{ToolExecutionErrorDetail, ToolExecutionErrorDetailFailure, ToolResultText};
 
 use super::{diagnostic::*, redaction::*, result::*};
-
-pub(super) const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
 
 pub(super) const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
@@ -106,23 +104,54 @@ pub(super) fn provider_error_detail(
             error.status
         )
     };
-    let bounded = truncate_after_redaction(detail);
-    if scrubber.contains_case_normalized_credential(&bounded) {
+    let bounded = detail_after_redaction(detail)?;
+    if scrubber.contains_case_normalized_credential(bounded.as_str()) {
         return Ok(None);
     }
-    ToolExecutionErrorDetail::try_new(bounded)
-        .map(Some)
-        .map_err(|_| WebSearchExecutorError::EvidenceEncoding)
+    Ok(Some(bounded))
 }
 
-pub(super) fn truncate_after_redaction(detail: String) -> String {
-    if detail.len() <= MAX_ERROR_DETAIL_BYTES {
-        return detail;
+pub(super) fn detail_after_redaction(
+    detail: String,
+) -> Result<ToolExecutionErrorDetail, WebSearchExecutorError> {
+    let rejected = match ToolExecutionErrorDetail::try_new(detail) {
+        Ok(detail) => return Ok(detail),
+        Err(rejected) => rejected,
+    };
+    let (detail, failure) = rejected.into_parts();
+    if !matches!(failure, ToolExecutionErrorDetailFailure::TooLong { .. }) {
+        return Err(WebSearchExecutorError::EvidenceEncoding);
     }
-    let retained_bytes = MAX_ERROR_DETAIL_BYTES.saturating_sub(TRUNCATION_SUFFIX.len());
-    let mut end = retained_bytes;
-    while !detail.is_char_boundary(end) {
-        end -= 1;
+
+    let boundaries = detail
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(detail.len()))
+        .collect::<Vec<_>>();
+    let mut first_candidate = 1;
+    let mut last_candidate = boundaries.len().saturating_sub(1);
+    let mut admitted = None;
+    while first_candidate <= last_candidate {
+        let candidate_index = first_candidate + (last_candidate - first_candidate) / 2;
+        let candidate = format!(
+            "{}{TRUNCATION_SUFFIX}",
+            &detail[..boundaries[candidate_index]]
+        );
+        match ToolExecutionErrorDetail::try_new(candidate) {
+            Ok(detail) => {
+                admitted = Some(detail);
+                first_candidate = candidate_index + 1;
+            }
+            Err(rejected)
+                if matches!(
+                    rejected.failure(),
+                    ToolExecutionErrorDetailFailure::TooLong { .. }
+                ) =>
+            {
+                last_candidate = candidate_index.saturating_sub(1);
+            }
+            Err(_) => return Err(WebSearchExecutorError::EvidenceEncoding),
+        }
     }
-    format!("{}{}", &detail[..end], TRUNCATION_SUFFIX)
+    admitted.ok_or(WebSearchExecutorError::EvidenceEncoding)
 }

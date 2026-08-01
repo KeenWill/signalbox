@@ -137,18 +137,20 @@ fn web_search_result_entity_escapes_snippets() {
 /// provider-controlled fields that could reflect the API key.
 #[test]
 fn web_search_debug_output_omits_reflected_credential() {
-    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+    let fields = WebSearchResultFields {
         title: String::from(SYNTHETIC_KEY),
         url: format!("{FIXTURE_RESULT_URL}?token={SYNTHETIC_KEY}"),
         snippet: String::from(SYNTHETIC_KEY),
-    })
-    .expect("reflected fixture result is admitted");
+    };
+    let fields_debug = format!("{fields:?}");
+    let reflected = WebSearchResult::try_new(fields).expect("reflected fixture result is admitted");
     let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
         .expect("fixture response is admitted");
     let error =
         WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, SYNTHETIC_KEY.as_bytes().to_vec())
             .expect("fixture error body is bounded");
 
+    assert!(!fields_debug.contains(SYNTHETIC_KEY));
     assert!(!format!("{response:?}").contains(SYNTHETIC_KEY));
     assert!(!format!("{error:?}").contains(SYNTHETIC_KEY));
 }

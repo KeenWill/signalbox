@@ -65,9 +65,9 @@ fn web_search_unparsed_error_body_never_enters_evidence() {
 fn web_search_error_body_is_redacted_before_truncation() {
     let reflected = format!(
         "{}{}{}",
-        "a".repeat(MAX_ERROR_DETAIL_BYTES - 100),
+        "a".repeat(MAX_PROVIDER_RESPONSE_BYTES / 4),
         SYNTHETIC_KEY,
-        "z".repeat(MAX_ERROR_DETAIL_BYTES)
+        "z".repeat(MAX_PROVIDER_RESPONSE_BYTES / 4)
     );
     let body = serde_json::to_vec(&serde_json::json!({"message": reflected}))
         .expect("fixture provider error encodes");

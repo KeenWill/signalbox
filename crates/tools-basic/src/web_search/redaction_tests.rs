@@ -455,7 +455,7 @@ fn web_search_html_reference_scan_handles_multibyte_boundaries() {
 fn web_search_html_reference_scan_bounds_and_rejects_distant_terminator() {
     let source = distant_html_reference_terminator();
 
-    assert_eq!(decode_html_character_references(&source), None);
+    assert!(decode_html_character_references(&source).is_none());
 }
 
 /// INV-035: credential removal cannot reproduce a key that overlaps the

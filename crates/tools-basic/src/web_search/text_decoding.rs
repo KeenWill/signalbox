@@ -3,12 +3,34 @@ use unicode_normalization::UnicodeNormalization;
 
 pub(super) const MAX_REVERSIBLE_DECODE_PASSES: usize = 4;
 
-pub(super) fn decode_reversible_text_once(text: &str) -> Option<(String, bool)> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReversibleTextChange {
+    Unchanged,
+    Changed,
+}
+
+pub(super) struct DecodedText {
+    pub(super) text: String,
+    pub(super) change: ReversibleTextChange,
+}
+
+pub(super) fn decode_reversible_text_once(text: &str) -> Option<DecodedText> {
     let form_decoded = String::from_utf8(form_decode_once(text.as_bytes())).ok()?;
     let form_changed = form_decoded != text;
-    let (html_decoded, html_changed) = decode_html_character_references(&form_decoded)?;
-    let (json_decoded, json_changed) = decode_json_string_escapes(&html_decoded);
-    Some((json_decoded, form_changed || html_changed || json_changed))
+    let html_decoded = decode_html_character_references(&form_decoded)?;
+    let json_decoded = decode_json_string_escapes(&html_decoded.text);
+    let change = if form_changed
+        || html_decoded.change == ReversibleTextChange::Changed
+        || json_decoded.change == ReversibleTextChange::Changed
+    {
+        ReversibleTextChange::Changed
+    } else {
+        ReversibleTextChange::Unchanged
+    };
+    Some(DecodedText {
+        text: json_decoded.text,
+        change,
+    })
 }
 
 // WHATWG's named-character-reference table marks these legacy names as
@@ -28,7 +50,7 @@ pub(super) const LEGACY_SEMICOLONLESS_HTML_REFERENCES: [&str; 106] = [
     "yacute", "yen", "yuml",
 ];
 
-pub(super) fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
+pub(super) fn decode_html_character_references(text: &str) -> Option<DecodedText> {
     const MAX_CHARACTER_REFERENCE_BYTES: usize = 64;
     let mut decoded = String::with_capacity(text.len());
     let mut remaining = text;
@@ -57,7 +79,14 @@ pub(super) fn decode_html_character_references(text: &str) -> Option<(String, bo
         remaining = &reference[relative_end + 1..];
     }
     decoded.push_str(remaining);
-    Some((decoded, changed))
+    Some(DecodedText {
+        text: decoded,
+        change: if changed {
+            ReversibleTextChange::Changed
+        } else {
+            ReversibleTextChange::Unchanged
+        },
+    })
 }
 
 pub(super) fn numeric_character_reference_prefix(reference: &str) -> bool {
@@ -108,7 +137,7 @@ pub(super) fn unicode_normalized_contains(haystack: &str, needle: &str) -> bool 
             .contains(&normalized_needle)
 }
 
-pub(super) fn decode_json_string_escapes(text: &str) -> (String, bool) {
+pub(super) fn decode_json_string_escapes(text: &str) -> DecodedText {
     let mut decoded = String::with_capacity(text.len());
     let mut remaining = text;
     let mut changed = false;
@@ -138,7 +167,14 @@ pub(super) fn decode_json_string_escapes(text: &str) -> (String, bool) {
         changed = true;
     }
     decoded.push_str(remaining);
-    (decoded, changed)
+    DecodedText {
+        text: decoded,
+        change: if changed {
+            ReversibleTextChange::Changed
+        } else {
+            ReversibleTextChange::Unchanged
+        },
+    }
 }
 
 pub(super) fn decode_json_unicode_escape(escape: &str) -> Option<(char, usize)> {
