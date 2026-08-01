@@ -141,6 +141,23 @@ AS $$
            AND attempt.turn_id = candidate.provenance_turn_id
            AND attempt.session_id = candidate.session_id
            AND attempt.effect_class = 'external_effect'
+           AND (
+                attempt.state_kind = 'in_flight'
+                OR (
+                    attempt.state_kind = 'terminal'
+                    AND (
+                        attempt.terminal_disposition_kind IN (
+                            'completed', 'ambiguous'
+                        )
+                        OR (
+                            attempt.terminal_disposition_kind = 'known_failed'
+                            AND attempt.error_kind IN (
+                                'execution_failed', 'result_too_large'
+                            )
+                        )
+                    )
+                )
+           )
            AND request.request_id = candidate.provenance_request_id
            AND request.session_id = candidate.session_id
            AND request.turn_id = candidate.provenance_turn_id

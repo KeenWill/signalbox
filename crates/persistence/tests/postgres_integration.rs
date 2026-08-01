@@ -20905,6 +20905,64 @@ async fn session_plan_append_classifies_missing_session_as_invalid_provenance()
     Ok(())
 }
 
+/// Durable provenance that no longer proves physical dispatch fails closed
+/// before either current or requested-history evidence can be exposed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_prepared_attempt_provenance() -> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "authenticate the dispatched attempt";
+    const HISTORY_LIMIT: usize = 10;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments = create_plan_arguments(CREATED_TEXT);
+    let (session, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    expect_appended(
+        repository
+            .append(PlanAppendRequest::new(
+                provenance,
+                PlanEventDraft::Create {
+                    text: plan_text(CREATED_TEXT),
+                },
+            ))
+            .await?,
+    );
+
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE tool_attempt SET state_kind = 'prepared' WHERE attempt_id = $1")
+        .bind(provenance.correlation().attempt().into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let authorized: bool = sqlx::query_scalar(
+        "SELECT session_plan_event_has_authority(event)
+           FROM session_plan_event AS event
+          WHERE event.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let error = repository
+        .read(PlanReadRequest::new(session, None, Some(HISTORY_LIMIT)))
+        .await
+        .expect_err("prepared provenance cannot authenticate current or history evidence");
+
+    assert!(!authorized);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::InvalidEventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A revision naming no creation event returns its typed rejection without an
 /// append or ordinal allocation.
 #[tokio::test(flavor = "multi_thread")]

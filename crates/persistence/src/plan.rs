@@ -98,6 +98,7 @@ const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
        event.provenance_turn_id, event.provenance_issuing_turn_attempt_id,
        event.provenance_request_id, event.provenance_attempt_id,
        event.provenance_dispatch_generation,
+       session_plan_event_has_authority(event) AS event_authorized,
        attempt.attempt_id AS authority_attempt_id,
        attempt.request_id AS authority_attempt_request_id,
        attempt.session_id AS authority_attempt_session_id,
@@ -685,6 +686,9 @@ fn decode_event(session: SessionId, row: &PgRow) -> Result<PlanEvent, SessionPla
     .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
         "entry ordinal",
     ))?;
+    if required_projected_authority(row, "event_authorized")? != ProjectedAuthority::Trusted {
+        return Err(SessionPlanCorruption::UntrustedProvenance.into());
+    }
     let provenance = decode_provenance(session, row)?;
     let event_kind: String = required(row, "event_kind")?;
     let storage_kind = mapping::plan_event_kind_from_str(&event_kind).ok_or(
