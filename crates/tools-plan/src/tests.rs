@@ -235,6 +235,15 @@ fn known_failure_has_detail(evidence: &ToolExecutorEvidence) -> bool {
     }
 }
 
+fn has_invalid_arguments_detail(outcome: Result<(), ToolCatalogValidationFailure>) -> bool {
+    match outcome {
+        Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) }) => true,
+        Ok(())
+        | Err(ToolCatalogValidationFailure::UnknownTool)
+        | Err(ToolCatalogValidationFailure::InvalidArguments { detail: None }) => false,
+    }
+}
+
 fn oversized_read_page(provenance: PlanEventProvenance) -> PlanReadPage {
     let large_text = text(&"🦀".repeat(MAX_PLAN_TEXT_CHARS));
     let entries = (1..=MAX_PLAN_READ_ENTRIES)
@@ -303,10 +312,7 @@ fn status_arguments_reject_values_outside_the_closed_vocabulary() {
 
     let outcome = catalog.validate_arguments(&name, &unknown);
 
-    assert!(matches!(
-        outcome,
-        Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
-    ));
+    assert!(has_invalid_arguments_detail(outcome));
 }
 
 #[test]
