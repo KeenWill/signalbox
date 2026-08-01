@@ -2352,6 +2352,14 @@ impl CredentialScrubber {
             return true;
         }
         if self.reversible_variants().any(|variant| {
+            url_preprocessed_credential_variant(variant).is_some_and(|normalized| {
+                unicode_case_insensitive_contains(text, &normalized)
+                    || encoded_contains_credential(text, &normalized)
+            })
+        }) {
+            return true;
+        }
+        if self.reversible_variants().any(|variant| {
             normalize_url_path_dot_segments(variant).is_some_and(|normalized| {
                 unicode_case_insensitive_contains(text, &normalized)
                     || encoded_contains_credential(text, &normalized)
@@ -2393,17 +2401,25 @@ impl CredentialScrubber {
             {
                 return true;
             }
-            if let std::net::IpAddr::V4(result_ipv4) = result_host {
-                let result_components = result_ipv4.octets();
-                return self.reversible_variants().any(|variant| {
-                    canonicalized_ipv4_component_values(variant).is_some_and(|components| {
-                        components
-                            .into_iter()
-                            .any(|component| result_components.contains(&component))
-                    })
-                });
+            match result_host {
+                std::net::IpAddr::V4(result_ipv4) => {
+                    let result_components = result_ipv4.octets();
+                    return self.reversible_variants().any(|variant| {
+                        canonicalized_ipv4_component_fragments(variant).any(|fragment| {
+                            result_components
+                                .windows(fragment.len())
+                                .any(|window| window == fragment)
+                        })
+                    });
+                }
+                std::net::IpAddr::V6(result_ipv6) => {
+                    let result_components = result_ipv6.segments();
+                    return self.reversible_variants().any(|variant| {
+                        canonicalized_ipv6_hextet(variant)
+                            .is_some_and(|component| result_components.contains(&component))
+                    });
+                }
             }
-            return false;
         }
         if self.reversible_variants().any(|variant| {
             idna::domain_to_ascii(variant)
@@ -2927,15 +2943,29 @@ fn parse_ip_literal(value: &str) -> Option<std::net::IpAddr> {
     unbracketed.parse().ok()
 }
 
-fn canonicalized_ipv4_component_values(value: &str) -> Option<[u8; 4]> {
-    let first = canonicalized_ipv4_component(&format!("{value}.0.0.1"), 0)?;
-    let second = canonicalized_ipv4_component(&format!("0.{value}.0.1"), 1)?;
-    let third = canonicalized_ipv4_component(&format!("0.0.{value}.1"), 2)?;
-    let fourth = canonicalized_ipv4_component(&format!("0.0.0.{value}"), 3)?;
-    Some([first, second, third, fourth])
+fn url_preprocessed_credential_variant(value: &str) -> Option<String> {
+    let normalized = value
+        .chars()
+        .filter(|character| !matches!(character, '\t' | '\n' | '\r'))
+        .collect::<String>();
+    (normalized != value && !normalized.is_empty()).then_some(normalized)
 }
 
-fn canonicalized_ipv4_component(host: &str, position: usize) -> Option<u8> {
+fn canonicalized_ipv4_component_fragments(value: &str) -> impl Iterator<Item = Vec<u8>> {
+    [
+        canonicalized_ipv4_fragment(&format!("{value}.0.0.1"), 0..1),
+        canonicalized_ipv4_fragment(&format!("0.{value}.0.1"), 1..2),
+        canonicalized_ipv4_fragment(&format!("0.0.{value}.1"), 2..3),
+        canonicalized_ipv4_fragment(&format!("0.0.0.{value}"), 3..4),
+        canonicalized_ipv4_fragment(&format!("0.0.{value}"), 2..4),
+        canonicalized_ipv4_fragment(&format!("0.{value}"), 1..4),
+        canonicalized_ipv4_fragment(value, 0..4),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn canonicalized_ipv4_fragment(host: &str, positions: std::ops::Range<usize>) -> Option<Vec<u8>> {
     let candidate = format!("http://{host}/");
     let url = Url::parse(&candidate).ok()?;
     if !url.username().is_empty()
@@ -2947,12 +2977,26 @@ fn canonicalized_ipv4_component(host: &str, position: usize) -> Option<u8> {
     {
         return None;
     }
-    url.host_str()?
-        .parse::<std::net::Ipv4Addr>()
-        .ok()?
-        .octets()
-        .get(position)
-        .copied()
+    let components = url.host_str()?.parse::<std::net::Ipv4Addr>().ok()?.octets();
+    components.get(positions).map(<[u8]>::to_vec)
+}
+
+fn canonicalized_ipv6_hextet(value: &str) -> Option<u16> {
+    let candidate = format!("http://[{value}:0:0:0:0:0:0:1]/");
+    let url = Url::parse(&candidate).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let std::net::IpAddr::V6(address) = parse_ip_literal(url.host_str()?)? else {
+        return None;
+    };
+    address.segments().first().copied()
 }
 
 fn form_decode_once(encoded: &[u8]) -> Vec<u8> {
@@ -3027,6 +3071,8 @@ mod tests {
     const FIXTURE_IPV6_RESULT_URL: &str = "https://[2001:db8::1]/result";
     const FIXTURE_LEGACY_IPV4_RESULT_URL: &str = "https://2130706433/result";
     const FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.0.1/";
+    const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
+    const FIXTURE_TAB_NORMALIZED_RESULT_URL: &str = "http://example.com/abcd";
     const FIXTURE_UPPERCASE_SCHEME_RESULT_URL: &str = "HTTPS://example.com/result";
     const FIXTURE_BACKSLASH_RESULT_URL: &str = "https://example.com/abc\\def";
     const FIXTURE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-ABCDEF.example/result";
@@ -3080,6 +3126,9 @@ mod tests {
     const URL_LEGACY_IPV4_COLLISION_KEY: &str = "2130706433";
     const URL_OCTAL_IPV4_COMPONENT_COLLISION_KEY: &str = "0177";
     const URL_HEX_IPV4_COMPONENT_COLLISION_KEY: &str = "0x7f";
+    const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
+    const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
+    const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
     const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
     const URL_DECODED_CASE_BACKSLASH_COLLISION_KEY: &str = "ABC%5CDEF";
@@ -6038,6 +6087,29 @@ mod tests {
         );
     }
 
+    /// INV-035: URL preprocessing cannot conceal a credential containing an
+    /// internal ASCII tab in completed provider result evidence.
+    #[test]
+    fn web_search_rejects_tab_preprocessed_credential_in_result_url() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_TAB_NORMALIZED_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("tab-normalized fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_INTERNAL_TAB_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// INV-035: URL backslash normalization is composed with reversible
     /// credential decoding before completed evidence is retained.
     #[test]
@@ -6192,6 +6264,29 @@ mod tests {
         );
     }
 
+    /// INV-035: canonical IPv6 hextet spelling and compression boundaries
+    /// cannot conceal a credential in a provider result host.
+    #[test]
+    fn web_search_rejects_canonicalized_ipv6_hextet_credential_in_result_host() {
+        let result = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_IPV6_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("IPv6 hextet fixture result is admitted");
+        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_IPV6_HEXTET_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// INV-035: WHATWG legacy IPv4 serialization cannot conceal a credential
     /// reflected in a provider result host.
     #[test]
@@ -6252,6 +6347,31 @@ mod tests {
             .expect("fixture response is admitted");
         let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
             URL_HEX_IPV4_COMPONENT_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: a multi-octet final IPv4 component is preserved as one
+    /// credential-derived fragment when compared with a canonical result host.
+    #[test]
+    fn web_search_rejects_multi_octet_credential_in_canonical_ipv4_component() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("multi-octet IPv4 fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY
+                .as_bytes()
+                .to_vec(),
         ))
         .expect("fixture credential is usable");
 
