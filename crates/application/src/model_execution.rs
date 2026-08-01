@@ -1725,11 +1725,12 @@ where
                                 .copied()
                                 .unwrap_or(InitialToolApproval::Confirm);
                             approval_index += 1;
-                            every_request_approved &= matches!(
-                                approval,
+                            every_request_approved &= match approval {
+                                InitialToolApproval::Confirm
+                                | InitialToolApproval::AlwaysConfirm => false,
                                 InitialToolApproval::PolicyAuto
-                                    | InitialToolApproval::SessionBlanket
-                            );
+                                | InitialToolApproval::SessionBlanket => true,
+                            };
                             continuing.push(ToolResponsePartIdentity::tool_call(
                                 self.ids.next_semantic_entry_id(),
                                 self.ids.next_tool_request_id(),
