@@ -498,6 +498,40 @@ async fn production_runner_reaps_new_session_target_after_supervisor_kill()
 }
 
 #[tokio::test]
+async fn production_runner_reaps_new_session_target_after_process_group_kill()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let pid_file = TemporaryPath::new("signalbox-exec-process-group-kill-pid")?;
+        let script = format!(
+            "{} {} -c \"printf %s \\$\\$ > {}; exec {} 30\" & {} 0.05; kill -KILL 0",
+            fixture_program("setsid")?.display(),
+            fixture_program("sh")?.display(),
+            pid_file.as_path().display(),
+            fixture_program("sleep")?.display(),
+            fixture_program("sleep")?.display()
+        );
+        let request = shell_request(&script, Duration::from_secs(5), std::env::current_dir()?)?;
+        let started = std::time::Instant::now();
+
+        let result = production_runner()?.run(request).await;
+        let elapsed = started.elapsed();
+        let target = std::fs::read_to_string(pid_file.as_path())?.parse::<u32>()?;
+        await_process_absent(target).await?;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            }
+        );
+        assert!(elapsed < Duration::from_secs(2));
+        assert!(!std::path::Path::new(&format!("/proc/{target}")).exists());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn production_runner_reaps_new_session_descendant_after_leader_completion()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
