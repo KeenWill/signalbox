@@ -10,14 +10,15 @@ use signalbox_domain::{
 use signalbox_persistence::runner_protocol::{
     IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
     RunnerConnectionEpoch, RunnerConnectionTransition, RunnerConnectionTransitionOutcome,
-    RunnerEnrollmentRequestFailure, RunnerEnrollmentRequestId, RunnerProtocolStore,
-    RunnerProtocolStoreError, RunnerRegistrationRevision,
+    RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure, RunnerEnrollmentRequestId,
+    RunnerProtocolStore, RunnerProtocolStoreError, RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
-    FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message, PositiveU64,
-    ReconnectDirectives, Registered, Rejected, RejectionCode, Resume, Resumed, Shutdown,
-    ShutdownReason, advertisement_digest, decode_line, encode_line,
+    FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, MAX_FRAME_BYTES, Message,
+    PositiveU64, ReconnectDirectives, Registered, Rejected, RejectionCode, Resume, Resumed,
+    Shutdown, ShutdownReason, WorkspaceFailureCorrelation, advertisement_digest, decode_line,
+    encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -151,12 +152,15 @@ impl PostgresRunnerRegistrationService {
             disposition = ?outcome.disposition(),
             "runner enrollment accepted"
         );
-        tracing::info!(
-            enrollment_id = %identities.enrollment().into_uuid(),
-            runner_id = %identities.runner().into_uuid(),
-            registration_revision = receipt.registration().revision().get(),
-            "runner registration revision stored"
-        );
+        match outcome.disposition() {
+            RunnerEnrollmentDisposition::Created => tracing::info!(
+                enrollment_id = %identities.enrollment().into_uuid(),
+                runner_id = %identities.runner().into_uuid(),
+                registration_revision = receipt.registration().revision().get(),
+                "runner registration revision stored"
+            ),
+            RunnerEnrollmentDisposition::Replayed => {}
+        }
         let connection = self
             .store
             .open_connection(identities.enrollment())
@@ -220,6 +224,23 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
+        let previous_registration_revision = match self
+            .store
+            .load_enrollment(identities.enrollment())
+            .await
+            .map_err(|error| {
+                store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+            })? {
+            Some(enrollment) => self
+                .store
+                .load_current_registration(&enrollment)
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?
+                .map(|registration| registration.revision()),
+            None => None,
+        };
         let receipt = self
             .store
             .resume_registration(
@@ -232,6 +253,16 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
+        if previous_registration_revision == Some(prior)
+            && receipt.registration().revision() != prior
+        {
+            tracing::info!(
+                enrollment_id = %receipt.enrollment().enrollment().into_uuid(),
+                runner_id = %receipt.enrollment().runner().into_uuid(),
+                registration_revision = receipt.registration().revision().get(),
+                "runner registration revision stored"
+            );
+        }
         let connection = self
             .store
             .open_connection(receipt.enrollment().enrollment())
@@ -1754,7 +1785,38 @@ fn available_correlation(message: &Message) -> AvailableCorrelation {
         }
         Message::Shutdown(value) => AvailableCorrelation::ConnectionEpoch(value.connection_epoch),
         Message::Rejected(value) => value.available_correlation.clone(),
-        Message::Heartbeat(_) | Message::HeartbeatAck(_) => AvailableCorrelation::None,
+        Message::Heartbeat(_) => AvailableCorrelation::None,
+        Message::HeartbeatAck(value) => heartbeat_ack_correlation(value),
+    }
+}
+
+fn heartbeat_ack_correlation(acknowledgement: &HeartbeatAck) -> AvailableCorrelation {
+    match (
+        acknowledgement.lease_phase.as_ref(),
+        acknowledgement.workspace_phase.as_ref(),
+    ) {
+        (Some(lease), None) => AvailableCorrelation::Lease(lease.correlation.clone()),
+        (None, Some(HeartbeatWorkspacePhase::Provisioning { correlation }))
+        | (None, Some(HeartbeatWorkspacePhase::ReadyUnrecorded { correlation })) => {
+            AvailableCorrelation::Provision(correlation.clone())
+        }
+        (None, Some(HeartbeatWorkspacePhase::ReleaseAccepted { correlation }))
+        | (None, Some(HeartbeatWorkspacePhase::ReleaseCompleted { correlation })) => {
+            AvailableCorrelation::Release(correlation.clone())
+        }
+        (
+            None,
+            Some(HeartbeatWorkspacePhase::FailureUnrecorded {
+                correlation: WorkspaceFailureCorrelation::Provision(correlation),
+            }),
+        ) => AvailableCorrelation::Provision(correlation.clone()),
+        (
+            None,
+            Some(HeartbeatWorkspacePhase::FailureUnrecorded {
+                correlation: WorkspaceFailureCorrelation::Release(correlation),
+            }),
+        ) => AvailableCorrelation::Release(correlation.clone()),
+        (None, None) | (Some(_), Some(_)) => AvailableCorrelation::None,
     }
 }
 
@@ -1880,6 +1942,8 @@ mod tests {
     const DATABASE_PASSWORD: &str = "signalbox-test";
     const DATABASE_NAME: &str = "signalbox";
     const CONFIGURED_REPOSITORY: &str = "signalbox";
+    const ARBITRARY_HEARTBEAT_CHALLENGE_SEQUENCE: u64 = 1;
+    const ARBITRARY_HEARTBEAT_RUNNER_SEQUENCE: u64 = 1;
     const ARBITRARY_PROVISION_AUTHORIZATION_ID_SEED: u128 = 5;
     const ARBITRARY_PROVISION_SESSION_ID_SEED: u128 = 6;
     const ARBITRARY_PROVISION_RUNNER_ID_SEED: u128 = 7;
@@ -2443,6 +2507,56 @@ mod tests {
         );
 
         served.expect("the pre-enrollment workspace provision closes after rejection");
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn initial_heartbeat_ack_rejection_preserves_its_complete_phase_correlation() {
+        let correlation = workspace_provision_correlation();
+        let advertisement = empty_advertisement();
+        let service = EnrollmentService {
+            response: enrolled_response(correlation.authorization_id, &advertisement),
+        };
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::HeartbeatAck(HeartbeatAck {
+                    challenge_sequence: PositiveU64::try_new(
+                        ARBITRARY_HEARTBEAT_CHALLENGE_SEQUENCE,
+                    )
+                    .expect("the fixture challenge sequence is positive"),
+                    runner_sequence: PositiveU64::try_new(ARBITRARY_HEARTBEAT_RUNNER_SEQUENCE)
+                        .expect("the fixture runner sequence is positive"),
+                    lease_phase: None,
+                    workspace_phase: Some(HeartbeatWorkspacePhase::Provisioning {
+                        correlation: correlation.clone(),
+                    }),
+                }),
+            )
+            .await
+            .expect("the initial heartbeat acknowledgement is sent");
+            read_frame(&mut reader)
+                .await
+                .expect("the typed rejection is received")
+                .message
+        };
+
+        let (served, observed) = tokio::join!(server, client);
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::HeartbeatAck,
+                AvailableCorrelation::Provision(correlation),
+                RejectionCode::CorrelationMismatch,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the pre-enrollment heartbeat acknowledgement closes after rejection");
         assert_eq!(observed, expected);
     }
 
