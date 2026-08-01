@@ -1051,9 +1051,40 @@ classification parks crash-lost execution for recovery rather than silently
 retrying it. The adapter never returns code-host response bodies as error
 detail.
 
+### Session plan tools
+
+This catalog family is verified through PR #387 (`agent/tool-exercise-smoke`)
+at implementation ref `6ca4e31dffcb5b88d9f149cf1c347f8aa34843a3`.
+
+The process-lifetime daemon catalog always includes `plan_write` and `plan_read`
+in both base and fully mapped production composition. `signalboxd` binds their
+injected `SessionPlanPort` to `SessionPlanRepository` in production. Each
+request takes its target session from the trusted tool-dispatch correlation;
+neither schema accepts a session identity. Both declarations default to `Auto`.
+`plan_write` is `ExternalEffect` because it appends durable state, while
+`plan_read` is `EffectFree`.
+
+`plan_write` accepts exactly one tagged operation. `create` takes nonempty text
+of at most 4,096 Unicode scalars and creates a pending entry whose identity is
+its positive creation-event ordinal. `revise` replaces the text of one positive
+`entry_id`; `set_status` selects `pending`, `in_progress`, `completed`, or
+`abandoned` for that entry. Text cannot contain U+0000. One successful
+invocation appends exactly one session-local event with the trusted
+physical-attempt provenance and returns that event as compact JSON. A revision
+or status change for an absent entry is a definite known failure and appends
+nothing.
+
+`plan_read` accepts an optional positive exclusive `after_entry_id` cursor and
+`include_history`, which defaults to false. It returns folded current entries in
+creation order, at most 100 per page, with `next_after_entry_id` and
+`plan_truncated`; when requested, `history` contains at most 100 chronological
+events and carries an independent `history_truncated` label. Compact-result
+admission may retain a smaller prefix, preserving the matching truncation labels
+instead of returning oversized evidence.
+
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
-preexisting names and the sixteen code-host names; disagreement between the
+preexisting names, the two session-plan names, and the sixteen code-host names; disagreement between the
 advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
