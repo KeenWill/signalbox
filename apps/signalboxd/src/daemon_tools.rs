@@ -9,6 +9,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{NormalizedToolArguments, ToolName};
 use signalbox_model_runtime::CredentialAccess;
+use signalbox_persistence::plan::SessionPlanRepository;
 use signalbox_tools_basic::{
     CURRENT_TIME_NAME, CurrentTimeClock, CurrentTimeExecutor, CurrentTimeTool, ECHO_NAME,
     EchoExecutor, EchoTool, PostgresSessionStatusWriter, ReqwestWebFetchTransport,
@@ -26,6 +27,7 @@ use signalbox_tools_github::{
     GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy, GitHubExecutor, GitHubTools,
     GitHubTransport,
 };
+use signalbox_tools_plan::{PLAN_TOOL_NAMES, PlanExecutor, PlanTools, SessionPlanPort};
 use signalbox_tools_workspace::{
     LocalWorkspaceFileSystem, WORKSPACE_MUTATION_TOOL_NAMES, WORKSPACE_READ_TOOL_NAMES,
     WorkspaceDirectoryRead, WorkspaceEntryKind, WorkspaceFileBytes, WorkspaceFileMutation,
@@ -127,7 +129,8 @@ struct ComposedToolFamilies<
     HostTransport,
     GitHubTransportType,
     FileSystem: WorkspaceMutationFileSystem,
-    Port,
+    ConversationPort,
+    PlanPort,
 > {
     web_fetch: WebFetchTool<Transport>,
     status: SessionStatusTool<Writer>,
@@ -135,7 +138,8 @@ struct ComposedToolFamilies<
     github: Option<GitHubTools<Credentials, GitHubTransportType>>,
     workspace_read: Option<WorkspaceReadTools<FileSystem>>,
     workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
-    conversations: Option<ConversationTools<Port>>,
+    conversations: Option<ConversationTools<ConversationPort>>,
+    plan: PlanTools<PlanPort>,
     goal: Option<GoalDeclarationTool>,
 }
 
@@ -148,7 +152,8 @@ pub struct DaemonTools<
     HostTransport,
     GitHubTransportType,
     FileSystem: WorkspaceMutationFileSystem,
-    Port,
+    ConversationPort,
+    PlanPort,
 > {
     catalog: DaemonToolCatalog,
     executor: DaemonToolExecutor<
@@ -159,7 +164,8 @@ pub struct DaemonTools<
         HostTransport,
         GitHubTransportType,
         FileSystem,
-        Port,
+        ConversationPort,
+        PlanPort,
     >,
 }
 
@@ -173,6 +179,7 @@ impl<Clock>
         GitHubApiTransport,
         PinnedWorkspaceFileSystem,
         PostgresConversationIntrospection,
+        SessionPlanRepository,
     >
 {
     /// Composes every production tool family from explicit deployment inputs.
@@ -202,8 +209,10 @@ impl<Clock>
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
-        let goal = GoalDeclarationTool::try_new(pool)
+        let goal = GoalDeclarationTool::try_new(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
+        let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
+            .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
@@ -214,6 +223,7 @@ impl<Clock>
                 workspace_read: Some(workspace_read),
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
+                plan,
                 goal: Some(goal),
             },
         )
@@ -232,10 +242,12 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let status = SessionStatusTool::try_new_postgres(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        let goal = GoalDeclarationTool::try_new(pool)
+        let goal = GoalDeclarationTool::try_new(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let code_host = CodeHostTools::try_new(credentials, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
+            .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
@@ -246,13 +258,24 @@ impl<Clock>
                 workspace_read: None,
                 workspace_mutation: None,
                 conversations: None,
+                plan,
                 goal: Some(goal),
             },
         )
     }
 }
 
-impl<Clock, Transport, Writer, Credentials, HostTransport, GitHubTransportType, FileSystem, Port>
+impl<
+    Clock,
+    Transport,
+    Writer,
+    Credentials,
+    HostTransport,
+    GitHubTransportType,
+    FileSystem,
+    ConversationPort,
+    PlanPort,
+>
     DaemonTools<
         Clock,
         Transport,
@@ -261,7 +284,8 @@ impl<Clock, Transport, Writer, Credentials, HostTransport, GitHubTransportType, 
         HostTransport,
         GitHubTransportType,
         FileSystem,
-        Port,
+        ConversationPort,
+        PlanPort,
     >
 where
     FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
@@ -279,7 +303,8 @@ where
         github_egress_policy: GitHubEgressPolicy,
         filesystem: FileSystem,
         workspace_root: &Path,
-        conversation_port: Port,
+        conversation_port: ConversationPort,
+        plan_port: PlanPort,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let web_fetch = WebFetchTool::try_new(transport, web_fetch_egress_policy)
@@ -297,6 +322,7 @@ where
             .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
+        let plan = PlanTools::try_new(plan_port).map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
@@ -307,6 +333,7 @@ where
                 workspace_read: Some(workspace_read),
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
+                plan,
                 goal: None,
             },
         )
@@ -321,7 +348,8 @@ where
             HostTransport,
             GitHubTransportType,
             FileSystem,
-            Port,
+            ConversationPort,
+            PlanPort,
         >,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let ComposedToolFamilies {
@@ -332,6 +360,7 @@ where
             workspace_read,
             workspace_mutation,
             conversations,
+            plan,
             goal,
         } = families;
         let (current_time_catalog, current_time) = CurrentTimeTool::try_new(clock)
@@ -347,6 +376,7 @@ where
         let workspace_read = workspace_read.map(WorkspaceReadTools::into_parts);
         let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
+        let (plan_catalog, plan) = plan.into_parts();
         let goal = goal.map(GoalDeclarationTool::into_parts);
         let mut catalogs = vec![
             current_time_catalog,
@@ -354,6 +384,7 @@ where
             web_fetch_catalog,
             status_catalog,
             code_host_catalog,
+            plan_catalog,
         ];
         catalogs.extend(github.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(workspace_read.as_ref().map(|(catalog, _)| catalog.clone()));
@@ -379,6 +410,7 @@ where
                 workspace_mutation: workspace_mutation
                     .map(|(_, executor)| SharedToolExecutor::new(executor)),
                 conversations: conversations.map(|(_, executor)| executor),
+                plan,
                 goal: goal.map(|(_, executor)| executor),
             },
         })
@@ -398,7 +430,8 @@ where
             HostTransport,
             GitHubTransportType,
             FileSystem,
-            Port,
+            ConversationPort,
+            PlanPort,
         >,
     ) {
         (self.catalog, self.executor)
@@ -427,6 +460,8 @@ pub enum DaemonToolsConstructionError {
     WorkspaceMutation,
     /// The conversation declarations or introspection port were invalid.
     Conversations,
+    /// The plan declarations or session plan port were invalid.
+    Plan,
     /// The goal declaration or its static validation details were invalid.
     GoalDeclaration,
     /// Two declarations unexpectedly shared one name.
@@ -445,6 +480,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::WorkspaceRead => "workspace read tool suite construction failed",
             Self::WorkspaceMutation => "workspace mutation tool suite construction failed",
             Self::Conversations => "conversation tool suite construction failed",
+            Self::Plan => "plan tool suite construction failed",
             Self::GoalDeclaration => "goal_declare tool construction failed",
             Self::Duplicate => "daemon tool catalog contains a duplicate name",
         })
@@ -571,7 +607,8 @@ pub struct DaemonToolExecutor<
     HostTransport,
     GitHubTransportType,
     FileSystem: WorkspaceMutationFileSystem,
-    Port,
+    ConversationPort,
+    PlanPort,
 > {
     current_time: CurrentTimeExecutor<Clock>,
     echo: EchoExecutor,
@@ -581,7 +618,8 @@ pub struct DaemonToolExecutor<
     github: Option<GitHubExecutor<Credentials, GitHubTransportType>>,
     workspace_read: Option<WorkspaceReadExecutor<FileSystem>>,
     workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
-    conversations: Option<ConversationExecutor<Port>>,
+    conversations: Option<ConversationExecutor<ConversationPort>>,
+    plan: PlanExecutor<PlanPort>,
     goal: Option<GoalDeclarationExecutor>,
 }
 
@@ -619,8 +657,17 @@ impl ClassifyOperatorFailure for DaemonToolExecutorError {
     }
 }
 
-impl<Clock, Transport, Writer, Credentials, HostTransport, GitHubTransportType, FileSystem, Port>
-    ToolExecutor
+impl<
+    Clock,
+    Transport,
+    Writer,
+    Credentials,
+    HostTransport,
+    GitHubTransportType,
+    FileSystem,
+    ConversationPort,
+    PlanPort,
+> ToolExecutor
     for DaemonToolExecutor<
         Clock,
         Transport,
@@ -629,7 +676,8 @@ impl<Clock, Transport, Writer, Credentials, HostTransport, GitHubTransportType, 
         HostTransport,
         GitHubTransportType,
         FileSystem,
-        Port,
+        ConversationPort,
+        PlanPort,
     >
 where
     Clock: CurrentTimeClock,
@@ -639,7 +687,8 @@ where
     HostTransport: CodeHostTransport,
     GitHubTransportType: GitHubTransport,
     FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
-    Port: ConversationIntrospectionPort,
+    ConversationPort: ConversationIntrospectionPort,
+    PlanPort: SessionPlanPort,
 {
     type Error = DaemonToolExecutorError;
 
@@ -705,6 +754,11 @@ where
                 .goal
                 .as_mut()
                 .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if PLAN_TOOL_NAMES.contains(&name) => self
+                .plan
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
@@ -850,6 +904,23 @@ mod tests {
             Ok(None)
         }
     }
+    impl SessionPlanPort for OfflineConversationPort {
+        type Error = OfflineWriterError;
+
+        async fn append_plan_event(
+            &mut self,
+            _request: signalbox_tools_plan::PlanAppendRequest,
+        ) -> Result<signalbox_tools_plan::PlanAppendOutcome, Self::Error> {
+            Err(OfflineWriterError)
+        }
+
+        async fn read_plan(
+            &mut self,
+            _request: signalbox_tools_plan::PlanReadRequest,
+        ) -> Result<signalbox_tools_plan::PlanReadPage, Self::Error> {
+            Err(OfflineWriterError)
+        }
+    }
 
     fn definition_names(definitions: &[ToolDefinition]) -> Vec<&str> {
         definitions
@@ -927,6 +998,8 @@ mod tests {
                 workspace_read: None::<WorkspaceReadTools<LocalWorkspaceFileSystem>>,
                 workspace_mutation: None::<WorkspaceMutationTools<LocalWorkspaceFileSystem>>,
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
+                plan: PlanTools::try_new(OfflineConversationPort)
+                    .expect("offline plan tools compile"),
                 goal: None,
             },
         )
@@ -954,6 +1027,8 @@ mod tests {
                 CHANGE_REQUEST_THREAD_RESOLVE_NAME,
                 CURRENT_TIME_NAME,
                 ECHO_NAME,
+                signalbox_tools_plan::PLAN_READ_NAME,
+                signalbox_tools_plan::PLAN_WRITE_NAME,
                 REPOSITORY_LIST_DIRECTORY_NAME,
                 REPOSITORY_READ_FILE_NAME,
                 REVIEW_GATE_CHECK_NAME,
@@ -979,6 +1054,7 @@ mod tests {
             GitHubEgressPolicy::github_api_only(),
             LocalWorkspaceFileSystem,
             workspace.path(),
+            OfflineConversationPort,
             OfflineConversationPort,
             WebFetchEgressPolicy::deny_all(),
         )
@@ -1015,6 +1091,8 @@ mod tests {
                 GLOB_FILES_NAME,
                 signalbox_tools_conversations::LIST_CONVERSATIONS_NAME,
                 LIST_DIRECTORY_NAME,
+                signalbox_tools_plan::PLAN_READ_NAME,
+                signalbox_tools_plan::PLAN_WRITE_NAME,
                 signalbox_tools_conversations::READ_CONVERSATION_NAME,
                 READ_FILE_NAME,
                 signalbox_tools_conversations::READ_IMPORTED_CONVERSATION_NAME,
