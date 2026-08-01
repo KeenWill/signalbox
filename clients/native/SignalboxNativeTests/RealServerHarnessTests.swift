@@ -190,8 +190,8 @@ private enum RealServerFixture {
   static let staleDefaultsVersion = SignalboxCanonicalUInt64(rawValue: 99)
   static let initialDefaultsVersion = SignalboxCanonicalUInt64(rawValue: 1)
   static let importedEntryCount = 3
-  static let importedQuestion = "Owner fixture question"
-  static let importedAnswer = "Owner fixture answer"
+  static let importedQuestion = "User fixture question"
+  static let importedAnswer = "User fixture answer"
   static let modelAlias = SignalboxModelAliasSummary(
     aliasID: try! SignalboxCanonicalUUID(
       validating: "30000000-0000-4000-8000-000000000001"
@@ -215,7 +215,7 @@ private enum RealServerFixture {
   static var importedRollout: Data {
     Data(
       """
-      {"timestamp":"t0","type":"session_meta","payload":{"id":"owner-fixture","session_id":"owner-fixture"}}
+      {"timestamp":"t0","type":"session_meta","payload":{"id":"user-fixture","session_id":"user-fixture"}}
       {"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"\(importedQuestion)"}]}}
       {"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"\(importedAnswer)"}]}}
       """.utf8

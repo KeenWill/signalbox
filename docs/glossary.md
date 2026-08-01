@@ -28,9 +28,8 @@ The caller-supplied immutable content value owned by one accepted input. See
 
 ## Durable command identity
 
-One owner-global idempotency identity for a durably handled caller command,
-whose claimed canonical payload and terminal result make replay deterministic.
-See
+One user-global idempotency identity for a durably handled caller command, whose
+claimed canonical payload and terminal result make replay deterministic. See
 [durable command records](spec/identity-and-commands.md#durable-command-records).
 
 ## Actor
@@ -83,7 +82,7 @@ request. Deferred design; see [tool safety](open-questions.md#tool-safety).
 
 ## Creation cause
 
-The typed reason a session exists, of which owner-initiated is the first
+The typed reason a session exists, of which user-initiated is the first
 implementable value. See
 [creation provenance](spec/sessions-and-transcript.md#session-identity-and-creation-provenance).
 

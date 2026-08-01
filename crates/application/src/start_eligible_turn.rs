@@ -232,7 +232,7 @@ mod tests {
             session,
             session,
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             session,

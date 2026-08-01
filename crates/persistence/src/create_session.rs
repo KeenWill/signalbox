@@ -29,7 +29,8 @@ const WRITTEN_STORAGE_VERSION: i16 = 4;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
-const OWNER_INITIATED: &str = "owner_initiated";
+// Applied migrations freeze this legacy storage spelling.
+const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
 
@@ -40,7 +41,7 @@ pub enum CreateSessionHandlingOutcome {
     Applied(CreateSessionAppliedResult),
     /// The identifier is already bound to a structurally different payload.
     ConflictingReuse {
-        /// The owner-global identifier whose earlier meaning is retained.
+        /// The user-global identifier whose earlier meaning is retained.
         command_id: DurableCommandId,
     },
 }
@@ -104,7 +105,7 @@ pub enum CreateSessionRepositoryError {
     CommitAmbiguous(sqlx::Error),
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
-        /// The owner-global identifier that names another kind.
+        /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
     /// Committed or transaction-visible records cannot reconstruct the domain.
@@ -182,7 +183,7 @@ impl CreateSessionRepository {
 
     /// Claims and applies a new command, or resolves replay from the winner.
     ///
-    /// Lookup by owner-global command identity is the first durable operation.
+    /// Lookup by user-global command identity is the first durable operation.
     /// All first-handling records commit together; no returned applied result
     /// precedes commit.
     pub async fn handle(
@@ -356,7 +357,7 @@ async fn insert_prepared(
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(session_id_to_uuid(session.id()))
-    .bind(OWNER_INITIATED)
+    .bind(USER_INITIATED)
     .bind(NO_ANCESTRY)
     .bind(
         session
@@ -434,7 +435,7 @@ async fn insert_prepared(
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
-    .bind(OWNER_INITIATED)
+    .bind(USER_INITIATED)
     .bind(NO_ANCESTRY)
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(command_selection.kind)
@@ -738,7 +739,7 @@ fn decode_provenance(
     cause: String,
     ancestry: String,
 ) -> Result<SessionCreationProvenance, CreateSessionRepositoryError> {
-    if cause != OWNER_INITIATED {
+    if cause != USER_INITIATED {
         return Err(CreateSessionCorruption::Unsupported {
             field: "creation cause",
             value: cause,
@@ -753,7 +754,7 @@ fn decode_provenance(
         .into());
     }
     Ok(SessionCreationProvenance::new(
-        SessionCreationCause::OwnerInitiated,
+        SessionCreationCause::UserInitiated,
         TranscriptAncestry::None,
     ))
 }
