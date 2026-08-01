@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, DangerousToolAutoApproval, DurableCommandId,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, ToolAttemptId,
-    ToolRequestId, TurnId,
+    ToolPermissionDefault, ToolRequestId, TurnId,
 };
 use sqlx::types::Uuid;
 
@@ -136,6 +136,25 @@ pub fn dangerous_tool_auto_approval_from_str(value: &str) -> Option<DangerousToo
     }
 }
 
+/// Encodes a tool permission default as its closed PostgreSQL spelling.
+pub(crate) const fn tool_permission_default_to_str(value: ToolPermissionDefault) -> &'static str {
+    match value {
+        ToolPermissionDefault::Auto => "auto",
+        ToolPermissionDefault::Confirm => "confirm",
+        ToolPermissionDefault::AlwaysConfirm => "always_confirm",
+    }
+}
+
+/// Decodes a tool permission default from its closed PostgreSQL spelling.
+pub(crate) fn tool_permission_default_from_str(value: &str) -> Option<ToolPermissionDefault> {
+    match value {
+        "auto" => Some(ToolPermissionDefault::Auto),
+        "confirm" => Some(ToolPermissionDefault::Confirm),
+        "always_confirm" => Some(ToolPermissionDefault::AlwaysConfirm),
+        _ => None,
+    }
+}
+
 fn positive_u64_from_numeric(value: Decimal) -> Result<u64, PositiveOrdinalMappingError> {
     if !value.fract().is_zero() {
         return Err(PositiveOrdinalMappingError::Fractional);
@@ -242,7 +261,7 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_domain::{
         AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, TurnId,
+        SessionInputPosition, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -251,7 +270,8 @@ mod tests {
         accepted_input_id_from_uuid, accepted_input_id_to_uuid, defaults_version_from_numeric,
         defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
         durable_command_kind_from_str, durable_command_kind_to_str, input_position_from_numeric,
-        input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
+        input_position_to_numeric, session_id_from_uuid, session_id_to_uuid,
+        tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
 
@@ -268,6 +288,17 @@ mod tests {
             Some(DurableCommandKind::CompactSession)
         );
         assert_eq!(durable_command_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn always_confirm_permission_mapping_is_closed() {
+        let encoded = tool_permission_default_to_str(ToolPermissionDefault::AlwaysConfirm);
+        let decoded = tool_permission_default_from_str(encoded)
+            .expect("the additive permission encoding is canonical");
+
+        assert_eq!(encoded, "always_confirm");
+        assert_eq!(decoded, ToolPermissionDefault::AlwaysConfirm);
+        assert_eq!(tool_permission_default_from_str("unknown"), None);
     }
 
     /// INV-002: PostgreSQL numeric values are decoded and checked before a
