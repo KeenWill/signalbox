@@ -17,42 +17,42 @@ pub(super) enum LocalGitResult {
 
 #[derive(Debug, Serialize)]
 pub(super) struct StatusResult {
-    branch: Option<String>,
-    branch_truncated: bool,
-    head: Option<String>,
-    entries: Vec<StatusEntry>,
-    truncated: bool,
+    pub(super) branch: Option<String>,
+    pub(super) branch_truncated: bool,
+    pub(super) head: Option<String>,
+    pub(super) entries: Vec<StatusEntry>,
+    pub(super) truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub(super) struct StatusEntry {
-    path: String,
-    previous_path: Option<String>,
-    index: &'static str,
-    worktree: &'static str,
+    pub(super) path: String,
+    pub(super) previous_path: Option<String>,
+    pub(super) index: &'static str,
+    pub(super) worktree: &'static str,
 }
 
 #[derive(Debug, Serialize)]
 pub(super) struct DiffResult {
-    patch: String,
-    truncated: bool,
+    pub(super) patch: String,
+    pub(super) truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub(super) struct LogResult {
-    commits: Vec<LogEntry>,
-    truncated: bool,
+    pub(super) commits: Vec<LogEntry>,
+    pub(super) truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub(super) struct LogEntry {
-    commit: String,
-    author_name: String,
-    author_name_truncated: bool,
-    author_email: String,
-    author_email_truncated: bool,
-    message: String,
-    message_truncated: bool,
+    pub(super) commit: String,
+    pub(super) author_name: String,
+    pub(super) author_name_truncated: bool,
+    pub(super) author_email: String,
+    pub(super) author_email_truncated: bool,
+    pub(super) message: String,
+    pub(super) message_truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,8 +68,8 @@ pub(super) struct CommitResult {
 
 #[derive(Debug, Serialize)]
 pub(super) struct BranchResult {
-    branch: String,
-    head: String,
+    pub(super) branch: String,
+    pub(super) head: String,
 }
 
 pub(super) fn encode_result(result: &LocalGitResult) -> Result<String, LocalGitFailure> {

@@ -98,8 +98,8 @@ pub(super) fn validate_revision(value: &str) -> Result<(), InvalidGitArguments> 
 
 #[derive(Clone, Debug)]
 pub(super) struct GitArgumentValidator {
-    kind: LocalToolKind,
-    detail: ToolExecutionErrorDetail,
+    pub(super) kind: LocalToolKind,
+    pub(super) detail: ToolExecutionErrorDetail,
 }
 
 impl ToolArgumentValidator for GitArgumentValidator {

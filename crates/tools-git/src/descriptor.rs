@@ -14,15 +14,15 @@ use crate::failure::LocalGitFailure;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FileIdentity {
-    device: u64,
-    inode: u64,
+    pub(super) device: u64,
+    pub(super) inode: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RepositoryIdentity {
     pub(super) root: FileIdentity,
-    git_directory: FileIdentity,
-    config: FileIdentity,
+    pub(super) git_directory: FileIdentity,
+    pub(super) config: FileIdentity,
 }
 
 pub(super) fn descriptor_path_from_fd(file: &OwnedFd) -> PathBuf {

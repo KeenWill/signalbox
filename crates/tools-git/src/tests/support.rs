@@ -113,19 +113,19 @@ impl ModeOnlyPathFixture {
 
 #[derive(Clone, Debug)]
 pub(super) struct ReplacingRootFileSystem {
-    retired_root: PathBuf,
-    replacement_root: PathBuf,
+    pub(super) retired_root: PathBuf,
+    pub(super) replacement_root: PathBuf,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct ObservingIndexLockFileSystem {
-    root_path: PathBuf,
-    lock_observed: Arc<AtomicBool>,
+    pub(super) root_path: PathBuf,
+    pub(super) lock_observed: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct ConcurrentRootOpenFileSystem {
-    extra_root: Arc<Mutex<Option<fs::File>>>,
+    pub(super) extra_root: Arc<Mutex<Option<fs::File>>>,
 }
 
 impl WorkspaceFileSystem for ReplacingRootFileSystem {

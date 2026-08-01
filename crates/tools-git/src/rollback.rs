@@ -383,9 +383,9 @@ pub(super) fn rollback_states_equal(
 }
 
 pub(super) struct CheckoutRollbackContext<'context, FileSystem> {
-    filesystem: &'context FileSystem,
-    root: &'context WorkspaceRoot,
-    authority: &'context PinnedRepository,
+    pub(super) filesystem: &'context FileSystem,
+    pub(super) root: &'context WorkspaceRoot,
+    pub(super) authority: &'context PinnedRepository,
 }
 
 pub(super) fn checkout_tree_with_rollback<

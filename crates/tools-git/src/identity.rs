@@ -7,8 +7,8 @@ use crate::limits::MAX_IDENTITY_BYTES;
 /// Injected commit author and committer identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitIdentity {
-    name: String,
-    email: String,
+    pub(super) name: String,
+    pub(super) email: String,
 }
 
 impl GitIdentity {

@@ -55,8 +55,8 @@ use crate::status::{status, tracked_directories};
 pub struct LocalGitExecutor<FileSystem> {
     pub(super) filesystem: FileSystem,
     pub(super) root: WorkspaceRoot,
-    root_path: PathBuf,
-    repository_identity: RepositoryIdentity,
+    pub(super) root_path: PathBuf,
+    pub(super) repository_identity: RepositoryIdentity,
     pub(super) repository_authority: PinnedRepository,
     pub(super) identity: GitIdentity,
     pub(super) repository_detail: ToolExecutionErrorDetail,
