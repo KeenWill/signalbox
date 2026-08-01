@@ -5744,16 +5744,19 @@ fn reconstitute_active_acceptance_tail(
 
         let disposition_valid = match entry.state {
             SessionAcceptanceTailEntryState::RetiredGoalOrigin => {
-                matches!(
-                    entry.accepted_input.disposition(),
-                    AcceptedInputDisposition::OriginOf(origin)
-                        if !records_by_turn.contains_key(origin)
+                match entry.accepted_input.disposition() {
+                    AcceptedInputDisposition::OriginOf(origin) => {
+                        !records_by_turn.contains_key(origin)
                             && !accepted_input_turns.contains_key(&accepted_input)
                             && matches!(
                                 entry.delivery,
                                 DeliveryRequest::StartWhenNoActiveTurn { .. }
                             )
-                )
+                    }
+                    AcceptedInputDisposition::PendingSteering { .. }
+                    | AcceptedInputDisposition::ConsumedAsSteering { .. }
+                    | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { .. } => false,
+                }
             }
             SessionAcceptanceTailEntryState::RuntimeRelevant => {
                 match entry.accepted_input.disposition() {

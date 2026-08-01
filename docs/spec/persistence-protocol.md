@@ -559,14 +559,16 @@ Locks per transaction, in acquisition order:
 - **Goal commands and transitions**: an unseen user command first claims the
   user-global registry, then every user, model, scheduler, and continuation
   transaction locks the session row `FOR NO KEY UPDATE` before reading the event
-  stream. Applied transitions insert the event; deferred provenance correlation
-  first reacquires the session-row lock before checking the current goal turn
-  and, for scheduler failure, holds the named lifecycle row `FOR SHARE` while
-  checking its unsuccessful terminal disposition. The continuity trigger
-  reacquires the session-row lock before validating the predecessor. Pursuing
-  user transitions then read current defaults and insert their queued goal turn;
-  rejected commands commit without firing the trigger, and exact user-command
-  replay takes no row lock.
+  stream. An applied user transition next locks `session_scheduler` `FOR UPDATE`
+  before recording its receipt or event, so stop and queued-turn activation
+  share one serialization point. Deferred provenance correlation first
+  reacquires the session-row lock before checking the current goal turn and, for
+  scheduler failure, holds the named lifecycle row `FOR SHARE` while checking
+  its unsuccessful terminal disposition. The continuity trigger reacquires the
+  session-row lock before validating the predecessor. Pursuing user transitions
+  then read current defaults and insert their queued goal turn; rejected
+  commands commit without firing the trigger, and exact user-command replay
+  takes no row lock.
 
 - **StartEligibleTurn**, **startup recovery**, and the **model-call execution
   transactions** (prepare, authorize, observation commit, restart recovery — all
