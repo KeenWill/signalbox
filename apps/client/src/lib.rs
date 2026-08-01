@@ -1704,25 +1704,41 @@ impl GoalHistoryReplay {
 }
 
 const fn goal_state_is_pursuing(state: &GoalLifecycleState) -> bool {
-    matches!(state, GoalLifecycleState::Pursuing {})
+    match state {
+        GoalLifecycleState::Pursuing {} => true,
+        GoalLifecycleState::Blocked { .. }
+        | GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
 }
 
 const fn goal_state_is_blocked(state: &GoalLifecycleState) -> bool {
-    matches!(state, GoalLifecycleState::Blocked { .. })
+    match state {
+        GoalLifecycleState::Blocked { .. } => true,
+        GoalLifecycleState::Pursuing {}
+        | GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
 }
 
 const fn goal_state_is_open(state: &GoalLifecycleState) -> bool {
-    matches!(
-        state,
-        GoalLifecycleState::Pursuing {} | GoalLifecycleState::Blocked { .. }
-    )
+    match state {
+        GoalLifecycleState::Pursuing {} | GoalLifecycleState::Blocked { .. } => true,
+        GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
 }
 
 const fn goal_state_admits_commission(state: &GoalLifecycleState) -> bool {
-    matches!(
-        state,
-        GoalLifecycleState::Achieved { .. } | GoalLifecycleState::UserStopped {}
-    )
+    match state {
+        GoalLifecycleState::Achieved { .. } | GoalLifecycleState::UserStopped {} => true,
+        GoalLifecycleState::Pursuing {}
+        | GoalLifecycleState::Blocked { .. }
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
 }
 
 async fn goal_show(

@@ -2004,9 +2004,16 @@ fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationEr
             provenance,
         } => {
             validate_goal_text(need)?;
-            let scheduler_reason = *reason == GoalBlockedReason::ExecutionFailure;
-            let scheduler_provenance =
-                matches!(provenance, GoalBlockedProvenance::ExecutionFailure { .. });
+            let scheduler_reason = match reason {
+                GoalBlockedReason::UserInputRequired
+                | GoalBlockedReason::ExternalChangeRequired
+                | GoalBlockedReason::AuthorizationRequired => false,
+                GoalBlockedReason::ExecutionFailure => true,
+            };
+            let scheduler_provenance = match provenance {
+                GoalBlockedProvenance::Model { .. } => false,
+                GoalBlockedProvenance::ExecutionFailure { .. } => true,
+            };
             if scheduler_reason != scheduler_provenance {
                 return Err(FrameValidationError::GoalShape);
             }
