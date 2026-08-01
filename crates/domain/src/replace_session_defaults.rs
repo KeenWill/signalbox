@@ -1,7 +1,7 @@
 //! Canonical session-defaults replacement command and terminal results.
 //!
 //! Session-defaults replacement (`docs/spec/sessions-and-transcript.md`)
-//! admits one idempotent owner command that installs a complete replacement
+//! admits one idempotent user command that installs a complete replacement
 //! as the next immutable defaults version.
 //! `docs/spec/identity-and-commands.md` fixes structural command equality
 //! and typed applied-or-rejected results, while
@@ -17,7 +17,7 @@ use crate::{
 
 /// The canonical caller payload for replacing one session's defaults.
 ///
-/// The payload contains exactly the owner-global command identity, target
+/// The payload contains exactly the user-global command identity, target
 /// session, expected current defaults version, and complete replacement
 /// defaults. It contains no server-derived current version or installed
 /// version.
@@ -26,7 +26,7 @@ use crate::{
 ///
 /// Structural equality and hashing exclude `command_id` and include every
 /// other caller-supplied semantic field. The command identifier is looked up
-/// separately at the owner-global durable-command boundary.
+/// separately at the user-global durable-command boundary.
 #[derive(Clone, Debug)]
 pub struct ReplaceSessionDefaults {
     command_id: DurableCommandId,
@@ -51,7 +51,7 @@ impl ReplaceSessionDefaults {
         }
     }
 
-    /// Returns the owner-global durable command identity.
+    /// Returns the user-global durable command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -707,7 +707,7 @@ mod tests {
             id,
             id,
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             id,

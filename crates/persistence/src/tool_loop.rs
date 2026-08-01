@@ -294,7 +294,7 @@ impl PostgresToolLoopRepository {
         }
     }
 
-    /// Atomically records one replay-idempotent owner decision and successor
+    /// Atomically records one replay-idempotent user decision and successor
     /// phase. A fresh continuation attempt is supplied only for the final
     /// undecided request.
     pub async fn decide<NextAttempt>(
@@ -388,10 +388,10 @@ impl PostgresToolLoopRepository {
                         })
                         .map(|_| next_attempt());
                     let decision = batch
-                        .prepare_owner_decision(command, continuation_attempt)
+                        .prepare_user_decision(command, continuation_attempt)
                         .map_err(|_| {
                             ToolLoopRepositoryError::InvalidTransition(
-                                "owner decision does not match active batch",
+                                "user decision does not match active batch",
                             )
                         })?;
                     persist_batch_decision(&mut transaction, &decision).await?;
@@ -1312,7 +1312,7 @@ async fn load_window_result_attempts(
         .collect()
 }
 
-/// Loads the owner-sourced denial resolution backing every `tool_denied` entry
+/// Loads the user-sourced denial resolution backing every `tool_denied` entry
 /// in a terminal tool round's result suffix.
 ///
 /// The reconstitution guard tightened by the terminal tool-round evidence work
@@ -1343,7 +1343,7 @@ pub(crate) async fn load_terminal_result_denials(
 
 /// Loads the round result evidence backing one steering-consuming call
 /// prepared at a tool-round continuation boundary: the terminal tool attempts
-/// and owner-sourced denial resolutions whose result entries fill the call's
+/// and user-sourced denial resolutions whose result entries fill the call's
 /// frontier between the round boundary and the consumed steering suffix.
 ///
 /// A `None` result names a call frontier with no continuing tool round in
@@ -1393,7 +1393,7 @@ pub(crate) async fn load_steering_continuation_round_evidence(
 
 /// Loads the round result evidence backing one steering-free continuation
 /// call named by a terminal or recovery gate: the terminal tool attempts and
-/// owner-sourced denial resolutions whose result entries fill the call's
+/// user-sourced denial resolutions whose result entries fill the call's
 /// whole frontier after the round boundary, with no trailing suffix.
 ///
 /// A `None` result names a call frontier with no continuing tool round in
@@ -1598,7 +1598,7 @@ pub(crate) async fn decode_approvals(
     connection: &mut PgConnection,
     rows: Vec<PgRow>,
 ) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
-    let owner_commands = rows
+    let user_commands = rows
         .iter()
         .map(|row| row.try_get::<Option<Uuid>, _>("owner_command_id"))
         .collect::<Result<Vec<_>, _>>()?
@@ -1606,11 +1606,11 @@ pub(crate) async fn decode_approvals(
         .flatten()
         .map(|command| {
             durable_command_id_from_uuid(command).map_err(|_| {
-                ToolLoopCorruption::Inconsistent("approval owner command identity").into()
+                ToolLoopCorruption::Inconsistent("approval user command identity").into()
             })
         })
         .collect::<Result<Vec<_>, ToolLoopRepositoryError>>()?;
-    let receipts = load_owner_decision_receipts(connection, &owner_commands).await?;
+    let receipts = load_user_decision_receipts(connection, &user_commands).await?;
     let mut approvals = Vec::with_capacity(rows.len());
     for row in rows {
         approvals.push(decode_approval(connection, row, &receipts).await?);
@@ -1621,7 +1621,7 @@ pub(crate) async fn decode_approvals(
 async fn decode_approval(
     connection: &mut PgConnection,
     row: PgRow,
-    owner_receipts: &BTreeMap<DurableCommandId, PreparedDecideToolRequest>,
+    user_receipts: &BTreeMap<DurableCommandId, PreparedDecideToolRequest>,
 ) -> Result<signalbox_domain::ToolApprovalResolution, ToolLoopRepositoryError> {
     let request = tool_request_id_from_uuid(required(&row, "request_id")?);
     let reason: Option<String> = row.try_get("denial_reason")?;
@@ -1646,35 +1646,32 @@ async fn decode_approval(
             .into());
         }
     };
-    let owner_command: Option<Uuid> = row.try_get("owner_command_id")?;
+    let user_command: Option<Uuid> = row.try_get("owner_command_id")?;
     let input = match required::<String>(&row, "decision_source")?.as_str() {
         "owner_command" => {
             let command_id = durable_command_id_from_uuid(
-                owner_command.ok_or(ToolLoopCorruption::Missing("approval owner command"))?,
+                user_command.ok_or(ToolLoopCorruption::Missing("approval user command"))?,
             )
-            .map_err(|_| ToolLoopCorruption::Inconsistent("approval owner command identity"))?;
-            let command =
-                owner_receipts
-                    .get(&command_id)
-                    .cloned()
-                    .ok_or(ToolLoopCorruption::Missing(
-                        "approval owner command receipt",
-                    ))?;
+            .map_err(|_| ToolLoopCorruption::Inconsistent("approval user command identity"))?;
+            let command = user_receipts
+                .get(&command_id)
+                .cloned()
+                .ok_or(ToolLoopCorruption::Missing("approval user command receipt"))?;
             if command.command().request() != request
                 || command.command().decision() != &decision
                 || !matches!(command.result(), DecideToolRequestResult::Applied(_))
             {
                 return Err(
-                    ToolLoopCorruption::Inconsistent("approval owner command receipt").into(),
+                    ToolLoopCorruption::Inconsistent("approval user command receipt").into(),
                 );
             }
-            ToolApprovalResolutionReconstitutionInput::owner_command(command)
+            ToolApprovalResolutionReconstitutionInput::user_command(command)
         }
-        "policy_auto" if owner_command.is_none() && decision == ToolApprovalDecision::Approve => {
+        "policy_auto" if user_command.is_none() && decision == ToolApprovalDecision::Approve => {
             ToolApprovalResolutionReconstitutionInput::policy_auto(request)
         }
         "session_blanket"
-            if owner_command.is_none() && decision == ToolApprovalDecision::Approve =>
+            if user_command.is_none() && decision == ToolApprovalDecision::Approve =>
         {
             ToolApprovalResolutionReconstitutionInput::session_blanket(
                 request,
@@ -1697,7 +1694,7 @@ async fn decode_approval(
         .map_err(|_| ToolLoopCorruption::Inconsistent("approval resolution").into())
 }
 
-async fn load_owner_decision_receipts(
+async fn load_user_decision_receipts(
     connection: &mut PgConnection,
     commands: &[DurableCommandId],
 ) -> Result<BTreeMap<DurableCommandId, PreparedDecideToolRequest>, ToolLoopRepositoryError> {
@@ -1739,7 +1736,7 @@ async fn load_owner_decision_receipts(
         let rejection: Option<String> = row.try_get("rejection_kind")?;
         let earliest: Option<Uuid> = row.try_get("result_earliest_undecided_request_id")?;
         if result_kind != "applied" || rejection.is_some() || earliest.is_some() {
-            return Err(ToolLoopCorruption::Inconsistent("approval owner command receipt").into());
+            return Err(ToolLoopCorruption::Inconsistent("approval user command receipt").into());
         }
         let producing_call =
             signalbox_domain::ModelCallId::from_uuid(required(&row, "producing_model_call_id")?);
@@ -1751,7 +1748,7 @@ async fn load_owner_decision_receipts(
             .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?;
         if receipts.insert(command_id, prepared).is_some() {
             return Err(ToolLoopCorruption::Inconsistent(
-                "duplicate approval owner command receipt",
+                "duplicate approval user command receipt",
             )
             .into());
         }

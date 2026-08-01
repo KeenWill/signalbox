@@ -243,7 +243,7 @@ impl FailedTurnExecutionReconstitutionInput {
         self
     }
 
-    /// Supplies the complete owner-sourced denial resolutions backing every
+    /// Supplies the complete user-sourced denial resolutions backing every
     /// `ToolDenied` entry in a writer-produced tool-result suffix.
     pub fn with_terminal_tool_denials(
         mut self,
@@ -278,7 +278,7 @@ impl FailedTurnExecutionReconstitutionInput {
         &self.terminal_tool_attempts
     }
 
-    /// Borrows every owner denial resolution supplied for result correlation.
+    /// Borrows every user denial resolution supplied for result correlation.
     pub fn terminal_tool_denials(&self) -> &[ToolApprovalResolution] {
         &self.terminal_tool_denials
     }
@@ -368,7 +368,7 @@ impl CancelledTurnExecutionReconstitutionInput {
         self
     }
 
-    /// Supplies the complete owner-sourced denial resolutions backing every
+    /// Supplies the complete user-sourced denial resolutions backing every
     /// `ToolDenied` entry in a writer-produced tool-result suffix.
     pub fn with_terminal_tool_denials(
         mut self,
@@ -383,7 +383,7 @@ impl CancelledTurnExecutionReconstitutionInput {
         &self.terminal_tool_attempts
     }
 
-    /// Borrows every owner denial resolution supplied for result correlation.
+    /// Borrows every user denial resolution supplied for result correlation.
     pub fn terminal_tool_denials(&self) -> &[ToolApprovalResolution] {
         &self.terminal_tool_denials
     }
@@ -619,7 +619,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         }
     }
 
-    /// Supplies inert facts for a live ambiguous call awaiting an owner
+    /// Supplies inert facts for a live ambiguous call awaiting a user
     /// recovery decision.
     pub const fn awaiting_model_call_recovery(
         owning_turn: TurnId,
@@ -896,7 +896,7 @@ pub struct SteeringContinuationRoundReconstitutionInput {
 
 impl SteeringContinuationRoundReconstitutionInput {
     /// Supplies the consuming call with its round's complete independently
-    /// checked terminal tool attempts and owner-sourced denial resolutions.
+    /// checked terminal tool attempts and user-sourced denial resolutions.
     pub const fn new(
         call: crate::ModelCallId,
         round_tool_attempts: Vec<crate::EndedToolAttempt>,
@@ -919,7 +919,7 @@ impl SteeringContinuationRoundReconstitutionInput {
         &self.round_tool_attempts
     }
 
-    /// Borrows every owner denial resolution backing the round's `ToolDenied`
+    /// Borrows every user denial resolution backing the round's `ToolDenied`
     /// entries.
     pub fn round_tool_denials(&self) -> &[ToolApprovalResolution] {
         &self.round_tool_denials
@@ -945,7 +945,7 @@ pub struct ContinuationRoundReconstitutionInput {
 
 impl ContinuationRoundReconstitutionInput {
     /// Supplies the named call with its round's complete independently
-    /// checked terminal tool attempts and owner-sourced denial resolutions.
+    /// checked terminal tool attempts and user-sourced denial resolutions.
     pub const fn new(
         call: crate::ModelCallId,
         round_tool_attempts: Vec<crate::EndedToolAttempt>,
@@ -968,7 +968,7 @@ impl ContinuationRoundReconstitutionInput {
         &self.round_tool_attempts
     }
 
-    /// Borrows every owner denial resolution backing the round's `ToolDenied`
+    /// Borrows every user denial resolution backing the round's `ToolDenied`
     /// entries.
     pub fn round_tool_denials(&self) -> &[ToolApprovalResolution] {
         &self.round_tool_denials
@@ -6763,7 +6763,7 @@ mod tests {
             session,
             session,
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             session,
@@ -7039,13 +7039,13 @@ mod tests {
         SemanticEntryFixture { seed }
     }
 
-    fn owner_denial(request: ToolRequestId) -> ToolApprovalResolution {
-        ToolApprovalResolutionReconstitutionInput::owner_fixture(
+    fn user_denial(request: ToolRequestId) -> ToolApprovalResolution {
+        ToolApprovalResolutionReconstitutionInput::user_fixture(
             request,
             ToolApprovalDecision::Deny { reason: None },
         )
         .reconstitute()
-        .expect("the owner denial fixture is valid")
+        .expect("the user denial fixture is valid")
     }
 
     impl SemanticEntryFixture {
@@ -8317,12 +8317,12 @@ mod tests {
                 .expect("fixture arguments are canonical"),
         )
         .into_request();
-        let approval = ToolApprovalResolutionReconstitutionInput::owner_fixture(
+        let approval = ToolApprovalResolutionReconstitutionInput::user_fixture(
             request_id,
             ToolApprovalDecision::Approve,
         )
         .reconstitute()
-        .expect("owner approval is implemented");
+        .expect("user approval is implemented");
         let yielded = ResolvedContextFrontierSnapshot::try_from_candidate(
             session.id(),
             yielded_frontier.id(),
@@ -8396,15 +8396,14 @@ mod tests {
                 turn_attempt: continuation_attempt,
             })
         );
-        assert!(matches!(
-            projection
-                .active_turn_execution()
-                .expect("the correlated continuation owns the active slot")
-                .phase(),
-            ActiveTurnPhase::Running { current_attempt }
-                if current_attempt.id() == continuation_attempt
-                    && current_attempt.state() == &CurrentTurnAttemptState::Prepared
-        ));
+        let active_execution = projection
+            .active_turn_execution()
+            .expect("the correlated continuation owns the active slot");
+        let ActiveTurnPhase::Running { current_attempt } = active_execution.phase() else {
+            panic!("the correlated continuation is the running phase");
+        };
+        assert_eq!(current_attempt.id(), continuation_attempt);
+        assert_eq!(current_attempt.state(), &CurrentTurnAttemptState::Prepared);
     }
 
     /// S03 / INV-034: startup recovery consumes the complete active
@@ -8631,7 +8630,7 @@ mod tests {
                     None,
                     interrupt,
                 )
-                .with_terminal_tool_denials(vec![owner_denial(request)]),
+                .with_terminal_tool_denials(vec![user_denial(request)]),
                 terminal_frontier: terminal_frontier.id(),
             },
         );
@@ -9016,7 +9015,7 @@ mod tests {
     }
 
     /// S02 / S07 / S11 / INV-005 / INV-006 / INV-037: a cancelled terminal
-    /// tool round whose `ToolDenied` result entry names no owner denial
+    /// tool round whose `ToolDenied` result entry names no user denial
     /// resolution fails closed.
     #[test]
     fn s02_s07_s11_inv005_inv006_inv037_cancelled_tool_round_rejects_missing_denial_resolution() {
@@ -9061,7 +9060,7 @@ mod tests {
                     None,
                     interrupt,
                 )
-                // The denial entry's backing owner resolution is deliberately
+                // The denial entry's backing user resolution is deliberately
                 // absent: this emptiness is the behavior under test.
                 .with_terminal_tool_denials(Vec::new()),
                 terminal_frontier: terminal_frontier.id(),
@@ -9149,7 +9148,7 @@ mod tests {
         );
     }
 
-    /// S02 / S07 / S11 / INV-005 / INV-006 / INV-037: an approving owner
+    /// S02 / S07 / S11 / INV-005 / INV-006 / INV-037: an approving user
     /// resolution cannot back a cancelled terminal tool round's `ToolDenied`
     /// result entry; the round fails closed.
     #[test]
@@ -9167,7 +9166,7 @@ mod tests {
         let producing_attempt = turn_attempt_id(51);
         let terminal_attempt = turn_attempt_id(52);
         let request = tool_request_id(60);
-        let approving_resolution = ToolApprovalResolutionReconstitutionInput::owner_fixture(
+        let approving_resolution = ToolApprovalResolutionReconstitutionInput::user_fixture(
             request,
             ToolApprovalDecision::Approve,
         )
@@ -13430,14 +13429,15 @@ mod tests {
                 .expect("fixture arguments are canonical"),
         )
         .into_request();
-        let approval = ToolApprovalResolutionReconstitutionInput::owner_fixture(
+        let approval = ToolApprovalResolutionReconstitutionInput::user_fixture(
             request.id(),
             ToolApprovalDecision::Approve,
         )
         .reconstitute()
-        .expect("owner approval is implemented");
+        .expect("user approval is implemented");
+        let expected_tool_attempt = tool_attempt_id(80);
         let tool_attempt = ToolAttemptReconstitutionInput::new(
-            tool_attempt_id(80),
+            expected_tool_attempt,
             request.id(),
             session.id(),
             active.turn(),
@@ -13454,6 +13454,7 @@ mod tests {
             vec![origin_entry.reference(&session)],
         )
         .expect("the yielded snapshot is valid");
+        let expected_request = request.id();
         let batch = ToolBatchReconstitutionInput::new(
             session.id(),
             active.turn(),
@@ -13463,7 +13464,7 @@ mod tests {
             vec![approval],
             vec![tool_attempt],
             ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
-                attempt: tool_attempt_id(80),
+                attempt: expected_tool_attempt,
             },
         )
         .reconstitute()
@@ -13492,13 +13493,13 @@ mod tests {
         )
         .reconstitute()
         .expect_err("the wait cannot be attached to another turn attempt");
-        assert!(matches!(
-            error.failure(),
-            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
-                turn,
-                ..
-            } if *turn == active.turn()
-        ));
+        let AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+            turn, ..
+        } = error.failure()
+        else {
+            panic!("the cross-wired wait fails as an active-phase mismatch");
+        };
+        assert_eq!(*turn, active.turn());
         let successor = accepted_origin(2);
         let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
             successor.position(),
@@ -13599,30 +13600,31 @@ mod tests {
             .active_turn()
             .expect("the recovery wait retains the progressing slot");
 
-        assert!(matches!(
-            waiting.active_phase(),
-            Some(ActiveTurnPhase::AwaitingRecoveryDecision {
-                ambiguous_operations,
-                ..
-            }) if ambiguous_operations.contains(
-                crate::IssuedOperationRef::ToolAttempt(tool_attempt_id(80))
-            )
-        ));
+        let Some(ActiveTurnPhase::AwaitingRecoveryDecision {
+            ambiguous_operations,
+            ..
+        }) = waiting.active_phase()
+        else {
+            panic!("the opaque tool wait remains an active recovery decision");
+        };
+        assert!(
+            ambiguous_operations.contains(crate::IssuedOperationRef::ToolAttempt(
+                expected_tool_attempt
+            ))
+        );
 
-        let ended_tool = batch
+        let retained_request = batch
             .requests()
-            .iter()
-            .find_map(|request| match batch.attempt(request.id()) {
-                Some(crate::ReconstitutedToolAttempt::Ended(attempt))
-                    if attempt.attempt() == tool_attempt_id(80) =>
-                {
-                    Some(attempt.clone())
-                }
-                Some(crate::ReconstitutedToolAttempt::Current(_))
-                | Some(crate::ReconstitutedToolAttempt::Ended(_))
-                | None => None,
-            })
-            .expect("the batch retains its exact ambiguous attempt");
+            .first()
+            .expect("the one-request batch retains its request");
+        assert_eq!(retained_request.id(), expected_request);
+        let Some(crate::ReconstitutedToolAttempt::Ended(ended_tool)) =
+            batch.attempt(retained_request.id())
+        else {
+            panic!("the batch retains its ended ambiguous attempt");
+        };
+        assert_eq!(ended_tool.attempt(), expected_tool_attempt);
+        let ended_tool = ended_tool.clone();
         let result_entry = semantic_entry(31);
         let result_projection = batch
             .prepare_reconciliation_projection(vec![result_entry.id()], frontier(41).id())
@@ -13636,7 +13638,7 @@ mod tests {
                 crate::AmbiguousModelCallTurnIdentities::new(frontier(41).id()),
             )
             .expect("the interrupt retains exact tool ambiguity");
-        assert_eq!(reconciled.tool_attempt().attempt(), tool_attempt_id(80));
+        assert_eq!(reconciled.tool_attempt().attempt(), expected_tool_attempt);
         assert_eq!(
             reconciled.attempt().end(),
             &AttemptEnd::AfterCancellation {
@@ -13657,16 +13659,20 @@ mod tests {
         assert_eq!(
             reconciled.tool_result_entries()[0].payload(),
             &crate::SemanticTranscriptEntryPayload::ToolClosed {
-                request: tool_request_id(70),
+                request: expected_request,
             }
         );
-        assert!(matches!(
-            reconciled.disposition(),
-            crate::TurnDisposition::ReconciliationRequired { marker }
-                if marker.ambiguous_operations().contains(
-                    crate::IssuedOperationRef::ToolAttempt(tool_attempt_id(80))
-                )
-        ));
+        let crate::TurnDisposition::ReconciliationRequired { marker } = reconciled.disposition()
+        else {
+            panic!("the interrupted ambiguity requires reconciliation");
+        };
+        assert!(
+            marker
+                .ambiguous_operations()
+                .contains(crate::IssuedOperationRef::ToolAttempt(
+                    expected_tool_attempt
+                ))
+        );
     }
 
     /// S09 / INV-015: a predecessor snapshot that omits its required failed
@@ -13755,7 +13761,7 @@ mod tests {
             ancestral,
             ancestral,
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::SingleSource {
                     source_session: session_id(9),
                     source_frontier: transcript_frontier(9),

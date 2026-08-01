@@ -115,7 +115,7 @@ fn creation(command_value: u128, session_value: u128) -> PreparedCreateSession {
     CreateSession::new(
         command(command_value),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
@@ -123,7 +123,7 @@ fn creation(command_value: u128, session_value: u128) -> PreparedCreateSession {
         )),
     )
     .prepare(session(session_value))
-    .expect("owner-initiated creation without ancestry is preparable")
+    .expect("user-initiated creation without ancestry is preparable")
 }
 
 fn metadata(
@@ -152,11 +152,11 @@ fn replacement(
     ReplaceSessionMetadata::new(command(command_value), session(session_value), content)
 }
 
-/// INV-012: the issuer-evidence migration preserves the fixed owner agency of
+/// INV-012: the issuer-evidence migration preserves the fixed user agency of
 /// legacy metadata receipts even when their actor projection was corrupted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_metadata_issuer_migration_preserves_legacy_owner_agency()
+async fn inv012_metadata_issuer_migration_preserves_legacy_user_agency()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres_before_metadata_issuer().await?;
     let command_id = Uuid::from_u128(0x901);
@@ -453,10 +453,10 @@ async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Resul
     );
     let first = replacement(0x902, 0x701, first_content.clone());
     let first_outcome = repository.handle(first.clone()).await?;
-    let ReplaceSessionMetadataHandlingOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
-        first_applied,
-    )) = &first_outcome
-    else {
+    let ReplaceSessionMetadataHandlingOutcome::Recorded(first_result) = &first_outcome else {
+        panic!("first metadata write must record");
+    };
+    let ReplaceSessionMetadataResult::Applied(first_applied) = first_result else {
         panic!("first metadata write must apply");
     };
     assert_eq!(first_applied.snapshot().content(), &first_content);
@@ -466,7 +466,7 @@ async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Resul
             .last_writer()
             .expect("applied write has a writer")
             .actor(),
-        Actor::Owner
+        Actor::User
     );
     assert_eq!(repository.handle(first.clone()).await?, first_outcome);
     assert_eq!(
@@ -475,12 +475,7 @@ async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Resul
             .await?
             .expect("durable receipt exists")
             .result(),
-        match &first_outcome {
-            ReplaceSessionMetadataHandlingOutcome::Recorded(result) => result,
-            ReplaceSessionMetadataHandlingOutcome::ConflictingReuse { .. } => {
-                unreachable!("fixture first handling recorded")
-            }
-        }
+        first_result
     );
 
     let conflicting = replacement(0x902, 0x701, metadata(Some("different"), &[], &[], false));
@@ -1409,7 +1404,7 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
     Ok(())
 }
 
-/// INV-012: an owner-global identifier claimed by another command kind is a
+/// INV-012: a user-global identifier claimed by another command kind is a
 /// conflict, never an absent metadata command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

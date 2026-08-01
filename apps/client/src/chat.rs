@@ -12,6 +12,7 @@ use signalbox_process_protocol::{
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, ReadBuf},
+    signal::unix::{Signal, SignalKind, signal},
     sync::mpsc,
 };
 use uuid::Uuid;
@@ -363,6 +364,44 @@ impl InterruptState {
     }
 }
 
+/// One interrupt listener for the whole chat session, paired with the offer
+/// state it drives. Registering a listener per `select!` iteration instead would
+/// drop an interrupt that arrives between iterations, because a listener
+/// delivers only the signals that arrive after its registration; a listener that
+/// outlives the loop queues them.
+struct ChatInterrupts {
+    listener: Signal,
+    state: InterruptState,
+}
+
+impl ChatInterrupts {
+    fn listen() -> Result<Self, ClientError> {
+        Ok(Self {
+            listener: signal(SignalKind::interrupt()).map_err(ClientError::Io)?,
+            state: InterruptState::default(),
+        })
+    }
+
+    /// Resolves with the action the next interrupt calls for. Cancelling this
+    /// future consumes no interrupt: the offer state advances in the same poll
+    /// that receives one.
+    async fn received(
+        &mut self,
+        status: Option<ChatTurnStatus>,
+    ) -> Result<InterruptAction, ClientError> {
+        self.listener.recv().await.ok_or_else(|| {
+            ClientError::Io(io::Error::other(
+                "the interrupt listener stopped delivering",
+            ))
+        })?;
+        Ok(self.state.received(status))
+    }
+
+    fn reset(&mut self) {
+        self.state.reset();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestKind {
     ReadOnly,
@@ -376,7 +415,7 @@ enum RequestWait<T> {
 
 async fn await_request<T, F>(
     output: &mut Output<'_>,
-    interrupts: &mut InterruptState,
+    interrupts: &mut ChatInterrupts,
     status: Option<ChatTurnStatus>,
     kind: RequestKind,
     future: F,
@@ -388,9 +427,8 @@ where
     loop {
         tokio::select! {
             result = &mut future => return Ok(RequestWait::Complete(result)),
-            interrupt = tokio::signal::ctrl_c() => {
-                interrupt.map_err(ClientError::Io)?;
-                match interrupts.received(status) {
+            interrupt = interrupts.received(status) => {
+                match interrupt? {
                     InterruptAction::OfferStop => output.chat_interrupt_offered(COMMANDS)?,
                     InterruptAction::OfferApproval(tool_request_id) => {
                         output.chat_approval_interrupt_offered(tool_request_id, COMMANDS)?;
@@ -429,7 +467,7 @@ where
 {
     let mut lines = BoundedLines::new(input);
     let mut displayed_entries = SnapshotIdentitySet::new()?;
-    let mut interrupts = InterruptState::default();
+    let mut interrupts = ChatInterrupts::listen()?;
     let mut turns = ChatTurns::default();
 
     'resubscribe: loop {
@@ -919,9 +957,8 @@ where
                     }
                     output.flush()?;
                 }
-                interrupt = tokio::signal::ctrl_c() => {
-                    interrupt.map_err(ClientError::Io)?;
-                    match interrupts.received(turns.status()) {
+                interrupt = interrupts.received(turns.status()) => {
+                    match interrupt? {
                         InterruptAction::OfferStop => output.chat_interrupt_offered(COMMANDS)?,
                         InterruptAction::OfferApproval(tool_request_id) => {
                             output.chat_approval_interrupt_offered(tool_request_id, COMMANDS)?;
@@ -1159,7 +1196,7 @@ fn render_approval_wait(turns: &ChatTurns, output: &mut Output<'_>) -> Result<()
 async fn refresh_approval_after_decision(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
-    interrupts: &mut InterruptState,
+    interrupts: &mut ChatInterrupts,
     turns: &mut ChatTurns,
     session_id: CanonicalUuid,
 ) -> Result<bool, ClientError> {
@@ -1366,8 +1403,8 @@ mod tests {
     #[test]
     fn chat_parser_keeps_plain_input_exact() {
         assert_eq!(
-            parse_line(String::from("  exact owner text  ")),
-            Ok(ChatInput::Submit(String::from("  exact owner text  ")))
+            parse_line(String::from("  exact user text  ")),
+            Ok(ChatInput::Submit(String::from("  exact user text  ")))
         );
     }
 
@@ -1451,7 +1488,7 @@ mod tests {
         const ACCEPTED_INPUT_IDENTITY: u128 = 12;
         const ATTEMPT_IDENTITY: u128 = 13;
         const FIRST_ACCEPTANCE_POSITION: u64 = 1;
-        const QUEUED_OWNER_INPUT: &str = "queued owner input";
+        const QUEUED_USER_INPUT: &str = "queued user input";
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(TURN_IDENTITY));
         let mut turns = ChatTurns::default();
 
@@ -1464,7 +1501,7 @@ mod tests {
                     )),
                     turn_id,
                     acceptance_position: CanonicalU64::new(FIRST_ACCEPTANCE_POSITION),
-                    content: InputContent::new(String::from(QUEUED_OWNER_INPUT)),
+                    content: InputContent::new(String::from(QUEUED_USER_INPUT)),
                 }
             ),
             TurnEventEffect::None

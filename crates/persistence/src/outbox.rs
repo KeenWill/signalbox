@@ -191,7 +191,7 @@ pub enum DispatchedToolBatchState {
         /// Exact result frontier.
         frontier: ContextFrontierId,
     },
-    /// One exact attempt requires an owner recovery decision.
+    /// One exact attempt requires a user recovery decision.
     RecoveryRequired {
         /// Ambiguous tool attempt.
         attempt: ToolAttemptId,

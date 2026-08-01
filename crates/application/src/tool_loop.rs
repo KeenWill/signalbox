@@ -471,7 +471,7 @@ impl ToolExecutionIdGenerator for UuidV7ToolLoopIdGenerator {
     }
 }
 
-/// Application service for one durable owner approval/denial command.
+/// Application service for one durable user approval/denial command.
 pub struct DecideToolRequestService<Ids, Transaction> {
     ids: Ids,
     transaction: Transaction,
@@ -579,7 +579,7 @@ pub enum ToolExecutionServiceOutcome {
     NoWork,
     /// The batch remains parked on its earliest undecided request.
     AwaitingApproval(ToolRequestId),
-    /// Exact ambiguity remains parked for owner recovery.
+    /// Exact ambiguity remains parked for user recovery.
     AwaitingRecovery(ToolAttemptId),
     /// A fresh attempt checkpoint committed; execution waits for another pass.
     AttemptCheckpointed(ToolAttemptId),
@@ -2011,7 +2011,7 @@ mod tests {
     }
 
     /// INV-020: registry automation records policy provenance, while blanket
-    /// automation remains explicitly distinct from owner agency.
+    /// automation remains explicitly distinct from user agency.
     #[test]
     fn inv020_initial_policy_preserves_automation_provenance() {
         let automatic = definition(
@@ -2034,7 +2034,7 @@ mod tests {
         );
         assert_ne!(
             ToolDecisionSource::PolicyAuto,
-            ToolDecisionSource::OwnerCommand
+            ToolDecisionSource::UserCommand
         );
     }
 

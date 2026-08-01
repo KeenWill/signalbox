@@ -1,4 +1,4 @@
-//! Closed inspection of the owner-global durable-command registry.
+//! Closed inspection of the user-global durable-command registry.
 
 use std::sync::LazyLock;
 

@@ -11,7 +11,7 @@
 mod support;
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     error::Error,
     sync::{
         Arc, Mutex,
@@ -81,6 +81,7 @@ use signalbox_persistence::{
         DispatchedReconciliationOperation, DispatchedToolBatchState, OutboxCorruption,
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
+    plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessModelCallRecoveryPrecondition, ProcessModelSelection,
@@ -108,6 +109,11 @@ use signalbox_persistence::{
         SubmitInputRepositoryError,
     },
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
+};
+use signalbox_tools_plan::{
+    PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanEntryId, PlanEvent,
+    PlanEventDraft, PlanEventProvenance, PlanPageCompleteness, PlanReadRequest, PlanStatus,
+    PlanText,
 };
 use sqlx::{PgConnection, PgPool, Row, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -500,7 +506,7 @@ fn application_user_message(message: &ModelConversationMessage) -> (AcceptedInpu
             content,
             ..
         } => (*accepted_input, content.text().as_str()),
-        _ => panic!("fixture message must be an application user message"),
+        _ => panic!("fixture message must be an application user-role message"),
     }
 }
 
@@ -1031,13 +1037,13 @@ fn prepared(
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(selection),
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
-    .expect("owner-initiated creation without ancestry is preparable")
+    .expect("user-initiated creation without ancestry is preparable")
 }
 
 async fn append_session_created_test_event(
@@ -2098,11 +2104,11 @@ async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result
     Ok(())
 }
 
-/// S10: owner-decision receipts for one batch reconstitute from one identity-set
+/// S10: user-decision receipts for one batch reconstitute from one identity-set
 /// load instead of one query per approval row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_owner_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error>> {
+async fn s10_user_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x73a0;
     let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
@@ -2115,37 +2121,56 @@ async fn s10_owner_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn 
     )
     .await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
-    for (index, request) in requests.iter().enumerate() {
-        let offset = u128::try_from(index)?;
-        repository
-            .decide(
-                decide_tool_request(
-                    DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0 + offset)),
-                    *request,
-                    ToolApprovalDecision::Deny { reason: None },
-                ),
-                || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0 + offset)),
-            )
-            .await?;
-    }
+    let [first_request, second_request] = requests.as_slice() else {
+        panic!("the fixture proposes exactly two dangerous tools");
+    };
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                *first_request,
+                ToolApprovalDecision::Deny { reason: None },
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+        )
+        .await?;
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+                *second_request,
+                ToolApprovalDecision::Deny { reason: None },
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
 
     let reconstituted = repository
         .load_active_batch(fixture.session, fixture.turn)
         .await?
         .expect("the fully denied batch remains available for result projection");
-    for request in requests {
-        let approval = reconstituted
-            .approval(request)
-            .expect("each owner decision reconstitutes");
-        assert!(matches!(
-            approval.decision(),
-            ToolApprovalDecision::Deny { .. }
-        ));
-        assert_eq!(
-            approval.source(),
-            signalbox_domain::ToolDecisionSource::OwnerCommand
-        );
-    }
+    let first_approval = reconstituted
+        .approval(*first_request)
+        .expect("the first user decision reconstitutes");
+    assert!(matches!(
+        first_approval.decision(),
+        ToolApprovalDecision::Deny { .. }
+    ));
+    assert_eq!(
+        first_approval.source(),
+        signalbox_domain::ToolDecisionSource::UserCommand
+    );
+    let second_approval = reconstituted
+        .approval(*second_request)
+        .expect("the second user decision reconstitutes");
+    assert!(matches!(
+        second_approval.decision(),
+        ToolApprovalDecision::Deny { .. }
+    ));
+    assert_eq!(
+        second_approval.source(),
+        signalbox_domain::ToolDecisionSource::UserCommand
+    );
     assert!(
         ProcessReadRepository::new(pool.clone())
             .session_has_tool_history(fixture.session)
@@ -2595,7 +2620,7 @@ async fn s31_inv004_inv043_batch_reload_restores_retired_attempt_identities()
 }
 
 /// S02 / S10 / S11 / INV-005 / INV-006 / INV-019 / INV-027 / INV-036: one confirmed
-/// proposal survives a repository restart, records a replay-safe owner
+/// proposal survives a repository restart, records a replay-safe user
 /// decision, executes through an exact durable fence, and projects one
 /// reference-only result atomically with the same-turn continuation call.
 #[tokio::test(flavor = "multi_thread")]
@@ -3594,7 +3619,7 @@ async fn s02_s10_inv006_refused_continuation_call_reloads_and_scans() -> Result<
 
 /// S04 / INV-006 / INV-025: a daemon restart with the continuation model call
 /// of a completed tool round in flight classifies the call as ambiguous and
-/// parks the turn awaiting an owner recovery decision — the committed
+/// parks the turn awaiting a user recovery decision — the committed
 /// recovery wait reloads through the scheduling projection, the reconcile
 /// verb's precondition still names the parked turn, and the reconciling
 /// interrupt terminalizes the turn naming that call.
@@ -3623,7 +3648,7 @@ async fn s04_inv006_inv025_in_flight_continuation_call_restart_parks_recovery()
     };
     assert!(
         matches!(*recovered, ModelCallTerminalOutcome::AwaitingRecovery(_)),
-        "the lost in-flight continuation call parks awaiting an owner decision"
+        "the lost in-flight continuation call parks awaiting a user decision"
     );
 
     let mut second_scan_ids = FixedStartupScanIds::new([], []);
@@ -4984,7 +5009,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     Ok(())
 }
 
-/// INV-012: concurrent owner-global command claims serialize before either
+/// INV-012: concurrent user-global command claims serialize before either
 /// request-local decision can commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -5013,7 +5038,7 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
             (Ok(_), Err(ToolLoopRepositoryError::ConflictingCommandReuse))
                 | (Err(ToolLoopRepositoryError::ConflictingCommandReuse), Ok(_))
         ),
-        "exactly one request-local decision wins the owner-global identity"
+        "exactly one request-local decision wins the user-global identity"
     );
     let winner_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -5036,7 +5061,7 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
 
 /// INV-006 / INV-012: an applied interrupt racing a tool-using response closes
 /// every request in proposal order, binds those facts into the terminal
-/// frontier, and makes a later owner decision canonically AlreadyResolved.
+/// frontier, and makes a later user decision canonically AlreadyResolved.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
@@ -8030,7 +8055,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 /// S03 / S04 / S07 / INV-006 / INV-016 / INV-029 / INV-034: a restart-parked
 /// ambiguous model call wedges the session — the scan classifies nothing, the
 /// wait stays visible across a second restart, and ordinary input is refused —
-/// and the owner reconciliation decision then terminalizes the exact ambiguity
+/// and the user reconciliation decision then terminalizes the exact ambiguity
 /// without inventing an outcome, releases the slot, and lets the session
 /// activate the accepted successor.
 ///
@@ -8042,7 +8067,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 /// guarantee broke rather than only that the timeline broke.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambiguous_turn()
+async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguous_turn()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let parked = checkpoint_restart_model_call(&pool, 0xB100, true).await?;
@@ -8138,7 +8163,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
                 active_turn: parked.turn,
             }
         )),
-        "the slot is never released without an owner decision"
+        "the slot is never released without a user decision"
     );
 
     let second_restart = scan.execute().await?;
@@ -8159,7 +8184,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
             input_with_delivery(
                 0xB220,
                 0xB101,
-                "continue after the owner reconciliation decision",
+                "continue after the user reconciliation decision",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: parked.turn,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
@@ -8176,7 +8201,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
                 SubmitInputAppliedResult::TurnOrigin(_)
             ))
         ),
-        "the owner decision is accepted as the successor origin"
+        "the user decision is accepted as the successor origin"
     );
 
     let reconciled_shape: (String, String, Uuid, Uuid, i64) = sqlx::query_as(
@@ -8243,17 +8268,22 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
         .read_transcript(parked.session)
         .await?
         .expect("the reconciled session remains process-readable");
-    assert!(
-        matches!(
-            snapshot.turns()[0].state(),
-            ProcessTurnState::ReconciliationRequired {
-                terminal_attempt,
-                operation,
-                ..
-            } if *terminal_attempt == parked.attempt
-                && *operation == ProcessReconciliationOperation::ModelCall(parked.call)
-        ),
-        "the reconciled turn stays readable and still names its exact ambiguity"
+    let ProcessTurnState::ReconciliationRequired {
+        terminal_attempt,
+        operation,
+        ..
+    } = snapshot.turns()[0].state()
+    else {
+        panic!("the reconciled turn stays readable as reconciliation-required");
+    };
+    assert_eq!(
+        *terminal_attempt, parked.attempt,
+        "the readable turn retains its exact terminal attempt"
+    );
+    assert_eq!(
+        *operation,
+        ProcessReconciliationOperation::ModelCall(parked.call),
+        "the readable turn retains its exact ambiguous call"
     );
 
     let activated = activate_earliest_queued_turn(
@@ -9742,7 +9772,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
     )
     .execute(&pool)
     .await
-    .expect_err("the owner-global command ID must be unique");
+    .expect_err("the user-global command ID must be unique");
     assert_eq!(
         duplicate_command_id
             .as_database_error()
@@ -10134,7 +10164,7 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
     Ok(())
 }
 
-/// S01 / INV-012: the owner-global primary key is the concurrency boundary.
+/// S01 / INV-012: the user-global primary key is the concurrency boundary.
 /// Equal duplicates return one winner; unequal duplicates retain that winner
 /// and report one typed conflict.
 #[tokio::test(flavor = "multi_thread")]
@@ -10248,7 +10278,7 @@ async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<
     Ok(())
 }
 
-/// INV-012: an observed owner-global claim is never treated as unseen merely
+/// INV-012: an observed user-global claim is never treated as unseen merely
 /// because its typed record is missing or its storage version is unknown.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -10404,7 +10434,7 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
 }
 
 /// INV-002 / INV-008 / INV-012: the second admitted command kind retains a
-/// complete typed record, while the owner-global registry and append-only
+/// complete typed record, while the user-global registry and append-only
 /// constraints reject torn, malformed, or mutable receipts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -10826,7 +10856,7 @@ async fn s33_inv008_inv015_inv046_mid_session_model_switch_is_forward_only()
         application_user_message(
             first_messages
                 .first()
-                .expect("the first call carries its owner input")
+                .expect("the first call carries its user input")
         ),
         (first_input, first_content)
     );
@@ -11035,7 +11065,7 @@ async fn compact_session_command_id_reuse_is_a_client_conflict() -> Result<(), B
     Ok(())
 }
 
-/// INV-012: registry dispatch remains owner-global across command kinds while
+/// INV-012: registry dispatch remains user-global across command kinds while
 /// purpose-specific loads distinguish a valid other-kind claim from absence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -14328,7 +14358,7 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
         )?)
         .await?
     else {
-        panic!("owner-initiated composed creation must apply");
+        panic!("user-initiated composed creation must apply");
     };
     assert_eq!(created.session(), session);
 
@@ -14461,17 +14491,23 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
             blocked_start.delivery(),
         )?)
         .await?;
-    assert!(
-        matches!(
-            blocked,
-            SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::ActiveTurnPresent {
-                    session: rejected_session,
-                    active_turn,
-                }
-            )) if rejected_session == session && active_turn == activated.turn()
-        ),
-        "a start against the service-activated slot must name it: {blocked:?}"
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::ActiveTurnPresent {
+            session: rejected_session,
+            active_turn,
+        },
+    )) = blocked
+    else {
+        panic!("a start against the service-activated slot must be rejected");
+    };
+    assert_eq!(
+        rejected_session, session,
+        "the occupied-slot rejection names the session"
+    );
+    assert_eq!(
+        active_turn,
+        activated.turn(),
+        "the occupied-slot rejection names the active turn"
     );
 
     let effect_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
@@ -14534,7 +14570,7 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
         )?)
         .await?
     else {
-        panic!("owner-initiated composed creation must apply");
+        panic!("user-initiated composed creation must apply");
     };
     assert_eq!(created.session(), session);
 
@@ -14763,17 +14799,23 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
             blocked_start.delivery(),
         )?)
         .await?;
-    assert!(
-        matches!(
-            blocked,
-            SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::ActiveTurnPresent {
-                    session: rejected_session,
-                    active_turn,
-                }
-            )) if rejected_session == session && active_turn == second_activated.turn()
-        ),
-        "a start against the After-lineage slot must name it: {blocked:?}"
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::ActiveTurnPresent {
+            session: rejected_session,
+            active_turn,
+        },
+    )) = blocked
+    else {
+        panic!("a start against the After-lineage slot must be rejected");
+    };
+    assert_eq!(
+        rejected_session, session,
+        "the successor rejection names the session"
+    );
+    assert_eq!(
+        active_turn,
+        second_activated.turn(),
+        "the successor rejection names the active turn"
     );
 
     let successor_shape: (i64, String, Uuid, i64) = sqlx::query_as(
@@ -17829,12 +17871,12 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
     .bind(Uuid::from_u128(0x332))
     .execute(&pool)
     .await?;
-    let non_owner = repository
+    let non_user = repository
         .load(first.command_id())
         .await
-        .expect_err("domain reconstitution rejects a stored non-owner actor");
+        .expect_err("domain reconstitution rejects a stored non-user actor");
     assert!(matches!(
-        non_owner,
+        non_user,
         SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Domain(
             SubmitInputReconstitutionFailure::StoredActorMismatch
         ))
@@ -17916,18 +17958,23 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
         1,
         ModelSelectionOverride::UseSessionDefault,
     );
-    assert!(matches!(
-        repository
-            .handle(
-                exhausted,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x933)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa33))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::AcceptancePositionExhausted { last, .. }
-        )) if last.as_u64() == u64::MAX
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AcceptancePositionExhausted { last, .. },
+    )) = repository
+        .handle(
+            exhausted,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x933)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa33))),
+        )
+        .await?
+    else {
+        panic!("the maximum stored position rejects the next input");
+    };
+    assert_eq!(
+        last.as_u64(),
+        u64::MAX,
+        "the exhaustion receipt retains the maximum position"
+    );
 
     sqlx::query(
         "UPDATE accepted_input
@@ -19920,13 +19967,13 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     let creation = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xa47)),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         prompted_defaults.clone(),
     )
     .prepare(session)
-    .expect("owner-initiated creation without ancestry is preparable");
+    .expect("user-initiated creation without ancestry is preparable");
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     create_repository.handle(creation.clone()).await?;
@@ -19938,13 +19985,13 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     let promptless_reuse = CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xa47)),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(0xa60)))
-    .expect("owner-initiated creation without ancestry is preparable");
+    .expect("user-initiated creation without ancestry is preparable");
     assert_eq!(
         create_repository.handle(promptless_reuse).await?,
         CreateSessionHandlingOutcome::ConflictingReuse {
@@ -20684,6 +20731,447 @@ async fn s03_inv015_context_compaction_constraints_use_projected_successor_order
             .as_deref(),
         Some("23514")
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ConcurrentPlanAppendDisposition {
+    Appended,
+    DuplicateAttempt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlanRepositoryErrorKind {
+    InvalidAppendProvenance,
+    InvalidEventSequence,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PlanStorageSnapshot {
+    event_count: i64,
+    head_ordinal: Decimal,
+}
+
+static NEXT_PLAN_FIXTURE_SEED: AtomicU64 = AtomicU64::new(0xd100);
+const PLAN_FIXTURE_SEED_STRIDE: u64 = 0x200;
+
+fn plan_text(value: &str) -> PlanText {
+    PlanText::try_new(String::from(value)).expect("the plan text fixture is valid")
+}
+
+fn create_plan_arguments(text: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "kind": "create",
+        "text": text,
+    }))
+    .expect("the plan create arguments fixture serializes")
+}
+
+fn revise_plan_arguments(entry: PlanEntryId, text: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "entry_id": entry.as_u64(),
+        "kind": "revise",
+        "text": text,
+    }))
+    .expect("the plan revision arguments fixture serializes")
+}
+
+async fn authorize_plan_write(
+    pool: &PgPool,
+    arguments: &str,
+) -> Result<(SessionId, PlanEventProvenance), Box<dyn Error>> {
+    let seed =
+        u128::from(NEXT_PLAN_FIXTURE_SEED.fetch_add(PLAN_FIXTURE_SEED_STRIDE, Ordering::Relaxed));
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(pool, seed, "plan_write", arguments).await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xd2));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?
+        .expect("the approved plan-write fixture prepares its physical attempt");
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    Ok((
+        fixture.session,
+        PlanEventProvenance::from_invocation(authorized.correlation()),
+    ))
+}
+
+fn expect_appended(outcome: PlanAppendOutcome) -> PlanEvent {
+    match outcome {
+        PlanAppendOutcome::Appended(event) => event,
+        PlanAppendOutcome::Rejected(rejection) => {
+            panic!("the plan append fixture was unexpectedly rejected: {rejection:?}")
+        }
+    }
+}
+
+fn plan_repository_error_kind(error: SessionPlanRepositoryError) -> PlanRepositoryErrorKind {
+    match error {
+        SessionPlanRepositoryError::InvalidAppendProvenance => {
+            PlanRepositoryErrorKind::InvalidAppendProvenance
+        }
+        SessionPlanRepositoryError::Corruption(SessionPlanCorruption::InvalidEventSequence) => {
+            PlanRepositoryErrorKind::InvalidEventSequence
+        }
+        other => panic!("unexpected plan repository error: {other:?}"),
+    }
+}
+
+fn concurrent_append_disposition(
+    result: Result<PlanAppendOutcome, SessionPlanRepositoryError>,
+) -> ConcurrentPlanAppendDisposition {
+    match result {
+        Ok(PlanAppendOutcome::Appended(_)) => ConcurrentPlanAppendDisposition::Appended,
+        Err(SessionPlanRepositoryError::DuplicateAppendAttempt) => {
+            ConcurrentPlanAppendDisposition::DuplicateAttempt
+        }
+        Ok(PlanAppendOutcome::Rejected(rejection)) => {
+            panic!("the competing append was unexpectedly rejected: {rejection:?}")
+        }
+        Err(error) => panic!("the competing append failed unexpectedly: {error:?}"),
+    }
+}
+
+/// The first authoritative append advances the certified head and round-trips
+/// through both the current projection and chronological history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_and_read_round_trip_through_postgres() -> Result<(), Box<dyn Error>> {
+    const REQUESTED_HISTORY_LIMIT: usize = 10;
+    const EXPECTED_ENTRY_COUNT: usize = 1;
+    const CREATED_TEXT: &str = "persist the durable plan";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments = create_plan_arguments(CREATED_TEXT);
+    let (session, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    let event = expect_appended(
+        repository
+            .append(PlanAppendRequest::new(
+                provenance,
+                PlanEventDraft::Create {
+                    text: plan_text(CREATED_TEXT),
+                },
+            ))
+            .await?,
+    );
+    let page = repository
+        .read(PlanReadRequest::new(
+            session,
+            None,
+            Some(REQUESTED_HISTORY_LIMIT),
+        ))
+        .await?;
+    let history = page
+        .history()
+        .expect("the requested plan history is returned");
+
+    assert_eq!(page.completeness(), PlanPageCompleteness::Complete);
+    let entry = page
+        .entries()
+        .first()
+        .expect("the created entry is projected");
+
+    assert_eq!(page.entries().len(), EXPECTED_ENTRY_COUNT);
+    assert_eq!(entry.id().as_u64(), event.ordinal().as_u64());
+    assert_eq!(entry.text().as_str(), CREATED_TEXT);
+    assert_eq!(entry.status(), PlanStatus::Pending);
+    assert_eq!(history.events(), std::slice::from_ref(&event));
+    assert_eq!(history.completeness(), PlanPageCompleteness::Complete);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A direct repository caller cannot turn a missing owning session into a
+/// retryable database failure before provenance authentication.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_classifies_missing_session_as_invalid_provenance()
+-> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "refuse a missing session";
+    const FIXTURE_SEED: u128 = 0xd000;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let correlation = signalbox_domain::ToolAttemptDispatchCorrelation::reconstitute(
+        signalbox_domain::ToolAttemptDispatchCorrelationReconstitutionInput {
+            session: SessionId::from_uuid(Uuid::from_u128(FIXTURE_SEED)),
+            turn: TurnId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 1)),
+            issuing_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 2)),
+            request: ToolRequestId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 3)),
+            attempt: ToolAttemptId::from_uuid(Uuid::from_u128(FIXTURE_SEED + 4)),
+            generation: signalbox_domain::ToolDispatchGeneration::first(),
+        },
+    );
+    let repository = SessionPlanRepository::new(pool.clone());
+    let error = repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(correlation),
+            PlanEventDraft::Create {
+                text: plan_text(CREATED_TEXT),
+            },
+        ))
+        .await
+        .expect_err("the absent owning session rejects the append");
+
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::InvalidAppendProvenance
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Durable provenance that no longer proves physical dispatch fails closed
+/// before either current or requested-history evidence can be exposed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_prepared_attempt_provenance() -> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "authenticate the dispatched attempt";
+    const HISTORY_LIMIT: usize = 10;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments = create_plan_arguments(CREATED_TEXT);
+    let (session, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    expect_appended(
+        repository
+            .append(PlanAppendRequest::new(
+                provenance,
+                PlanEventDraft::Create {
+                    text: plan_text(CREATED_TEXT),
+                },
+            ))
+            .await?,
+    );
+
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE tool_attempt SET state_kind = 'prepared' WHERE attempt_id = $1")
+        .bind(provenance.correlation().attempt().into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let authorized: bool = sqlx::query_scalar(
+        "SELECT session_plan_event_has_authority(event)
+           FROM session_plan_event AS event
+          WHERE event.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let error = repository
+        .read(PlanReadRequest::new(session, None, Some(HISTORY_LIMIT)))
+        .await
+        .expect_err("prepared provenance cannot authenticate current or history evidence");
+
+    assert!(!authorized);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::InvalidEventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A revision naming no creation event returns its typed rejection without an
+/// append or ordinal allocation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_unknown_entry() -> Result<(), Box<dyn Error>> {
+    const MISSING_ENTRY_ID: u64 = 7;
+    const REQUESTED_TEXT: &str = "replace a missing step";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let missing_entry =
+        PlanEntryId::try_from_u64(MISSING_ENTRY_ID).expect("the missing entry fixture is positive");
+    let arguments = revise_plan_arguments(missing_entry, REQUESTED_TEXT);
+    let (_, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    let rejection = repository
+        .append(PlanAppendRequest::new(
+            provenance,
+            PlanEventDraft::Revise {
+                entry: missing_entry,
+                text: plan_text(REQUESTED_TEXT),
+            },
+        ))
+        .await?;
+
+    assert_eq!(
+        rejection,
+        PlanAppendOutcome::Rejected(PlanAppendRejection::UnknownEntry {
+            entry: missing_entry,
+        })
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Arguments that differ from the durable plan-write request cannot authorize
+/// an append even when the physical attempt itself is in flight.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_untrusted_request() -> Result<(), Box<dyn Error>> {
+    const MISSING_ENTRY_ID: u64 = 7;
+    const REQUESTED_TEXT: &str = "replace a missing step";
+    const MISMATCHED_TEXT: &str = "different request payload";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let missing_entry =
+        PlanEntryId::try_from_u64(MISSING_ENTRY_ID).expect("the missing entry fixture is positive");
+    let arguments = revise_plan_arguments(missing_entry, REQUESTED_TEXT);
+    let (_, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    let authority_error = repository
+        .append(PlanAppendRequest::new(
+            provenance,
+            PlanEventDraft::Revise {
+                entry: missing_entry,
+                text: plan_text(MISMATCHED_TEXT),
+            },
+        ))
+        .await
+        .expect_err("mismatched request arguments cannot authorize an append");
+
+    assert_eq!(
+        plan_repository_error_kind(authority_error),
+        PlanRepositoryErrorKind::InvalidAppendProvenance
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A physically present but malformed head is not projected as an honest empty
+/// plan when required-column and trigger defenses are deliberately bypassed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_present_head_with_null_ordinal() -> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "detect a corrupt plan head";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments = create_plan_arguments(CREATED_TEXT);
+    let (session, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    expect_appended(
+        repository
+            .append(PlanAppendRequest::new(
+                provenance,
+                PlanEventDraft::Create {
+                    text: plan_text(CREATED_TEXT),
+                },
+            ))
+            .await?,
+    );
+    sqlx::query("ALTER TABLE session_plan_head DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_plan_head ALTER COLUMN event_ordinal DROP NOT NULL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE session_plan_head SET event_ordinal = NULL WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_plan_head ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corruption = repository
+        .read(PlanReadRequest::new(session, None, None))
+        .await
+        .expect_err("a present malformed plan head fails closed");
+
+    assert_eq!(
+        plan_repository_error_kind(corruption),
+        PlanRepositoryErrorKind::InvalidEventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Competing submission of one physical plan-write attempt serializes to one
+/// append and one typed duplicate-attempt failure without advancing twice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_competing_append_uses_one_ordinal() -> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "append once under contention";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let arguments = create_plan_arguments(CREATED_TEXT);
+    let (session, provenance) = authorize_plan_write(&pool, &arguments).await?;
+    let request = PlanAppendRequest::new(
+        provenance,
+        PlanEventDraft::Create {
+            text: plan_text(CREATED_TEXT),
+        },
+    );
+    let first_repository = SessionPlanRepository::new(pool.clone());
+    let second_repository = SessionPlanRepository::new(pool.clone());
+    let (first, second) = tokio::join!(
+        first_repository.append(request.clone()),
+        second_repository.append(request),
+    );
+    let dispositions = HashSet::from([
+        concurrent_append_disposition(first),
+        concurrent_append_disposition(second),
+    ]);
+    let snapshot = sqlx::query_as::<_, PlanStorageSnapshot>(
+        "SELECT count(event.event_ordinal) AS event_count,
+                head.event_ordinal AS head_ordinal
+           FROM session_plan_event AS event
+           JOIN session_plan_head AS head ON head.session_id = event.session_id
+          WHERE event.session_id = $1
+          GROUP BY head.event_ordinal",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        dispositions,
+        HashSet::from([
+            ConcurrentPlanAppendDisposition::Appended,
+            ConcurrentPlanAppendDisposition::DuplicateAttempt,
+        ])
+    );
+    assert_eq!(snapshot.event_count, 1);
+    assert_eq!(snapshot.head_ordinal, Decimal::ONE);
 
     pool.close().await;
     drop(container);

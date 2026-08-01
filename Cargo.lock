@@ -3060,6 +3060,7 @@ dependencies = [
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
  "signalbox-domain",
+ "signalbox-tools-plan",
  "sqlx",
  "testcontainers-modules",
  "tokio",
@@ -3210,6 +3211,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-tools-plan"
+version = "0.0.0"
+dependencies = [
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-tool-contract",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-tools-workspace"
 version = "0.0.0"
 dependencies = [
@@ -3254,6 +3268,7 @@ dependencies = [
  "signalbox-tools-code-host",
  "signalbox-tools-conversations",
  "signalbox-tools-github",
+ "signalbox-tools-plan",
  "signalbox-tools-workspace",
  "sqlx",
  "tempfile",

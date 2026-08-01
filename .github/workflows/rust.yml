@@ -32,6 +32,10 @@ jobs:
         run: python3 scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
+      - name: Check user vocabulary
+        run: python3 scripts/check_user_vocabulary.py
+      - name: Test user vocabulary checker
+        run: python3 scripts/test_check_user_vocabulary.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
       - name: Test documentation consistency checker
@@ -55,7 +59,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            0339cb4cc039583d49775f3bc473d7c4085f20baac9743ee1df58b008db533bb
+            3c28d72928abf689eb9bf7e7617e7e54a3de85f85cb74497533adbd4ec4a1a82
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};

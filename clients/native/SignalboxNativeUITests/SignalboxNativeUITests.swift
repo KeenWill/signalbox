@@ -44,7 +44,7 @@ final class SignalboxNativeUITests: XCTestCase {
 
     @MainActor
     func testRealServerConnectionListsRunnerAndCreatesSessionWhenConfigured() throws {
-        throw XCTSkip("Remote/mobile transport is an owner design gate; signalboxd currently exposes only a local Unix socket.")
+        throw XCTSkip("Remote/mobile transport is a maintainer design gate; signalboxd currently exposes only a local Unix socket.")
     }
 
     private func assertElementExists(

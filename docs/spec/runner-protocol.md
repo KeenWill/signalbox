@@ -1,5 +1,8 @@
 # Runner protocol and placement
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page specifies the implemented runner-protocol domain foundation as
 verified against the implementing stack through PR #260
 (`agent/runner-protocol-domain`); its durable Postgres representation and
@@ -23,7 +26,9 @@ The registration-only executable slice is verified through PR #376
 idempotent enrollment receipts, exact resume and replacement-advertisement
 registration, the `signalbox-runner` binary, explicit credential/repository
 availability, and heartbeat liveness exchange with durable connection epochs,
-shutdown, suspect, and loss facts. Recovery inventory, workspaces, leases,
+shutdown, suspect, and loss facts. Its fatal stale-shutdown close, complete
+rejection correlations, and lifecycle observability are re-verified through PR
+#382 (`agent/runner-honesty`). Recovery inventory, workspaces, leases,
 execution, and model calls remain unimplemented as labeled below. Remote
 transport and dynamic policy stay under [Open edges](#open-edges).
 
@@ -78,8 +83,8 @@ between runners, and any automatic-placement policy — stays in
 one home for undecided design; a commitment whose implementation is deferred is
 not an undecided question.
 
-Owner-directed relocation of a healthy session is committed functionality that
-version one does not implement. `move_healthy_session` is the owner command that
+User-directed relocation of a healthy session is committed functionality that
+version one does not implement. `move_healthy_session` is the user command that
 re-places a healthy session on a different runner; its same-runner form changes
 only the working directory. Version one's sole placement-change producer is loss
 replacement ([session placement and affinity](#session-placement-and-affinity)),
@@ -93,10 +98,10 @@ authority from filesystem reachability: the injected placement event never
 claims that relocation deleted prior files
 ([model-call execution](model-call-execution.md#frontier-rendering)).
 
-Successor promotion stays owner-initiated in every form. Fresh-install
-enrollment is instantly active; only a successor after loss waits, and it waits
-on an owner command rather than on a daemon decision. No mechanism in this page
-migrates a session, promotes a candidate, or reschedules work automatically.
+Successor promotion stays user-initiated in every form. Fresh-install enrollment
+is instantly active; only a successor after loss waits, and it waits on a user
+command rather than on a daemon decision. No mechanism in this page migrates a
+session, promotes a candidate, or reschedules work automatically.
 
 ## Local transport and connection protocol
 
@@ -391,7 +396,7 @@ unreclaimed disk. Daemon logic keys off that category alone, so the set stays
 small and every member names a decision the daemon can make. The second is one
 runner-authored detail: a runner-specific code, a message, and a structured
 payload, all carried as data. The daemon retains the detail as operator evidence
-and exposes it verbatim through owner runner inspection; it never parses,
+and exposes it verbatim through user runner inspection; it never parses,
 interprets, or branches on it, so a runner may add detail codes freely without a
 daemon change.
 
@@ -577,7 +582,7 @@ enrollment as complete.
 pending successor. After durable predecessor loss, a successor request may in
 future issue the same identity shapes plus one checked `PendingRunnerEnrollment`
 and pending registration revision. That authority may admit heartbeat, startup
-leak reconciliation, and one owner-command-bound workspace operation, but never
+leak reconciliation, and one user-command-bound workspace operation, but never
 registration mutation, grant creation, lease offer, claim, or dispatch. At most
 one pending request may exist, and equal replay must return its exact original
 receipt.
@@ -590,7 +595,7 @@ Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the
 registration-reconciliation transition marks that placement `RunnerLost` while
 the connection and enrollment stay healthy, so no successor is pending and no
-different live runner exists to name. For that loss source only, the owner
+different live runner exists to name. For that loss source only, the user
 replacement command may name the same runner identity: a checked re-enrollment
 against its current connection revalidates the exact enrollment, runner, and
 authentication-reference correlations, requires the current registration to
@@ -603,24 +608,24 @@ moment of recovery, so demanding a second runner would leave the only state that
 produced this loss permanently unrecoverable.
 
 A pending successor may also be promoted with no lost session placement
-involved. `promote_pending_runner` is the owner command for the
-deployment-scoped fact that this daemon's active runner is durably gone: it
-requires the recorded active enrollment's connection to be durably lost and the
-pending candidate to be connected under its provisioning-only authority, then
-revokes the predecessor and constructs the active enrollment and validated
-registration from the exact pending facts in one transaction. It provisions no
-workspace, consumes no workspace receipt, touches no session placement, creates
-no lease, and fabricates no turn or frontier; a session pinned to the
-predecessor stays `RunnerLost` until its own owner replacement runs. The command
-generalizes to multi-runner as the fact that one of this daemon's active runners
-is durably gone and a successor for it is pending, and stays owner-initiated in
-both forms. Why: a deployment with no session, or one whose every placement is
-an unpinned capability-class request, offers no placement for a replacement
-command to target, so without this path its pending candidate would remain
+involved. `promote_pending_runner` is the user command for the deployment-scoped
+fact that this daemon's active runner is durably gone: it requires the recorded
+active enrollment's connection to be durably lost and the pending candidate to
+be connected under its provisioning-only authority, then revokes the predecessor
+and constructs the active enrollment and validated registration from the exact
+pending facts in one transaction. It provisions no workspace, consumes no
+workspace receipt, touches no session placement, creates no lease, and
+fabricates no turn or frontier; a session pinned to the predecessor stays
+`RunnerLost` until its own user replacement runs. The command generalizes to
+multi-runner as the fact that one of this daemon's active runners is durably
+gone and a successor for it is pending, and stays user-initiated in both forms.
+Why: a deployment with no session, or one whose every placement is an unpinned
+capability-class request, offers no placement for a replacement command to
+target, so without this path its pending candidate would remain
 provisioning-only forever.
 
 For a pinned repository-backed loss, `replace_lost_runner` first durably claims
-the owner command and its complete request, then creates one single-use
+the user command and its complete request, then creates one single-use
 provisioning authorization naming that command and pending registration. The
 runner provisions and spools `workspace_ready` under that limited authority.
 Only a later transaction can activate the pending enrollment: it rechecks the
@@ -657,7 +662,7 @@ another process running as the same trusted user and would falsely imply a
 remote-ready handshake.
 
 One `RunnerEnrollment` binds the enrollment identity, runner identity, opaque
-authentication-reference identity, and owner-allowed capability classes. The
+authentication-reference identity, and daemon-allowed capability classes. The
 authentication reference identifies daemon-resident enrollment policy; it is not
 an authentication secret. Enrollment is either active or revoked. Revocation is
 terminal and makes later registration invalid. Complete reconstitution rejects
@@ -689,7 +694,7 @@ It carries no permission default, effect class, placement declaration, approval
 posture, credential path, or credential value. Registration validates classes,
 tools, workspace capabilities, and sandbox profiles against enrollment and the
 daemon catalog. Credential-profile names are checked, duplicate-free
-availability facts from strict runner configuration; the owner selects one exact
+availability facts from strict runner configuration; the user selects one exact
 advertised name, while daemon-owned profile and override policy decide approval
 independently of that name. A disallowed catalog claim or malformed name rejects
 the complete registration. A valid registration retains the exact advertised
@@ -861,7 +866,7 @@ and its exact tool name to the tool loop's `AuthorizedToolAttempt`. Only
 publicly produce that pairing: each selects the batch's canonical immutable
 request and approval together with its physical-attempt authority.
 `RunnerToolAttemptAuthorization` has no public raw-parts constructor. The
-underlying attempt exists only after the automatic or owner decision authorizes
+underlying attempt exists only after the automatic or user decision authorizes
 that exact attempt, and neither authority nor the resulting lease is cloneable.
 Every checked `ToolBatch` carries a durable per-attempt inventory of runner
 authority already issued. Its in-memory clones share the exact atomic guard for
@@ -1072,7 +1077,7 @@ explicit replacement transitions:
 - an optional `CredentialProfileName`;
 - `WorkspaceRequirement`, either none or a repository worktree;
 - one exact `RunnerSandboxProfile`, defaulted to `WorkspaceRestricted` only at
-  the owner/client construction boundary and always explicit in the domain; and
+  the user/client construction boundary and always explicit in the domain; and
 - one bounded map of exact tool names to
   `RunnerToolPermissionOverride::{Auto, Confirm}`.
 
@@ -1142,7 +1147,7 @@ Runner loss is explicit state, not implicit reassignment. Marking a pinned
 runner lost retains the prior placement and disables future lease creation.
 Marking an exact-identity request lost before pin retains that request and
 records `RunnerLostBeforePin { runner }`, disabling eligibility and initial pin.
-An owner-directed pinned replacement supplies and installs a new complete
+A user-directed pinned replacement supplies and installs a new complete
 placement request, validated registration, working directory, credential-profile
 selection, tool inventory, and provisioned workspace. It advances a positive
 placement revision and returns one `RunnerPlacementChange` value carrying the
@@ -1168,11 +1173,11 @@ after that call reaches its observation boundary, so the call's own output
 appends first and the prefix-only frontier law holds
 ([turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)).
 Safe retry authority exists only for a pinned lost runner and can be consumed
-only as part of its owner replacement; it never causes automatic dispatch.
+only as part of its user replacement; it never causes automatic dispatch.
 
 Reconstitution accepts a complete public raw-facts input and rejects ordinary
 `Unpinned` above revision one unless append-only history proves an exact
-lost-before-pin owner replacement into that revision. It rejects
+lost-before-pin user replacement into that revision. It rejects
 `RunnerLostBeforePin` unless the request selector is the retained exact runner.
 Two further conditions each cause rejection on their own, and no exemption
 attaches to either: a pinned or pinned-loss state that does not match its
@@ -1214,7 +1219,7 @@ Runner loss is an application-visible typed session state. A pinned placement
 becomes `RunnerLost`; an unpinned placement whose exact-identity selector names
 the lost runner becomes `RunnerLostBeforePin { runner }`. An unpinned
 capability-class request has selected no runner and is unaffected. Once durable
-loss commits, only two owner commands can leave either lost state. For pinned
+loss commits, only two user commands can leave either lost state. For pinned
 loss, `replace` names a different live runner, atomically activates the one
 pending replacement enrollment, or — for a registration-triggered loss only —
 re-enrolls the same runner against its current connection, then commits the
@@ -1236,8 +1241,8 @@ target an ordinary unpinned, live, stale, or already-replaced placement
 ## Sandbox profiles and approval
 
 The sandbox profile is an immutable placement fact and appears in every session,
-lease, dispatch, result, evidence, transcript, and owner-inspection projection.
-A client that omits it receives `WorkspaceRestricted` at the client construction
+lease, dispatch, result, evidence, transcript, and user-inspection projection. A
+client that omits it receives `WorkspaceRestricted` at the client construction
 boundary; the domain and wire always carry the selected value. Changing profiles
 requires the same explicit replacement frontier as changing runners.
 
@@ -1371,7 +1376,7 @@ workspace, because the credential belongs to the session's work rather than to a
 clone ([session composition](#session-composition));
 [runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
 owns the configuration meaning of the optional repository profile. Why: a
-silently inferred credential is an authorization the owner never granted, and
+silently inferred credential is an authorization the user never granted, and
 refusing to guess is the only behavior that keeps the grant record a truthful
 statement of intent.
 
@@ -1421,7 +1426,7 @@ of immutable grant audit evidence is rejected. Lease insertion joins the current
 unrevoked grant and exact tool/profile pair atomically with dispatch
 authorization. Durable admission requires provenance matching that stored
 placement-policy result: `Automatic` requires policy-derived automatic approval,
-and `SessionPolicy` requires an exact owner confirmation. The daemon-local
+and `SessionPolicy` requires an exact user confirmation. The daemon-local
 dangerous blanket is never accepted for runner insertion, including a direct
 lease-row insert (INV-035, INV-045).
 
@@ -1457,8 +1462,8 @@ workspace can delete it, and a runner that is replaced, revoked, or dead simply
 leaves its workspace on disk: no cleanup authority resumes for a retired
 identity, and no mechanism transfers ownership of an existing clone to a
 successor. The system records the abandoned clone through the existing startup
-workspace-leak report, which the owner can read, and stops there. Reclaiming
-that disk is an operator and tooling concern — periodic cleanup jobs, added per
+workspace-leak report, which the user can read, and stops there. Reclaiming that
+disk is an operator and tooling concern — periodic cleanup jobs, added per
 backend over time — and is deliberately outside this contract. Why: making
 cleanup a runner obligation turned every loss-based replacement into a state the
 design could reach and not leave, while the alternative costs only disk — the

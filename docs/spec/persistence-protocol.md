@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
@@ -21,7 +24,8 @@ storage version four were verified through PR #311
 (`agent/session-templates-spec`); and the context-compaction transaction and
 lock inventory were verified against PR #314
 (`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
-was verified against this PR (`agent/domain-cleanup`). This page covers the
+was verified against this PR (`agent/domain-cleanup`); the session-plan event
+sequence was verified against this PR (`agent/plan-tool`). This page covers the
 Postgres representation in `crates/persistence` (source and migrations),
 migration discipline, durable command storage and replay equality, the
 fail-closed reconstitution boundary, the lock protocol, pending-steering durable
@@ -108,11 +112,14 @@ triggers, locks, and races described below against a pinned Postgres image.
 ## Relational representation
 
 Storage is a normalized, purpose-specific relational schema of current-state
-rows and append-only immutable facts. There is no event store: the guarded row
-is the durable statement of record, and no state is rebuilt by replaying events
-(INV-005). Why: the database-level invariants (INV-009, INV-012) are declarative
-constraints over current-state rows; an event log would move them back into
-projection code.
+rows and append-only immutable facts. There is no general-purpose event store:
+outside session plans, the guarded row is the durable statement of record and
+current state is not rebuilt by replaying events (INV-005). Session plans are
+the deliberate exception verified against this PR (`agent/plan-tool`): their
+durable statement of record is the session-local append-only event sequence, and
+the current plan is its checked fold. Why: database-level invariants (INV-009,
+INV-012) stay declarative over current-state rows, while plan history is itself
+retained product evidence rather than an implementation log.
 
 Implemented table families (across the forward-only migrations):
 
@@ -153,6 +160,10 @@ Implemented table families (across the forward-only migrations):
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
+- `session_plan_event`, whose session-local positive ordinal sequence retains
+  entry creation, text revision, and status change with exact trusted
+  tool-dispatch provenance, plus trigger-maintained `session_plan_head`, which
+  certifies the complete validated prefix for bounded current reads; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -220,7 +231,7 @@ Representation rules, all enforced in the schema:
   session seed projections, metadata replacement receipts, and every existing
   historical fact. Metadata receipt satellites must be inserted before their
   deferrable parent record; their `BEFORE INSERT` triggers lock the existing
-  owner-global command claim, require that claim, and reject insertion once the
+  user-global command claim, require that claim, and reject insertion once the
   parent seals the receipt. The parent and both receipt satellites also reject
   `TRUNCATE`, which does not invoke row-level delete triggers. Mutable lifecycle
   tables carry guard triggers instead: `turn_lifecycle` rows must be inserted
@@ -387,7 +398,7 @@ The claim protocol, structural replay equality, and conflicting-reuse semantics
 are owned by [identity-and-commands](identity-and-commands.md); this section
 states only their storage representation and adapter mechanics.
 
-One append-only, owner-global `durable_command` registry claims every command
+One append-only, user-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
@@ -440,12 +451,12 @@ locked current state inside the claim transaction, while `CreateSession` — whi
 has no current session state to lock — arrives as an already-prepared
 `PreparedCreateSession` value and is inserted after the claim
 (`create_session.rs`). Authoritative rejections claim the identifier and commit
-their typed record exactly as applied results do. Owner-specified pre-claim
+their typed record exactly as applied results do. User-specified pre-claim
 admission errors are different: after registry inspection, a missing
 conversation named by the selected imported frontier or a boundary absent from
 that conversation returns without inserting a claim or typed record. Replay
 resolution — reconstruct the recorded command, compare structurally, return the
-recorded result or `ConflictingReuse` — follows the owner page's contract.
+recorded result or `ConflictingReuse` — follows the owning page's contract.
 
 `load` operations return `None` only for an unseen identifier; a claimed row
 that cannot be reconstructed is corruption, never an unclaimed identifier.
@@ -453,15 +464,21 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Two explicit lock sites live in the
-schema instead:
+`crates/persistence/src/lock_inventory.rs`. Five explicit lock statements live
+in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
   `accepted_input` insert reaches commit; and
 - the metadata receipt-satellite insert trigger (migration `202607260101`) takes
   `FOR UPDATE` on the already-claimed `durable_command` row before it checks
-  whether the typed receipt parent has sealed the command.
+  whether the typed receipt parent has sealed the command;
+- `next_session_plan_event_ordinal` (migration `202608020011`) takes
+  `FOR NO KEY UPDATE` on the plan's session before reading its certified head;
+  and
+- the session-plan append trigger in that migration reacquires the session
+  `FOR NO KEY UPDATE`, then takes `FOR SHARE` on the exact active `plan_write`
+  attempt while authenticating its request payload.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -476,7 +493,7 @@ Locks per transaction, in acquisition order:
   append-only, so complete loading and boundary resolution need no mutable-state
   lock. Semantic-entry candidates are requested only after the resulting checked
   prefix fixes their cardinality.
-- **ContextCompaction**: after claiming an unseen owner-global command,
+- **ContextCompaction**: after claiming an unseen user-global command,
   preparation locks the target `session_scheduler` row `FOR UPDATE` and then the
   current-defaults pointer `FOR UPDATE` before reading defaults, turn, frontier,
   and existing compaction state. Holding the scheduler lock through boundary
@@ -506,11 +523,11 @@ Locks per transaction, in acquisition order:
   existence is checked with a bare `EXISTS`). The session row is locked only
   `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
   `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
-- **Tool-loop transactions** (owner decision, attempt prepare, attempt
+- **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
   the `session_scheduler` row `FOR UPDATE` is the first and only explicit lock.
-  An unseen decision command first claims the owner-global registry; after
+  An unseen decision command first claims the user-global registry; after
   resolving the request's owning session it takes that scheduler lock before
   reading or mutating the active tool batch. A replay resolves entirely from the
   command registry and receipt and takes no lifecycle lock. Guarded
@@ -533,6 +550,15 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
+- **SessionPlan append**: `next_session_plan_event_ordinal` first locks the
+  session row `FOR NO KEY UPDATE` and reads the trigger-maintained head. The
+  adapter then uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the
+  exact active tool attempt `FOR SHARE` while authenticating its request. The
+  insert trigger reacquires those same locks in session-then-attempt order,
+  validates the complete new event and its predecessor, and only then advances
+  `session_plan_head`; the head update's row lock is therefore last. A
+  repeatable-read plan read takes no explicit lock and compares that certified
+  head with the indexed latest event before opening its bounded projections.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or
@@ -540,12 +566,12 @@ Locks per transaction, in acquisition order:
   connection/loss heads in runner-identity order; current registration head;
   placement; current credential grant; lease; operation-failure evidence after
   its correlated operation; and only then semantic-frontier and turn rows. A
-  durable owner-command claim precedes this subsequence.
+  durable user-command claim precedes this subsequence.
 - **Runner enrollment and registration**: the current enrollment or pending
   replacement-request head is locked first, followed by the relevant runner
   heads in runner-identity order and then the current registration head.
   Activating a pending replacement retires the old enrollment, persists the
-  issued successor identities and registration, and installs the owner-command
+  issued successor identities and registration, and installs the user-command
   effect in one transaction. Deployment-scoped promotion
   (`promote_pending_runner`) uses that same subsequence, takes no
   `session_scheduler`, placement, grant, or lease lock because it changes none
