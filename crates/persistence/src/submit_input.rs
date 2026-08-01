@@ -1398,7 +1398,7 @@ pub(crate) async fn load_scheduling_projection(
             if let Some(accepting_command) = accepting_command {
                 if goal_generation.is_some() {
                     return Err(
-                        SubmitInputCorruption::Inconsistent("scheduling input ownership").into(),
+                        SubmitInputCorruption::Inconsistent("scheduling input correlation").into(),
                     );
                 }
                 let accepting_command =
