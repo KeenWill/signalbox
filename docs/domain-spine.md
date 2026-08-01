@@ -3328,6 +3328,7 @@ pub enum DangerousToolAutoApproval {
 pub enum ToolPermissionDefault {
     Auto,
     Confirm,
+    AlwaysConfirm,
 }
 pub enum ToolApprovalPosture {
     Auto,
@@ -3421,6 +3422,7 @@ pub struct ToolApprovalResolutionReconstitutionError { /* private */ }
 // accessors: input(), into_input()
 pub enum InitialToolApproval {
     Confirm,
+    AlwaysConfirm,
     Human,
     Delegated,
     PolicyAuto,

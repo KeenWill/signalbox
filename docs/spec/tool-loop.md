@@ -20,24 +20,24 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
-at this foundation proposal extends the same laws to the runner locus. This page
-owns logical tool requests, approval policy and decisions, physical tool
-attempts, result admission, intra-turn continuation, crash classification, the
-compiled registry, and the daemon-local catalog. Turn and attempt lifecycle law
-lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entry vocabulary in
-[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
-provider translation in [model-call-execution](model-call-execution.md);
-durable-command identity in [identity-and-commands](identity-and-commands.md);
-and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant test index](../invariants.md). The The
-approval-delegation stack rooted at this foundation proposal adds frozen
-per-tool postures, recorded judge calls, and typed decision provenance; these
-paragraphs become verified only with its child pull requests.
-
-runner-locus paragraphs in this page are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests.
+at this foundation proposal extends the same laws to the runner locus. The
+non-overridable explicit-approval posture is verified through PR #366
+(`agent/exec-tools`). This page owns logical tool requests, approval policy and
+decisions, physical tool attempts, result admission, intra-turn continuation,
+crash classification, the compiled registry, and the daemon-local catalog. Turn
+and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
+model-call staging and provider translation in
+[model-call-execution](model-call-execution.md); durable-command identity in
+[identity-and-commands](identity-and-commands.md); and relational mechanics in
+[persistence-protocol](persistence-protocol.md). Invariant tags cite
+[the invariant test index](../invariants.md). The runner-locus paragraphs in
+this page are the foundation proposal at the bottom of their implementing stack
+and become verified only with those child pull requests. The approval-delegation
+stack rooted at this foundation proposal adds frozen per-tool postures, recorded
+judge calls, and typed decision provenance; those paragraphs become verified
+only with its child pull requests.
 
 ## Intra-turn rounds and request batches
 
@@ -105,12 +105,16 @@ policy has no decider or rationale. Neither automated path can claim user agency
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
 or `Human`. The selected posture is frozen into every resulting request. An
-explicit posture is authoritative: `Auto` records `PolicyAuto`, `Delegated`
-parks for a judge, and `Human` parks for the user even when the session blanket
-would otherwise approve. When the mapping omits the posture, the existing
-precedence below is unchanged.
+`AlwaysConfirm` permission remains human-only regardless of that mapping or the
+session blanket. For every other definition, an explicit posture is
+authoritative: `Auto` records `PolicyAuto`, `Delegated` parks for a judge, and
+`Human` parks for the user even when the session blanket would otherwise
+approve. When the mapping omits the posture, the existing precedence below is
+unchanged.
 
-Daemon-local execution keeps this precedence:
+Daemon-local execution first leaves an `AlwaysConfirm` declaration undecided;
+the dangerous blanket cannot override that posture. All other declarations keep
+this precedence:
 
 1. the frozen session posture `DangerousToolAutoApproval::ApproveAll`;
 2. the registry default (`Auto` or `Confirm`); then
@@ -208,9 +212,9 @@ intact.
 
 The application `ToolCatalog` port supplies immutable daemon-local
 `ToolDefinition` values: name, model-facing description, argument JSON Schema,
-permission default (`Auto` or `Confirm`), optional approval posture (`Auto`,
-`Delegated`, or `Human`), and the stored two-class crash classification used by
-the implemented local attempt machinery.
+permission default (`Auto`, `Confirm`, or `AlwaysConfirm`), optional approval
+posture (`Auto`, `Delegated`, or `Human`), and the stored two-class crash
+classification used by the implemented local attempt machinery.
 
 The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
 per runner-advertisable name. It carries a required checked model-facing

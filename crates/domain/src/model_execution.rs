@@ -3838,7 +3838,7 @@ fn assemble_tool_round(
                 if !used_entries.insert(entry) || !used_requests.insert(request) {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
-                if !initial_approval_matches_session(approval, dangerous_tool_auto_approval) {
+                if !initial_tool_approval_matches_posture(dangerous_tool_auto_approval, approval) {
                     return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
                 let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
@@ -3913,14 +3913,15 @@ fn assemble_tool_round(
     })
 }
 
-fn initial_approval_matches_session(
+fn initial_tool_approval_matches_posture(
+    posture: DangerousToolAutoApproval,
     approval: InitialToolApproval,
-    dangerous_tool_auto_approval: DangerousToolAutoApproval,
 ) -> bool {
-    match dangerous_tool_auto_approval {
+    match posture {
         DangerousToolAutoApproval::ApproveAll => matches!(
             approval,
-            InitialToolApproval::SessionBlanket
+            InitialToolApproval::AlwaysConfirm
+                | InitialToolApproval::SessionBlanket
                 | InitialToolApproval::PolicyAuto
                 | InitialToolApproval::Human
                 | InitialToolApproval::Delegated
@@ -3997,7 +3998,7 @@ fn assemble_stopped_tool_round(
                 {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
-                if !initial_approval_matches_session(approval, dangerous_tool_auto_approval) {
+                if !initial_tool_approval_matches_posture(dangerous_tool_auto_approval, approval) {
                     return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
                 let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
@@ -4499,6 +4500,46 @@ mod tests {
             turn_attempt_id, turn_id,
         },
     };
+
+    #[test]
+    fn always_confirm_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::AlwaysConfirm,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::SessionBlanket,
+        ));
+        assert!(!initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Confirm,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::PolicyAuto,
+        ));
+    }
+
+    #[test]
+    fn session_blanket_approval_is_rejected_when_blanket_posture_is_disabled() {
+        assert!(!initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::SessionBlanket,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::AlwaysConfirm,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Confirm,
+        ));
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::PolicyAuto,
+        ));
+    }
 
     fn active_execution() -> ModelCallExecution {
         let session_id = session_id(1);
@@ -6916,18 +6957,6 @@ mod tests {
         .expect_err("immutable request identity cannot be reused");
 
         assert_eq!(error, ModelCallClosureError::FrontierDerivationFailed);
-    }
-
-    #[test]
-    fn initial_posture_correlation_admits_explicit_auto_but_not_false_blanket() {
-        assert!(initial_approval_matches_session(
-            InitialToolApproval::PolicyAuto,
-            DangerousToolAutoApproval::ApproveAll
-        ));
-        assert!(!initial_approval_matches_session(
-            InitialToolApproval::SessionBlanket,
-            DangerousToolAutoApproval::Disabled
-        ));
     }
 
     /// S02 / S15 / INV-006 / INV-009: an all-auto batch creates one fresh

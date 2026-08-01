@@ -535,6 +535,8 @@ pub enum ToolPermissionDefault {
     Auto,
     /// A user decision is required.
     Confirm,
+    /// A user decision is required even under blanket automatic approval.
+    AlwaysConfirm,
 }
 
 /// Deployment-selected approval authority for one exact tool.
@@ -1059,6 +1061,8 @@ impl ToolApprovalResolutionReconstitutionError {
 pub enum InitialToolApproval {
     /// Leave the request undecided and fail closed.
     Confirm,
+    /// Leave an `AlwaysConfirm` request undecided despite blanket posture.
+    AlwaysConfirm,
     /// Leave the request parked for an explicitly human-only decision.
     Human,
     /// Leave the request parked for a delegate judge.
@@ -1072,7 +1076,7 @@ pub enum InitialToolApproval {
 impl InitialToolApproval {
     pub(crate) const fn resolution(self, request: ToolRequestId) -> Option<ToolApprovalResolution> {
         match self {
-            Self::Confirm | Self::Human | Self::Delegated => None,
+            Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => None,
             Self::PolicyAuto => Some(ToolApprovalResolution::policy_auto(request)),
             Self::SessionBlanket => Some(ToolApprovalResolution::session_blanket(request)),
         }
@@ -1080,7 +1084,7 @@ impl InitialToolApproval {
 
     pub(crate) const fn posture(self) -> ToolApprovalPosture {
         match self {
-            Self::Confirm | Self::Human => ToolApprovalPosture::Human,
+            Self::Confirm | Self::AlwaysConfirm | Self::Human => ToolApprovalPosture::Human,
             Self::Delegated => ToolApprovalPosture::Delegated,
             Self::PolicyAuto | Self::SessionBlanket => ToolApprovalPosture::Auto,
         }
@@ -1088,7 +1092,10 @@ impl InitialToolApproval {
 
     /// Returns whether this outcome leaves an explicit decision outstanding.
     pub const fn requires_decision(self) -> bool {
-        matches!(self, Self::Confirm | Self::Human | Self::Delegated)
+        matches!(
+            self,
+            Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated
+        )
     }
 }
 
