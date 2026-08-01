@@ -1189,10 +1189,16 @@ pub(crate) async fn load_scheduling_projection(
         "SELECT
             (SELECT count(*)
                FROM queued_input_origin
-              WHERE session_id = $1),
+              WHERE session_id = $1
+                AND goal_turn_is_runtime_relevant(
+                    session_id, turn_id
+                )),
             (SELECT count(*)
                FROM turn_lifecycle
-              WHERE session_id = $1)",
+              WHERE session_id = $1
+                AND goal_turn_is_runtime_relevant(
+                    session_id, turn_id
+                ))",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_one(&mut *connection)
@@ -1304,6 +1310,9 @@ pub(crate) async fn load_scheduling_projection(
                 turn.terminal_attempt_id
               )
         WHERE queued.session_id = $1
+          AND goal_turn_is_runtime_relevant(
+                queued.session_id, queued.turn_id
+          )
         ORDER BY queued.acceptance_position",
     )
     .bind(session_id_to_uuid(session_id))
