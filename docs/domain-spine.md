@@ -2008,6 +2008,12 @@ impl SessionAcceptanceTailEntryReconstitutionInput {
         position: SessionInputPosition,
         delivery: DeliveryRequest,
     ) -> Self;
+    pub const fn retired_goal_origin(
+        session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        position: SessionInputPosition,
+        delivery: DeliveryRequest,
+    ) -> Self;
     // accessors: session(), accepted_input(), position(), delivery()
 }
 

@@ -51,7 +51,7 @@ use signalbox_domain::{
     SubmitInputTurnOriginReconstitutionInput, TerminalAttemptEndReconstitutionInput, ToolRequestId,
     TranscriptAncestry, TurnAttemptId, TurnId, UnstoppedAttemptDisposition, UserContent,
 };
-use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
+use sqlx::{FromRow, PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
     command_registry::{
@@ -84,6 +84,12 @@ use crate::{
 const STORAGE_VERSION: i16 = 1;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
+
+#[derive(FromRow)]
+struct StoredSchedulingInventoryCounts {
+    queue_count: i64,
+    lifecycle_count: i64,
+}
 
 pub(crate) type StoredTurnOriginKey = (Uuid, Uuid);
 
@@ -1185,25 +1191,25 @@ pub(crate) async fn load_scheduling_projection(
     } else {
         None
     };
-    let (queue_count, lifecycle_count): (i64, i64) = sqlx::query_as(
+    let inventory = sqlx::query_as::<_, StoredSchedulingInventoryCounts>(
         "SELECT
             (SELECT count(*)
                FROM queued_input_origin
               WHERE session_id = $1
                 AND goal_turn_is_runtime_relevant(
                     session_id, turn_id
-                )),
+                )) AS queue_count,
             (SELECT count(*)
                FROM turn_lifecycle
               WHERE session_id = $1
                 AND goal_turn_is_runtime_relevant(
                     session_id, turn_id
-                ))",
+                )) AS lifecycle_count",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_one(&mut *connection)
     .await?;
-    if queue_count != lifecycle_count {
+    if inventory.queue_count != inventory.lifecycle_count {
         return Err(
             SubmitInputCorruption::Inconsistent("complete scheduling turn inventory").into(),
         );
@@ -3693,11 +3699,14 @@ async fn load_active_acceptance_tail(
             model_override_kind,
             replacement_model_kind,
             replacement_direct_model_selection_id,
-            replacement_model_alias_id
-           FROM accepted_input
-          WHERE session_id = $1
-            AND acceptance_position >= $2
-          ORDER BY acceptance_position",
+            replacement_model_alias_id,
+            NOT goal_turn_is_runtime_relevant(
+                accepted.session_id, accepted.origin_turn_id
+            ) AS retired_goal_origin
+           FROM accepted_input AS accepted
+          WHERE accepted.session_id = $1
+            AND accepted.acceptance_position >= $2
+          ORDER BY accepted.acceptance_position",
     )
     .bind(session_id_to_uuid(session))
     .bind(input_position_to_numeric(
@@ -3780,12 +3789,23 @@ async fn load_active_acceptance_tail(
                 .into());
             }
         };
-        entries.push(SessionAcceptanceTailEntryReconstitutionInput::new(
-            entry_session,
-            AcceptedInputLifecycle::new(accepted_input, disposition),
-            position,
-            delivery,
-        ));
+        let lifecycle = AcceptedInputLifecycle::new(accepted_input, disposition);
+        let entry = if required(&row, "retired_goal_origin")? {
+            SessionAcceptanceTailEntryReconstitutionInput::retired_goal_origin(
+                entry_session,
+                lifecycle,
+                position,
+                delivery,
+            )
+        } else {
+            SessionAcceptanceTailEntryReconstitutionInput::new(
+                entry_session,
+                lifecycle,
+                position,
+                delivery,
+            )
+        };
+        entries.push(entry);
     }
 
     let observed_last_position = entries

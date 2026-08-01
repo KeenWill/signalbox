@@ -265,6 +265,20 @@ async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
         )
         .await?;
 
+    let accepted_events: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM input_accepted_outbox_event
+          WHERE session_id = $1
+            AND accepted_input_id = $2
+            AND turn_id = $3",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(candidates.accepted_input().into_uuid())
+    .bind(candidates.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(accepted_events, 1);
+
     let activation = StartEligibleTurnRepository::new(pool.clone())
         .handle(
             session(SESSION),
@@ -682,6 +696,98 @@ async fn inv048_stop_retires_queued_work_without_blocking_reattach() -> Result<(
     Ok(())
 }
 
+/// INV-048: retiring a queued replacement keeps its immutable tail position
+/// while excluding its turn from runtime scheduling.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let active = turn_candidates(0xb61);
+    repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the original task")),
+            ),
+            Some(active),
+            |_| None,
+        )
+        .await?;
+    assert_eq!(activate_goal_turn(&pool, 0xd61).await?, active.turn());
+    repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(SUPERSEDE_COMMAND),
+                session(SESSION),
+                GoalUserAction::Supersede(statement("finish the replacement task")),
+            ),
+            Some(turn_candidates(0xb62)),
+            |_| None,
+        )
+        .await?;
+    repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(STOP_COMMAND),
+                session(SESSION),
+                GoalUserAction::Stop,
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            SubmitInput::new(
+                command(STEER_COMMAND),
+                session(SESSION),
+                UserContent::try_text(String::from("steer the still-active original turn"))
+                    .expect("fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: active.turn(),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xe61)),
+            None,
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xf61)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xf62)),
+            ),
+            |_| panic!("steering cannot be reclassified while its source remains active"),
+            |_| {
+                panic!("steering cannot cancel a tool request without a terminal model observation")
+            },
+        )
+        .await?;
+    let pending_position: i64 = sqlx::query_scalar(
+        "SELECT acceptance_position::bigint FROM accepted_input
+          WHERE accepting_command_id = $1 AND disposition_kind = 'pending_steering'",
+    )
+    .bind(Uuid::from_u128(STEER_COMMAND))
+    .fetch_one(&pool)
+    .await?;
+    let replacement_runtime_relevant: bool =
+        sqlx::query_scalar("SELECT goal_turn_is_runtime_relevant($1, $2)")
+            .bind(Uuid::from_u128(SESSION))
+            .bind(turn_candidates(0xb62).turn().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(pending_position, 3);
+    assert!(!replacement_runtime_relevant);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-048: an alias absent at acceptance is a replayable command rejection,
 /// not repository corruption or a partially commissioned lineage.
 #[tokio::test(flavor = "multi_thread")]
@@ -801,6 +907,65 @@ async fn inv048_applied_receipt_cannot_cross_wire_another_command_event()
             .and_then(|database| database.code())
             .as_deref(),
         Some("23503")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: an applied goal command names only the event kind corresponding
+/// to its immutable operation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let mismatched = command(0x923);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'goal', 1, transaction_timestamp())",
+    )
+    .bind(mismatched.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, result_kind, result_event_ordinal)
+         VALUES ($1, 'goal', 1, $2, 'stop', 'applied', 1)",
+    )
+    .bind(mismatched.into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, statement, user_command_id)
+         VALUES ($1, 1, 1, 'commissioned', $2, $3)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind("finish the mismatched task")
+    .bind(mismatched.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("mismatched goal command operation and event kind must fail at commit");
+    let database = error
+        .as_database_error()
+        .expect("deferred kind correlation reports a database constraint");
+
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(
+        database.constraint(),
+        Some("goal_command_applied_event_kind")
     );
 
     pool.close().await;

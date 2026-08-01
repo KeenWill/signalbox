@@ -597,6 +597,39 @@ ALTER TABLE goal_command
         REFERENCES goal_event(user_command_id, session_id, event_ordinal)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
+CREATE FUNCTION require_goal_command_applied_event_kind()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE applied_event_kind text;
+BEGIN
+    IF NEW.result_kind <> 'applied' THEN
+        RETURN NULL;
+    END IF;
+    SELECT event_kind INTO applied_event_kind
+      FROM goal_event
+     WHERE session_id = NEW.session_id
+       AND event_ordinal = NEW.result_event_ordinal;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF NOT (
+        (NEW.operation_kind = 'attach' AND applied_event_kind = 'commissioned')
+        OR (NEW.operation_kind = 'resume' AND applied_event_kind = 'resumed')
+        OR (NEW.operation_kind = 'stop' AND applied_event_kind = 'user_stopped')
+        OR (NEW.operation_kind = 'supersede' AND applied_event_kind = 'superseded')
+    ) THEN
+        RAISE EXCEPTION 'goal command operation disagrees with applied event kind'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'goal_command_applied_event_kind';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER goal_command_applied_event_kind
+    AFTER INSERT ON goal_command
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_goal_command_applied_event_kind();
+
 CREATE FUNCTION require_goal_event_continuity()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
