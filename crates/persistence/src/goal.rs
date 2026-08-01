@@ -322,6 +322,49 @@ impl GoalRepository {
         Ok(GoalCommandHandlingOutcome::Recorded(result))
     }
 
+    /// Loads the exact assistant-text part immediately preceding a correlated
+    /// `goal_declare` request when it is the final part of the provider response.
+    pub async fn load_model_declaration_text(
+        &self,
+        session: SessionId,
+        provenance: GoalModelProvenance,
+    ) -> Result<Option<String>, GoalRepositoryError> {
+        let text = sqlx::query_scalar::<_, String>(
+            "SELECT declaration.assistant_text_value
+               FROM tool_request AS request
+               JOIN semantic_transcript_entry AS tool_use
+                 ON tool_use.source_session_id = request.session_id
+                AND tool_use.producing_model_call_id = request.producing_model_call_id
+                AND tool_use.payload_kind = 'assistant_tool_use'
+                AND tool_use.assistant_tool_request_id = request.request_id
+               JOIN semantic_transcript_entry AS declaration
+                 ON declaration.source_session_id = tool_use.source_session_id
+                AND declaration.producing_model_call_id = tool_use.producing_model_call_id
+                AND declaration.payload_kind = 'assistant_text'
+                AND declaration.assistant_response_part_ordinal + 1 =
+                    tool_use.assistant_response_part_ordinal
+              WHERE request.request_id = $1
+                AND request.session_id = $2
+                AND request.turn_id = $3
+                AND request.tool_name = 'goal_declare'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM semantic_transcript_entry AS later_part
+                     WHERE later_part.source_session_id = tool_use.source_session_id
+                       AND later_part.producing_model_call_id =
+                           tool_use.producing_model_call_id
+                       AND later_part.assistant_response_part_ordinal >
+                           tool_use.assistant_response_part_ordinal
+                )",
+        )
+        .bind(tool_request_id_to_uuid(provenance.tool_request()))
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(provenance.turn()))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(text)
+    }
+
     /// Loads one complete durable user-command receipt.
     pub async fn load_command(
         &self,

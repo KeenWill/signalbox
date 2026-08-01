@@ -60,13 +60,15 @@ through the session-scoped goal declaration tool. The declaration has no
 caller-supplied session identity. Trusted tool-dispatch correlation supplies the
 invoking session, turn, and tool-request identity, and persistence requires that
 exact triple to name the request. The request must name `goal_declare`, carry
-canonical JSON, and its exact transition, reason, need, or report values must
-match the event it causes. A request from another tool or with different
-arguments cannot commit. A tool-request identity can cause at most one goal
-declaration event. Only the current goal turn may declare; an otherwise valid
-request from an older turn returns `NotCurrentGoalTurn` without appending an
-event. An achieved event stores the exact final report and derives its
-transcript reference from that same invocation.
+canonical transition-and-reason JSON, be immediately preceded by one
+assistant-text part in the same model response, and be that response's final
+part. That text is the exact need or report and must match the event the request
+causes. A request from another tool, with different arguments, without the
+adjacent matching text, or followed by another response part cannot commit. Only
+the current goal turn may declare; an otherwise valid request from an older turn
+returns `NotCurrentGoalTurn` without appending an event. A tool-request identity
+can cause at most one goal declaration event. An achieved event stores the exact
+final report and derives its transcript reference from that same invocation.
 
 **Implemented behavior.** Model-selectable blocked reasons are
 `user_input_required`, `external_change_required`, and `authorization_required`.
@@ -139,11 +141,12 @@ to exactly one queued goal turn, whose requested and frozen configuration
 derives from its exact defaults epoch. Model-declaration requests and
 scheduler-failure turns are single-use; composite foreign keys enforce
 user-command, model-invocation, and scheduler-turn provenance, while deferred
-constraints bind each model event to the current goal turn and exact
-`goal_declare` name and canonical arguments of its request, and bind every
-scheduler failure event to the current unsuccessfully terminal goal turn. Loads
-replay complete rows through the domain aggregate rather than reading a mutable
-current-state projection (INV-048).
+constraints bind each model event to the current goal turn, the exact
+`goal_declare` name and canonical arguments of its request, the immediately
+preceding assistant-text part, and its final position in the model response.
+They bind every scheduler failure event to the current unsuccessfully terminal
+goal turn. Loads replay complete rows through the domain aggregate rather than
+reading a mutable current-state projection (INV-048).
 
 **Implemented behavior.** The process protocol exposes attach, show, resume,
 stop, and supersede requests. Show returns the current generation and complete

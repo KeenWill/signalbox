@@ -899,12 +899,12 @@ protocol scope). Implemented storage:
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
   `session_created_outbox_event`, `input_accepted_outbox_event`,
-  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
-  `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
-  `context_compacted_outbox_event`, `turn_completed_outbox_event`,
-  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
-  `turn_reconciliation_required_outbox_event`, and
-  `runner_state_transition_outbox_event` — with a deferred trigger requiring
+  `goal_turn_retired_outbox_event`, `turn_activated_outbox_event`,
+  `turn_failed_outbox_event`, `model_call_transition_outbox_event`,
+  `tool_batch_transition_outbox_event`, `context_compacted_outbox_event`,
+  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
+  `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
+  and `runner_state_transition_outbox_event` — with a deferred trigger requiring
   exactly one typed record per header. A runner-transition record carries the
   affected runner, the positive placement revision, the sandbox profile, one
   closed transition state, and the relocation facts that state requires, so a
@@ -952,7 +952,11 @@ successor turn and appends that correlated `input_accepted`; an applied
 stopped issued work becomes ambiguous; terminal reclassification of pending
 steering appends its correlated `input_accepted`. Goal-owned turn creation
 appends the same correlated `input_accepted`; dispatch authenticates its exact
-`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command.
+`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command. A
+stop or supersede that makes a queued goal turn ineligible appends
+`goal_turn_retired` in the same transaction; supersede appends retirement before
+the replacement `input_accepted`. The typed record names the exact queued,
+now-ineligible `goal_turn`, and dispatch rechecks that durable correlation.
 Model-call state transitions append `model_call_transition`, tool-round creation
 appends `tool_batch_transition { proposed }`, all-resolved result projection
 appends `tool_batch_transition { results_projected }`, and an external-effect
