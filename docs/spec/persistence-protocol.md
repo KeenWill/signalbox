@@ -159,7 +159,8 @@ Implemented table families (across the forward-only migrations):
   daemon-owned session advisory pool fences;
 - `session_plan_event`, whose session-local positive ordinal sequence retains
   entry creation, text revision, and status change with exact trusted
-  tool-dispatch provenance; and
+  tool-dispatch provenance, plus trigger-maintained `session_plan_head`, which
+  certifies the complete validated prefix for bounded current reads; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -460,15 +461,21 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Two explicit lock sites live in the
-schema instead:
+`crates/persistence/src/lock_inventory.rs`. Five explicit lock statements live
+in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
   `accepted_input` insert reaches commit; and
 - the metadata receipt-satellite insert trigger (migration `202607260101`) takes
   `FOR UPDATE` on the already-claimed `durable_command` row before it checks
-  whether the typed receipt parent has sealed the command.
+  whether the typed receipt parent has sealed the command;
+- `next_session_plan_event_ordinal` (migration `202608020011`) takes
+  `FOR NO KEY UPDATE` on the plan's session before reading its certified head;
+  and
+- the session-plan append trigger in that migration reacquires the session
+  `FOR NO KEY UPDATE`, then takes `FOR SHARE` on the exact active `plan_write`
+  attempt while authenticating its request payload.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -540,6 +547,15 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
+- **SessionPlan append**: `next_session_plan_event_ordinal` first locks the
+  session row `FOR NO KEY UPDATE` and reads the trigger-maintained head. The
+  adapter then uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the
+  exact active tool attempt `FOR SHARE` while authenticating its request. The
+  insert trigger reacquires those same locks in session-then-attempt order,
+  validates the complete new event and its predecessor, and only then advances
+  `session_plan_head`; the head update's row lock is therefore last. A
+  repeatable-read plan read takes no explicit lock and compares that certified
+  head with the indexed latest event before opening its bounded projections.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or

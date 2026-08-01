@@ -6,6 +6,11 @@ CREATE TABLE session_plan_event (
     session_id uuid NOT NULL REFERENCES session(session_id) ON DELETE RESTRICT,
     event_ordinal numeric(20, 0) NOT NULL
         CHECK (event_ordinal BETWEEN 1 AND 18446744073709551615),
+    prior_event_ordinal numeric(20, 0)
+        CHECK (
+            prior_event_ordinal IS NULL
+            OR prior_event_ordinal BETWEEN 1 AND 18446744073709551615
+        ),
     event_kind text NOT NULL
         CONSTRAINT session_plan_event_kind_closed
         CHECK (event_kind IN ('created', 'text_revised', 'status_changed')),
@@ -45,6 +50,16 @@ CREATE TABLE session_plan_event (
     FOREIGN KEY (provenance_attempt_id, provenance_turn_id, session_id)
         REFERENCES tool_attempt (attempt_id, turn_id, session_id)
         ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, prior_event_ordinal)
+        REFERENCES session_plan_event (session_id, event_ordinal)
+        ON DELETE RESTRICT,
+    CONSTRAINT session_plan_event_predecessor_shape CHECK (
+        (event_ordinal = 1 AND prior_event_ordinal IS NULL)
+        OR (
+            event_ordinal > 1
+            AND prior_event_ordinal = event_ordinal - 1
+        )
+    ),
     CONSTRAINT session_plan_event_shape CHECK (
         (
             event_kind = 'created'
@@ -69,6 +84,19 @@ CREATE TABLE session_plan_event (
             AND entry_status IS NOT NULL
         )
     )
+);
+
+-- This mutable head certifies the complete contiguous prefix admitted by the
+-- append guard. Reads compare it with the indexed latest event instead of
+-- replaying an unbounded history to rediscover sequence integrity.
+CREATE TABLE session_plan_head (
+    session_id uuid PRIMARY KEY
+        REFERENCES session(session_id) ON DELETE RESTRICT,
+    event_ordinal numeric(20, 0) NOT NULL
+        CHECK (event_ordinal BETWEEN 1 AND 18446744073709551615),
+    FOREIGN KEY (session_id, event_ordinal)
+        REFERENCES session_plan_event (session_id, event_ordinal)
+        ON DELETE RESTRICT
 );
 
 CREATE FUNCTION session_plan_event_has_authority(candidate session_plan_event)
@@ -130,9 +158,9 @@ BEGIN
         RAISE EXCEPTION 'session plan event requires its owning session';
     END IF;
 
-    SELECT max(event_ordinal)
+    SELECT event_ordinal
       INTO latest_ordinal
-      FROM session_plan_event
+      FROM session_plan_head
      WHERE session_id = target_session_id;
     RETURN coalesce(latest_ordinal + 1, 1);
 END;
@@ -146,6 +174,14 @@ DECLARE
     latest_ordinal numeric(20, 0);
     target_kind text;
 BEGIN
+    PERFORM 1
+      FROM session
+     WHERE session_id = NEW.session_id
+       FOR NO KEY UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'session plan event requires its owning session';
+    END IF;
+
     PERFORM 1
       FROM tool_attempt AS attempt
       JOIN tool_request AS request
@@ -189,17 +225,9 @@ BEGIN
                     'session_plan_event_requires_active_plan_write_attempt';
     END IF;
 
-    PERFORM 1
-      FROM session
-     WHERE session_id = NEW.session_id
-       FOR NO KEY UPDATE;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'session plan event requires its owning session';
-    END IF;
-
-    SELECT max(event_ordinal)
+    SELECT event_ordinal
       INTO latest_ordinal
-      FROM session_plan_event
+      FROM session_plan_head
      WHERE session_id = NEW.session_id;
     IF (latest_ordinal IS NULL AND NEW.event_ordinal <> 1)
         OR (
@@ -208,6 +236,45 @@ BEGIN
         )
     THEN
         RAISE EXCEPTION 'session plan events must append by one ordinal';
+    END IF;
+
+    IF (NEW.event_ordinal = 1 AND NEW.prior_event_ordinal IS NOT NULL)
+        OR (
+            NEW.event_ordinal > 1
+            AND NEW.prior_event_ordinal IS DISTINCT FROM NEW.event_ordinal - 1
+        )
+        OR (
+            NEW.event_kind = 'created'
+            AND (
+                NEW.entry_ordinal IS DISTINCT FROM NEW.event_ordinal
+                OR NEW.entry_text IS NULL
+                OR char_length(NEW.entry_text) NOT BETWEEN 1 AND 4096
+                OR NEW.entry_status IS NOT NULL
+            )
+        )
+        OR (
+            NEW.event_kind = 'text_revised'
+            AND (
+                NEW.entry_ordinal >= NEW.event_ordinal
+                OR NEW.entry_text IS NULL
+                OR char_length(NEW.entry_text) NOT BETWEEN 1 AND 4096
+                OR NEW.entry_status IS NOT NULL
+            )
+        )
+        OR (
+            NEW.event_kind = 'status_changed'
+            AND (
+                NEW.entry_ordinal >= NEW.event_ordinal
+                OR NEW.entry_text IS NOT NULL
+                OR NEW.entry_status IS NULL
+                OR NEW.entry_status NOT IN (
+                    'pending', 'in_progress', 'completed', 'abandoned'
+                )
+            )
+        )
+        OR NEW.event_kind NOT IN ('created', 'text_revised', 'status_changed')
+    THEN
+        RAISE EXCEPTION 'session plan event has invalid certified shape';
     END IF;
 
     IF NEW.event_kind <> 'created' THEN
@@ -228,6 +295,47 @@ CREATE TRIGGER session_plan_event_append_guard
 BEFORE INSERT ON session_plan_event
 FOR EACH ROW EXECUTE FUNCTION guard_session_plan_event_append();
 
+CREATE FUNCTION advance_session_plan_head()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.event_ordinal = 1 THEN
+        INSERT INTO session_plan_head (session_id, event_ordinal)
+        VALUES (NEW.session_id, NEW.event_ordinal);
+    ELSE
+        UPDATE session_plan_head
+           SET event_ordinal = NEW.event_ordinal
+         WHERE session_id = NEW.session_id
+           AND event_ordinal = NEW.prior_event_ordinal;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'session plan head must advance by one ordinal';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER session_plan_event_advances_head
+AFTER INSERT ON session_plan_event
+FOR EACH ROW EXECUTE FUNCTION advance_session_plan_head();
+
+CREATE FUNCTION guard_session_plan_head_maintenance()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF pg_trigger_depth() < 2 THEN
+        RAISE EXCEPTION 'session plan head is trigger-maintained';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER session_plan_head_maintenance_guard
+BEFORE INSERT OR UPDATE ON session_plan_head
+FOR EACH ROW EXECUTE FUNCTION guard_session_plan_head_maintenance();
+
 CREATE FUNCTION reject_session_plan_event_rewrite()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -244,6 +352,23 @@ FOR EACH ROW EXECUTE FUNCTION reject_session_plan_event_rewrite();
 CREATE TRIGGER session_plan_event_rejects_truncate
 BEFORE TRUNCATE ON session_plan_event
 FOR EACH STATEMENT EXECUTE FUNCTION reject_session_plan_event_rewrite();
+
+CREATE FUNCTION reject_session_plan_head_rewrite()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'session plan head is trigger-maintained';
+END;
+$$;
+
+CREATE TRIGGER session_plan_head_immutable_identity
+BEFORE DELETE ON session_plan_head
+FOR EACH ROW EXECUTE FUNCTION reject_session_plan_head_rewrite();
+
+CREATE TRIGGER session_plan_head_rejects_truncate
+BEFORE TRUNCATE ON session_plan_head
+FOR EACH STATEMENT EXECUTE FUNCTION reject_session_plan_head_rewrite();
 
 CREATE INDEX session_plan_event_entry_history
     ON session_plan_event (session_id, entry_ordinal, event_ordinal);

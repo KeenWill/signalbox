@@ -16,7 +16,7 @@ use signalbox_tools_plan::{
 };
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
-use crate::{commit_failure_is_ambiguous, mapping};
+use crate::{commit_failure_is_ambiguous, lock_inventory, mapping};
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
 
@@ -60,72 +60,31 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
  ORDER BY created.event_ordinal
  LIMIT $3";
 
-const ACTIVE_APPEND_AUTHORITY_SQL: &str = "SELECT attempt.attempt_id
-  FROM tool_attempt AS attempt
-  JOIN tool_request AS request
-    ON request.request_id = attempt.request_id
- WHERE attempt.attempt_id = $1
-   AND attempt.request_id = $2
-   AND attempt.issuing_turn_attempt_id = $3
-   AND attempt.dispatch_generation = $4
-   AND attempt.turn_id = $5
-   AND attempt.session_id = $6
-   AND attempt.effect_class = 'external_effect'
-   AND attempt.state_kind = 'in_flight'
-   AND request.request_id = $2
-   AND request.session_id = $6
-   AND request.turn_id = $5
-   AND request.tool_name = 'plan_write'
-   AND request.arguments_kind = 'json'
-   AND request.arguments_text::jsonb =
-        CASE $7::text
-            WHEN 'created' THEN jsonb_build_object(
-                'kind', 'create',
-                'text', $9::text
-            )
-            WHEN 'text_revised' THEN jsonb_build_object(
-                'kind', 'revise',
-                'entry_id', $8::numeric,
-                'text', $9::text
-            )
-            WHEN 'status_changed' THEN jsonb_build_object(
-                'kind', 'set_status',
-                'entry_id', $8::numeric,
-                'status', $10::text
-            )
-        END
- FOR SHARE OF attempt";
-
 const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
   FROM session_plan_event
  WHERE session_id = $1
    AND event_kind NOT IN ('created', 'text_revised', 'status_changed')
  LIMIT 1";
 
-const INVALID_EVENT_SEQUENCE_SQL: &str = "WITH ordered AS (
-    SELECT event_ordinal,
-           lag(event_ordinal, 1, 0::numeric) OVER (ORDER BY event_ordinal) AS prior_ordinal
-      FROM session_plan_event
-     WHERE session_id = $1
-), invalid_ordinal AS (
-    SELECT 1
-      FROM ordered
-     WHERE event_ordinal <> prior_ordinal + 1
-     LIMIT 1
-), missing_creation AS (
-    SELECT 1
-      FROM session_plan_event AS mutation
-      LEFT JOIN session_plan_event AS creation
-        ON creation.session_id = mutation.session_id
-       AND creation.event_ordinal = mutation.entry_ordinal
-       AND creation.event_kind = 'created'
-     WHERE mutation.session_id = $1
-       AND mutation.event_kind IN ('text_revised', 'status_changed')
-       AND creation.event_ordinal IS NULL
-     LIMIT 1
-)
-SELECT EXISTS (SELECT 1 FROM invalid_ordinal)
-    OR EXISTS (SELECT 1 FROM missing_creation)";
+const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
+           WHEN head.event_ordinal IS NULL THEN latest.event_ordinal IS NOT NULL
+           ELSE latest.event_ordinal IS DISTINCT FROM head.event_ordinal
+                OR certified.event_ordinal IS NULL
+                OR NOT session_plan_event_has_authority(certified)
+       END
+  FROM (VALUES (1)) AS singleton(only)
+  LEFT JOIN session_plan_head AS head
+    ON head.session_id = $1
+  LEFT JOIN LATERAL (
+      SELECT event_ordinal
+        FROM session_plan_event
+       WHERE session_id = $1
+       ORDER BY event_ordinal DESC
+       LIMIT 1
+  ) AS latest ON TRUE
+  LEFT JOIN session_plan_event AS certified
+    ON certified.session_id = head.session_id
+   AND certified.event_ordinal = head.event_ordinal";
 
 const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
        event.entry_ordinal, event.entry_text, event.entry_status,
@@ -343,7 +302,7 @@ impl SessionPlanRepository {
             ))?;
         let encoded = EncodedDraft::new(next, request.draft());
         let correlation = request.provenance().correlation();
-        let authorized: Option<Uuid> = sqlx::query_scalar(ACTIVE_APPEND_AUTHORITY_SQL)
+        let authorized: Option<Uuid> = sqlx::query_scalar(lock_inventory::PLAN_APPEND_ATTEMPT)
             .bind(correlation.attempt().into_uuid())
             .bind(correlation.request().into_uuid())
             .bind(correlation.issuing_attempt().into_uuid())
@@ -383,16 +342,23 @@ impl SessionPlanRepository {
             }
         }
 
+        let prior = next
+            .as_u64()
+            .checked_sub(1)
+            .filter(|prior| *prior > 0)
+            .map(Decimal::from);
         sqlx::query(
             "INSERT INTO session_plan_event
-                (session_id, event_ordinal, event_kind, entry_ordinal,
+                (session_id, event_ordinal, prior_event_ordinal,
+                 event_kind, entry_ordinal,
                  entry_text, entry_status, provenance_turn_id,
                  provenance_issuing_turn_attempt_id, provenance_request_id,
                  provenance_attempt_id, provenance_dispatch_generation)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(request.session().into_uuid())
         .bind(Decimal::from(next.as_u64()))
+        .bind(prior)
         .bind(mapping::plan_event_kind_to_str(encoded.kind))
         .bind(Decimal::from(encoded.entry.as_u64()))
         .bind(encoded.text)
