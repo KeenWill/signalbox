@@ -37,8 +37,8 @@ use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
 use signalbox_tools_workspace::{
-    LocalWorkspaceFileSystem, WorkspaceEntryKind, WorkspaceFileSystem, WorkspaceResolveError,
-    WorkspaceRoot, WorkspaceRootError,
+    LocalWorkspaceFileSystem, WorkspaceEntryKind, WorkspaceFileBytes, WorkspaceFileSystem,
+    WorkspaceResolveError, WorkspaceRoot, WorkspaceRootError,
 };
 
 /// Repository status tool name.
@@ -76,6 +76,7 @@ const MAX_STAGE_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STAGE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REPOSITORY_CONFIG_BYTES: usize = 1024 * 1024;
 const MAX_IGNORE_FILE_BYTES: usize = 1024 * 1024;
+const MAX_ATTRIBUTE_FILE_BYTES: usize = 1024 * 1024;
 const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OBJECT_BYTES: usize = 1024 * 1024;
 const MAX_WORKTREE_INSPECTIONS: usize = 4096;
@@ -459,7 +460,10 @@ fn validate_branch(value: &str) -> Result<(), InvalidGitArguments> {
 }
 
 fn validate_revision(value: &str) -> Result<(), InvalidGitArguments> {
-    (!value.is_empty() && value.len() <= MAX_REVISION_BYTES && !value.contains('\0'))
+    let exact_object = git2::Oid::from_str(value).is_ok();
+    let exact_reference =
+        value == "HEAD" || (value.starts_with("refs/") && git2::Reference::is_valid_name(value));
+    (value.len() <= MAX_REVISION_BYTES && (exact_object || exact_reference))
         .then_some(())
         .ok_or(InvalidGitArguments)
 }
@@ -1164,6 +1168,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     bytes,
                     mode,
                 } => {
+                    let _attribute_sources = self.pin_attribute_sources(Path::new(&supplied))?;
                     let mut writer = repository
                         .blob_writer(Some(Path::new(&supplied)))
                         .map_err(|_| LocalGitFailure::Operation)?;
@@ -1278,7 +1283,15 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .file_name()
                     .is_some_and(|name| name == ".gitignore")
                 {
-                    self.validate_workspace_ignore(&entry.path)?;
+                    match entry.kind {
+                        WorkspaceEntryKind::File => {
+                            self.validate_workspace_ignore(&entry.path)?;
+                        }
+                        WorkspaceEntryKind::Directory => {}
+                        WorkspaceEntryKind::Symlink | WorkspaceEntryKind::Other => {
+                            return Err(LocalGitFailure::Path);
+                        }
+                    }
                 }
             }
             for entry in read.entries {
@@ -1314,12 +1327,66 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         }
     }
 
+    fn pin_attribute_sources(
+        &self,
+        path: &Path,
+    ) -> Result<PinnedAttributeSources, LocalGitFailure> {
+        let git_attributes = pin_optional_git_file(
+            &self.repository_authority.git_path("info/attributes"),
+            MAX_ATTRIBUTE_FILE_BYTES,
+        )?;
+        let mut worktree_attributes = Vec::new();
+        worktree_attributes
+            .extend(self.pin_optional_workspace_control_file(Path::new(".gitattributes"))?);
+        let mut directory = PathBuf::new();
+        for component in path.parent().into_iter().flat_map(Path::components) {
+            directory.push(component.as_os_str());
+            worktree_attributes.extend(
+                self.pin_optional_workspace_control_file(&directory.join(".gitattributes"))?,
+            );
+        }
+        Ok(PinnedAttributeSources {
+            _git_attributes: git_attributes,
+            _worktree_attributes: worktree_attributes,
+        })
+    }
+
+    fn pin_optional_workspace_control_file(
+        &self,
+        path: &Path,
+    ) -> Result<Option<WorkspaceFileBytes>, LocalGitFailure> {
+        match self.filesystem.entry_kind(&self.root, path) {
+            Ok(WorkspaceEntryKind::File) => {
+                match self
+                    .filesystem
+                    .read_file_prefix(&self.root, path, MAX_ATTRIBUTE_FILE_BYTES)
+                {
+                    Ok(read) if read.truncated => Err(LocalGitFailure::Repository),
+                    Ok(read) => Ok(Some(read)),
+                    Err(WorkspaceResolveError::Rejected(_)) => Err(LocalGitFailure::Path),
+                    Err(WorkspaceResolveError::Io { .. }) => Err(LocalGitFailure::Operation),
+                }
+            }
+            Ok(WorkspaceEntryKind::Directory) => Ok(None),
+            Ok(WorkspaceEntryKind::Symlink | WorkspaceEntryKind::Other) => {
+                Err(LocalGitFailure::Path)
+            }
+            Err(WorkspaceResolveError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(WorkspaceResolveError::Rejected(_)) => Err(LocalGitFailure::Path),
+            Err(WorkspaceResolveError::Io { .. }) => Err(LocalGitFailure::Operation),
+        }
+    }
+
     fn branch_switch(
         &self,
         repository: &Repository,
         arguments: GitBranchSwitchArguments,
     ) -> Result<BranchResult, LocalGitFailure> {
-        let _index_lock = self.bind_locked_index(repository)?;
+        let index_lock = self.bind_locked_index(repository)?;
         if repository.state() != RepositoryState::Clean {
             return Err(LocalGitFailure::Operation);
         }
@@ -1376,6 +1443,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository
             .checkout_tree(target_commit.as_object(), Some(&mut checkout))
             .map_err(|_| LocalGitFailure::Operation)?;
+        let mut index = repository.index().map_err(|_| LocalGitFailure::Operation)?;
+        index
+            .read_tree(&target_tree)
+            .and_then(|_| index.write())
+            .map_err(|_| LocalGitFailure::Operation)?;
+        drop(index);
+        index_lock.commit()?;
         transaction
             .set_symbolic_target(
                 "HEAD",
@@ -1513,6 +1587,13 @@ fn write_empty_index(file: &mut fs::File) -> Result<(), LocalGitFailure> {
 }
 
 fn validate_optional_git_file(path: &Path, max_bytes: usize) -> Result<(), LocalGitFailure> {
+    pin_optional_git_file(path, max_bytes).map(drop)
+}
+
+fn pin_optional_git_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Option<fs::File>, LocalGitFailure> {
     match openat(
         CWD,
         path,
@@ -1520,18 +1601,22 @@ fn validate_optional_git_file(path: &Path, max_bytes: usize) -> Result<(), Local
         Mode::empty(),
     ) {
         Ok(descriptor) => {
-            let metadata = fs::File::from(descriptor)
-                .metadata()
-                .map_err(|_| LocalGitFailure::Repository)?;
+            let file = fs::File::from(descriptor);
+            let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
             if metadata.is_file() && metadata.len() <= max_bytes as u64 {
-                Ok(())
+                Ok(Some(file))
             } else {
                 Err(LocalGitFailure::Repository)
             }
         }
-        Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
         Err(_) => Err(LocalGitFailure::Repository),
     }
+}
+
+struct PinnedAttributeSources {
+    _git_attributes: Option<fs::File>,
+    _worktree_attributes: Vec<WorkspaceFileBytes>,
 }
 
 enum PlannedStage {
@@ -1957,6 +2042,7 @@ fn commit(
         )
         .map_err(|_| LocalGitFailure::Operation)?;
     let update_reference = locked_chain.last().ok_or(LocalGitFailure::Operation)?;
+    let head_symbolic_target = locked_chain.get(1);
     transaction
         .set_target(
             update_reference,
@@ -1964,7 +2050,19 @@ fn commit(
             Some(&signature),
             "commit: fixer agent",
         )
-        .and_then(|_| transaction.commit())
+        .map_err(|_| LocalGitFailure::Operation)?;
+    if let Some(head_symbolic_target) = head_symbolic_target {
+        transaction
+            .set_symbolic_target(
+                "HEAD",
+                head_symbolic_target,
+                Some(&signature),
+                "commit: fixer agent",
+            )
+            .map_err(|_| LocalGitFailure::Operation)?;
+    }
+    transaction
+        .commit()
         .map_err(|_| LocalGitFailure::Operation)?;
     let state_cleaned = state != RepositoryState::Merge || repository.cleanup_state().is_ok();
     Ok(CommitResult {
@@ -2670,6 +2768,24 @@ mod tests {
     }
 
     #[test]
+    fn status_ignores_a_directory_named_gitignore() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.root().join(".gitignore"))
+            .expect("gitignore-named directory constructs");
+        let executor = fixture.executor();
+
+        let status = execute(&executor, LocalOperation::Status);
+
+        assert_eq!(
+            status["entries"]
+                .as_array()
+                .expect("entries are an array")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
     fn worktree_diff_observes_real_repository_state() {
         let fixture = Fixture::new();
         fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
@@ -2913,6 +3029,67 @@ mod tests {
     }
 
     #[test]
+    fn stage_rejects_oversized_worktree_attributes_before_filtering() {
+        let fixture = Fixture::new();
+        let attributes = fs::File::create(fixture.root().join(".gitattributes"))
+            .expect("worktree attributes fixture creates");
+        attributes
+            .set_len((MAX_ATTRIBUTE_FILE_BYTES + 1) as u64)
+            .expect("oversized sparse worktree attributes sets length");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("fixture content change writes");
+        let executor = fixture.executor();
+
+        let failure = executor
+            .execute_operation(LocalOperation::Stage(GitStageArguments {
+                paths: vec![TRACKED_PATH.to_owned()],
+            }))
+            .expect_err("oversized attributes reject before filtering");
+
+        assert_eq!(failure, LocalGitFailure::Repository);
+    }
+
+    #[test]
+    fn stage_rejects_nonregular_worktree_attributes_before_filtering() {
+        let fixture = Fixture::new();
+        let attributes_path = fixture.root().join(".gitattributes");
+        mkfifoat(CWD, &attributes_path, Mode::RUSR | Mode::WUSR)
+            .expect("worktree attributes FIFO constructs");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("fixture content change writes");
+        let executor = fixture.executor();
+
+        let failure = executor
+            .execute_operation(LocalOperation::Stage(GitStageArguments {
+                paths: vec![TRACKED_PATH.to_owned()],
+            }))
+            .expect_err("nonregular attributes reject before filtering");
+
+        assert_eq!(failure, LocalGitFailure::Path);
+    }
+
+    #[test]
+    fn stage_rejects_oversized_repository_attributes_before_filtering() {
+        let fixture = Fixture::new();
+        let executor = fixture.executor();
+        let attributes = fs::File::create(fixture.root().join(".git/info/attributes"))
+            .expect("repository attributes fixture creates");
+        attributes
+            .set_len((MAX_ATTRIBUTE_FILE_BYTES + 1) as u64)
+            .expect("oversized sparse repository attributes sets length");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("fixture content change writes");
+
+        let failure = executor
+            .execute_operation(LocalOperation::Stage(GitStageArguments {
+                paths: vec![TRACKED_PATH.to_owned()],
+            }))
+            .expect_err("oversized repository attributes reject before filtering");
+
+        assert_eq!(failure, LocalGitFailure::Repository);
+    }
+
+    #[test]
     fn stage_holds_index_lock_while_reading_worktree_bytes() {
         let fixture = Fixture::new();
         fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
@@ -3027,6 +3204,47 @@ mod tests {
         assert_eq!(commit.author().email(), Ok(AUTHOR_EMAIL));
         assert_eq!(commit.committer().name(), Ok(AUTHOR_NAME));
         assert_eq!(commit.committer().email(), Ok(AUTHOR_EMAIL));
+    }
+
+    #[test]
+    fn commit_records_the_advanced_branch_in_the_head_reflog() {
+        let fixture = Fixture::new();
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("fixture change writes");
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let original_head_target = repository
+            .find_reference("HEAD")
+            .expect("HEAD exists")
+            .symbolic_target()
+            .expect("HEAD is symbolic")
+            .expect("HEAD has a symbolic target")
+            .to_owned();
+        let mut index = repository.index().expect("fixture index opens");
+        index
+            .add_path(Path::new(TRACKED_PATH))
+            .expect("fixture change stages");
+        index.write().expect("fixture index writes");
+        let executor = fixture.executor();
+
+        let result = execute(
+            &executor,
+            LocalOperation::Commit(GitCommitArguments {
+                message: MODEL_MESSAGE.to_owned(),
+            }),
+        );
+        let oid = Oid::from_str(result["commit"].as_str().expect("commit id is text"))
+            .expect("commit id parses");
+        let reflog = repository.reflog("HEAD").expect("HEAD reflog opens");
+        let latest = reflog.get(0).expect("HEAD reflog has a latest entry");
+
+        assert_eq!(latest.id_new(), oid);
+        assert_eq!(
+            repository
+                .find_reference("HEAD")
+                .expect("HEAD exists")
+                .symbolic_target(),
+            Ok(Some(original_head_target.as_str()))
+        );
     }
 
     #[test]
@@ -3483,6 +3701,16 @@ mod tests {
             fs::read(fixture.root().join(TRACKED_PATH)).expect("switched fixture content reads"),
             INITIAL_CONTENT.as_bytes()
         );
+        let switched_repository =
+            Repository::open(fixture.root()).expect("switched repository reopens");
+        let index = switched_repository.index().expect("switched index opens");
+        let entry = index
+            .get_path(Path::new(TRACKED_PATH), 0)
+            .expect("switched path remains indexed");
+        let blob = switched_repository
+            .find_blob(entry.id)
+            .expect("switched blob exists");
+        assert_eq!(blob.content(), INITIAL_CONTENT.as_bytes());
     }
 
     #[test]
@@ -4160,6 +4388,16 @@ mod tests {
         .expect("JSON arguments normalize");
 
         assert!(decode_operation(LocalToolKind::Stage, &arguments).is_err());
+    }
+
+    #[test]
+    fn revision_argument_rejects_unbounded_ancestry_expression_before_execution() {
+        let arguments = NormalizedToolArguments::try_from_provider_text(
+            serde_json::json!({"revision": "HEAD~1000000000", "max_entries": 1}).to_string(),
+        )
+        .expect("JSON arguments normalize");
+
+        assert!(decode_operation(LocalToolKind::Log, &arguments).is_err());
     }
 
     #[test]
