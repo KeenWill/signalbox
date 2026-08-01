@@ -11,10 +11,11 @@ use signalbox_application::StartEligibleTurnOutcome;
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, CancelledModelCallTurnIdentities,
     ContextFrontierId, CreateSession, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    Goal, GoalCommandResult, GoalNeed, GoalStatement, GoalUserAction, GoalUserCommand,
-    GoalUserProvenance, ModelSelectionRequest, PreparedCreateSession, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    Goal, GoalCommandResult, GoalGuidance, GoalNeed, GoalSchedulerProvenance, GoalStatement,
+    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelSelectionRequest,
+    PreparedCreateSession, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry,
+    TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -42,6 +43,7 @@ const SUPERSEDE_COMMAND: u128 = 0x902;
 const STOP_COMMAND: u128 = 0x903;
 const REATTACH_COMMAND: u128 = 0x904;
 const STEER_COMMAND: u128 = 0x905;
+const RESUME_COMMAND: u128 = 0x906;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -204,6 +206,87 @@ async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
     .fetch_one(&pool)
     .await?;
     assert_eq!(pending_steering, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: resuming a blocked goal schedules exactly one next turn whose
+/// accepted input is the exact optional user guidance.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xb10);
+    repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the commissioned task")),
+            ),
+            Some(attached_turn),
+            |_| None,
+        )
+        .await?;
+    let blocked = repository
+        .block_execution_failure(
+            session(SESSION),
+            GoalNeed::try_new(String::from("repair execution")).expect("fixture need is admitted"),
+            GoalSchedulerProvenance::new(attached_turn.turn()),
+        )
+        .await?;
+    assert!(matches!(
+        blocked,
+        signalbox_persistence::goal::GoalTransitionOutcome::Applied(_)
+    ));
+
+    let guidance = GoalGuidance::try_new(String::from("use the newly granted credential"))
+        .expect("fixture guidance is admitted");
+    let resumed_turn = turn_candidates(0xb20);
+    let resumed = repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(RESUME_COMMAND),
+                session(SESSION),
+                GoalUserAction::Resume(Some(guidance.clone())),
+            ),
+            Some(resumed_turn),
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(
+        resumed,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
+    ));
+
+    let resumed_content: String = sqlx::query_scalar(
+        "SELECT content_text
+           FROM accepted_input
+          WHERE accepted_input_id = $1
+            AND session_id = $2",
+    )
+    .bind(resumed_turn.accepted_input().into_uuid())
+    .bind(Uuid::from_u128(SESSION))
+    .fetch_one(&pool)
+    .await?;
+    let resumed_goal_turns: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM goal_turn
+          WHERE turn_id = $1
+            AND source_event_ordinal IS NOT NULL",
+    )
+    .bind(resumed_turn.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(resumed_content, guidance.as_str());
+    assert_eq!(resumed_goal_turns, 1);
 
     pool.close().await;
     drop(container);
