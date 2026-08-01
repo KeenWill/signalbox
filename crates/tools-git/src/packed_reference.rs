@@ -12,11 +12,9 @@ pub(super) fn packed_reference_exists(
 ) -> Result<bool, LocalGitFailure> {
     for (_, existing) in read_packed_references(authority)? {
         let requested = reference_name.as_bytes();
-        let requested_prefix = [requested, b"/"].concat();
-        let existing_prefix = [existing.as_slice(), b"/"].concat();
         if existing == requested
-            || existing.starts_with(&requested_prefix)
-            || requested.starts_with(&existing_prefix)
+            || is_namespaced_under(&existing, requested)
+            || is_namespaced_under(requested, &existing)
         {
             return Ok(true);
         }
@@ -30,15 +28,20 @@ pub(super) fn packed_reference_namespace_conflicts(
 ) -> Result<bool, LocalGitFailure> {
     for (_, existing) in read_packed_references(authority)? {
         let requested = reference_name.as_bytes();
-        let requested_prefix = [requested, b"/"].concat();
-        let existing_prefix = [existing.as_slice(), b"/"].concat();
         if existing != requested
-            && (existing.starts_with(&requested_prefix) || requested.starts_with(&existing_prefix))
+            && (is_namespaced_under(&existing, requested)
+                || is_namespaced_under(requested, &existing))
         {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn is_namespaced_under(candidate: &[u8], namespace: &[u8]) -> bool {
+    candidate.len() > namespace.len()
+        && candidate.starts_with(namespace)
+        && candidate[namespace.len()] == b'/'
 }
 
 pub(super) fn packed_reference_target(

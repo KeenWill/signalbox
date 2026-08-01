@@ -501,9 +501,9 @@ where
                     inode: status.st_ino,
                 },
             };
-            if post_create().is_err() {
+            if let Err(failure) = post_create() {
                 created.remove_if_owned();
-                return Err(LocalGitFailure::Operation);
+                return Err(failure);
             }
             let directory = match openat(parent, name, flags, Mode::empty()) {
                 Ok(directory) => directory,

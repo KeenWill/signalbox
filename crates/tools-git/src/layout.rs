@@ -166,6 +166,25 @@ pub(super) fn open_repository_config(
         Mode::empty(),
     )
     .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    validate_repository_config_descriptor(descriptor)
+}
+
+pub(super) fn open_repository_config_at(
+    git_directory: &fs::File,
+) -> Result<fs::File, LocalGitToolsConstructionError> {
+    let descriptor = openat(
+        git_directory,
+        "config",
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    validate_repository_config_descriptor(descriptor)
+}
+
+fn validate_repository_config_descriptor(
+    descriptor: OwnedFd,
+) -> Result<fs::File, LocalGitToolsConstructionError> {
     let mut file = fs::File::from(descriptor);
     let metadata = file
         .metadata()

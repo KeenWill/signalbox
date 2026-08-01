@@ -15,7 +15,7 @@ use crate::descriptor::{
     RepositoryIdentity, descriptor_path, descriptor_path_from_fd, file_identity,
 };
 use crate::failure::LocalGitFailure;
-use crate::layout::open_repository_config;
+use crate::layout::open_repository_config_at;
 use crate::limits::{MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES, MAX_PACK_FILE_BYTES};
 
 pub(super) struct PinnedRepository {
@@ -42,11 +42,23 @@ impl PinnedRepository {
         root_path: &Path,
         expected: RepositoryIdentity,
     ) -> Result<Self, LocalGitToolsConstructionError> {
+        Self::open_with_hook(root_path, expected, || {})
+    }
+
+    pub(super) fn open_with_hook<Hook>(
+        root_path: &Path,
+        expected: RepositoryIdentity,
+        after_git_directory_open: Hook,
+    ) -> Result<Self, LocalGitToolsConstructionError>
+    where
+        Hook: FnOnce(),
+    {
         let root =
             fs::File::open(root_path).map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let git_directory = fs::File::open(root_path.join(".git"))
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        let config = open_repository_config(&root_path.join(".git/config"))?;
+        after_git_directory_open();
+        let config = open_repository_config_at(&git_directory)?;
         let observed = RepositoryIdentity {
             root: file_identity(
                 &root
