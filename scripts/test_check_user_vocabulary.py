@@ -43,7 +43,11 @@ def main() -> int:
             "session_owners = []\n"
             "owner2 = []\n"
             "Owner2 = []\n"
-            "session_owner2 = []\n",
+            "session_owner2 = []\n"
+            "owner2_id = nil\n"
+            "Owner2Id = nil\n"
+            "session_owner2_id = nil\n"
+            "The session owner approves this tool.\n",
             encoding="utf-8",
         )
         git(root, "init", "--quiet")
@@ -58,6 +62,12 @@ def main() -> int:
         numeric = "docs/spec/example.md:4: owner2 = []"
         numeric_capitalized = "docs/spec/example.md:5: Owner2 = []"
         numeric_identifier = "docs/spec/example.md:6: session_owner2 = []"
+        continued_numeric = "docs/spec/example.md:7: owner2_id = nil"
+        continued_capitalized = "docs/spec/example.md:8: Owner2Id = nil"
+        continued_numeric_identifier = "docs/spec/example.md:9: session_owner2_id = nil"
+        semantic_session_owner = (
+            "docs/spec/example.md:10: The session owner approves this tool."
+        )
         assert expected in rejected.stdout, (
             f"singular violation missing:\n{rejected.stdout}"
         )
@@ -75,6 +85,18 @@ def main() -> int:
         )
         assert numeric_identifier in rejected.stdout, (
             f"numeric identifier violation missing:\n{rejected.stdout}"
+        )
+        assert continued_numeric in rejected.stdout, (
+            f"continued numeric violation missing:\n{rejected.stdout}"
+        )
+        assert continued_capitalized in rejected.stdout, (
+            f"continued capitalized violation missing:\n{rejected.stdout}"
+        )
+        assert continued_numeric_identifier in rejected.stdout, (
+            f"continued numeric identifier violation missing:\n{rejected.stdout}"
+        )
+        assert semantic_session_owner in rejected.stdout, (
+            f"semantic session-owner violation missing:\n{rejected.stdout}"
         )
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
         accepted = run_checker(root)

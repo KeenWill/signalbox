@@ -12,7 +12,8 @@ from pathlib import Path
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
-    r"(?i:\bowners?\d*\b|owners?[_-]|(?<=[_-])owners?\d*\b)|"
+    r"(?i:\bowners?\d*(?:\b|[_-])|owners?[_-]|(?<=[_-])owners?\d*(?:\b|[_-]))|"
+    r"\b[Oo]wners?\d+[A-Z][A-Za-z0-9_]*|"
     r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
     r"\b[A-Za-z0-9_]+Owners?(?:[A-Z][A-Za-z0-9_]*)?"
 )
@@ -111,7 +112,7 @@ ALLOWLIST = (
         re.compile(
             r"[A-Za-z0-9_]*Ownership[A-Za-z0-9_]*|ownership|\bowned\b|\bowning\b|"
             r"(?:slot|lease|row|record|entry|event|attachment|observation|snapshot|"
-            r"frontier|session|turn|attempt|call|defaults|pointer|workspace|operation|"
+            r"frontier|turn|attempt|call|defaults|pointer|workspace|operation|"
             r"database|component|conversation|source|target|object|aggregate|terminal|"
             r"usage|member|runner|pass|finding) owner|"
             r"owner (?:slot|lease|row|record|entry|event|attachment|observation|snapshot|"
