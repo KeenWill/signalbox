@@ -994,18 +994,26 @@ fn open_repository_config(config_path: &Path) -> Result<fs::File, LocalGitToolsC
         String::from_utf8(bytes).map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let mut section = "";
     for line in config.lines() {
-        let normalized = line.trim().to_ascii_lowercase();
+        let mut normalized = line.trim().to_ascii_lowercase();
         if normalized.starts_with('[') {
-            section = if normalized.starts_with("[core]") {
+            let closing = normalized
+                .find(']')
+                .ok_or(LocalGitToolsConstructionError::Repository)?;
+            let header = &normalized[..=closing];
+            section = if header.starts_with("[core]") {
                 "core"
-            } else if normalized.starts_with("[extensions]") {
+            } else if header.starts_with("[extensions]") {
                 "extensions"
-            } else if normalized.starts_with("[filter ") || normalized.starts_with("[include") {
+            } else if header.starts_with("[filter ") || header.starts_with("[include") {
                 return Err(LocalGitToolsConstructionError::Repository);
             } else {
                 ""
             };
-            continue;
+            let trailing = normalized[closing + 1..].trim();
+            if trailing.is_empty() || trailing.starts_with('#') || trailing.starts_with(';') {
+                continue;
+            }
+            normalized = trailing.to_owned();
         }
         if section == "core" {
             let file_valued = normalized.split_once('=').is_some_and(|(key, _)| {
@@ -1625,15 +1633,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .collect::<Vec<_>>()
             })
             .collect::<BTreeSet<_>>();
-        let staged_entries = staged_paths
-            .into_iter()
-            .map(|path| {
-                let entry = current_index
-                    .get_path(&path, 0)
-                    .map(|entry| clone_index_entry(&entry));
-                (path, entry)
-            })
-            .collect::<Vec<_>>();
         let changes = repository
             .diff_tree_to_tree(current_tree.as_ref(), Some(&target_tree), None)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -1647,6 +1646,18 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .map(Path::to_owned)
             })
             .collect::<BTreeSet<_>>();
+        if !staged_paths.is_disjoint(&checkout_paths) {
+            return Err(LocalGitFailure::Operation);
+        }
+        let staged_entries = staged_paths
+            .into_iter()
+            .map(|path| {
+                let entry = current_index
+                    .get_path(&path, 0)
+                    .map(|entry| clone_index_entry(&entry));
+                (path, entry)
+            })
+            .collect::<Vec<_>>();
         for path in &checkout_paths {
             validate_checkout_path(
                 &self.filesystem,
@@ -3047,8 +3058,8 @@ fn persist_objects(
     )
     .map_err(|_| LocalGitFailure::Repository)?;
     let stem = format!("pack-{checksum}");
-    install_packed_object_file(&pack, &indexed.path().join(format!("{stem}.idx")))?;
-    install_packed_object_file(&pack, &indexed.path().join(format!("{stem}.pack")))
+    install_packed_object_file(&pack, &indexed.path().join(format!("{stem}.pack")))?;
+    install_packed_object_file(&pack, &indexed.path().join(format!("{stem}.idx")))
 }
 
 fn install_packed_object_file(
@@ -3098,10 +3109,14 @@ fn install_packed_object_file(
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Operation)?;
-            let metadata = fs::File::from(existing)
+            let mut existing = fs::File::from(existing);
+            let metadata = existing
                 .metadata()
                 .map_err(|_| LocalGitFailure::Operation)?;
-            if metadata.is_file() && metadata.len() == source_length {
+            if metadata.is_file()
+                && metadata.len() == source_length
+                && files_have_equal_content(&mut source, &mut existing)?
+            {
                 Ok(())
             } else {
                 Err(LocalGitFailure::Operation)
@@ -3110,6 +3125,34 @@ fn install_packed_object_file(
         Err(_) => {
             let _ = unlinkat(pack_directory, &temporary_name, AtFlags::empty());
             Err(LocalGitFailure::Operation)
+        }
+    }
+}
+
+fn files_have_equal_content(
+    first: &mut fs::File,
+    second: &mut fs::File,
+) -> Result<bool, LocalGitFailure> {
+    first
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|_| LocalGitFailure::Operation)?;
+    second
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let mut first_buffer = [0_u8; 8192];
+    let mut second_buffer = [0_u8; 8192];
+    loop {
+        let first_read = first
+            .read(&mut first_buffer)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let second_read = second
+            .read(&mut second_buffer)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        if first_read != second_read || first_buffer[..first_read] != second_buffer[..second_read] {
+            return Ok(false);
+        }
+        if first_read == 0 {
+            return Ok(true);
         }
     }
 }
@@ -3318,6 +3361,7 @@ mod tests {
     const UNTRACKED_PATH: &str = "untracked.txt";
     const INITIAL_CONTENT: &str = "before\n";
     const CHANGED_CONTENT: &str = "after\n";
+    const TARGET_CONTENT: &str = "target\n";
     const CRLF_CONTENT: &[u8] = b"first\r\nsecond\r\n";
     const UNTRACKED_CONTENT: &str = "untracked\n";
     const NESTED_TRACKED_DIRECTORY: &str = "removed";
@@ -4893,6 +4937,33 @@ mod tests {
     }
 
     #[test]
+    fn packed_object_install_rejects_same_length_replacement_content() {
+        let source = tempfile::tempdir().expect("fixture source directory constructs");
+        let destination = tempfile::tempdir().expect("fixture pack directory constructs");
+        let name = "pack-fixture.pack";
+        let source_path = source.path().join(name);
+        let destination_path = destination.path().join(name);
+        fs::write(&source_path, b"trusted").expect("fixture source pack writes");
+        fs::write(&destination_path, b"hostile").expect("fixture replacement pack writes");
+        let directory = openat(
+            CWD,
+            destination.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("fixture pack directory pins");
+
+        let failure = install_packed_object_file(&directory, &source_path)
+            .expect_err("different same-length pack rejects");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            fs::read(destination_path).expect("fixture replacement pack reads"),
+            b"hostile"
+        );
+    }
+
+    #[test]
     fn stage_preserves_index_mode_when_core_filemode_is_false() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -6098,6 +6169,66 @@ mod tests {
     }
 
     #[test]
+    fn branch_switch_rejects_a_staged_path_changed_by_the_target() {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+        let initial_tree = repository
+            .find_commit(fixture.initial)
+            .expect("fixture initial commit exists")
+            .tree()
+            .expect("fixture initial tree opens");
+        let target_blob = repository
+            .blob(TARGET_CONTENT.as_bytes())
+            .expect("target fixture blob writes");
+        let mut target_builder = repository
+            .treebuilder(Some(&initial_tree))
+            .expect("target fixture tree builder opens");
+        target_builder
+            .insert(TRACKED_PATH, target_blob, 0o100644)
+            .expect("target fixture blob inserts");
+        let target_tree = target_builder.write().expect("target fixture tree writes");
+        let target = raw_commit_with_tree(&repository, target_tree, fixture.initial);
+        let target = repository
+            .find_commit(target)
+            .expect("target fixture commit exists");
+        repository
+            .branch(FIX_BRANCH, &target, false)
+            .expect("target fixture branch creates");
+        fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+            .expect("staged fixture change writes");
+        let mut index = repository.index().expect("fixture index opens");
+        index
+            .add_path(Path::new(TRACKED_PATH))
+            .expect("fixture change stages");
+        index.write().expect("fixture index writes");
+        let executor = fixture.executor();
+
+        let failure = executor
+            .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            }))
+            .expect_err("target overlap rejects branch switch");
+        let index = repository.index().expect("fixture index reopens");
+        let entry = index
+            .get_path(Path::new(TRACKED_PATH), 0)
+            .expect("staged fixture path remains indexed");
+        let blob = repository
+            .find_blob(entry.id)
+            .expect("staged fixture blob remains readable");
+
+        assert_eq!(failure, LocalGitFailure::Operation);
+        assert_eq!(
+            fs::read(fixture.root().join(TRACKED_PATH)).expect("fixture content remains readable"),
+            CHANGED_CONTENT.as_bytes()
+        );
+        assert_eq!(blob.content(), CHANGED_CONTENT.as_bytes());
+        assert_eq!(
+            repository.head().expect("fixture HEAD remains").target(),
+            Some(fixture.initial)
+        );
+    }
+
+    #[test]
     fn branch_switch_rejects_head_lock_before_checkout() {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -6711,6 +6842,22 @@ mod tests {
 
         let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
             .expect_err("external ignore file rejects");
+
+        assert!(matches!(error, LocalGitToolsConstructionError::Repository));
+    }
+
+    #[test]
+    fn inline_configured_external_ignore_file_is_rejected() {
+        let fixture = Fixture::new();
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.root().join(".git/config"))
+            .expect("fixture config opens");
+        writeln!(config, "[core] excludesFile = /outside/evil")
+            .expect("inline external ignore override writes");
+
+        let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+            .expect_err("inline external ignore file rejects");
 
         assert!(matches!(error, LocalGitToolsConstructionError::Repository));
     }
