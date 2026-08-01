@@ -7,7 +7,7 @@ use signalbox_domain::{
     AcceptedInputId, DangerousToolAutoApproval, DurableCommandId, GoalBlockedReasonKind,
     GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
-    SessionPlacementEventKind, ToolAttemptId, ToolRequestId, TurnId,
+    SessionPlacementEventKind, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
     UpdateSessionPlacementRejection,
 };
 use signalbox_tools_plan::PlanStatus;
@@ -345,6 +345,25 @@ pub fn dangerous_tool_auto_approval_from_str(value: &str) -> Option<DangerousToo
     }
 }
 
+/// Encodes a tool permission default as its closed PostgreSQL spelling.
+pub(crate) const fn tool_permission_default_to_str(value: ToolPermissionDefault) -> &'static str {
+    match value {
+        ToolPermissionDefault::Auto => "auto",
+        ToolPermissionDefault::Confirm => "confirm",
+        ToolPermissionDefault::AlwaysConfirm => "always_confirm",
+    }
+}
+
+/// Decodes a tool permission default from its closed PostgreSQL spelling.
+pub(crate) fn tool_permission_default_from_str(value: &str) -> Option<ToolPermissionDefault> {
+    match value {
+        "auto" => Some(ToolPermissionDefault::Auto),
+        "confirm" => Some(ToolPermissionDefault::Confirm),
+        "always_confirm" => Some(ToolPermissionDefault::AlwaysConfirm),
+        _ => None,
+    }
+}
+
 /// Closed plan-event kinds stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PlanEventStorageKind {
@@ -504,7 +523,7 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_domain::{
         AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionPlacementEventKind, TurnId,
+        SessionInputPosition, SessionPlacementEventKind, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -518,7 +537,8 @@ mod tests {
         plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
         session_placement_rejection_from_str, session_placement_result_kind_from_str,
-        session_placement_result_kind_to_str, turn_id_from_uuid, turn_id_to_uuid,
+        session_placement_result_kind_to_str, tool_permission_default_from_str,
+        tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
@@ -594,6 +614,17 @@ mod tests {
             Some(SessionPlacementRejectionStorageKind::VersionExhausted)
         );
         assert_eq!(session_placement_rejection_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn always_confirm_permission_mapping_is_closed() {
+        let encoded = tool_permission_default_to_str(ToolPermissionDefault::AlwaysConfirm);
+        let decoded = tool_permission_default_from_str(encoded)
+            .expect("the additive permission encoding is canonical");
+
+        assert_eq!(encoded, "always_confirm");
+        assert_eq!(decoded, ToolPermissionDefault::AlwaysConfirm);
+        assert_eq!(tool_permission_default_from_str("unknown"), None);
     }
 
     /// INV-002: PostgreSQL numeric values are decoded and checked before a
