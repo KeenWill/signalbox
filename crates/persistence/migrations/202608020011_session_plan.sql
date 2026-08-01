@@ -81,7 +81,7 @@ BEGIN
     PERFORM 1
       FROM session
      WHERE session_id = target_session_id
-       FOR UPDATE;
+       FOR NO KEY UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'session plan event requires its owning session';
     END IF;
@@ -105,7 +105,7 @@ BEGIN
     PERFORM 1
       FROM session
      WHERE session_id = NEW.session_id
-       FOR UPDATE;
+       FOR NO KEY UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'session plan event requires its owning session';
     END IF;
