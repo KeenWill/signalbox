@@ -1,9 +1,9 @@
 use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
 
 use signalbox_runner::{
-    ArgumentError, RunnerConfiguration, RunnerConfigurationError, RunnerConfigurationPath,
-    RunnerConnection, RunnerConnectionError, RunnerStateError, RunnerStateRoot, ServeOutcome,
-    SocketConnectError, connect_verified,
+    ArgumentError, ConnectionEnd, EnrollmentOutcome, RunnerConfiguration, RunnerConfigurationError,
+    RunnerConfigurationPath, RunnerConnection, RunnerConnectionError, RunnerStateError,
+    RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
 };
 
 const CONFIGURATION_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_CONFIG_FILE";
@@ -84,6 +84,7 @@ async fn run(
             }
             Err(error) => return Err(RunnerDaemonError::Connection(error)),
         };
+        report_established(&connection);
         backoff.reset();
         let shutdown = async {
             tokio::select! {
@@ -93,7 +94,17 @@ async fn run(
         };
         let served = connection.serve_until_shutdown(&mut state, shutdown).await;
         match served {
-            Ok(ServeOutcome::ConnectionEnded(_)) => return Ok(()),
+            Ok(ServeOutcome::ConnectionEnded(end @ ConnectionEnd::DaemonShutdown { .. })) => {
+                report_graceful_shutdown(&connection, end);
+                return Ok(());
+            }
+            Ok(ServeOutcome::ConnectionEnded(end @ ConnectionEnd::RunnerShutdown { .. })) => {
+                report_graceful_shutdown(&connection, end);
+                return Ok(());
+            }
+            Ok(ServeOutcome::ConnectionEnded(ConnectionEnd::StaleConnectionRejected {
+                ..
+            })) => return Err(RunnerDaemonError::StaleConnectionRejected),
             Ok(ServeOutcome::ShutdownReady) => {
                 return shutdown_with_timeout(&mut connection).await;
             }
@@ -113,8 +124,68 @@ async fn shutdown_with_timeout(
     connection: &mut RunnerConnection<tokio::net::UnixStream>,
 ) -> Result<(), RunnerDaemonError> {
     match tokio::time::timeout(SHUTDOWN_WRITE_TIMEOUT, connection.shutdown()).await {
-        Ok(result) => result.map(|_| ()).map_err(RunnerDaemonError::Connection),
+        Ok(result) => {
+            let end = result.map_err(RunnerDaemonError::Connection)?;
+            report_graceful_shutdown(connection, end);
+            Ok(())
+        }
         Err(_) => Err(RunnerDaemonError::ShutdownTimeout),
+    }
+}
+
+fn report_established(connection: &RunnerConnection<tokio::net::UnixStream>) {
+    let receipt = connection.receipt();
+    match connection.outcome() {
+        outcome @ EnrollmentOutcome::Enrolled => {
+            eprintln!(
+                "signalbox-runner: info: runner enrolled enrollment_id={} runner_id={} registration_revision={} connection_epoch={} enrollment_outcome={outcome:?}",
+                receipt.enrollment_id(),
+                receipt.runner_id(),
+                receipt.registration_revision().get(),
+                connection.connection_epoch().get(),
+            );
+        }
+        outcome @ EnrollmentOutcome::ReplacementPending => {
+            eprintln!(
+                "signalbox-runner: info: runner replacement pending enrollment_id={} runner_id={} registration_revision={} connection_epoch={} enrollment_outcome={outcome:?}",
+                receipt.enrollment_id(),
+                receipt.runner_id(),
+                receipt.registration_revision().get(),
+                connection.connection_epoch().get(),
+            );
+        }
+        outcome @ EnrollmentOutcome::Resumed => {
+            eprintln!(
+                "signalbox-runner: info: runner resumed enrollment_id={} runner_id={} registration_revision={} connection_epoch={} enrollment_outcome={outcome:?}",
+                receipt.enrollment_id(),
+                receipt.runner_id(),
+                receipt.registration_revision().get(),
+                connection.connection_epoch().get(),
+            );
+        }
+    }
+}
+
+fn report_graceful_shutdown(
+    connection: &RunnerConnection<tokio::net::UnixStream>,
+    end: ConnectionEnd,
+) {
+    match end {
+        ConnectionEnd::DaemonShutdown { .. } => {
+            eprintln!(
+                "signalbox-runner: info: runner graceful shutdown observed enrollment_id={} runner_id={} connection_end={end:?}",
+                connection.receipt().enrollment_id(),
+                connection.receipt().runner_id(),
+            );
+        }
+        ConnectionEnd::RunnerShutdown { .. } => {
+            eprintln!(
+                "signalbox-runner: info: runner graceful shutdown sent enrollment_id={} runner_id={} connection_end={end:?}",
+                connection.receipt().enrollment_id(),
+                connection.receipt().runner_id(),
+            );
+        }
+        ConnectionEnd::StaleConnectionRejected { .. } => {}
     }
 }
 
@@ -186,6 +257,7 @@ enum RunnerDaemonError {
     Connection(RunnerConnectionError),
     Signal(io::Error),
     ShutdownTimeout,
+    StaleConnectionRejected,
 }
 
 impl fmt::Display for RunnerDaemonError {
@@ -198,6 +270,7 @@ impl fmt::Display for RunnerDaemonError {
             Self::Connection(_) => "runner connection failed",
             Self::Signal(_) => "runner signal listener failed",
             Self::ShutdownTimeout => "runner shutdown write timed out",
+            Self::StaleConnectionRejected => "runner connection was rejected as stale",
         })
     }
 }
@@ -211,7 +284,7 @@ impl Error for RunnerDaemonError {
             Self::Socket(error) => Some(error),
             Self::Connection(error) => Some(error),
             Self::Signal(error) => Some(error),
-            Self::ShutdownTimeout => None,
+            Self::ShutdownTimeout | Self::StaleConnectionRejected => None,
         }
     }
 }

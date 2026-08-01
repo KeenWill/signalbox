@@ -8,6 +8,7 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, ToolAttemptId,
     ToolPermissionDefault, ToolRequestId, TurnId,
 };
+use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
 /// Closed durable-command kinds stored by the owner-global registry.
@@ -155,7 +156,60 @@ pub(crate) fn tool_permission_default_from_str(value: &str) -> Option<ToolPermis
     }
 }
 
-fn positive_u64_from_numeric(value: Decimal) -> Result<u64, PositiveOrdinalMappingError> {
+/// Closed plan-event kinds stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlanEventStorageKind {
+    /// Entry creation.
+    Created,
+    /// Text revision.
+    TextRevised,
+    /// Status change.
+    StatusChanged,
+}
+
+/// Encodes a plan-event kind as its closed PostgreSQL spelling.
+pub(crate) const fn plan_event_kind_to_str(value: PlanEventStorageKind) -> &'static str {
+    match value {
+        PlanEventStorageKind::Created => "created",
+        PlanEventStorageKind::TextRevised => "text_revised",
+        PlanEventStorageKind::StatusChanged => "status_changed",
+    }
+}
+
+/// Decodes a closed plan-event kind from its PostgreSQL spelling.
+pub(crate) fn plan_event_kind_from_str(value: &str) -> Option<PlanEventStorageKind> {
+    match value {
+        "created" => Some(PlanEventStorageKind::Created),
+        "text_revised" => Some(PlanEventStorageKind::TextRevised),
+        "status_changed" => Some(PlanEventStorageKind::StatusChanged),
+        _ => None,
+    }
+}
+
+/// Encodes the closed durable plan-status spelling.
+pub(crate) const fn plan_status_to_str(value: PlanStatus) -> &'static str {
+    match value {
+        PlanStatus::Pending => "pending",
+        PlanStatus::InProgress => "in_progress",
+        PlanStatus::Completed => "completed",
+        PlanStatus::Abandoned => "abandoned",
+    }
+}
+
+/// Decodes the closed durable plan-status spelling.
+pub(crate) fn plan_status_from_str(value: &str) -> Option<PlanStatus> {
+    match value {
+        "pending" => Some(PlanStatus::Pending),
+        "in_progress" => Some(PlanStatus::InProgress),
+        "completed" => Some(PlanStatus::Completed),
+        "abandoned" => Some(PlanStatus::Abandoned),
+        _ => None,
+    }
+}
+
+pub(crate) fn positive_u64_from_numeric(
+    value: Decimal,
+) -> Result<u64, PositiveOrdinalMappingError> {
     if !value.fract().is_zero() {
         return Err(PositiveOrdinalMappingError::Fractional);
     }
@@ -266,16 +320,34 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        DurableCommandIdMappingError, DurableCommandKind, PositiveOrdinalMappingError,
-        accepted_input_id_from_uuid, accepted_input_id_to_uuid, defaults_version_from_numeric,
-        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        durable_command_kind_from_str, durable_command_kind_to_str, input_position_from_numeric,
-        input_position_to_numeric, session_id_from_uuid, session_id_to_uuid,
+        DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
+        PositiveOrdinalMappingError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
+        durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
+        input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
+        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
+
+    #[test]
+    fn plan_event_kind_mapping_is_closed() {
+        assert_eq!(
+            plan_event_kind_from_str(plan_event_kind_to_str(PlanEventStorageKind::Created)),
+            Some(PlanEventStorageKind::Created)
+        );
+        assert_eq!(
+            plan_event_kind_from_str(plan_event_kind_to_str(PlanEventStorageKind::TextRevised)),
+            Some(PlanEventStorageKind::TextRevised)
+        );
+        assert_eq!(
+            plan_event_kind_from_str(plan_event_kind_to_str(PlanEventStorageKind::StatusChanged)),
+            Some(PlanEventStorageKind::StatusChanged)
+        );
+        assert_eq!(plan_event_kind_from_str("unknown"), None);
+    }
 
     #[test]
     fn compact_session_command_kind_mapping_is_closed() {

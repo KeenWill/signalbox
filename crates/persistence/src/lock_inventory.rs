@@ -69,6 +69,44 @@ pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
 pub(crate) const REPLACE_SESSION_METADATA: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
+pub(crate) const PLAN_APPEND_ATTEMPT: &str = "SELECT attempt.attempt_id
+  FROM tool_attempt AS attempt
+  JOIN tool_request AS request
+    ON request.request_id = attempt.request_id
+ WHERE attempt.attempt_id = $1
+   AND attempt.request_id = $2
+   AND attempt.issuing_turn_attempt_id = $3
+   AND attempt.dispatch_generation = $4
+   AND attempt.turn_id = $5
+   AND attempt.session_id = $6
+   AND attempt.effect_class = 'external_effect'
+   AND attempt.state_kind = 'in_flight'
+   AND request.request_id = $2
+   AND request.session_id = $6
+   AND request.turn_id = $5
+   AND request.tool_name = 'plan_write'
+   AND request.arguments_kind = 'json'
+   AND session_plan_request_arguments_json(
+           request.arguments_kind, request.arguments_text
+       ) =
+        CASE $7::text
+            WHEN 'created' THEN jsonb_build_object(
+                'kind', 'create',
+                'text', $9::text
+            )
+            WHEN 'text_revised' THEN jsonb_build_object(
+                'kind', 'revise',
+                'entry_id', $8::numeric,
+                'text', $9::text
+            )
+            WHEN 'status_changed' THEN jsonb_build_object(
+                'kind', 'set_status',
+                'entry_id', $8::numeric,
+                'status', $10::text
+            )
+        END
+ FOR SHARE OF attempt";
+
 pub(crate) const OUTBOX_DELIVERY: &str = "SELECT delivered_through
            FROM outbox_delivery_state
           WHERE singleton
