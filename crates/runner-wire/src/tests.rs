@@ -306,6 +306,21 @@ fn decoder_rejects_noncanonical_uuid() {
 }
 
 #[test]
+fn unsupported_digest_version_passes_structural_validation() {
+    let request = Enroll {
+        request_id: uuid(ARBITRARY_UUID_A),
+        digest_version: DIGEST_VERSION + 1,
+        advertisement: advertisement(),
+    };
+    let expected = Message::Enroll(request.clone());
+
+    let observed = Frame::try_new(Message::Enroll(request))
+        .unwrap_or_else(|error| panic!("structural advertisement validation succeeds: {error}"));
+
+    assert_eq!(observed.message, expected);
+}
+
+#[test]
 fn decoder_rejects_json_null_for_absent_only_phase() {
     assert!(decode_line(br#"{"version":1,"kind":"heartbeat_ack","payload":{"challenge_sequence":1,"runner_sequence":1,"lease_phase":null}}
 "#).is_err());
@@ -779,6 +794,7 @@ fn resumed_frame_rejects_invalid_complete_provision_correlation() {
     correlation.repository = None;
     let invalid = Message::Resumed(Box::new(Resumed {
         registration_revision: positive(7),
+        connection_epoch: positive(8),
         directives: ReconnectDirectives {
             workspace_operation: Some(Directive {
                 correlation: OperationCorrelation::Provision(correlation),
@@ -795,6 +811,7 @@ fn resumed_frame_rejects_invalid_complete_provision_correlation() {
 fn resumed_frame_rejects_lease_offer_workspace_correlation() {
     let invalid = Message::Resumed(Box::new(Resumed {
         registration_revision: positive(7),
+        connection_epoch: positive(8),
         directives: ReconnectDirectives {
             workspace_operation: Some(Directive {
                 correlation: OperationCorrelation::LeaseOffer(lease_correlation()),
