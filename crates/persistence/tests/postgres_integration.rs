@@ -21658,8 +21658,7 @@ async fn session_plan_projection_rechecks_cycle_after_append_guard_bypass()
     Ok(())
 }
 
-/// Dependency append validates both creation roots before graph traversal, and
-/// the projection trigger independently enforces the same authority boundary.
+/// Dependency append validates both creation roots before graph traversal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn session_plan_dependency_append_rejects_an_untrusted_root() -> Result<(), Box<dyn Error>> {
@@ -21716,6 +21715,51 @@ async fn session_plan_dependency_append_rejects_an_untrusted_root() -> Result<()
         PlanRepositoryErrorKind::UntrustedProvenance
     );
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The projection trigger independently rejects an untrusted dependency root.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_dependency_projection_rejects_an_untrusted_root() -> Result<(), Box<dyn Error>>
+{
+    const ROOT_EVENT_ORDINAL: u64 = 1;
+    const CORRUPTED_TEXT: &str = "rewritten without durable request authority";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![depends_plan_arguments(dependent, prerequisite)])
+            .await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = sqlx::query(
+        "UPDATE session_plan_event
+            SET entry_text = $1
+          WHERE session_id = $2
+            AND event_ordinal = $3",
+    )
+    .bind(CORRUPTED_TEXT)
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(ROOT_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    assert_eq!(corrupted.rows_affected(), 1);
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
     sqlx::query(
         "ALTER TABLE session_plan_event
          DISABLE TRIGGER session_plan_event_append_guard",

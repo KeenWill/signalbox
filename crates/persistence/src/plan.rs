@@ -817,6 +817,7 @@ async fn find_dependency_cycle(
     dependency: PlanEntryId,
 ) -> Result<Option<PlanDependencyCycle>, SessionPlanRepositoryError> {
     let graph = load_relevant_dependency_graph(transaction, session, &[entry, dependency]).await?;
+    validate_dependency_graph_acyclic(&graph)?;
     let mut queued = VecDeque::from([dependency]);
     let mut visited = HashSet::from([dependency]);
     let mut parents = HashMap::<PlanEntryId, PlanEntryId>::new();
@@ -845,6 +846,41 @@ async fn find_dependency_cycle(
         }
     }
     Ok(None)
+}
+
+fn validate_dependency_graph_acyclic(
+    graph: &HashMap<PlanEntryId, Vec<PlanEntryId>>,
+) -> Result<(), SessionPlanRepositoryError> {
+    let mut incoming = HashMap::<PlanEntryId, usize>::new();
+    for (entry, dependencies) in graph {
+        incoming.entry(*entry).or_insert(0);
+        for dependency in dependencies {
+            *incoming.entry(*dependency).or_insert(0) += 1;
+        }
+    }
+    let mut ready = incoming
+        .iter()
+        .filter_map(|(entry, count)| (*count == 0).then_some(*entry))
+        .collect::<VecDeque<_>>();
+    let mut visited = 0_usize;
+    while let Some(entry) = ready.pop_front() {
+        visited += 1;
+        for dependency in graph.get(&entry).into_iter().flatten() {
+            let count = incoming
+                .get_mut(dependency)
+                .ok_or(SessionPlanCorruption::InvalidEventSequence)?;
+            *count = count
+                .checked_sub(1)
+                .ok_or(SessionPlanCorruption::InvalidEventSequence)?;
+            if *count == 0 {
+                ready.push_back(*dependency);
+            }
+        }
+    }
+    if visited != incoming.len() {
+        return Err(SessionPlanCorruption::InvalidEventSequence.into());
+    }
+    Ok(())
 }
 
 async fn load_relevant_dependency_graph(
@@ -1402,10 +1438,14 @@ fn optional_projected_authority(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         APPEND_TARGET_SQL, CURRENT_DEPENDENCIES_SQL, INVALID_EVENT_SEQUENCE_SQL,
-        MAX_PLAN_DEPENDENCIES_PER_ENTRY, RELEVANT_DEPENDENCY_GRAPH_SQL,
+        MAX_PLAN_DEPENDENCIES_PER_ENTRY, RELEVANT_DEPENDENCY_GRAPH_SQL, SessionPlanCorruption,
+        validate_dependency_graph_acyclic,
     };
+    use signalbox_tools_plan::PlanEntryId;
 
     const SESSION_PLAN_MIGRATION: &str =
         include_str!("../migrations/202608020011_session_plan.sql");
@@ -1451,10 +1491,32 @@ mod tests {
     }
 
     #[test]
+    fn dependency_graph_validation_rejects_an_existing_cycle() {
+        const FIRST_ENTRY_ORDINAL: u64 = 1;
+        const SECOND_ENTRY_ORDINAL: u64 = 2;
+        let first = PlanEntryId::try_from_u64(FIRST_ENTRY_ORDINAL)
+            .expect("the first fixture entry identity is positive");
+        let second = PlanEntryId::try_from_u64(SECOND_ENTRY_ORDINAL)
+            .expect("the second fixture entry identity is positive");
+        let graph = HashMap::from([(first, vec![second]), (second, vec![first])]);
+        let error = validate_dependency_graph_acyclic(&graph)
+            .expect_err("the existing dependency cycle is corruption");
+
+        assert_eq!(
+            error.to_string(),
+            SessionPlanCorruption::InvalidEventSequence.to_string()
+        );
+    }
+
+    #[test]
     fn migration_dependency_limit_matches_the_tools_plan_constant() {
+        const DEPENDENCY_LIMIT_GUARD_COUNT: usize = 2;
         let expected_guard =
             format!("IF dependency_count >= {MAX_PLAN_DEPENDENCIES_PER_ENTRY} THEN");
 
-        assert!(SESSION_PLAN_MIGRATION.contains(&expected_guard));
+        assert_eq!(
+            SESSION_PLAN_MIGRATION.matches(&expected_guard).count(),
+            DEPENDENCY_LIMIT_GUARD_COUNT
+        );
     }
 }
