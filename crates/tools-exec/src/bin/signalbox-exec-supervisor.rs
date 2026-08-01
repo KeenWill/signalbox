@@ -699,8 +699,13 @@ mod linux {
             let watcher = std::thread::spawn(move || {
                 let mut interval = MINIMUM_POLL_INTERVAL;
                 while !watcher_stop.load(Ordering::Acquire) {
-                    let changed = match observe_descendants(root, supervisor, &watcher_descendants)
-                    {
+                    let changed = match observe_descendants(
+                        root,
+                        supervisor,
+                        &watcher_descendants,
+                        Some(&watcher_stop),
+                        None,
+                    ) {
                         Ok(changed) => changed,
                         Err(()) => {
                             watcher_process_tree_supported.store(false, Ordering::Release);
@@ -732,7 +737,15 @@ mod linux {
             let mut root_success = None;
             let deadline = Instant::now() + REAP_DEADLINE;
             loop {
-                if observe_descendants(self.root, self.supervisor, &self.descendants).is_err() {
+                if observe_descendants(
+                    self.root,
+                    self.supervisor,
+                    &self.descendants,
+                    None,
+                    Some(deadline),
+                )
+                .is_err()
+                {
                     process_tree_supported = false;
                 }
                 self.kill_tracked_descendants();
@@ -784,7 +797,14 @@ mod linux {
 
         fn kill_all(&mut self) {
             self.stop_watcher();
-            let _ = observe_descendants(self.root, self.supervisor, &self.descendants);
+            let deadline = Instant::now() + REAP_DEADLINE;
+            let _ = observe_descendants(
+                self.root,
+                self.supervisor,
+                &self.descendants,
+                None,
+                Some(deadline),
+            );
             self.kill_tracked_descendants();
             self.kill_root();
         }
@@ -821,7 +841,7 @@ mod linux {
         }
 
         fn live_descendant_beyond_root(&self) -> Result<bool, ()> {
-            observe_descendants(self.root, self.supervisor, &self.descendants)?;
+            observe_descendants(self.root, self.supervisor, &self.descendants, None, None)?;
             let descendants = self
                 .descendants
                 .lock()
@@ -858,11 +878,16 @@ mod linux {
         root: u32,
         supervisor: u32,
         descendants: &Arc<Mutex<BTreeMap<u32, TrackedProcess>>>,
+        stop: Option<&AtomicBool>,
+        deadline: Option<Instant>,
     ) -> Result<bool, ()> {
         let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
         let mut changed = retire_exited_or_reused(&mut tracked)?;
         let mut known = tracked.keys().copied().collect::<BTreeSet<_>>();
         loop {
+            if descendant_observation_should_stop(stop, deadline) {
+                return Ok(changed);
+            }
             let before = known.len();
             let parents = known
                 .iter()
@@ -870,6 +895,9 @@ mod linux {
                 .chain(std::iter::once(supervisor))
                 .collect::<Vec<_>>();
             for parent in parents {
+                if descendant_observation_should_stop(stop, deadline) {
+                    return Ok(changed);
+                }
                 let expected_start_time = tracked.get(&parent).map(|process| process.start_time);
                 if expected_start_time.is_some()
                     && process_start_time(parent)? != expected_start_time
@@ -901,6 +929,9 @@ mod linux {
                     continue;
                 }
                 for raw_pid in children {
+                    if descendant_observation_should_stop(stop, deadline) {
+                        return Ok(changed);
+                    }
                     if raw_pid == root || known.contains(&raw_pid) {
                         continue;
                     }
@@ -916,6 +947,14 @@ mod linux {
             }
         }
         Ok(changed)
+    }
+
+    fn descendant_observation_should_stop(
+        stop: Option<&AtomicBool>,
+        deadline: Option<Instant>,
+    ) -> bool {
+        stop.is_some_and(|stop| stop.load(Ordering::Acquire))
+            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     fn retire_exited_or_reused(tracked: &mut BTreeMap<u32, TrackedProcess>) -> Result<bool, ()> {
@@ -1114,14 +1153,36 @@ mod linux {
                 let tracked = Arc::new(Mutex::new(BTreeMap::from([(raw_pid, process)])));
                 child.wait()?;
 
-                let changed = observe_descendants(raw_pid, std::process::id(), &tracked)
-                    .map_err(|()| std::io::Error::other("observe descendants"))?;
+                let changed =
+                    observe_descendants(raw_pid, std::process::id(), &tracked, None, None)
+                        .map_err(|()| std::io::Error::other("observe descendants"))?;
                 let tracked = tracked.lock().unwrap_or_else(PoisonError::into_inner);
 
                 assert!(changed);
                 assert!(!tracked.contains_key(&raw_pid));
                 Ok(())
             })
+        }
+
+        #[test]
+        fn descendant_observation_honors_the_watcher_stop_signal() {
+            let stop = AtomicBool::new(true);
+            let tracked = Arc::new(Mutex::new(BTreeMap::new()));
+
+            assert_eq!(
+                observe_descendants(u32::MAX, u32::MAX, &tracked, Some(&stop), None),
+                Ok(false)
+            );
+        }
+
+        #[test]
+        fn descendant_observation_honors_the_cleanup_deadline() {
+            let tracked = Arc::new(Mutex::new(BTreeMap::new()));
+
+            assert_eq!(
+                observe_descendants(u32::MAX, u32::MAX, &tracked, None, Some(Instant::now())),
+                Ok(false)
+            );
         }
 
         #[test]
