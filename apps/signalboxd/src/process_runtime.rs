@@ -9689,6 +9689,9 @@ const fn wire_goal_command_rejection(
             WireGoalCommandRejection::GoalAlreadyAttached
         }
         DomainGoalCommandRejection::GoalNotAttached => WireGoalCommandRejection::GoalNotAttached,
+        DomainGoalCommandRejection::UnknownModelAlias => {
+            WireGoalCommandRejection::UnknownModelAlias
+        }
         DomainGoalCommandRejection::RequiresBlocked => WireGoalCommandRejection::RequiresBlocked,
         DomainGoalCommandRejection::RequiresPursuingOrBlocked => {
             WireGoalCommandRejection::RequiresPursuingOrBlocked

@@ -244,10 +244,12 @@ impl ClassifyOperatorFailure for GoalDeclarationExecutorError {
                     commit_ambiguous: true,
                 }
             }
-            Self::Repository(
-                GoalRepositoryError::DifferentCommandKind { .. }
-                | GoalRepositoryError::Corruption(_),
-            ) => OperatorFailureClass::CallerOrHubBug,
+            Self::Repository(GoalRepositoryError::DifferentCommandKind { .. }) => {
+                OperatorFailureClass::CallerOrHubBug
+            }
+            Self::Repository(GoalRepositoryError::Corruption(_)) => {
+                OperatorFailureClass::FailClosedCorruption
+            }
         }
     }
 }
@@ -333,11 +335,11 @@ impl ClassifyOperatorFailure for PostgresGoalPassDispositionError {
                     commit_ambiguous: true,
                 }
             }
-            Self::Repository(
-                GoalRepositoryError::DifferentCommandKind { .. }
-                | GoalRepositoryError::Corruption(_),
-            )
+            Self::Repository(GoalRepositoryError::DifferentCommandKind { .. })
             | Self::InvalidStaticNeed => OperatorFailureClass::CallerOrHubBug,
+            Self::Repository(GoalRepositoryError::Corruption(_)) => {
+                OperatorFailureClass::FailClosedCorruption
+            }
         }
     }
 
@@ -444,6 +446,7 @@ fn execution_failure_need() -> Result<GoalNeed, PostgresGoalPassDispositionError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_persistence::goal::GoalCorruption;
 
     fn arguments(value: &str) -> NormalizedToolArguments {
         NormalizedToolArguments::try_from_provider_text(value.to_owned())
@@ -485,5 +488,24 @@ mod tests {
         };
 
         assert_eq!(decoded.as_str(), report);
+    }
+
+    #[test]
+    fn goal_repository_corruption_classifies_fail_closed_at_both_runtime_seams() {
+        let declaration = GoalDeclarationExecutorError::Repository(
+            GoalRepositoryError::Corruption(GoalCorruption::Missing("event")),
+        );
+        let disposition = PostgresGoalPassDispositionError::Repository(
+            GoalRepositoryError::Corruption(GoalCorruption::Missing("turn")),
+        );
+
+        assert_eq!(
+            declaration.operator_failure_class(),
+            OperatorFailureClass::FailClosedCorruption
+        );
+        assert_eq!(
+            disposition.operator_failure_class(),
+            OperatorFailureClass::FailClosedCorruption
+        );
     }
 }

@@ -247,6 +247,7 @@ const fn goal_command_rejection_name(reason: GoalCommandRejection) -> &'static s
         GoalCommandRejection::SessionNotFound => "session_not_found",
         GoalCommandRejection::GoalAlreadyAttached => "goal_already_attached",
         GoalCommandRejection::GoalNotAttached => "goal_not_attached",
+        GoalCommandRejection::UnknownModelAlias => "unknown_model_alias",
         GoalCommandRejection::RequiresBlocked => "requires_blocked",
         GoalCommandRejection::RequiresPursuingOrBlocked => "requires_pursuing_or_blocked",
         GoalCommandRejection::GenerationExhausted => "generation_exhausted",

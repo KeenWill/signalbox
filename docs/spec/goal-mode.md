@@ -93,6 +93,13 @@ exact failed-turn provenance. Continuation stops on blocked, achieved,
 user-stopped, and a superseded generation; supersession's successor is pursuing
 and therefore independently eligible to continue.
 
+**Implemented behavior.** A periodic durable sweep includes a pursuing goal
+whose current goal turn is terminal and still owed continuation or blocking. The
+initial post-startup sweep therefore recovers a process loss between turn
+terminalization and goal disposition; reconciliation is idempotent and removes
+that terminal turn from this candidate shape by scheduling its successor or
+appending the blocking event.
+
 **Implemented behavior.** Attaching or superseding commissions a pursuing
 generation and schedules its first turn. Resuming schedules exactly one next
 turn and supplies guidance as that turn's accepted input when present. A queued

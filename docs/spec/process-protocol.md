@@ -689,12 +689,13 @@ that variant. Every accepted non-review mutation request — `create_session`,
 **Implemented behavior.** An accepted goal mutation returns
 `goal_transition_applied { session_id, event_ordinal, generation }`. A
 successful `read_goal` returns `goal_history_start` with the current generation,
-immutable statement, and state; zero or more contiguous `goal_history_item`
+immutable statement, and state; one or more contiguous `goal_history_item`
 messages with event ordinal, generation, event, and provenance; then
-`goal_history_end { event_count }`. The client validates the complete sequence
-and count before presenting any line. Goal text uses the ordinary bounded text
-grammar; the closed lifecycle, event, reason, and provenance correlations are
-owned by [goal mode](goal-mode.md).
+`goal_history_end { event_count }`. Because every attached lineage has its
+commissioning event, `event_count` is the exact number of preceding items. The
+client validates the complete sequence and count before presenting any line.
+Goal text uses the ordinary bounded text grammar; the closed lifecycle, event,
+reason, and provenance correlations are owned by [goal mode](goal-mode.md).
 
 Review mutations return exactly one stable acknowledgement:
 

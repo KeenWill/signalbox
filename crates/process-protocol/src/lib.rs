@@ -1849,6 +1849,8 @@ pub enum GoalCommandRejection {
     GoalAlreadyAttached,
     /// The session has no goal lineage.
     GoalNotAttached,
+    /// The session's selected model alias is absent from daemon configuration.
+    UnknownModelAlias,
     /// Resume requires a blocked current generation.
     RequiresBlocked,
     /// Stop or supersede requires a pursuing or blocked generation.
@@ -5132,7 +5134,7 @@ mod tests {
         CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
         FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
         FrameEncodeError, FrameValidationError, GoalBlockedProvenance, GoalBlockedReason,
-        GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+        GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
         ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
         ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
@@ -5407,6 +5409,18 @@ mod tests {
                 event_count: CanonicalU64::new(4),
             },
             r#"{"type":"goal_history_end","event_count":"4"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(16)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("goal command rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::GoalCommandRejected {
+                    session_id: uuid(3),
+                    reason: GoalCommandRejection::UnknownModelAlias,
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"goal command rejected","detail":{"type":"goal_command_rejected","session_id":"00000000-0000-0000-0000-000000000003","reason":"unknown_model_alias"}}"#,
         )
     }
 

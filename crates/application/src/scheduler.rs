@@ -99,13 +99,12 @@ pub trait EligibilityNudge {
     fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome;
 }
 
-/// Finds sessions whose durable storage shape may admit an eligibility pass.
+/// Finds sessions whose durable storage shape requires an authoritative pass.
 pub trait EligibilitySweep {
     /// Adapter-specific infrastructure failure.
     type Error;
 
-    /// Returns one bounded batch of session hints for queued work with no
-    /// active slot owner.
+    /// Returns one bounded batch of durable scheduling or disposition hints.
     fn find_sessions(
         &mut self,
     ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send;
@@ -231,10 +230,10 @@ where
             } => write!(formatter, "{source}"),
             Self::Pass {
                 source,
-                blocking: Some(_),
+                blocking: Some(blocking),
             } => write!(
                 formatter,
-                "{source}; goal execution-failure blocking also failed"
+                "{source}; goal execution-failure blocking also failed: {blocking}"
             ),
             Self::Reconciliation(error) => {
                 write!(
@@ -1446,6 +1445,19 @@ mod tests {
         assert_eq!(
             *calls.lock().expect("goal disposition calls are available"),
             vec![GoalDispositionCall::Block(selected_session, selected_turn)]
+        );
+    }
+
+    #[test]
+    fn goal_pass_error_preserves_secondary_blocking_evidence() {
+        let error = GoalAwareEligibilityPassError::Pass {
+            source: "authoritative pass failed",
+            blocking: Some("durable block failed"),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "authoritative pass failed; goal execution-failure blocking also failed: durable block failed"
         );
     }
 

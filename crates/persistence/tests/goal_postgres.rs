@@ -26,6 +26,7 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
+    scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository,
@@ -183,6 +184,47 @@ async fn terminalize_goal_turn_as_failed(pool: &PgPool, value: u128) -> Result<(
     let StartupScanSessionOutcome::Recovered(_) = outcome else {
         panic!("prepared active goal turn must recover as failed");
     };
+    Ok(())
+}
+
+/// INV-048: a fresh durable sweep rediscovers a pursuing goal whose current
+/// turn terminalized before its scheduler disposition could commit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_terminal_goal_disposition_survives_scheduler_restart() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached_turn = turn_candidates(0xb61);
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the commissioned task")),
+            ),
+            Some(attached_turn),
+            |_| None,
+        )
+        .await?;
+    assert_eq!(
+        activate_goal_turn(&pool, 0xd61).await?,
+        attached_turn.turn()
+    );
+    terminalize_goal_turn_as_failed(&pool, 0xe61).await?;
+
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+
+    assert_eq!(sessions, vec![session(SESSION)]);
+    assert!(!continuation);
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 
@@ -613,6 +655,13 @@ async fn inv048_stop_retires_queued_work_without_blocking_reattach() -> Result<(
             .await?,
         StartEligibleTurnOutcome::NoEligibleTurn
     );
+    let (stopped_sessions, stopped_continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+
+    assert!(stopped_sessions.is_empty());
+    assert!(!stopped_continuation);
 
     let successor = turn_candidates(0xb42);
     repository
