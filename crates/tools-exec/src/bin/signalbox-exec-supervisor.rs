@@ -30,6 +30,7 @@ mod linux {
     const REAP_DEADLINE: Duration = Duration::from_secs(1);
     const DISPATCH_MODE: &str = "--dispatch";
     const LAUNCH_MODE: &str = "--launch";
+    const OUTER_MODE: &str = "--outer";
     const SELF_EXE: &str = "/proc/self/exe";
     const DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
     const LAUNCH_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-launch-status:";
@@ -70,6 +71,15 @@ mod linux {
         if mode_or_timeout == LAUNCH_MODE {
             return launch(arguments.collect());
         }
+        if mode_or_timeout == OUTER_MODE {
+            let Some(timeout) = arguments.next() else {
+                return ExitCode::FAILURE;
+            };
+            return match run_outer_supervisor(timeout, arguments.collect()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(()) => ExitCode::FAILURE,
+            };
+        }
         match run_supervisor(mode_or_timeout, arguments.collect()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(()) => ExitCode::FAILURE,
@@ -101,6 +111,90 @@ mod linux {
             .ok()
             .and_then(|value| value.parse().ok())
             .ok_or(())
+    }
+
+    fn run_outer_supervisor(timeout: OsString, mut arguments: Vec<OsString>) -> Result<(), ()> {
+        let timeout_milliseconds = parse_u64(timeout.clone())?;
+        if arguments.is_empty() || read_control_byte().is_err() {
+            return Err(());
+        }
+        let started = Instant::now();
+        let pidfd_reservation = preflight_process_tree()?;
+        let program = arguments.remove(0);
+        let mut command = Command::new(SELF_EXE);
+        command
+            .arg(timeout)
+            .arg(program)
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        let mut child = command.spawn().map_err(|_| ())?;
+        drop(pidfd_reservation);
+        let Some(mut control) = child.stdin.take() else {
+            terminate_child(&mut child);
+            cleanup_untracked_children(std::process::id());
+            return Err(());
+        };
+        let mut tree = match ProcessTreeGuard::new(child.id(), std::process::id()) {
+            Ok(tree) => tree,
+            Err(()) => {
+                terminate_child(&mut child);
+                cleanup_untracked_children(std::process::id());
+                return Err(());
+            }
+        };
+        control.write_all(&[1]).map_err(|_| ())?;
+        let cancelled = cancellation_signal();
+        loop {
+            match tree.live_descendant_beyond_root() {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(()) => return Err(()),
+            }
+            if cancelled.load(Ordering::Acquire)
+                || started.elapsed() >= Duration::from_millis(timeout_milliseconds)
+            {
+                drop(control);
+                let _ = tree.finish(&mut child);
+                return Err(());
+            }
+            std::thread::sleep(MINIMUM_POLL_INTERVAL);
+        }
+        control.write_all(&[1]).map_err(|_| ())?;
+        let mut child_success = None;
+        let mut child_wait_failed = false;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    child_success = Some(status.success());
+                    break;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    child_wait_failed = true;
+                    break;
+                }
+            }
+            if cancelled.load(Ordering::Acquire)
+                || started.elapsed() >= Duration::from_millis(timeout_milliseconds)
+                || !tree.process_tree_supported()
+            {
+                break;
+            }
+            std::thread::sleep(MINIMUM_POLL_INTERVAL);
+        }
+        drop(control);
+        match tree.finish(&mut child) {
+            CleanupStatus::Complete { root_success }
+                if !child_wait_failed && child_success.unwrap_or(root_success) =>
+            {
+                Ok(())
+            }
+            CleanupStatus::Complete { .. }
+            | CleanupStatus::ProcessTreeUnsupported { .. }
+            | CleanupStatus::Failed { .. } => Err(()),
+        }
     }
 
     fn dispatch(arguments: Vec<OsString>, announce_dispatch: bool) -> ExitCode {

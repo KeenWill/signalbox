@@ -24,6 +24,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Install Bubblewrap
+        run: sudo apt-get install --yes bubblewrap
       - name: Check generated invariant index
         run: python3 scripts/generate_invariants.py --check
       - name: Check domain spine sync

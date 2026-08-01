@@ -24,11 +24,17 @@ mod review_workflow_command;
 pub mod runner_protocol;
 pub mod scheduler;
 pub mod session;
+pub mod session_credentials;
 pub mod session_metadata;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
 pub mod tool_loop;
+
+pub use session_credentials::{
+    ModelCredentialFamilyCatalog, ModelCredentialFamilyCatalogError, SessionCredentialPin,
+    SessionCredentialPinError, SessionModelCredential,
+};
 
 use std::str::FromStr;
 

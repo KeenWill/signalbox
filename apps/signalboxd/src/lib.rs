@@ -29,11 +29,14 @@ mod context_guard;
 mod daemon_tools;
 mod fenced_database;
 mod local_socket;
+pub mod model_adapter;
 mod process_runtime;
 mod review_orchestration_runtime;
+pub mod runner_protocol_runtime;
 mod session_template_configuration;
 mod single_hub;
 mod telemetry;
+pub mod usage_limits;
 
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,

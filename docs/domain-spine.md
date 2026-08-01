@@ -3292,6 +3292,7 @@ pub enum DangerousToolAutoApproval {
 pub enum ToolPermissionDefault {
     Auto,
     Confirm,
+    AlwaysConfirm,
 }
 pub enum ToolEffectClass {
     EffectFree,

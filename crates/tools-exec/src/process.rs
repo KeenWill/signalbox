@@ -66,6 +66,8 @@ const SUPERVISOR_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-supervisor-status:
 #[cfg(target_os = "linux")]
 const SUPERVISOR_STATUS_TAIL_BYTES: usize = 1024;
 #[cfg(target_os = "linux")]
+const SUPERVISOR_OUTER_MODE: &str = "--outer";
+#[cfg(target_os = "linux")]
 const OUTER_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 #[cfg(target_os = "linux")]
 const OUTER_PROCESS_CLEANUP_DEADLINE: Duration = Duration::from_secs(1);
@@ -252,7 +254,7 @@ impl<Runner: ProcessRunner> UnsandboxedExecTool<Runner> {
         let command_runner = UnsandboxedCommandRunner::try_new(runner, workspace_root)?;
         let (catalog, executor) = build_tool::<UnsandboxedExecContract, _>(
             command_runner,
-            ToolPermissionDefault::Confirm,
+            ToolPermissionDefault::AlwaysConfirm,
         )?;
         Ok(Self { catalog, executor })
     }
@@ -1370,15 +1372,6 @@ impl OuterProcessTreeGuard {
         outer_pidfd_has_exited(&root.pidfd)
     }
 
-    fn live_descendant_beyond_root(&self) -> Result<bool, ()> {
-        outer_observe_descendants(self.root, &self.descendants)?;
-        let descendants = self
-            .descendants
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        Ok(descendants.keys().any(|pid| *pid != self.root))
-    }
-
     fn kill_all(&mut self) {
         self.stop_watcher();
         if outer_observe_descendants(self.root, &self.descendants).is_err() {
@@ -1388,9 +1381,13 @@ impl OuterProcessTreeGuard {
     }
 
     fn finish(&mut self) -> OuterCleanupStatus {
-        self.kill_all();
+        self.stop_watcher();
         let deadline = Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
         loop {
+            if outer_observe_descendants(self.root, &self.descendants).is_err() {
+                self.process_tree_supported.store(false, Ordering::Release);
+            }
+            self.kill_tracked();
             outer_reap_tracked(&self.descendants);
             if self.all_tracked_absent() {
                 self.armed = false;
@@ -1450,7 +1447,6 @@ impl Drop for OuterProcessTreeGuard {
 
 #[cfg(target_os = "linux")]
 fn preflight_outer_process_tree() -> Result<OuterTrackedProcess, ()> {
-    rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT)).map_err(|_| ())?;
     outer_process_children(std::process::id()).map_err(|_| ())?;
     outer_pin_process(std::process::id())?.ok_or(())
 }
@@ -1661,6 +1657,7 @@ async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> Proc
 
 #[cfg(target_os = "linux")]
 async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
+    let request_deadline = tokio::time::Instant::now() + request.timeout;
     let outer_reservation = match preflight_outer_process_tree() {
         Ok(reservation) => reservation,
         Err(()) => {
@@ -1672,6 +1669,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let timeout_milliseconds = request.timeout.as_millis().min(u128::from(u64::MAX));
     let mut command = Command::new(supervisor_program);
     command
+        .arg(SUPERVISOR_OUTER_MODE)
         .arg(timeout_milliseconds.to_string())
         .arg(&request.program)
         .args(&request.arguments)
@@ -1745,34 +1743,30 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     };
     let mut stdout_task = tokio::spawn(read_supervised_stdout(stdout, request.capture_bytes));
     let mut stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
-    let outer_deadline = request.timeout.saturating_add(Duration::from_secs(2));
-    let outer_deadline = tokio::time::Instant::now() + outer_deadline;
-    let startup = tokio::time::timeout(OUTER_PROCESS_CLEANUP_DEADLINE, async {
+    let startup = tokio::time::timeout_at(request_deadline, async {
         let control = control.as_mut().ok_or(())?;
-        control.write_all(&[1]).await.map_err(|_| ())?;
-        loop {
-            match outer_tree.live_descendant_beyond_root() {
-                Ok(true) => break,
-                Ok(false) => tokio::time::sleep(OUTER_PROCESS_POLL_INTERVAL).await,
-                Err(()) => return Err(()),
-            }
-        }
         control.write_all(&[1]).await.map_err(|_| ())
     })
     .await;
     if !matches!(startup, Ok(Ok(()))) {
+        let timed_out = startup.is_err();
         drop(control);
         kill_supervisor_process_group(supervisor_pid);
         outer_tree.kill_all();
         let _ = child.kill().await;
         let _ = child.wait().await;
+        let cleanup = outer_tree.finish();
         stdout_task.abort();
         stderr_task.abort();
-        return empty_process_result(ProcessOutcome::SupervisionFailed {
-            reason: ProcessSupervisionFailure::Cleanup,
+        return empty_process_result(if timed_out && cleanup == OuterCleanupStatus::Complete {
+            ProcessOutcome::TimedOut
+        } else {
+            ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Cleanup,
+            }
         });
     }
-    let root_exit = tokio::time::timeout_at(outer_deadline, async {
+    let root_exit = tokio::time::timeout_at(request_deadline, async {
         loop {
             match outer_tree.root_exited() {
                 Ok(true) => return Ok(()),
@@ -1782,14 +1776,28 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         }
     })
     .await;
-    kill_supervisor_process_group(supervisor_pid);
-    if root_exit.is_err() || matches!(root_exit, Ok(Err(()))) {
+    let request_timed_out = root_exit.is_err();
+    let observation_failed = matches!(root_exit, Ok(Err(())));
+    drop(control);
+    let graceful_deadline = tokio::time::Instant::now() + OUTER_PROCESS_CLEANUP_DEADLINE;
+    let mut waited = tokio::time::timeout_at(graceful_deadline, child.wait()).await;
+    if waited.is_err() {
+        kill_supervisor_process_group(supervisor_pid);
         outer_tree.kill_all();
         let _ = child.kill().await;
+        waited = tokio::time::timeout(OUTER_PROCESS_CLEANUP_DEADLINE, child.wait()).await;
     }
-    let waited = tokio::time::timeout_at(outer_deadline, child.wait()).await;
-    drop(control);
-    let mut wait_failure = match waited {
+    kill_supervisor_process_group(supervisor_pid);
+    let mut wait_failure = if request_timed_out {
+        Some(ProcessOutcome::TimedOut)
+    } else if observation_failed {
+        Some(ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Cleanup,
+        })
+    } else {
+        None
+    };
+    let waited_cleanly = match waited {
         Ok(Ok(status)) if status.success() => None,
         Ok(Ok(_)) | Ok(Err(_)) => Some(ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Wait,
@@ -1802,12 +1810,15 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
             })
         }
     };
+    if wait_failure.is_none() {
+        wait_failure = waited_cleanly;
+    }
     if outer_tree.finish() != OuterCleanupStatus::Complete {
         wait_failure = Some(ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Cleanup,
         });
     }
-    let captures = tokio::time::timeout_at(outer_deadline, async {
+    let captures = tokio::time::timeout(OUTER_PROCESS_CLEANUP_DEADLINE, async {
         let stdout = (&mut stdout_task).await;
         let stderr = (&mut stderr_task).await;
         (stdout, stderr)
@@ -2103,7 +2114,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogs_fix_sandboxed_auto_and_unsandboxed_confirm_permissions()
+    fn catalogs_fix_sandboxed_auto_and_unsandboxed_always_confirm_permissions()
     -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let sandboxed = SandboxedExecTool::try_new(
@@ -2134,7 +2145,7 @@ mod tests {
         );
         assert_eq!(
             unsandboxed_definition.permission_default(),
-            ToolPermissionDefault::Confirm
+            ToolPermissionDefault::AlwaysConfirm
         );
         Ok(())
     }

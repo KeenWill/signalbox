@@ -537,12 +537,42 @@ impl ContextCompactionRepository {
         prepared: &PreparedContextCompaction,
         disposition: FailedContextCompactionDisposition,
     ) -> Result<(), ContextCompactionRepositoryError> {
+        self.fail_record(
+            prepared,
+            disposition,
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await
+    }
+
+    /// Records a failed call together with provider-reported terminal usage.
+    pub async fn fail_with_usage(
+        &self,
+        prepared: &PreparedContextCompaction,
+        disposition: FailedContextCompactionDisposition,
+        usage: ContextCompactionTokenUsage,
+    ) -> Result<(), ContextCompactionRepositoryError> {
+        self.fail_record(prepared, disposition, usage).await
+    }
+
+    async fn fail_record(
+        &self,
+        prepared: &PreparedContextCompaction,
+        disposition: FailedContextCompactionDisposition,
+        usage: ContextCompactionTokenUsage,
+    ) -> Result<(), ContextCompactionRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_lifecycle_session(&mut transaction, prepared.session).await?;
         let lifecycle = load_lifecycle(&mut transaction, prepared).await?;
         if lifecycle.call_state == "terminal" {
             let exact = lifecycle.call_disposition.as_deref() == Some(disposition.as_str())
-                && lifecycle.command_result == "failed";
+                && lifecycle.command_result == "failed"
+                && lifecycle.input_tokens == usage.input_tokens().map(Decimal::from)
+                && lifecycle.output_tokens == usage.output_tokens().map(Decimal::from)
+                && lifecycle.cache_creation_input_tokens
+                    == usage.cache_creation_input_tokens().map(Decimal::from)
+                && lifecycle.cache_read_input_tokens
+                    == usage.cache_read_input_tokens().map(Decimal::from);
             transaction.rollback().await?;
             if exact {
                 return Ok(());
@@ -559,14 +589,29 @@ impl ContextCompactionRepository {
                 ContextCompactionCorruption::Inconsistent("compaction failure state").into(),
             );
         }
+        if usage != ContextCompactionTokenUsage::unreported() && lifecycle.call_state != "in_flight"
+        {
+            transaction.rollback().await?;
+            return Err(ContextCompactionCorruption::Inconsistent(
+                "compaction failure usage before authorization",
+            )
+            .into());
+        }
         let call_rows = sqlx::query(
             "UPDATE context_compaction_model_call
-                SET state_kind = 'terminal', terminal_disposition_kind = $1
-              WHERE model_call_id = $2
-                AND session_id = $3
+                SET state_kind = 'terminal', terminal_disposition_kind = $1,
+                    input_tokens = $2, output_tokens = $3,
+                    cache_creation_input_tokens = $4,
+                    cache_read_input_tokens = $5
+              WHERE model_call_id = $6
+                AND session_id = $7
                 AND state_kind IN ('prepared', 'in_flight')",
         )
         .bind(disposition.as_str())
+        .bind(usage.input_tokens().map(Decimal::from))
+        .bind(usage.output_tokens().map(Decimal::from))
+        .bind(usage.cache_creation_input_tokens().map(Decimal::from))
+        .bind(usage.cache_read_input_tokens().map(Decimal::from))
         .bind(prepared.call.into_uuid())
         .bind(session_id_to_uuid(prepared.session))
         .execute(&mut *transaction)

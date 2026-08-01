@@ -187,13 +187,18 @@ impl RunningIdleFixture {
             r#"
 version = 1
 
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
 [compaction]
 prompt = "{COMPACTION_PROMPT}"
 
 [[models]]
 selection_id = "{selection_uuid}"
 target_id = "{target_uuid}"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "idle-chat"
 max_output_tokens = 64
 context_window_tokens = {CONTEXT_WINDOW_TOKENS}
@@ -264,13 +269,18 @@ impl RunningChatFixture {
             r#"
 version = 1
 
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
 [compaction]
 prompt = "{COMPACTION_PROMPT}"
 
 [[models]]
 selection_id = "{}"
 target_id = "{}"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "{SCRIPTED_PROVIDER}"
 max_output_tokens = 64
 context_window_tokens = {CONTEXT_WINDOW_TOKENS}

@@ -851,13 +851,18 @@ mod tests {
             r#"
 version = 1
 
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
 [[models]]
 selection_id = "{SELECTION_ID}"
 target_id = "{TARGET_ID}"
-provider = "anthropic"
+model_family = "anthropic"
 provider_model = "synthetic-model"
 max_output_tokens = 1024
 context_window_tokens = 200000

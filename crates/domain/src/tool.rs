@@ -519,6 +519,8 @@ pub enum ToolPermissionDefault {
     Auto,
     /// An owner decision is required.
     Confirm,
+    /// An owner decision is required even under blanket automatic approval.
+    AlwaysConfirm,
 }
 
 /// Crash-relevant physical effect classification.
