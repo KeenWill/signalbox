@@ -1167,7 +1167,8 @@ fn write_staged_file(
     let result = file
         .write_all(content.as_bytes())
         .and_then(|()| {
-            fchmod(&file, Mode::from_bits_retain(mode & 0o1777)).map_err(std::io::Error::from)
+            fchmod(&file, Mode::from_bits_retain((mode & 0o1777) as _))
+                .map_err(std::io::Error::from)
         })
         .and_then(|()| file.sync_all());
     drop(file);

@@ -602,7 +602,7 @@ impl ProcessRunner for TokioProcessRunner {
 
     async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
         let result = run_process(&self.supervisor_program, probe).await;
-        classify_bwrap_availability(result.outcome)
+        classify_bwrap_availability(&result)
     }
 
     async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
@@ -610,12 +610,14 @@ impl ProcessRunner for TokioProcessRunner {
     }
 }
 
-fn classify_bwrap_availability(outcome: ProcessOutcome) -> BwrapAvailability {
-    match outcome {
+fn classify_bwrap_availability(result: &ProcessRunResult) -> BwrapAvailability {
+    match &result.outcome {
         ProcessOutcome::Exited { code: Some(0) } => BwrapAvailability::Available,
         ProcessOutcome::SpawnFailed {
             reason: ProcessSpawnFailure::NotFound,
-        } => BwrapAvailability::Missing,
+        } if !result.stderr.bytes.starts_with(SANDBOX_DISPATCH_MARKER) => {
+            BwrapAvailability::Missing
+        }
         ProcessOutcome::TimedOut => BwrapAvailability::TimedOut,
         ProcessOutcome::Exited { .. }
         | ProcessOutcome::SpawnFailed { .. }
@@ -2518,23 +2520,39 @@ mod tests {
     }
 
     #[test]
-    fn production_probe_classifies_missing_timeout_and_unusable_evidence() {
-        let missing = ProcessOutcome::SpawnFailed {
+    fn production_probe_distinguishes_missing_bwrap_from_missing_probe_target() {
+        let mut missing_bwrap = successful_process(b"");
+        missing_bwrap.outcome = ProcessOutcome::SpawnFailed {
             reason: ProcessSpawnFailure::NotFound,
         };
+        let mut missing_probe_target = missing_bwrap.clone();
+        missing_probe_target.stderr.bytes = SANDBOX_DISPATCH_MARKER.to_vec();
 
         assert_eq!(
-            classify_bwrap_availability(missing),
+            classify_bwrap_availability(&missing_bwrap),
             BwrapAvailability::Missing
         );
         assert_eq!(
-            classify_bwrap_availability(ProcessOutcome::TimedOut),
+            classify_bwrap_availability(&missing_probe_target),
+            BwrapAvailability::Unusable
+        );
+    }
+
+    #[test]
+    fn production_probe_classifies_timeout_and_nonzero_exit_as_unusable() {
+        let mut timed_out = successful_process(b"");
+        timed_out.outcome = ProcessOutcome::TimedOut;
+        let mut nonzero_exit = successful_process(b"");
+        nonzero_exit.outcome = ProcessOutcome::Exited {
+            code: Some(UNUSABLE_PROBE_EXIT_CODE),
+        };
+
+        assert_eq!(
+            classify_bwrap_availability(&timed_out),
             BwrapAvailability::TimedOut
         );
         assert_eq!(
-            classify_bwrap_availability(ProcessOutcome::Exited {
-                code: Some(UNUSABLE_PROBE_EXIT_CODE),
-            }),
+            classify_bwrap_availability(&nonzero_exit),
             BwrapAvailability::Unusable
         );
     }
