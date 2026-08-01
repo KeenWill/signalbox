@@ -19,7 +19,7 @@ OWNER = re.compile(
     r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
     r"\b[A-Za-z0-9_]+Owners?(?:[A-Z][A-Za-z0-9_]*)?"
 )
-BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+messages?\b)")
+BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 
 @dataclass(frozen=True)
 class Allowance:
@@ -72,10 +72,28 @@ ALLOWLIST = (
             r"association is `OWNER`, `MEMBER`, or `COLLABORATOR`|"
             r"matches!\(association, \"OWNER\" \| \"MEMBER\" \| \"COLLABORATOR\"\)|"
             r"author_association:\s*String::from\(\"OWNER\"\)|"
-            r"author:.*[\"']owner[\"']|"
-            r"valid_repository_segment\(owner\)|fn owner\(&self\)|"
+            r"valid_repository_segment\(owner\)|"
             r"Merge pull request.*owner/",
             re.IGNORECASE,
+        ),
+    ),
+    Allowance(
+        "GitHub repository-coordinate method declarations",
+        re.compile(
+            r"^(?:crates/tools-github/src/lib[.]rs|"
+            r"crates/tools-code-host/src/code_host/arguments[.]rs)$"
+        ),
+        re.compile(
+            r"^\s*(?:fn|pub[(]super[)] fn) owner[(]&self[)] -> &str [{]\s*$"
+        ),
+    ),
+    Allowance(
+        "GitHub fixture author usernames",
+        re.compile(
+            r"^crates/tools-code-host/src/code_host/review_slog/convergence[.]rs$"
+        ),
+        re.compile(
+            r'^\s*author:\s*Some\(String::from\("owner"\)\),\s*$'
         ),
     ),
     Allowance(

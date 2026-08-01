@@ -51,6 +51,16 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="signalbox-user-vocabulary-") as directory:
         root = Path(directory)
         allowed = root / "crates" / "tools-github" / "src" / "lib.rs"
+        reviewed_author = (
+            root
+            / "crates"
+            / "tools-code-host"
+            / "src"
+            / "code_host"
+            / "review_slog"
+            / "convergence.rs"
+        )
+        author_violation = reviewed_author.with_name("example.rs")
         imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
         mixed_storage_path = (
             root / "apps" / "signalboxd" / "tests" / "offline_tool_loop.rs"
@@ -157,8 +167,20 @@ def main() -> int:
         github_accessor_lines = (
             'const REPOSITORY: &str = "owner/repository";',
             "let approval = session.owner();",
+            'fn owner(&self) -> &str { "human who approves tools" }',
+        )
+        reviewed_author_lines = ('author: Some(String::from("owner")),',)
+        author_violation_lines = (
+            'let principal = Fixture { author: Some(String::from("owner")) };',
         )
         allowed.write_text(fixture_text(github_accessor_lines), encoding="utf-8")
+        reviewed_author.parent.mkdir(parents=True)
+        reviewed_author.write_text(
+            fixture_text(reviewed_author_lines), encoding="utf-8"
+        )
+        author_violation.write_text(
+            fixture_text(author_violation_lines), encoding="utf-8"
+        )
         violation.write_text(fixture_text(violation_lines), encoding="utf-8")
         ambiguous_message.write_text(
             "The runtime sends a user message.\n"
@@ -194,6 +216,8 @@ def main() -> int:
             root,
             "add",
             "crates/domain/src/imported_conversation.rs",
+            "crates/tools-code-host/src/code_host/review_slog/convergence.rs",
+            "crates/tools-code-host/src/code_host/review_slog/example.rs",
             "crates/tools-github/src/lib.rs",
             "apps/signalboxd/tests/offline_tool_loop.rs",
             "crates/persistence/migrations/202607180001_create_session.sql",
@@ -232,7 +256,11 @@ def main() -> int:
             *expected_diagnostics(
                 "crates/tools-github/src/lib.rs",
                 github_accessor_lines,
-                github_accessor_lines[-1:],
+                github_accessor_lines[1:],
+            ),
+            *expected_diagnostics(
+                "crates/tools-code-host/src/code_host/review_slog/example.rs",
+                author_violation_lines,
             ),
             *expected_diagnostics(
                 "crates/domain/src/imported_conversation.rs",
@@ -259,12 +287,18 @@ def main() -> int:
         violation.write_text("The user approves this tool.\n", encoding="utf-8")
         allowed.write_text(
             'const REPOSITORY: &str = "owner/repository";\n'
-            "segments.push(repository.owner());\n",
+            "segments.push(repository.owner());\n"
+            "fn owner(&self) -> &str {\n",
+            encoding="utf-8",
+        )
+        author_violation.write_text(
+            'let principal = Fixture { author: Some(String::from("user")) };\n',
             encoding="utf-8",
         )
         ambiguous_message.write_text(
             "The runtime sends a user-role message.\n"
-            "The runtime also sends a message from the user.\n",
+            "The runtime also sends a message from the user.\n"
+            "The user messages the daemon through the terminal.\n",
             encoding="utf-8",
         )
         reviewed_unix_path.write_text(
