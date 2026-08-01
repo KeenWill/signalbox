@@ -2289,6 +2289,32 @@ impl CreatedReferenceDirectory {
     }
 }
 
+impl CreatedReferenceDirectories {
+    fn open_or_create(
+        &mut self,
+        parent: &OwnedFd,
+        name: &OsStr,
+        mode: Mode,
+    ) -> Result<OwnedFd, LocalGitFailure> {
+        let pinned_parent = dup(parent).map_err(|_| LocalGitFailure::Operation)?;
+        let (directory, created) =
+            open_or_create_ref_directory_with_mode_tracked(parent, name, mode)?;
+        if created {
+            let identity = file_identity(
+                &fs::File::from(dup(&directory).map_err(|_| LocalGitFailure::Operation)?)
+                    .metadata()
+                    .map_err(|_| LocalGitFailure::Operation)?,
+            );
+            self.0.push(CreatedReferenceDirectory {
+                parent: pinned_parent,
+                name: name.to_owned(),
+                identity,
+            });
+        }
+        Ok(directory)
+    }
+}
+
 fn open_reference_parent(
     authority: &PinnedRepository,
     name: &str,
@@ -5186,8 +5212,9 @@ where
     )
     .map_err(|_| LocalGitFailure::Operation)?;
     let (directory_mode, file_mode) = reference_installation_modes(&refs)?;
+    let mut created_directories = CreatedReferenceDirectories::default();
     let mut directory =
-        open_or_create_ref_directory_with_mode(&refs, OsStr::new("heads"), directory_mode)?;
+        created_directories.open_or_create(&refs, OsStr::new("heads"), directory_mode)?;
     let mut components = Path::new(branch).components().peekable();
     let mut leaf = None;
     while let Some(component) = components.next() {
@@ -5196,7 +5223,7 @@ where
         };
         if components.peek().is_some() {
             directory =
-                open_or_create_ref_directory_with_mode(&directory, component, directory_mode)?;
+                created_directories.open_or_create(&directory, component, directory_mode)?;
         } else {
             leaf = Some(component.to_owned());
         }
@@ -9198,6 +9225,7 @@ mod tests {
 
         assert_eq!(failure, LocalGitFailure::Operation);
         assert!(!fixture.root().join(".git/refs/heads/release/v1").exists());
+        assert!(!fixture.root().join(".git/refs/heads/release").exists());
     }
 
     #[test]
