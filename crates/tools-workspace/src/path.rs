@@ -87,6 +87,25 @@ pub struct WorkspaceRoot {
     descriptor: Arc<OwnedFd>,
 }
 
+/// Stable filesystem identity of one pinned workspace-root descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceRootIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl WorkspaceRootIdentity {
+    /// Returns the filesystem device containing the pinned root.
+    pub const fn device(self) -> u64 {
+        self.device
+    }
+
+    /// Returns the inode naming the pinned root within its device.
+    pub const fn inode(self) -> u64 {
+        self.inode
+    }
+}
+
 impl fmt::Debug for WorkspaceRoot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -106,6 +125,16 @@ impl WorkspaceRoot {
         root: impl AsRef<Path>,
     ) -> Result<Self, WorkspaceRootError> {
         filesystem.open_root(root.as_ref())
+    }
+
+    /// Reads the identity of the already-pinned descriptor without reopening
+    /// the configured path.
+    pub fn identity(&self) -> io::Result<WorkspaceRootIdentity> {
+        let status = fstat(self.descriptor()).map_err(io::Error::from)?;
+        Ok(WorkspaceRootIdentity {
+            device: status.st_dev,
+            inode: status.st_ino,
+        })
     }
 
     fn open_local(root: &Path) -> Result<Self, WorkspaceRootError> {
@@ -739,6 +768,33 @@ mod tests {
 
         assert_eq!(read.bytes, ORIGINAL_CONTENT);
         assert_eq!(read.total_bytes, ORIGINAL_CONTENT.len() as u64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_root_identity_survives_later_path_replacement() {
+        use std::{fs, os::unix::fs::MetadataExt};
+
+        let parent = tempfile::tempdir().expect("parent fixture constructs");
+        let workspace_path = parent.path().join("workspace");
+        let moved_path = parent.path().join("moved-workspace");
+        fs::create_dir(&workspace_path).expect("workspace fixture constructs");
+        let root = WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, &workspace_path)
+            .expect("fixture root is valid");
+        let identity_before = root.identity().expect("pinned identity reads");
+        fs::rename(&workspace_path, &moved_path).expect("workspace fixture moves");
+        fs::create_dir(&workspace_path).expect("replacement workspace constructs");
+        let moved_metadata = fs::metadata(&moved_path).expect("moved workspace metadata reads");
+        let replacement = WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, &workspace_path)
+            .expect("replacement root is valid");
+
+        let identity_after = root.identity().expect("pinned identity rereads");
+        let replacement_identity = replacement.identity().expect("replacement identity reads");
+
+        assert_eq!(identity_after, identity_before);
+        assert_ne!(identity_after, replacement_identity);
+        assert_eq!(identity_after.device(), moved_metadata.dev());
+        assert_eq!(identity_after.inode(), moved_metadata.ino());
     }
 
     #[cfg(unix)]
