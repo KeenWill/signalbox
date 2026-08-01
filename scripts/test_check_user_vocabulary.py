@@ -62,6 +62,13 @@ def main() -> int:
         )
         author_violation = reviewed_author.with_name("example.rs")
         imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
+        application_import = (
+            root / "crates" / "application" / "src" / "conversation_import.rs"
+        )
+        domain_record = root / "crates" / "domain" / "src" / "session.rs"
+        legacy_actor = (
+            root / "crates" / "persistence" / "src" / "session_metadata.rs"
+        )
         mixed_storage_path = (
             root / "apps" / "signalboxd" / "tests" / "offline_tool_loop.rs"
         )
@@ -87,12 +94,23 @@ def main() -> int:
             / "SignalboxClient"
             / "SessionSynchronization.swift"
         )
+        cross_fragment_path = (
+            root
+            / "clients"
+            / "native"
+            / "Tests"
+            / "SignalboxAppTests"
+            / "ViewModelTests.swift"
+        )
         violation = root / "docs" / "spec" / "example.md"
         ambiguous_message = root / "docs" / "spec" / "user-message.md"
         reviewed_domain_path = root / "docs" / "spec" / "review-workflows.md"
         reviewed_github_path = root / "docs" / "spec" / "tool-loop.md"
         reviewed_identity_path = root / "docs" / "spec" / "identity-and-commands.md"
         reviewed_unix_path = root / "docs" / "spec" / "process-protocol.md"
+        local_socket_path = (
+            root / "apps" / "signalboxd" / "src" / "local_socket.rs"
+        )
         violation_lines = (
             "The owner approves this tool.",
             "The owners approve this tool.",
@@ -119,6 +137,13 @@ def main() -> int:
             "SESSIONOWNER = []",
             "OWNERID = nil",
             "Ownerid = nil",
+            "ownershipowner names the human who approves tools.",
+            "ownerownership names the human who approves tools.",
+            "OWNERSHIPOWNER names the human who approves tools.",
+            "ownershipoWnEr names the human who approves tools.",
+            "session_ownerid = nil",
+            "SESSION_OWNERID = nil",
+            "The oWnEr approves this tool.",
         )
         mixed_storage_lines = (
             'const PROCESS_ACTOR: &str = "owner";',
@@ -127,6 +152,10 @@ def main() -> int:
         future_migration_lines = (
             "-- New owner actor",
             "CHECK (actor_kind = 'owner');",
+        )
+        frozen_migration_lines = (
+            "CHECK (cause = 'owner_initiated');",
+            "human_owner TEXT;",
         )
         native_lines = ('let sessionOwner = "human who approves tools"',)
         reviewed_domain_lines = (
@@ -138,6 +167,8 @@ def main() -> int:
             "A request by an owner, member, or collaborator approves tools.",
             'author_association = "HUMAN_OWNER"',
             'The protocol emits {"owner": "the human who approves tools"}.',
+            'The protocol emits json!({"owner": owner, "meaning": "the human principal"}).',
+            "Merge pull request after the owner approves owner/repository.",
         )
         reviewed_identity_lines = (
             "The process protocol still accepts the human actor 'owner'.",
@@ -145,12 +176,17 @@ def main() -> int:
         reviewed_unix_lines = (
             "The wrong owner approves this tool.",
             "HumanRoleOwnerMismatch = true",
+            "Owner-only access lets the owner approve this socket.",
+        )
+        local_socket_lines = (
+            "fn tool_is_approved(owner: u32) -> bool { owner == HUMAN_USER_ID }",
+            "fn owner_access() -> bool { true } // human who approves tools",
         )
         imported_lines = (
             "struct EntryFixture {",
             "    owner: ImportedConversationId,",
             "}",
-            "fn fixture() {",
+            "fn converted() {",
             "    let owner = conversation(1);",
             "    consume(",
             "        owner,",
@@ -158,23 +194,41 @@ def main() -> int:
             "}",
             "// The owner approves this tool.",
         )
+        domain_record_lines = ('let OwnerID = "human who approves tools";',)
+        legacy_actor_lines = (
+            'let human_principal = String::from("owner"); // approves tools',
+            'let human = Principal { kind: "owner" }; // approves tools',
+        )
+        application_import_lines = (
+            "fn converted() {}",
+            "define_human_role!(",
+            "    owner,",
+            ")",
+        )
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
         mixed_storage_path.parent.mkdir(parents=True)
         frozen_migration.parent.mkdir(parents=True)
         native_path.parent.mkdir(parents=True)
+        cross_fragment_path.parent.mkdir(parents=True)
         violation.parent.mkdir(parents=True)
         github_accessor_lines = (
             'const REPOSITORY: &str = "owner/repository";',
             "let approval = session.owner();",
             'fn owner(&self) -> &str { "human who approves tools" }',
             "impl Session {",
-            "fn owner(&self) -> &str {",
+            "    fn owner(&self) -> &str {",
             '    "human who approves tools"',
+            "    }",
             "}",
             "impl GitHubRepository {",
+            "// unmatched non-code brace: {",
             "}",
-            "    fn owner(&self) -> &str {",
+            "impl Session {",
+            "        fn owner(&self) -> &str {",
+            "let owner = human_owner + repository.owner_end;",
+            "mutation Approve($owner: ID!) { approve(human: $owner) }",
+            "fn approve_repository(owner: HumanPrincipal) {}",
         )
         reviewed_author_lines = ('author: Some(String::from("owner")),',)
         author_violation_lines = (
@@ -199,12 +253,16 @@ def main() -> int:
             fixture_text(mixed_storage_lines), encoding="utf-8"
         )
         frozen_migration.write_text(
-            "CHECK (cause = 'owner_initiated');\n", encoding="utf-8"
+            fixture_text(frozen_migration_lines), encoding="utf-8"
         )
         future_migration.write_text(
             fixture_text(future_migration_lines), encoding="utf-8"
         )
         native_path.write_text(fixture_text(native_lines), encoding="utf-8")
+        cross_fragment_path.write_text(
+            "ImportedContinuationRetryFixture.sendOutcomeUnknownError,\n",
+            encoding="utf-8",
+        )
         reviewed_domain_path.write_text(
             fixture_text(reviewed_domain_lines), encoding="utf-8"
         )
@@ -217,12 +275,30 @@ def main() -> int:
         reviewed_unix_path.write_text(
             fixture_text(reviewed_unix_lines), encoding="utf-8"
         )
+        local_socket_path.parent.mkdir(parents=True, exist_ok=True)
+        local_socket_path.write_text(
+            fixture_text(local_socket_lines), encoding="utf-8"
+        )
         imported.write_text(fixture_text(imported_lines), encoding="utf-8")
+        application_import.parent.mkdir(parents=True, exist_ok=True)
+        application_import.write_text(
+            fixture_text(application_import_lines), encoding="utf-8"
+        )
+        domain_record.write_text(
+            fixture_text(domain_record_lines), encoding="utf-8"
+        )
+        legacy_actor.parent.mkdir(parents=True, exist_ok=True)
+        legacy_actor.write_text(
+            fixture_text(legacy_actor_lines), encoding="utf-8"
+        )
         git(root, "init", "--quiet")
         git(
             root,
             "add",
             "crates/domain/src/imported_conversation.rs",
+            "crates/application/src/conversation_import.rs",
+            "crates/domain/src/session.rs",
+            "crates/persistence/src/session_metadata.rs",
             "crates/tools-code-host/src/code_host/review_slog/convergence.rs",
             "crates/tools-code-host/src/code_host/review_slog/example.rs",
             "crates/tools-github/src/lib.rs",
@@ -230,12 +306,14 @@ def main() -> int:
             "crates/persistence/migrations/202607180001_create_session.sql",
             "crates/persistence/migrations/202608020009_user_vocabulary.sql",
             "clients/native/Sources/SignalboxClient/SessionSynchronization.swift",
+            "clients/native/Tests/SignalboxAppTests/ViewModelTests.swift",
             "docs/spec/example.md",
             "docs/spec/user-message.md",
             "docs/spec/identity-and-commands.md",
             "docs/spec/process-protocol.md",
             "docs/spec/review-workflows.md",
             "docs/spec/tool-loop.md",
+            "apps/signalboxd/src/local_socket.rs",
         )
         rejected = run_checker(root)
         assert rejected.returncode == 1, (
@@ -254,6 +332,9 @@ def main() -> int:
                 "docs/spec/process-protocol.md", reviewed_unix_lines
             ),
             *expected_diagnostics(
+                "apps/signalboxd/src/local_socket.rs", local_socket_lines
+            ),
+            *expected_diagnostics(
                 "docs/spec/review-workflows.md", reviewed_domain_lines
             ),
             *expected_diagnostics("docs/spec/tool-loop.md", reviewed_github_lines),
@@ -267,7 +348,10 @@ def main() -> int:
                     github_accessor_lines[1],
                     github_accessor_lines[2],
                     github_accessor_lines[4],
-                    github_accessor_lines[9],
+                    github_accessor_lines[12],
+                    github_accessor_lines[13],
+                    github_accessor_lines[14],
+                    github_accessor_lines[15],
                 ),
             ),
             *expected_diagnostics(
@@ -280,9 +364,25 @@ def main() -> int:
                 imported_lines[-1:],
             ),
             *expected_diagnostics(
+                "crates/application/src/conversation_import.rs",
+                application_import_lines,
+                (application_import_lines[2],),
+            ),
+            *expected_diagnostics(
+                "crates/domain/src/session.rs", domain_record_lines
+            ),
+            *expected_diagnostics(
+                "crates/persistence/src/session_metadata.rs", legacy_actor_lines
+            ),
+            *expected_diagnostics(
                 "apps/signalboxd/tests/offline_tool_loop.rs",
                 mixed_storage_lines,
                 mixed_storage_lines[:1],
+            ),
+            *expected_diagnostics(
+                "crates/persistence/migrations/202607180001_create_session.sql",
+                frozen_migration_lines,
+                frozen_migration_lines[1:],
             ),
             *expected_diagnostics(
                 "crates/persistence/migrations/202608020009_user_vocabulary.sql",
@@ -303,6 +403,13 @@ def main() -> int:
             "impl GitHubRepository {\n"
             "fn owner(&self) -> &str {\n"
             "    &self.value[..self.owner_end]\n"
+            "}\n"
+            "let payload = json!({\n"
+            '    "owner": repository.owner(),\n'
+            "});\n"
+            "query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!) {\n"
+            "  repository(owner: $owner, name: $name) {\n"
+            "  }\n"
             "}\n",
             encoding="utf-8",
         )
@@ -320,7 +427,34 @@ def main() -> int:
             "signalboxd binds a socket with owner-only `0600` permissions.\n",
             encoding="utf-8",
         )
+        local_socket_path.write_text(
+            "fn ancestor_owner_is_trusted(owner: u32, effective_user: u32) -> bool {\n"
+            "    owner == 0 || owner == effective_user\n"
+            "}\n"
+            "fn guarded_bind_listens_only_with_owner_access() {}\n",
+            encoding="utf-8",
+        )
         imported.write_text(fixture_text(imported_lines[:-1]), encoding="utf-8")
+        application_import.write_text(
+            "fn converted() {\n"
+            "    consume(\n"
+            "        owner,\n"
+            "    );\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        frozen_migration.write_text(
+            "CHECK (cause = 'owner_initiated');\n", encoding="utf-8"
+        )
+        domain_record.write_text(
+            'let user_id = "human who approves tools";\n', encoding="utf-8"
+        )
+        legacy_actor.write_text(
+            "Actor::User => EncodedActor {\n"
+            '    kind: "owner",\n'
+            "}\n",
+            encoding="utf-8",
+        )
         mixed_storage_path.write_text(
             'const PROCESS_ACTOR: &str = "user";\n'
             'const DECISION_SOURCE: &str = "owner_command";\n',

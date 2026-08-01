@@ -1330,7 +1330,7 @@ mod tests {
     #[test]
     fn invalid_actor_shapes_fail_closed() {
         let error = decode_actor(
-            String::from("owner"),
+            encode_actor(Actor::User).kind.to_owned(),
             Some(Uuid::from_u128(1)),
             None,
             "fixture actor",

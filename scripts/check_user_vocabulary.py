@@ -13,12 +13,7 @@ from typing import Mapping
 
 SCAN_ROOTS = ("crates", "apps", "clients", "docs/spec")
 OWNER = re.compile(
-    r"\b(?![A-Za-z0-9]*(?:ownership|OWNERSHIP|Ownership)[A-Za-z0-9]*\b)"
-    r"[A-Za-z0-9]*(?:owner|OWNER|Owner)[A-Za-z0-9]*\b|"
-    r"(?i:\bowners?\d*(?:\b|[_-])|owners?[_-]|(?<=[_-])owners?\d*(?:\b|[_-]))|"
-    r"\b[Oo]wners?\d+[A-Z][A-Za-z0-9_]*|"
-    r"\b[Oo]wners?[A-Z][A-Za-z0-9_]*|"
-    r"\b[A-Za-z0-9_]+Owners?(?:[A-Z][A-Za-z0-9_]*)?"
+    r"[A-Za-z0-9_]*owner[A-Za-z0-9_]*", re.IGNORECASE
 )
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 
@@ -30,6 +25,8 @@ class Allowance:
     paths: re.Pattern[str]
     lines: re.Pattern[str]
     enclosing_impls: Mapping[str, str] | None = None
+    enclosing_functions: Mapping[str, frozenset[str]] | None = None
+    previous_line: re.Pattern[str] | None = None
 
     @staticmethod
     def _inside_impl(
@@ -45,12 +42,33 @@ class Allowance:
         )
         if start is None:
             return False
-        depth = 0
-        for candidate in source_lines[start : index + 1]:
-            depth += candidate.count("{") - candidate.count("}")
-            if depth <= 0:
+        return not any(
+            re.fullmatch(r"}\s*(?://.*)?", candidate)
+            for candidate in source_lines[start + 1 : index]
+        )
+
+    @staticmethod
+    def _inside_function(
+        source_lines: list[str], index: int, expected_names: frozenset[str]
+    ) -> bool:
+        for candidate in range(index - 1, -1, -1):
+            declaration = re.match(
+                r"^(?P<indent>\s*)(?:async\s+)?fn\s+(?P<name>[A-Za-z0-9_]+)\b",
+                source_lines[candidate],
+            )
+            if declaration is None:
+                continue
+            if declaration.group("name") not in expected_names:
                 return False
-        return True
+            if "}" in source_lines[candidate][declaration.end() :]:
+                return False
+            indentation = len(declaration.group("indent"))
+            return not any(
+                line.strip() == "}"
+                and len(line) - len(line.lstrip()) <= indentation
+                for line in source_lines[candidate + 1 : index]
+            )
+        return False
 
     def covers(
         self,
@@ -68,6 +86,17 @@ class Allowance:
                 source_lines, index, expected_impl
             ):
                 return False
+        if self.enclosing_functions is not None:
+            expected_names = self.enclosing_functions.get(path)
+            if expected_names is None or not self._inside_function(
+                source_lines, index, expected_names
+            ):
+                return False
+        if self.previous_line is not None and (
+            index == 0
+            or self.previous_line.fullmatch(source_lines[index - 1]) is None
+        ):
+            return False
         token_start = match.start()
         while token_start > 0 and (
             line[token_start - 1].isalnum() or line[token_start - 1] == "_"
@@ -97,20 +126,48 @@ ALLOWLIST = (
             r"docs/spec/(?:configuration-and-credentials|runner-protocol|tool-loop)[.]md)$"
         ),
         re.compile(
-            r"owner/repository|owner/name|repos/owner/|repository\(owner:|\$owner\b|"
-            r"[\"']owner[\"']:\s*(?:arguments[.]repository\(\)[.]owner\(\)|"
-            r"repository[.]owner\(\)|owner)(?:,|\s*$)|"
+            r"owner/repository|owner/name|repos/owner/|"
             r"(?:arguments[.]repository[(][)]|repository)[.]owner[(][)]|"
-            r"let owner = .*owner_end|\bowner_end\b|"
+            r"let owner = &value\[\.\.owner_end\]|\bowner_end\b|"
             r"let \(owner, name\) = repository|"
             r"Exact owner/repository|canonical `owner/repository`|"
             r"`@codex review` request by an owner, member, or collaborator|"
             r"association is `OWNER`, `MEMBER`, or `COLLABORATOR`|"
             r"matches!\(association, \"OWNER\" \| \"MEMBER\" \| \"COLLABORATOR\"\)|"
             r"author_association:\s*String::from\(\"OWNER\"\)|"
-            r"valid_repository_segment\(owner\)|"
-            r"Merge pull request.*owner/",
+            r"valid_repository_segment\(owner\)",
             re.IGNORECASE,
+        ),
+    ),
+    Allowance(
+        "GitHub repository GraphQL owner variables",
+        re.compile(
+            r"^(?:crates/tools-github/src/lib[.]rs|"
+            r"crates/tools-code-host/src/code_host/github[.]rs)$"
+        ),
+        re.compile(
+            r"^query (?:PullRequestReviewThreads|ReviewThreads|Convergence|"
+            r"ThreadInventory)\(\$owner: String!,|"
+            r"^\s*repository\(owner: \$owner, name: \$name\) \{\s*$"
+        ),
+    ),
+    Allowance(
+        "GitHub stack GraphQL owner declarations",
+        re.compile(r"^crates/tools-code-host/src/code_host/github[.]rs$"),
+        re.compile(r"^\s*\$owner: String!\s*$"),
+        previous_line=re.compile(
+            r"^query (?:StackComparison|StackChildren)\(\s*$"
+        ),
+    ),
+    Allowance(
+        "GitHub repository-coordinate request fields",
+        re.compile(
+            r"^(?:crates/tools-github/src/lib[.]rs|"
+            r"crates/tools-code-host/src/code_host/github[.]rs)$"
+        ),
+        re.compile(
+            r"[\"']owner[\"']:\s*(?:arguments[.]repository\(\)[.]owner\(\)|"
+            r"repository[.]owner\(\)|owner)(?:,|\s*$)"
         ),
     ),
     Allowance(
@@ -149,8 +206,9 @@ ALLOWLIST = (
         ),
         re.compile(
             r"(?:socket|listener|directory|file|root|state|parent|sidecar|spool|mode|"
-            r"permissions|fixture|enrollment|durable).*owner-(?:only|private)|"
-            r"owner-(?:only|private).*(?:socket|listener|directory|file|root|state|"
+            r"permissions|fixture|enrollment|durable)(?:(?!owner).)*"
+            r"owner-(?:only|private)|"
+            r"owner-(?:only|private)(?:(?!owner).)*(?:socket|listener|directory|file|root|state|"
             r"parent|sidecar|spool|mode|permissions|fixture|enrollment|durable)|"
             r"unreadable, oversized, wrong-owner, wrong-mode|"
             r"unprivileged different owner cannot make a currently protected directory|"
@@ -158,12 +216,14 @@ ALLOWLIST = (
             r"local process socket parent ancestry has an untrusted owner|"
             r"local process socket parent has the wrong owner|"
             r"stale local process socket has the wrong owner|"
-            r"effective-user ownership|owner\s*==|"
-            r"owner:\s*u32|child_owner|ParentOwnerMismatch|AncestorOwnerMismatch|"
+            r"effective-user ownership|"
+            r"^\s*fn ancestor_owner_is_trusted\(owner: u32, effective_user: u32\) -> bool \{\s*$|"
+            r"^\s*owner == 0 \|\| owner == effective_user\s*$|"
+            r"child_owner|ParentOwnerMismatch|AncestorOwnerMismatch|"
             r"ExistingSocketOwnerMismatch|PeerOwnerMismatch|\bOwnerMismatch\b|"
             r"ancestor_owner_is_trusted|"
             r"ancestor_owner_must_be_root_or_the_effective_user|file owner|"
-            r"owner_access|dropping the owner|its owner, so it cannot shadow|"
+            r"dropping the owner|its owner, so it cannot shadow|"
             r"owner-vs-other|"
             r"guarded_bind_listens_only_with_owner_access",
             re.IGNORECASE,
@@ -203,7 +263,18 @@ ALLOWLIST = (
             r"202608020003_runner_wire_contract"
             r")[.]sql$"
         ),
-        re.compile(r"[A-Za-z0-9_]*owner[A-Za-z0-9_]*", re.IGNORECASE),
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:"
+            r"imported_conversation_raw_record_owner_fk|"
+            r"imported_transcript_entry_owner_fk|"
+            r"imported_transcript_entry_owner_identity_key|"
+            r"owner_command_id|owner_command|owner_initiated|"
+            r"owner_tool_approval_requires_command|"
+            r"review_pass_produced_finding_owner|"
+            r"tool_approval_decision_owner_command_fk|owner"
+            r")(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        ),
     ),
     Allowance(
         "imported-conversation record owner identifiers",
@@ -211,13 +282,50 @@ ALLOWLIST = (
         re.compile(
             r"returned_owner|"
             r"^\s*owner:\s*ImportedConversationId,\s*$|"
-            r"^\s*owner,\s*$|"
             r"^\s*self[.]owner,\s*$|"
             r"^\s*let owner = conversation\(\d+\);\s*$|"
             r"self[.]observed[.]push\(\(owner, source[.]to_vec\(\)\)\);|"
             r"self[.]returned_owner[.]unwrap_or\(owner\)|"
             r"self[.]convert\(owner, source, next_entry_id\)\?",
         ),
+    ),
+    Allowance(
+        "imported-conversation fixture owner arguments",
+        re.compile(
+            r"^crates/(?:application/src/conversation_import|"
+            r"domain/src/imported_conversation)[.]rs$"
+        ),
+        re.compile(r"^\s*owner,\s*$"),
+        enclosing_functions={
+            "crates/application/src/conversation_import.rs": frozenset(
+                {"converted"}
+            ),
+            "crates/domain/src/imported_conversation.rs": frozenset(
+                {
+                    "new",
+                    "claude_code_summary_fixture",
+                    "claude_code_user_text_fixture",
+                    "codex_session_meta_fixture",
+                    "converted",
+                    "inv002_inv038_raw_hash_corruption_retains_complete_input",
+                    "inv038_complete_normalized_record_rejects_129_containers",
+                    "inv038_coordinated_normalized_and_entry_corruption_fails_closed",
+                    "inv038_empty_raw_source_record_fails_closed",
+                    "inv038_entry_carried_structured_value_rejects_129_containers",
+                    "inv038_entry_content_must_match_the_complete_normalized_record",
+                    "inv038_entry_metadata_must_match_the_complete_normalized_record",
+                    "inv038_first_entry_cannot_skip_first_raw_record",
+                    "inv038_message_content_without_source_speaker_fails_closed",
+                    "inv038_message_speaker_must_match_the_raw_record_type",
+                    "inv038_raw_record_entry_count_must_match_its_normalized_projection",
+                    "inv038_source_event_rejects_a_message_record_type",
+                    "s28_inv002_inv038_checks_raw_depth_before_recursive_conversion_digest",
+                    "s28_inv002_inv038_converted_raw_depth_fails_closed_and_drops_safely",
+                    "s28_inv038_converter_versions_do_not_reinterpret_result_blocks",
+                    "s28_inv038_converter_versions_do_not_reinterpret_source_blocks",
+                }
+            ),
+        },
     ),
     Allowance(
         "context-frontier fixture owner identifiers",
@@ -280,10 +388,18 @@ ALLOWLIST = (
         ),
         re.compile(
             r"\(\"owner\", (?:None|Some\(_\))(?:, None)?\)|"
-            r"\"owner\" \| \"model\"|kind:\s*\"owner\"|"
-            r"String::from\(\"owner\"\)|expected_issuer\s*=\s*\(\"owner\"|"
+            r"\"owner\" \| \"model\"|"
+            r"expected_issuer\s*=\s*\(\"owner\"|"
             r"\(`owner`/(?:`model`|`tool`)"
         ),
+    ),
+    Allowance(
+        "legacy PostgreSQL actor encoder fields",
+        re.compile(
+            r"^crates/persistence/src/(?:session_metadata|submit_input)[.]rs$"
+        ),
+        re.compile(r'^\s*kind:\s*"owner",\s*$'),
+        previous_line=re.compile(r"^\s*Actor::User => EncodedActor \{\s*$"),
     ),
     Allowance(
         "legacy PostgreSQL SQL actor literals",
@@ -294,7 +410,30 @@ ALLOWLIST = (
         re.compile(r"(?:^|,|=\s*)\s*'owner'(?=\s*[,)]|$)"),
     ),
     Allowance(
-        "Rust and domain-record ownership phrasing",
+        "non-owner cross-fragment identifiers",
+        re.compile(
+            r"^clients/native/Tests/(?:SignalboxAppTests/ViewModelTests|"
+            r"SignalboxModelsTests/ProcessProtocolTests)[.]swift$"
+        ),
+        re.compile(
+            r"\b(?:sendOutcomeUnknownError|"
+            r"testExpandedKnownErrorDetailDegradesBeforeProtocolProjection|"
+            r"testUnknownRejectionDetailDegradesKnownError)\b"
+        ),
+    ),
+    Allowance(
+        "Rust borrow/ownership phrasing",
+        re.compile(r"^(?:crates|apps|clients|docs/spec)/"),
+        re.compile(
+            r"(?<![A-Za-z0-9_])"
+            r"(?![A-Za-z0-9_]*owner[A-Za-z0-9_]*owner)"
+            r"[A-Za-z0-9_]*ownership[A-Za-z0-9_]*"
+            r"(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        ),
+    ),
+    Allowance(
+        "domain-record ownership phrasing",
         re.compile(
             r"^(?:apps/signalbox-runner/src/state[.]rs|"
             r"apps/signalboxd/src/runner_protocol_runtime[.]rs|"
@@ -310,7 +449,6 @@ ALLOWLIST = (
             r"turn-lifecycle-and-scheduling)[.]md)$"
         ),
         re.compile(
-            r"[A-Za-z0-9_]*Ownership[A-Za-z0-9_]*|ownership|\bowned\b|\bowning\b|"
             r"acceptance positions, typed priority relations, and active-slot owner are|"
             r"active slot owner[.]$|sole active slot owner, when present|"
             r"exact active slot owner[.]$|records the active slot owner, stale|"
@@ -324,7 +462,7 @@ ALLOWLIST = (
             r"loss before and after pin, owner replacement|complete owner facts|"
             r"operation-owner facts|"
             r"(?:defaults|pending steering|snapshot) owner cross-wired|"
-            r"OwnerMismatch|OwnerIDs?|"
+            r"OwnerMismatch|"
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
             r"cross_wired_attempt_owner|cross_wired_defaults_owner|"
             r"foreign_attachment_owner|foreign_event_owner|foreign_observation_owner|"

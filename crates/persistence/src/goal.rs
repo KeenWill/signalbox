@@ -487,12 +487,15 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         };
-        if matches!(transition, SystemTransition::ExecutionFailure { .. })
-            && let Some(event) = recorded_scheduler_failure(&goal, transition.turn())
-        {
-            let event = event.clone();
-            transaction.rollback().await?;
-            return Ok(GoalTransitionOutcome::Applied(event));
+        match transition.authority() {
+            SystemTransitionAuthority::ModelDeclaration => {}
+            SystemTransitionAuthority::SchedulerFailure => {
+                if let Some(event) = recorded_scheduler_failure(&goal, transition.turn()) {
+                    let event = event.clone();
+                    transaction.rollback().await?;
+                    return Ok(GoalTransitionOutcome::Applied(event));
+                }
+            }
         }
         let generation = goal_turn_generation(&mut transaction, session, transition.turn()).await?;
         if generation != Some(goal.current().generation()) {
@@ -505,12 +508,16 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
         }
-        if matches!(transition, SystemTransition::ExecutionFailure { .. })
-            && goal_turn_terminal_state(&mut transaction, session, transition.turn()).await?
-                != GoalTurnTerminalState::Unsuccessful
-        {
-            transaction.rollback().await?;
-            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+        match transition.authority() {
+            SystemTransitionAuthority::ModelDeclaration => {}
+            SystemTransitionAuthority::SchedulerFailure => {
+                if goal_turn_terminal_state(&mut transaction, session, transition.turn()).await?
+                    != GoalTurnTerminalState::Unsuccessful
+                {
+                    transaction.rollback().await?;
+                    return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+                }
+            }
         }
         let transitioned = match transition {
             SystemTransition::Blocked {
@@ -641,7 +648,22 @@ enum SystemTransition {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemTransitionAuthority {
+    ModelDeclaration,
+    SchedulerFailure,
+}
+
 impl SystemTransition {
+    const fn authority(&self) -> SystemTransitionAuthority {
+        match self {
+            Self::Blocked { .. } | Self::Achieved { .. } => {
+                SystemTransitionAuthority::ModelDeclaration
+            }
+            Self::ExecutionFailure { .. } => SystemTransitionAuthority::SchedulerFailure,
+        }
+    }
+
     const fn turn(&self) -> TurnId {
         match self {
             Self::Blocked { provenance, .. } | Self::Achieved { provenance, .. } => {
