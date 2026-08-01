@@ -37,6 +37,7 @@ const INVALID_ARGUMENTS_DETAIL: &str =
     "expected a nonempty web search query of at most 400 characters and 50 words";
 const CREDENTIAL_UNAVAILABLE_DETAIL: &str = "web search credential is unavailable";
 const REQUEST_FAILED_DETAIL: &str = "web search request failed";
+const PROVIDER_REJECTED_DETAIL: &str = "web search provider rejected the request";
 const INVALID_RESPONSE_DETAIL: &str = "web search provider returned an invalid bounded response";
 const DEFAULT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_QUERY_CHARACTERS: usize = 400;
@@ -269,6 +270,9 @@ impl<Credentials, Transport> WebSearchTool<Credentials, Transport> {
         let request_failed_detail =
             ToolExecutionErrorDetail::try_new(String::from(REQUEST_FAILED_DETAIL))
                 .map_err(|_| WebSearchToolConstructionError::ErrorDetail)?;
+        let provider_rejected_detail =
+            ToolExecutionErrorDetail::try_new(String::from(PROVIDER_REJECTED_DETAIL))
+                .map_err(|_| WebSearchToolConstructionError::ErrorDetail)?;
         let invalid_response_detail =
             ToolExecutionErrorDetail::try_new(String::from(INVALID_RESPONSE_DETAIL))
                 .map_err(|_| WebSearchToolConstructionError::ErrorDetail)?;
@@ -295,6 +299,7 @@ impl<Credentials, Transport> WebSearchTool<Credentials, Transport> {
                 configuration,
                 credential_unavailable_detail,
                 request_failed_detail,
+                provider_rejected_detail,
                 invalid_response_detail,
             },
         })
@@ -350,6 +355,7 @@ impl WebSearchRequest {
 #[derive(Clone, Eq, PartialEq)]
 pub struct WebSearchResult {
     title: String,
+    source_url: String,
     url: String,
     snippet: String,
 }
@@ -392,6 +398,7 @@ impl WebSearchResult {
             && fields.snippet.len() <= MAX_RESULT_SNIPPET_BYTES)
             .then_some(Self {
                 title: fields.title,
+                source_url: fields.url,
                 url: normalized_url,
                 snippet: fields.snippet,
             })
@@ -514,6 +521,7 @@ pub enum WebSearchTransportFailure {
 pub struct WebSearchCredentialDiagnostic {
     rendered: String,
     failure_class: WebSearchCredentialDiagnosticClass,
+    transport_failure_class: Option<WebSearchTransportFailureClass>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -734,6 +742,7 @@ fn credential_safe_transport_outcome(
                     WebSearchCredentialDiagnostic {
                         rendered: safe_collision_diagnostic(credential_text),
                         failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                        transport_failure_class: None,
                     },
                 ))
             } else {
@@ -749,10 +758,15 @@ fn credential_safe_transport_outcome(
             Ok(_) => WebSearchCredentialDiagnosticClass::CallerOrHubBug,
             Err(failure) => transport_failure_diagnostic_class(failure),
         };
+        let transport_failure_class = match &sanitized {
+            Ok(_) => None,
+            Err(failure) => transport_failure_source_class(failure),
+        };
         Err(WebSearchTransportFailure::CredentialDiagnosticCollision(
             WebSearchCredentialDiagnostic {
                 rendered: safe_collision_diagnostic(credential_text),
                 failure_class,
+                transport_failure_class,
             },
         ))
     } else {
@@ -778,6 +792,17 @@ fn transport_failure_diagnostic_class(
         WebSearchTransportFailure::DispatchUnknown => {
             WebSearchCredentialDiagnosticClass::InfrastructureCommitAmbiguous
         }
+    }
+}
+
+fn transport_failure_source_class(
+    failure: &WebSearchTransportFailure,
+) -> Option<WebSearchTransportFailureClass> {
+    match failure {
+        WebSearchTransportFailure::CredentialDiagnosticCollision(diagnostic) => {
+            diagnostic.transport_failure_class
+        }
+        other => Some(other.class()),
     }
 }
 
@@ -812,9 +837,11 @@ fn credential_safe_transport_failure(
         || source_contains_credential
         || executor_contains_credential
     {
+        let transport_failure_class = transport_failure_source_class(&failure);
         WebSearchTransportFailure::CredentialDiagnosticCollision(WebSearchCredentialDiagnostic {
             rendered: safe_collision_diagnostic(credential_text),
             failure_class: transport_failure_diagnostic_class(&failure),
+            transport_failure_class,
         })
     } else {
         failure
@@ -841,6 +868,7 @@ fn credential_safe_executor_error(
 ) -> WebSearchExecutorError {
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let failure_class = executor_error_diagnostic_class(&error);
+    let transport_failure_class = executor_error_transport_failure_class(&error);
     if credential_text.is_empty()
         || format!("{error:?}").contains(credential_text)
         || error.to_string().contains(credential_text)
@@ -848,9 +876,23 @@ fn credential_safe_executor_error(
         WebSearchExecutorError::CredentialDiagnosticCollision(WebSearchCredentialDiagnostic {
             rendered: safe_collision_diagnostic(credential_text),
             failure_class,
+            transport_failure_class,
         })
     } else {
         error
+    }
+}
+
+fn executor_error_transport_failure_class(
+    error: &WebSearchExecutorError,
+) -> Option<WebSearchTransportFailureClass> {
+    match error {
+        WebSearchExecutorError::CredentialDiagnosticCollision(diagnostic) => {
+            diagnostic.transport_failure_class
+        }
+        WebSearchExecutorError::ArgumentValidationDrift
+        | WebSearchExecutorError::EvidenceEncoding
+        | WebSearchExecutorError::DispatchUnknown => None,
     }
 }
 
@@ -1033,6 +1075,7 @@ pub struct WebSearchExecutor<Credentials, Transport> {
     configuration: WebSearchConfiguration,
     credential_unavailable_detail: ToolExecutionErrorDetail,
     request_failed_detail: ToolExecutionErrorDetail,
+    provider_rejected_detail: ToolExecutionErrorDetail,
     invalid_response_detail: ToolExecutionErrorDetail,
 }
 
@@ -1056,7 +1099,7 @@ pub enum WebSearchExecutorError {
     EvidenceEncoding,
     /// Physical dispatch began without a complete bounded outcome.
     DispatchUnknown,
-    /// A dispatch-unknown diagnostic collided with its request credential.
+    /// A diagnostic collided with its request credential.
     CredentialDiagnosticCollision(WebSearchCredentialDiagnostic),
 }
 
@@ -1153,13 +1196,8 @@ where
             .search(request, &credential)
             .await
             .into_result();
-        if let Err(failure) = &transport_result
-            && let Err(error) = report_transport_failure(failure, correlation, &credential)
-        {
-            return WebSearchRequestOutcome::Error {
-                error: credential_safe_executor_error(error, &credential),
-                credential,
-            };
+        if let Err(failure) = &transport_result {
+            let _reporting = report_transport_failure(failure, correlation, &credential);
         }
         let outcome = match transport_result {
             Ok(response) => success_evidence(response, &scrubber),
@@ -1167,15 +1205,7 @@ where
                 known_failure_evidence(self.credential_unavailable_detail.clone(), &scrubber)
             }
             Err(WebSearchTransportFailure::CredentialDiagnosticCollision(diagnostic)) => {
-                match diagnostic.failure_class {
-                    WebSearchCredentialDiagnosticClass::CallerOrHubBug => known_failure_evidence(
-                        self.credential_unavailable_detail.clone(),
-                        &scrubber,
-                    ),
-                    WebSearchCredentialDiagnosticClass::InfrastructureCommitAmbiguous => Err(
-                        WebSearchExecutorError::CredentialDiagnosticCollision(diagnostic),
-                    ),
-                }
+                self.credential_diagnostic_evidence(diagnostic, &scrubber)
             }
             Err(WebSearchTransportFailure::RequestFailed) => {
                 known_failure_evidence(self.request_failed_detail.clone(), &scrubber)
@@ -1206,6 +1236,41 @@ where
                 error: credential_safe_executor_error(error, &credential),
                 credential,
             },
+        }
+    }
+
+    fn credential_diagnostic_evidence(
+        &self,
+        diagnostic: WebSearchCredentialDiagnostic,
+        scrubber: &CredentialScrubber,
+    ) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
+        match diagnostic.transport_failure_class {
+            Some(WebSearchTransportFailureClass::InvalidCredential) => {
+                known_failure_evidence(self.credential_unavailable_detail.clone(), scrubber)
+            }
+            Some(WebSearchTransportFailureClass::RequestFailed) => {
+                known_failure_evidence(self.request_failed_detail.clone(), scrubber)
+            }
+            Some(WebSearchTransportFailureClass::ProviderRejected) => {
+                known_failure_evidence(self.provider_rejected_detail.clone(), scrubber)
+            }
+            Some(
+                WebSearchTransportFailureClass::InvalidResponse
+                | WebSearchTransportFailureClass::ResponseTooLarge,
+            ) => known_failure_evidence(self.invalid_response_detail.clone(), scrubber),
+            Some(WebSearchTransportFailureClass::DispatchUnknown) => Err(
+                WebSearchExecutorError::CredentialDiagnosticCollision(diagnostic),
+            ),
+            Some(WebSearchTransportFailureClass::CredentialDiagnosticCollision) | None => {
+                match diagnostic.failure_class {
+                    WebSearchCredentialDiagnosticClass::CallerOrHubBug => {
+                        known_failure_evidence(self.credential_unavailable_detail.clone(), scrubber)
+                    }
+                    WebSearchCredentialDiagnosticClass::InfrastructureCommitAmbiguous => Err(
+                        WebSearchExecutorError::CredentialDiagnosticCollision(diagnostic),
+                    ),
+                }
+            }
         }
     }
 }
@@ -1279,6 +1344,7 @@ fn bind_request_outcome(
                         rendered: safe_collision_diagnostic(credential_text),
                         failure_class:
                             WebSearchCredentialDiagnosticClass::InfrastructureCommitAmbiguous,
+                        transport_failure_class: executor_error_transport_failure_class(&error),
                     },
                 ));
             }
@@ -1292,6 +1358,7 @@ fn bind_request_outcome(
                 WebSearchCredentialDiagnostic {
                     rendered: safe_collision_diagnostic(credential_text),
                     failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                    transport_failure_class: executor_error_transport_failure_class(&error),
                 },
             ));
         }
@@ -1314,6 +1381,7 @@ fn bind_request_outcome(
             WebSearchCredentialDiagnostic {
                 rendered: safe_collision_diagnostic(credential_text),
                 failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+                transport_failure_class: None,
             },
         ));
     }
@@ -1390,6 +1458,7 @@ fn report_transport_failure(
             WebSearchCredentialDiagnostic {
                 rendered: safe_collision_diagnostic(credential_text),
                 failure_class: transport_failure_diagnostic_class(failure),
+                transport_failure_class: transport_failure_source_class(failure),
             },
         ));
     }
@@ -1458,7 +1527,12 @@ fn success_evidence(
         .into_iter()
         .take(MAX_RETURNED_RESULTS)
         .map(|result| {
-            if scrubber.url_contains_encoded_credential(&result.url) {
+            let normalization_conceals_credential = result.source_url != result.url
+                && scrubber.contains_credential(&result.source_url)
+                && !scrubber.contains_credential(&result.url);
+            if normalization_conceals_credential
+                || scrubber.url_contains_encoded_credential(&result.url)
+            {
                 return Err(WebSearchExecutorError::EvidenceEncoding);
             }
             let sanitized = WebSearchResult::try_new(WebSearchResultFields {
@@ -1579,6 +1653,8 @@ impl CredentialScrubber {
         text.contains(&self.exact)
             || text.contains(&self.json_escaped)
             || self.contains_form_encoded_credential(text)
+            || html_decoded_contains(text, &self.exact)
+            || html_decoded_contains(text, &self.json_escaped)
     }
 
     fn contains_form_encoded_credential(&self, text: &str) -> bool {
@@ -1588,6 +1664,13 @@ impl CredentialScrubber {
 
     fn url_contains_encoded_credential(&self, text: &str) -> bool {
         if self.contains_form_encoded_credential(text) {
+            return true;
+        }
+        let slash_normalized = self.exact.replace('\\', "/");
+        if slash_normalized != self.exact
+            && (text.contains(&slash_normalized)
+                || form_decoded_contains(text, slash_normalized.as_bytes()))
+        {
             return true;
         }
         let Ok(url) = Url::parse(text) else {
@@ -1600,7 +1683,7 @@ impl CredentialScrubber {
             return false;
         };
         if canonicalized_url_host(&self.exact)
-            .is_some_and(|credential_host| credential_host.eq_ignore_ascii_case(host))
+            .is_some_and(|credential_host| ascii_case_insensitive_contains(host, &credential_host))
         {
             return true;
         }
@@ -1629,6 +1712,64 @@ impl CredentialScrubber {
         }
         self.redact_text(&text)
     }
+}
+
+fn ascii_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
+    !needle.is_empty()
+        && haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn html_decoded_contains(text: &str, credential: &str) -> bool {
+    const MAX_CHARACTER_REFERENCE_BYTES: usize = 64;
+    let mut decoded = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(reference_start) = remaining.find('&') {
+        decoded.push_str(&remaining[..reference_start]);
+        let reference = &remaining[reference_start..];
+        let Some(relative_end) = reference
+            .get(..MAX_CHARACTER_REFERENCE_BYTES.min(reference.len()))
+            .and_then(|candidate| candidate.find(';'))
+        else {
+            decoded.push('&');
+            remaining = &reference[1..];
+            continue;
+        };
+        let entity = &reference[1..relative_end];
+        let Some(replacement) = decode_html_character_reference(entity) else {
+            return true;
+        };
+        decoded.push_str(&replacement);
+        remaining = &reference[relative_end + 1..];
+    }
+    decoded.push_str(remaining);
+    decoded.contains(credential)
+}
+
+fn decode_html_character_reference(entity: &str) -> Option<String> {
+    let named = match entity {
+        "amp" | "AMP" => Some("&"),
+        "apos" => Some("'"),
+        "gt" | "GT" => Some(">"),
+        "lt" | "LT" => Some("<"),
+        "quot" | "QUOT" => Some("\""),
+        _ => None,
+    };
+    if let Some(named) = named {
+        return Some(String::from(named));
+    }
+    let (digits, radix) = if let Some(digits) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+    {
+        (digits, 16)
+    } else {
+        (entity.strip_prefix('#')?, 10)
+    };
+    let scalar = u32::from_str_radix(digits, radix).ok()?;
+    char::from_u32(scalar).map(|character| character.to_string())
 }
 
 fn fixed_outer_error_debug_may_contain(credential: &str) -> bool {
@@ -1743,6 +1884,8 @@ mod tests {
     const FIXTURE_IPV6_RESULT_URL: &str = "https://[2001:db8::1]/result";
     const FIXTURE_LEGACY_IPV4_RESULT_URL: &str = "https://2130706433/result";
     const FIXTURE_UPPERCASE_SCHEME_RESULT_URL: &str = "HTTPS://example.com/result";
+    const FIXTURE_BACKSLASH_RESULT_URL: &str = "https://example.com/abc\\def";
+    const FIXTURE_EMBEDDED_HOST_RESULT_URL: &str = "https://x-ABCDEF.example/result";
     const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
     const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
     const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";
@@ -1760,6 +1903,10 @@ mod tests {
     const URL_HOST_CASE_COLLISION_KEY: &str = "EXAMPLE.COM";
     const URL_IPV6_COLLISION_KEY: &str = "2001:0db8:0:0:0:0:0:1";
     const URL_LEGACY_IPV4_COLLISION_KEY: &str = "2130706433";
+    const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
+    const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
+    const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
+    const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
     const EXCESSIVE_FORM_ENCODING_VALUE: &str = "%252525252525252F";
     const DIAGNOSTIC_REDACTION_OVERLAP_KEY: &str = "e";
     const TIMESTAMP_COLLISION_KEY: &str = "2026";
@@ -2176,10 +2323,49 @@ mod tests {
             .expect("fixture credential is usable")
     }
 
+    fn completed_text(evidence: ToolExecutorEvidence) -> String {
+        match evidence {
+            ToolExecutorEvidence::CompletedText(content) => content,
+            other => panic!("expected completed text, got {other:?}"),
+        }
+    }
+
     fn provider_rejection(failure: WebSearchTransportFailure) -> WebSearchProviderError {
         match failure {
             WebSearchTransportFailure::ProviderRejected(error) => error,
             other => panic!("expected provider rejection, got {other:?}"),
+        }
+    }
+
+    fn colliding_failure_detail(
+        credential: &'static str,
+        failure_class: WebSearchTransportFailureClass,
+    ) -> String {
+        let credentials = StaticCredentials {
+            value: SYNTHETIC_KEY,
+        };
+        let transport = CountingTransport {
+            searches: Arc::new(AtomicUsize::new(0)),
+        };
+        let (_catalog, executor) = WebSearchTool::try_new(credentials, transport, configuration())
+            .expect("fixture web_search tool compiles")
+            .into_parts();
+        let credential = CredentialValue::new(credential.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let diagnostic = WebSearchCredentialDiagnostic {
+            rendered: String::from("!"),
+            failure_class: WebSearchCredentialDiagnosticClass::CallerOrHubBug,
+            transport_failure_class: Some(failure_class),
+        };
+        let evidence = executor
+            .credential_diagnostic_evidence(diagnostic, &scrubber)
+            .expect("non-ambiguous failure becomes evidence");
+        match evidence {
+            ToolExecutorEvidence::KnownFailed {
+                detail: Some(detail),
+            } => String::from(detail.as_str()),
+            other => panic!("expected detailed known failure, got {other:?}"),
         }
     }
 
@@ -2209,9 +2395,8 @@ mod tests {
             .expect("static web_search tool compiles")
             .into_parts();
         let definitions = catalog.definitions();
-        let [definition] = definitions.as_ref() else {
-            panic!("web_search is the one compiled definition")
-        };
+        assert_eq!(definitions.len(), 1);
+        let definition = &definitions[0];
 
         assert_eq!(definition.name().as_str(), WEB_SEARCH_NAME);
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
@@ -2437,9 +2622,7 @@ mod tests {
     fn web_search_result_reports_provider_result_truncation() {
         let response = response_with_result_count(MAX_RETURNED_RESULTS + 1);
         let evidence = success_evidence(response, &scrubber()).expect("response encodes");
-        let ToolExecutorEvidence::CompletedText(content) = evidence else {
-            panic!("a successful provider response completes with text")
-        };
+        let content = completed_text(evidence);
         let value: serde_json::Value =
             serde_json::from_str(&content).expect("result is valid JSON");
 
@@ -2463,9 +2646,7 @@ mod tests {
         )
         .expect("fixture response is admitted");
         let evidence = success_evidence(response, &scrubber()).expect("response encodes");
-        let ToolExecutorEvidence::CompletedText(content) = evidence else {
-            panic!("a successful provider response completes with text")
-        };
+        let content = completed_text(evidence);
         let value: serde_json::Value =
             serde_json::from_str(&content).expect("result is valid JSON");
 
@@ -2526,9 +2707,7 @@ mod tests {
         let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
             .expect("fixture response is admitted");
         let evidence = success_evidence(response, &scrubber()).expect("response encodes");
-        let ToolExecutorEvidence::CompletedText(content) = evidence else {
-            panic!("a successful provider response completes with text")
-        };
+        let content = completed_text(evidence);
 
         assert!(!content.contains(SYNTHETIC_KEY));
     }
@@ -2692,6 +2871,52 @@ mod tests {
         );
     }
 
+    /// INV-035: URL backslash normalization cannot conceal a credential in a
+    /// provider result path.
+    #[test]
+    fn web_search_rejects_backslash_normalized_credential_in_result_url() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_BACKSLASH_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("backslash fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_BACKSLASH_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
+    /// INV-035: case-insensitive host canonicalization cannot conceal an
+    /// embedded credential in a provider result host.
+    #[test]
+    fn web_search_rejects_embedded_case_normalized_credential_in_result_host() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_EMBEDDED_HOST_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("embedded host fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_EMBEDDED_HOST_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// IP-literal result hosts bypass domain-only IDNA decoding and remain
     /// valid structured search evidence.
     #[test]
@@ -2754,6 +2979,30 @@ mod tests {
         );
     }
 
+    /// INV-035: a standard HTML character reference cannot conceal a
+    /// credential reflected in provider-controlled text.
+    #[test]
+    fn web_search_redacts_html_encoded_credential_in_result_text() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(HTML_ENTITY_COLLISION_VALUE),
+            url: String::from(FIXTURE_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("HTML entity fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            HTML_ENTITY_COLLISION_KEY.as_bytes().to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+        let content = completed_text(evidence);
+
+        assert!(!content.contains(HTML_ENTITY_COLLISION_KEY));
+        assert!(!content.contains(HTML_ENTITY_COLLISION_VALUE));
+    }
+
     #[test]
     fn web_search_rejects_result_url_encoding_beyond_the_decode_bound() {
         let reflected = WebSearchResult::try_new(WebSearchResultFields {
@@ -2790,9 +3039,7 @@ mod tests {
         ))
         .expect("fixture credential is usable");
         let evidence = success_evidence(response, &scrubber).expect("response encodes");
-        let ToolExecutorEvidence::CompletedText(content) = evidence else {
-            panic!("a successful provider response completes with text")
-        };
+        let content = completed_text(evidence);
 
         assert!(!content.contains(SENTINEL_OVERLAPPING_KEY));
         assert!(!content.contains(SHAPED_SECRET));
@@ -3136,6 +3383,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn credential_collision_retains_invalid_credential_evidence() {
+        let detail = colliding_failure_detail(
+            "InvalidCredential",
+            WebSearchTransportFailureClass::InvalidCredential,
+        );
+
+        assert_eq!(detail, CREDENTIAL_UNAVAILABLE_DETAIL);
+    }
+
+    #[test]
+    fn credential_collision_retains_request_failure_evidence() {
+        let detail = colliding_failure_detail(
+            "RequestFailed",
+            WebSearchTransportFailureClass::RequestFailed,
+        );
+
+        assert_eq!(detail, REQUEST_FAILED_DETAIL);
+    }
+
+    #[test]
+    fn credential_collision_retains_provider_rejection_evidence() {
+        let detail = colliding_failure_detail(
+            "ProviderRejected",
+            WebSearchTransportFailureClass::ProviderRejected,
+        );
+
+        assert_eq!(detail, PROVIDER_REJECTED_DETAIL);
+    }
+
+    #[test]
+    fn credential_collision_retains_invalid_response_evidence() {
+        let detail = colliding_failure_detail(
+            "InvalidResponse",
+            WebSearchTransportFailureClass::InvalidResponse,
+        );
+
+        assert_eq!(detail, INVALID_RESPONSE_DETAIL);
+    }
+
+    #[test]
+    fn credential_collision_retains_response_overflow_evidence() {
+        let detail = colliding_failure_detail(
+            "ResponseTooLarge",
+            WebSearchTransportFailureClass::ResponseTooLarge,
+        );
+
+        assert_eq!(detail, INVALID_RESPONSE_DETAIL);
+    }
+
     /// INV-035: an evidence-encoding error arising after credential resolution
     /// is rendered through a request-scoped safe executor diagnostic.
     #[tokio::test]
@@ -3318,9 +3615,8 @@ mod tests {
 
         let response = decode_provider_response(WebSearchProvider::Brave, &body)
             .expect("recorded provider response decodes");
-        let [decoded] = response.results() else {
-            panic!("recorded response contains one web result")
-        };
+        assert_eq!(response.results().len(), 1);
+        let decoded = &response.results()[0];
 
         assert_eq!(decoded.title(), FIXTURE_RESULT_TITLE);
         assert_eq!(decoded.url(), FIXTURE_RESULT_URL);
