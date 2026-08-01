@@ -48,10 +48,10 @@ pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
     ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptError,
-    SessionSystemPromptFailure, TurnConfigurationProvenance, UnknownModelAlias,
-    VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+    OriginConfigurationReconstitutionInput, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionDefaultsVersionMismatch, SessionSystemPrompt,
+    SessionSystemPromptError, SessionSystemPromptFailure, TurnConfigurationProvenance,
+    UnknownModelAlias, VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
 pub use context_compaction::{
     ContextCompaction, ContextCompactionId, ContextCompactionModelCall,
@@ -70,7 +70,8 @@ pub use goal::{
     GoalGeneration, GoalGenerationSnapshot, GoalGuidance, GoalModelBlockedReasonKind,
     GoalModelProvenance, GoalNeed, GoalReconstitutionError, GoalReconstitutionFailure,
     GoalReconstitutionInput, GoalReport, GoalReportRef, GoalSchedulerProvenance, GoalState,
-    GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalUserProvenance,
+    GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalTurnSource,
+    GoalUserProvenance,
 };
 pub use goal_command::{
     GoalCommandRejection, GoalCommandResult, GoalUserAction, GoalUserCommand,
@@ -223,7 +224,7 @@ pub use session_template::{
     SessionTemplateNameFailure, SessionTemplateProvenance, SessionTemplateVersion,
 };
 pub use submit_input::{
-    PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput,
+    GoalTurnOriginConstructionInput, PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput,
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
     SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputInterruptedModelCallReconciliationConstructionInput,

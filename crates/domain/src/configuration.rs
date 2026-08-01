@@ -644,6 +644,63 @@ impl OriginConfiguration {
     }
 }
 
+/// Checked stored facts for reconstituting one explicit turn origin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OriginConfigurationReconstitutionInput {
+    defaults_version: SessionConfigurationDefaultsVersion,
+    defaults: SessionConfigurationDefaults,
+    requested_model: ModelSelectionRequest,
+    frozen_model: FrozenModelSelection,
+}
+
+impl OriginConfigurationReconstitutionInput {
+    /// Binds the immutable defaults epoch to its stored requested and frozen selections.
+    pub const fn new(
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        requested_model: ModelSelectionRequest,
+        frozen_model: FrozenModelSelection,
+    ) -> Self {
+        Self {
+            defaults_version,
+            defaults,
+            requested_model,
+            frozen_model,
+        }
+    }
+
+    /// Reconstitutes only when the stored request and frozen selection derive
+    /// from the exact supplied defaults epoch.
+    pub fn reconstitute(self) -> Option<OriginConfiguration> {
+        let versioned = VersionedSessionConfigurationDefaults::reconstitute(
+            self.defaults_version,
+            self.defaults,
+        );
+        let checked = versioned
+            .derive_request(
+                self.defaults_version,
+                ModelSelectionOverride::UseSessionDefault,
+            )
+            .ok()?;
+        if checked.request().model() != self.requested_model {
+            return None;
+        }
+        let frozen_model = self.frozen_model;
+        let origin = OriginConfiguration::freeze(checked, |alias| match frozen_model {
+            FrozenModelSelection::FrozenAlias {
+                alias: stored_alias,
+                definition,
+            } if stored_alias == alias => Some(definition),
+            FrozenModelSelection::Direct(_) | FrozenModelSelection::FrozenAlias { .. } => None,
+        })
+        .ok()?;
+        if origin.effective().model() != &frozen_model {
+            return None;
+        }
+        Some(origin)
+    }
+}
+
 /// Reports an alias request whose current definition could not be selected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnknownModelAlias {
@@ -678,10 +735,10 @@ mod tests {
         ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
         FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
         ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
-        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptFailure,
-        TurnConfigurationProvenance, VersionCheckedConfigurationRequest,
-        VersionedSessionConfigurationDefaults,
+        OriginConfigurationReconstitutionInput, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionDefaultsVersionMismatch, SessionSystemPrompt,
+        SessionSystemPromptFailure, TurnConfigurationProvenance,
+        VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
     };
     use crate::test_support::{alias, direct, turn_id};
     use crate::{DangerousToolAutoApproval, SteeringBinding};
@@ -1055,6 +1112,46 @@ mod tests {
         assert_eq!(origin.requested(), checked.request());
         assert_eq!(origin.session_defaults_version(), current_version);
         assert_eq!(origin.effective(), &expected_effective);
+    }
+
+    #[test]
+    fn stored_origin_configuration_reconstitutes_from_its_exact_defaults_epoch() {
+        let current = current_defaults();
+        let defaults_version = current.version();
+        let defaults = current.defaults().clone();
+        let requested = defaults.model();
+        let frozen = FrozenModelSelection::Direct(direct(1));
+        let expected = OriginConfiguration::freeze(
+            current
+                .derive_request(defaults_version, ModelSelectionOverride::UseSessionDefault)
+                .expect("the exact defaults version derives"),
+            |_| None,
+        )
+        .expect("the direct default freezes");
+
+        let reconstituted = OriginConfigurationReconstitutionInput::new(
+            defaults_version,
+            defaults,
+            requested,
+            frozen,
+        )
+        .reconstitute();
+
+        assert_eq!(reconstituted, Some(expected));
+    }
+
+    #[test]
+    fn stored_origin_configuration_rejects_a_frozen_model_not_derived_from_defaults() {
+        let current = current_defaults();
+        let reconstituted = OriginConfigurationReconstitutionInput::new(
+            current.version(),
+            current.defaults().clone(),
+            current.defaults().model(),
+            FrozenModelSelection::Direct(direct(2)),
+        )
+        .reconstitute();
+
+        assert_eq!(reconstituted, None);
     }
 
     #[test]

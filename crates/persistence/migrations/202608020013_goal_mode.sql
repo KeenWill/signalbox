@@ -172,6 +172,209 @@ CREATE TABLE goal_event (
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 
+-- Goal turns reuse the accepted-input turn engine without inventing user
+-- commands. A null accepting command is admitted only when this migration's
+-- deferred correlation proves an exact goal_turn owner.
+ALTER TABLE accepted_input
+    ALTER COLUMN accepting_command_id DROP NOT NULL;
+
+ALTER TABLE goal_event
+    ADD CONSTRAINT goal_event_generation_correlation_key
+        UNIQUE (session_id, event_ordinal, generation);
+
+CREATE TABLE goal_turn (
+    session_id uuid NOT NULL,
+    goal_generation numeric(20, 0) NOT NULL CHECK (
+        goal_generation BETWEEN 1 AND 18446744073709551615
+    ),
+    turn_id uuid NOT NULL,
+    accepted_input_id uuid NOT NULL UNIQUE,
+    source_event_ordinal numeric(20, 0) CHECK (
+        source_event_ordinal IS NULL
+        OR source_event_ordinal BETWEEN 1 AND 18446744073709551615
+    ),
+    predecessor_turn_id uuid,
+    PRIMARY KEY (session_id, turn_id),
+    UNIQUE (session_id, turn_id, goal_generation),
+    UNIQUE (session_id, goal_generation, source_event_ordinal),
+    UNIQUE (session_id, predecessor_turn_id),
+    CONSTRAINT goal_turn_source_shape CHECK (
+        (source_event_ordinal IS NOT NULL AND predecessor_turn_id IS NULL)
+        OR (source_event_ordinal IS NULL AND predecessor_turn_id IS NOT NULL)
+    ),
+    CONSTRAINT goal_turn_event_fk
+        FOREIGN KEY (session_id, source_event_ordinal)
+        REFERENCES goal_event(session_id, event_ordinal)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT goal_turn_predecessor_fk
+        FOREIGN KEY (session_id, predecessor_turn_id, goal_generation)
+        REFERENCES goal_turn(session_id, turn_id, goal_generation)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT goal_turn_accepted_input_fk
+        FOREIGN KEY (accepted_input_id, session_id, turn_id)
+        REFERENCES accepted_input(accepted_input_id, session_id, origin_turn_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT goal_turn_lifecycle_fk
+        FOREIGN KEY (turn_id, session_id, accepted_input_id)
+        REFERENCES turn_lifecycle(turn_id, session_id, origin_accepted_input_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+);
+
+ALTER TABLE goal_event
+    ADD CONSTRAINT goal_event_model_goal_turn_fk
+        FOREIGN KEY (session_id, model_turn_id, generation)
+        REFERENCES goal_turn(session_id, turn_id, goal_generation)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT goal_event_scheduler_goal_turn_fk
+        FOREIGN KEY (session_id, scheduler_turn_id, generation)
+        REFERENCES goal_turn(session_id, turn_id, goal_generation)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+CREATE FUNCTION require_goal_turn_shape()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    accepted accepted_input%ROWTYPE;
+    queued queued_input_origin%ROWTYPE;
+    lifecycle turn_lifecycle%ROWTYPE;
+    latest_event goal_event%ROWTYPE;
+    source_event goal_event%ROWTYPE;
+    predecessor turn_lifecycle%ROWTYPE;
+    expected_content text;
+BEGIN
+    SELECT * INTO accepted FROM accepted_input
+     WHERE accepted_input_id = NEW.accepted_input_id;
+    SELECT * INTO queued FROM queued_input_origin
+     WHERE turn_id = NEW.turn_id;
+    SELECT * INTO lifecycle FROM turn_lifecycle
+     WHERE turn_id = NEW.turn_id;
+    SELECT * INTO latest_event FROM goal_event
+     WHERE session_id = NEW.session_id
+     ORDER BY event_ordinal DESC LIMIT 1;
+
+    IF accepted.accepted_input_id IS NULL
+        OR accepted.accepting_command_id IS NOT NULL
+        OR accepted.session_id <> NEW.session_id
+        OR accepted.content_kind <> 'text'
+        OR accepted.delivery_kind <> 'start_when_no_active_turn'
+        OR accepted.expected_active_turn_id IS NOT NULL
+        OR accepted.expected_defaults_version IS NULL
+        OR accepted.model_override_kind <> 'use_session_default'
+        OR accepted.replacement_model_kind IS NOT NULL
+        OR accepted.replacement_direct_model_selection_id IS NOT NULL
+        OR accepted.replacement_model_alias_id IS NOT NULL
+        OR accepted.disposition_kind <> 'origin_of'
+        OR accepted.origin_turn_id <> NEW.turn_id
+        OR queued.turn_id IS NULL
+        OR queued.accepted_input_id <> NEW.accepted_input_id
+        OR queued.session_id <> NEW.session_id
+        OR queued.acceptance_position <> accepted.acceptance_position
+        OR queued.priority_kind <> 'ordinary'
+        OR queued.interrupt_predecessor_turn_id IS NOT NULL
+        OR queued.source_configuration_turn_id IS NOT NULL
+        OR lifecycle.turn_id IS NULL
+        OR lifecycle.session_id <> NEW.session_id
+        OR lifecycle.origin_accepted_input_id <> NEW.accepted_input_id
+        OR lifecycle.acceptance_position <> accepted.acceptance_position
+        OR lifecycle.state_kind <> 'queued'
+    THEN
+        RAISE EXCEPTION 'goal turn lacks its exact queued accepted-input shape'
+            USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_runtime_shape';
+    END IF;
+
+    IF latest_event.event_ordinal IS NULL
+        OR (
+            latest_event.event_kind = 'superseded'
+            AND latest_event.generation + 1 <> NEW.goal_generation
+        )
+        OR (
+            latest_event.event_kind <> 'superseded'
+            AND latest_event.generation <> NEW.goal_generation
+        )
+        OR latest_event.event_kind NOT IN ('commissioned', 'resumed', 'superseded')
+    THEN
+        RAISE EXCEPTION 'goal turn requires the current pursuing generation'
+            USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_current_pursuit';
+    END IF;
+
+    IF NEW.source_event_ordinal IS NOT NULL THEN
+        SELECT * INTO source_event FROM goal_event
+         WHERE session_id = NEW.session_id
+           AND event_ordinal = NEW.source_event_ordinal;
+        IF source_event.event_kind NOT IN ('commissioned', 'resumed', 'superseded') THEN
+            RAISE EXCEPTION 'first goal turn requires a pursuing user event'
+                USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_source_event';
+        END IF;
+        IF (
+            source_event.event_kind = 'superseded'
+            AND source_event.generation + 1 <> NEW.goal_generation
+        ) OR (
+            source_event.event_kind <> 'superseded'
+            AND source_event.generation <> NEW.goal_generation
+        ) THEN
+            RAISE EXCEPTION 'first goal turn generation disagrees with its user event'
+                USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_source_generation';
+        END IF;
+        IF source_event.event_kind = 'resumed' THEN
+            IF source_event.guidance IS NOT NULL THEN
+                expected_content := source_event.guidance;
+            ELSE
+                SELECT statement INTO expected_content FROM goal_event
+                 WHERE session_id = NEW.session_id
+                   AND event_ordinal <= NEW.source_event_ordinal
+                   AND event_kind IN ('commissioned', 'superseded')
+                 ORDER BY event_ordinal DESC LIMIT 1;
+            END IF;
+        ELSE
+            expected_content := source_event.statement;
+        END IF;
+    ELSE
+        SELECT * INTO predecessor FROM turn_lifecycle
+         WHERE session_id = NEW.session_id
+           AND turn_id = NEW.predecessor_turn_id;
+        IF predecessor.state_kind <> 'terminal'
+            OR predecessor.terminal_disposition_kind <> 'completed' THEN
+            RAISE EXCEPTION 'goal continuation requires a successfully completed predecessor'
+                USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_completed_predecessor';
+        END IF;
+        SELECT statement INTO expected_content FROM goal_event
+         WHERE session_id = NEW.session_id
+           AND event_kind IN ('commissioned', 'superseded')
+         ORDER BY event_ordinal DESC LIMIT 1;
+    END IF;
+
+    IF expected_content IS NULL OR accepted.content_text <> expected_content THEN
+        RAISE EXCEPTION 'goal turn input does not match its immutable source'
+            USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_input_content';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER goal_turn_shape
+    AFTER INSERT ON goal_turn
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_goal_turn_shape();
+
+CREATE FUNCTION require_accepted_input_owner()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE goal_owners bigint;
+BEGIN
+    SELECT count(*) INTO goal_owners FROM goal_turn
+     WHERE accepted_input_id = NEW.accepted_input_id;
+    IF (NEW.accepting_command_id IS NULL AND goal_owners <> 1)
+        OR (NEW.accepting_command_id IS NOT NULL AND goal_owners <> 0) THEN
+        RAISE EXCEPTION 'accepted input requires exactly one command or goal owner'
+            USING ERRCODE = '23514', CONSTRAINT = 'accepted_input_owner_closed';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER accepted_input_owner_closed
+    AFTER INSERT OR UPDATE ON accepted_input
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_accepted_input_owner();
+
 ALTER TABLE goal_command
     ADD CONSTRAINT goal_command_applied_event_fk
     FOREIGN KEY (session_id, result_event_ordinal)
@@ -266,6 +469,14 @@ CREATE TRIGGER goal_event_is_append_only
 
 CREATE TRIGGER goal_event_reject_truncate
     BEFORE TRUNCATE ON goal_event
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_goal_table_truncate();
+
+CREATE TRIGGER goal_turn_is_append_only
+    BEFORE UPDATE OR DELETE ON goal_turn
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER goal_turn_reject_truncate
+    BEFORE TRUNCATE ON goal_turn
     FOR EACH STATEMENT EXECUTE FUNCTION reject_goal_table_truncate();
 
 CREATE OR REPLACE FUNCTION require_durable_command_typed_record()

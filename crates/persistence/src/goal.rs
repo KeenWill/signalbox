@@ -7,18 +7,23 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DurableCommandId, Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection,
-    GoalCommandResult, GoalEvent, GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGuidance,
-    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReconstitutionFailure,
-    GoalReconstitutionInput, GoalReport, GoalSchedulerProvenance, GoalStatement, GoalTextError,
-    GoalTransitionError, GoalTransitionFailure, GoalUserAction, GoalUserCommand,
-    GoalUserProvenance, ReconstitutedGoalCommand, SessionId,
+    DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockProvenance, GoalBlockedReasonKind,
+    GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind, GoalEventOrdinal,
+    GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
+    GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport, GoalSchedulerProvenance,
+    GoalState, GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure,
+    GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias,
+    ModelSelectionOverride, OriginConfiguration, ReconstitutedGoalCommand, SessionId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     command_registry::{self, CommandKind, GOAL_KIND, RegistryCorruption, RegistryInspectionError},
     commit_failure_is_ambiguous,
+    goal_turn::{
+        GoalTurnCandidates, GoalTurnContinuationOutcome, continuation_exists, goal_turn_generation,
+        insert_goal_turn,
+    },
     mapping::{
         DurableCommandIdMappingError, PositiveOrdinalMappingError, durable_command_id_from_uuid,
         durable_command_id_to_uuid, positive_u64_from_numeric, session_id_to_uuid,
@@ -49,6 +54,8 @@ pub enum GoalTransitionOutcome {
     GoalNotAttached,
     /// The current state rejected the requested transition.
     Rejected(GoalTransitionError),
+    /// Scheduler provenance did not name a turn in the current goal generation.
+    NotCurrentGoalTurn,
 }
 
 /// A durable goal shape that cannot reconstruct domain values.
@@ -170,11 +177,17 @@ impl GoalRepository {
         Self { pool }
     }
 
-    /// Claims and handles an unseen user command, or resolves its durable meaning.
-    pub async fn handle_user_command(
+    /// Claims and handles an unseen user command, atomically scheduling a turn
+    /// for each applied pursuing transition, or resolves its durable meaning.
+    pub async fn handle_user_command<SelectDefinition>(
         &self,
         command: GoalUserCommand,
-    ) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError> {
+        candidates: Option<GoalTurnCandidates>,
+        select_definition: SelectDefinition,
+    ) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError>
+    where
+        SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    {
         let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
         if let Some(kind) = inspect_registry(&mut transaction, command_id).await? {
@@ -216,6 +229,30 @@ impl GoalRepository {
         insert_command(&mut transaction, &command, &result).await?;
         if let GoalCommandResult::Applied(event) = &result {
             insert_event(&mut transaction, command.session(), event).await?;
+            if event_starts_pursuit(event) {
+                let candidates = candidates.ok_or(GoalCorruption::Missing(
+                    "turn candidates for pursuing command",
+                ))?;
+                let configuration = current_origin_configuration(
+                    &mut transaction,
+                    command.session(),
+                    select_definition,
+                )
+                .await?;
+                let goal = load_goal_from_connection(&mut transaction, command.session())
+                    .await?
+                    .ok_or(GoalCorruption::Missing("scheduled command goal"))?;
+                insert_goal_turn(
+                    &mut transaction,
+                    command.session(),
+                    goal.current().generation(),
+                    GoalTurnSource::UserEvent(event.ordinal()),
+                    pursuit_input(&goal, event)?,
+                    &configuration,
+                    candidates,
+                )
+                .await?;
+            }
         }
         commit(transaction).await?;
         Ok(GoalCommandHandlingOutcome::Recorded(result))
@@ -240,6 +277,61 @@ impl GoalRepository {
     pub async fn load_goal(&self, session: SessionId) -> Result<Option<Goal>, GoalRepositoryError> {
         let mut connection = self.pool.acquire().await?;
         load_goal_from_connection(&mut connection, session).await
+    }
+
+    /// Queues one successor after a successfully completed current goal turn.
+    pub async fn continue_after_success<SelectDefinition>(
+        &self,
+        session: SessionId,
+        predecessor: TurnId,
+        candidates: GoalTurnCandidates,
+        select_definition: SelectDefinition,
+    ) -> Result<GoalTurnContinuationOutcome, GoalRepositoryError>
+    where
+        SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    {
+        let mut transaction = self.pool.begin().await?;
+        if !lock_session(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotPursuing);
+        }
+        let Some(goal) = load_goal_from_connection(&mut transaction, session).await? else {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotPursuing);
+        };
+        if !matches!(goal.current().state(), GoalState::Pursuing) {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotPursuing);
+        }
+        let Some(generation) = goal_turn_generation(&mut transaction, session, predecessor).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotCurrentGoalTurn);
+        };
+        if generation != goal.current().generation() {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotCurrentGoalTurn);
+        }
+        if continuation_exists(&mut transaction, session, predecessor).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::AlreadyScheduled);
+        }
+        let configuration =
+            current_origin_configuration(&mut transaction, session, select_definition).await?;
+        insert_goal_turn(
+            &mut transaction,
+            session,
+            generation,
+            GoalTurnSource::SuccessfulTurn(predecessor),
+            goal.current().statement().as_str(),
+            &configuration,
+            candidates,
+        )
+        .await?;
+        commit(transaction).await?;
+        Ok(GoalTurnContinuationOutcome::Scheduled {
+            turn: candidates.turn(),
+        })
     }
 
     /// Appends a model-declared blocked transition.
@@ -300,6 +392,11 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         };
+        let generation = goal_turn_generation(&mut transaction, session, transition.turn()).await?;
+        if generation != Some(goal.current().generation()) {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+        }
         let transitioned = match transition {
             SystemTransition::Blocked {
                 reason,
@@ -327,6 +424,59 @@ impl GoalRepository {
     }
 }
 
+fn event_starts_pursuit(event: &GoalEvent) -> bool {
+    matches!(
+        event.kind(),
+        GoalEventKind::Commissioned { .. }
+            | GoalEventKind::Resumed { .. }
+            | GoalEventKind::Superseded { .. }
+    )
+}
+
+fn pursuit_input<'a>(goal: &'a Goal, event: &'a GoalEvent) -> Result<&'a str, GoalCorruption> {
+    match event.kind() {
+        GoalEventKind::Resumed {
+            guidance: Some(guidance),
+            ..
+        } => Ok(guidance.as_str()),
+        GoalEventKind::Commissioned { .. }
+        | GoalEventKind::Resumed { guidance: None, .. }
+        | GoalEventKind::Superseded { .. } => Ok(goal.current().statement().as_str()),
+        GoalEventKind::Blocked { .. }
+        | GoalEventKind::Achieved { .. }
+        | GoalEventKind::UserStopped { .. } => Err(GoalCorruption::Inconsistent(
+            "non-pursuing event scheduled a turn",
+        )),
+    }
+}
+
+async fn current_origin_configuration<SelectDefinition>(
+    connection: &mut PgConnection,
+    session: SessionId,
+    select_definition: SelectDefinition,
+) -> Result<OriginConfiguration, GoalRepositoryError>
+where
+    SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+{
+    let current = match crate::session::load_session_from_connection(connection, session).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return Err(GoalCorruption::Missing("goal turn session").into()),
+        Err(crate::session::SessionRepositoryError::Database(error)) => return Err(error.into()),
+        Err(crate::session::SessionRepositoryError::Corruption(_)) => {
+            return Err(GoalCorruption::Inconsistent("goal turn session configuration").into());
+        }
+    };
+    let defaults = current.current_configuration_defaults();
+    let checked = defaults
+        .derive_request(
+            defaults.version(),
+            ModelSelectionOverride::UseSessionDefault,
+        )
+        .map_err(|_| GoalCorruption::Inconsistent("current goal turn defaults version"))?;
+    OriginConfiguration::freeze(checked, select_definition)
+        .map_err(|_| GoalCorruption::Inconsistent("current goal turn model alias").into())
+}
+
 enum SystemTransition {
     Blocked {
         reason: GoalModelBlockedReasonKind,
@@ -341,6 +491,17 @@ enum SystemTransition {
         need: GoalNeed,
         provenance: GoalSchedulerProvenance,
     },
+}
+
+impl SystemTransition {
+    const fn turn(&self) -> TurnId {
+        match self {
+            Self::Blocked { provenance, .. } | Self::Achieved { provenance, .. } => {
+                provenance.turn()
+            }
+            Self::ExecutionFailure { provenance, .. } => provenance.turn(),
+        }
+    }
 }
 
 async fn apply_user_command(

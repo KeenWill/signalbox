@@ -141,6 +141,14 @@ pub struct ModelCallOriginContent {
 }
 
 impl ModelCallOriginContent {
+    /// Binds exact content carried by a checked commissioned-goal turn.
+    pub const fn from_goal_turn(accepted_input: AcceptedInputId, content: UserContent) -> Self {
+        Self {
+            accepted_input,
+            content,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn from_validated_parts(
         accepted_input: AcceptedInputId,

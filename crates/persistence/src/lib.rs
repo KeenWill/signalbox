@@ -13,6 +13,7 @@ pub mod conversation_listing;
 pub mod create_session;
 pub mod create_session_from_imported_frontier;
 pub mod goal;
+pub mod goal_turn;
 pub mod hub_fence;
 pub mod mapping;
 pub mod model_execution;

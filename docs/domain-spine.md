@@ -1211,6 +1211,17 @@ impl OriginConfiguration {
     // accessors: requested(), session_defaults_version(), effective()
 }
 
+pub struct OriginConfigurationReconstitutionInput { /* private */ }
+impl OriginConfigurationReconstitutionInput {
+    pub const fn new(
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        requested_model: ModelSelectionRequest,
+        frozen_model: FrozenModelSelection,
+    ) -> Self;
+    pub fn reconstitute(self) -> Option<OriginConfiguration>;
+}
+
 pub struct UnknownModelAlias { /* private */ }
 // sealed: Err of OriginConfiguration::freeze
 impl UnknownModelAlias {
@@ -1456,6 +1467,21 @@ pub enum SubmitInputPreparationFailure {
     InterruptQueueOrderInvalid,
 }
 
+pub struct GoalTurnOriginConstructionInput {
+    pub generation: GoalGeneration,
+    pub source: GoalTurnSource,
+    pub session: SessionId,
+    pub accepted_input: AcceptedInputId,
+    pub turn: TurnId,
+    pub acceptance_position: SessionInputPosition,
+    pub content: UserContent,
+    pub lifecycle: AcceptedInputLifecycle,
+    pub queue_accepted_input: AcceptedInputId,
+    pub queue_session: SessionId,
+    pub queue_turn: TurnId,
+    pub queue_order: AcceptedInputQueueOrder,
+}
+
 pub struct SubmitInputTerminalSourceReconstitutionInput { /* private */ }
 pub struct SubmitInputTerminalSourceConstructionInput {
     /* public named canonical origin, turn, and disposition facts */
@@ -1478,6 +1504,7 @@ pub struct SubmitInputReclassifiedTurnOriginConstructionInput {
     /* public named receipt, lifecycle, queue-association, and terminal-source facts */
 }
 impl SubmitInputTurnOriginReconstitutionInput {
+    pub fn from_goal(input: GoalTurnOriginConstructionInput) -> Self;
     pub fn new(input: SubmitInputDirectTurnOriginConstructionInput) -> Self;
     pub fn reclassified(input: SubmitInputReclassifiedTurnOriginConstructionInput) -> Self;
 }
@@ -6820,6 +6847,7 @@ impl GoalReport {
 
 pub enum GoalTextError {
     Empty,
+    ContainsNull,
     Oversized { utf8_byte_length: usize },
 }
 
@@ -6832,6 +6860,11 @@ pub struct GoalEventOrdinal(/* private NonZeroU64 */);
 impl GoalEventOrdinal {
     pub const fn new(value: NonZeroU64) -> Self;
     // accessor: get()
+}
+
+pub enum GoalTurnSource {
+    UserEvent(GoalEventOrdinal),
+    SuccessfulTurn(TurnId),
 }
 
 pub struct GoalUserProvenance(/* private DurableCommandId */);
@@ -7826,11 +7859,11 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
-| domain: configuration                              | 22                   |
+| domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
 | domain: user_content                               | 4                    |
-| domain: submit_input                               | 31                   |
+| domain: submit_input                               | 32                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
 | domain: turn_lifecycle                             | 10                   |
 | domain: turn_eligibility                           | 29                   |
@@ -7847,12 +7880,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: goal                                       | 24                   |
+| domain: goal                                       | 25                   |
 | domain: goal_command                               | 5                    |
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **596 (+7 free fn)** |
+| **signalbox-domain total**                         | **599 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

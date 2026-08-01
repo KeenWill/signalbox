@@ -49,6 +49,9 @@ fn validate_goal_text(value: &str) -> Result<(), GoalTextError> {
     if value.is_empty() {
         return Err(GoalTextError::Empty);
     }
+    if value.contains('\0') {
+        return Err(GoalTextError::ContainsNull);
+    }
     let utf8_byte_length = value.len();
     if utf8_byte_length > MAX_GOAL_TEXT_UTF8_BYTES {
         return Err(GoalTextError::Oversized { utf8_byte_length });
@@ -61,6 +64,8 @@ fn validate_goal_text(value: &str) -> Result<(), GoalTextError> {
 pub enum GoalTextError {
     /// The value is empty.
     Empty,
+    /// PostgreSQL text cannot represent U+0000.
+    ContainsNull,
     /// The UTF-8 representation exceeds the shared admission bound.
     Oversized {
         /// The rejected representation's UTF-8 byte count.
@@ -72,6 +77,7 @@ impl fmt::Display for GoalTextError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("goal text must be nonempty"),
+            Self::ContainsNull => formatter.write_str("goal text must not contain U+0000"),
             Self::Oversized { utf8_byte_length } => write!(
                 formatter,
                 "goal text is {utf8_byte_length} UTF-8 bytes; the maximum is {MAX_GOAL_TEXT_UTF8_BYTES}"
@@ -128,6 +134,15 @@ impl GoalEventOrdinal {
     fn successor(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
     }
+}
+
+/// Durable source of one goal-owned autonomous turn.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GoalTurnSource {
+    /// A user event began or resumed pursuit.
+    UserEvent(GoalEventOrdinal),
+    /// A successfully completed goal turn continued pursuit.
+    SuccessfulTurn(TurnId),
 }
 
 /// Durable user-command provenance for a goal transition.
@@ -915,6 +930,14 @@ mod tests {
 
     fn report(value: &str) -> GoalReport {
         GoalReport::try_new(String::from(value)).expect("fixture report is admitted")
+    }
+
+    #[test]
+    fn goal_text_rejects_postgresqls_unrepresentable_null_scalar() {
+        assert_eq!(
+            GoalStatement::try_new(String::from("scope\0change")),
+            Err(GoalTextError::ContainsNull)
+        );
     }
 
     /// INV-048: supersession preserves immutable lineage while commissioning one successor.
