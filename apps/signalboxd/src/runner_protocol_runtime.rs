@@ -144,6 +144,19 @@ impl PostgresRunnerRegistrationService {
             })?;
         let receipt = outcome.receipt();
         let identities = receipt.identities();
+        tracing::info!(
+            request_id = %receipt.request().into_uuid(),
+            enrollment_id = %identities.enrollment().into_uuid(),
+            runner_id = %identities.runner().into_uuid(),
+            disposition = ?outcome.disposition(),
+            "runner enrollment accepted"
+        );
+        tracing::info!(
+            enrollment_id = %identities.enrollment().into_uuid(),
+            runner_id = %identities.runner().into_uuid(),
+            registration_revision = receipt.registration().revision().get(),
+            "runner registration revision stored"
+        );
         let connection = self
             .store
             .open_connection(identities.enrollment())
@@ -151,6 +164,13 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Enroll, correlation.clone(), error)
             })?;
+        tracing::info!(
+            enrollment_id = %identities.enrollment().into_uuid(),
+            runner_id = %identities.runner().into_uuid(),
+            connection_epoch = connection.epoch().get(),
+            connection_cause = ?connection.cause(),
+            "runner connection established"
+        );
         Ok(Enrolled {
             request_id: CanonicalUuid::from_uuid(receipt.request().into_uuid()),
             enrollment_id: CanonicalUuid::from_uuid(identities.enrollment().into_uuid()),
@@ -212,11 +232,24 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
+        tracing::info!(
+            enrollment_id = %receipt.enrollment().enrollment().into_uuid(),
+            runner_id = %receipt.enrollment().runner().into_uuid(),
+            registration_revision = receipt.registration().revision().get(),
+            "runner registration revision stored"
+        );
         let connection = self
             .store
             .open_connection(receipt.enrollment().enrollment())
             .await
             .map_err(|error| store_failure(RunnerInboundFrameKind::Resume, correlation, error))?;
+        tracing::info!(
+            enrollment_id = %receipt.enrollment().enrollment().into_uuid(),
+            runner_id = %receipt.enrollment().runner().into_uuid(),
+            connection_epoch = connection.epoch().get(),
+            connection_cause = ?connection.cause(),
+            "runner connection established"
+        );
         Ok(Resumed {
             registration_revision: positive_revision(receipt.registration().revision())?,
             connection_epoch: positive_epoch(connection.epoch())?,
@@ -327,6 +360,12 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Advertise, correlation, error)
             })?;
+        tracing::info!(
+            enrollment_id = %enrollment.enrollment().into_uuid(),
+            runner_id = %enrollment.runner().into_uuid(),
+            registration_revision = registration.revision().get(),
+            "runner registration revision stored"
+        );
         Ok(Registered {
             registration_revision: positive_revision(registration.revision())?,
             advertisement_digest: digest,
@@ -348,7 +387,8 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::CorrelationMismatch,
             )
         })?;
-        self.store
+        let outcome = self
+            .store
             .transition_connection(
                 RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
                 epoch,
@@ -361,7 +401,57 @@ impl PostgresRunnerRegistrationService {
                     AvailableCorrelation::ConnectionEpoch(wire_epoch),
                     error,
                 )
-            })
+            })?;
+        log_connection_transition(enrollment, transition, outcome);
+        Ok(outcome)
+    }
+}
+
+fn log_connection_transition(
+    enrollment: CanonicalUuid,
+    transition: RunnerConnectionTransition,
+    outcome: RunnerConnectionTransitionOutcome,
+) {
+    let RunnerConnectionTransitionOutcome::Current(snapshot) = outcome else {
+        return;
+    };
+    match (transition, snapshot.cause()) {
+        (RunnerConnectionTransition::DaemonShutdown, RunnerConnectionCause::DaemonShutdown)
+        | (RunnerConnectionTransition::RunnerShutdown, RunnerConnectionCause::RunnerShutdown) => {
+            tracing::info!(
+                enrollment_id = %enrollment,
+                connection_epoch = snapshot.epoch().get(),
+                shutdown_cause = ?snapshot.cause(),
+                "runner shutdown recorded"
+            )
+        }
+        (RunnerConnectionTransition::TransportClosed, RunnerConnectionCause::TransportClosed) => {
+            tracing::info!(
+                enrollment_id = %enrollment,
+                connection_epoch = snapshot.epoch().get(),
+                loss_cause = ?snapshot.cause(),
+                "runner transport loss recorded"
+            )
+        }
+        (
+            RunnerConnectionTransition::Observe
+            | RunnerConnectionTransition::HeartbeatRecovered
+            | RunnerConnectionTransition::HeartbeatMissed
+            | RunnerConnectionTransition::HeartbeatTimeout
+            | RunnerConnectionTransition::ProtocolFailure
+            | RunnerConnectionTransition::DaemonShutdown
+            | RunnerConnectionTransition::RunnerShutdown
+            | RunnerConnectionTransition::TransportClosed,
+            RunnerConnectionCause::Established
+            | RunnerConnectionCause::HeartbeatRecovered
+            | RunnerConnectionCause::HeartbeatMissed
+            | RunnerConnectionCause::DaemonShutdown
+            | RunnerConnectionCause::RunnerShutdown
+            | RunnerConnectionCause::HeartbeatTimeout
+            | RunnerConnectionCause::TransportClosed
+            | RunnerConnectionCause::ProtocolFailure
+            | RunnerConnectionCause::EnrollmentRevoked,
+        ) => {}
     }
 }
 
@@ -1621,42 +1711,55 @@ async fn write_message(
 fn available_correlation(message: &Message) -> AvailableCorrelation {
     match message {
         Message::Enroll(value) => AvailableCorrelation::Enrollment(value.request_id),
+        Message::Enrolled(value) => AvailableCorrelation::Enrollment(value.request_id),
         Message::Resume(value) => AvailableCorrelation::Enrollment(value.request_id),
+        Message::Resumed(value) => AvailableCorrelation::Registration(value.registration_revision),
+        Message::ReplacementPending(value) => AvailableCorrelation::Enrollment(value.request_id),
         Message::Advertise(value) => {
+            AvailableCorrelation::Registration(value.registration_revision)
+        }
+        Message::Registered(value) => {
             AvailableCorrelation::Registration(value.registration_revision)
         }
         Message::WorkspaceLeakPage(value) => {
             AvailableCorrelation::LeakPage(value.page.correlation.clone())
         }
+        Message::WorkspaceLeakRecorded(value) => {
+            AvailableCorrelation::LeakPage(value.correlation.clone())
+        }
+        Message::WorkspaceProvision(value) => {
+            AvailableCorrelation::Provision(value.correlation.clone())
+        }
         Message::WorkspaceReady(value) => {
             AvailableCorrelation::Provision(value.correlation.clone())
+        }
+        Message::WorkspaceRecorded(value) => {
+            AvailableCorrelation::Provision(value.correlation.clone())
+        }
+        Message::WorkspaceRelease(value) => {
+            AvailableCorrelation::Release(value.correlation.clone())
         }
         Message::WorkspaceReleased(value) => {
             AvailableCorrelation::Release(value.correlation.clone())
         }
+        Message::WorkspaceReleaseRecorded(value) => {
+            AvailableCorrelation::Release(value.correlation.clone())
+        }
+        Message::LeaseOffer(value) => AvailableCorrelation::Lease(value.correlation.clone()),
         Message::LeaseClaim(value) => AvailableCorrelation::Lease(value.correlation.clone()),
+        Message::LeaseClaimed(value) => AvailableCorrelation::Lease(value.correlation.clone()),
+        Message::Dispatch(value) => AvailableCorrelation::Lease(value.correlation.clone()),
         Message::Result(value) => AvailableCorrelation::Lease(value.correlation.clone()),
+        Message::ResultRecorded(value) => AvailableCorrelation::Lease(value.correlation.clone()),
         Message::OperationFailed(value) => {
             AvailableCorrelation::OperationFailure(value.failure.correlation.clone())
         }
+        Message::OperationFailureRecorded(value) => {
+            AvailableCorrelation::OperationFailure(value.correlation.clone())
+        }
         Message::Shutdown(value) => AvailableCorrelation::ConnectionEpoch(value.connection_epoch),
-        Message::Enrolled(_)
-        | Message::Resumed(_)
-        | Message::ReplacementPending(_)
-        | Message::Registered(_)
-        | Message::Heartbeat(_)
-        | Message::HeartbeatAck(_)
-        | Message::WorkspaceLeakRecorded(_)
-        | Message::WorkspaceProvision(_)
-        | Message::WorkspaceRecorded(_)
-        | Message::WorkspaceRelease(_)
-        | Message::WorkspaceReleaseRecorded(_)
-        | Message::LeaseOffer(_)
-        | Message::LeaseClaimed(_)
-        | Message::Dispatch(_)
-        | Message::ResultRecorded(_)
-        | Message::OperationFailureRecorded(_)
-        | Message::Rejected(_) => AvailableCorrelation::None,
+        Message::Rejected(value) => value.available_correlation.clone(),
+        Message::Heartbeat(_) | Message::HeartbeatAck(_) => AvailableCorrelation::None,
     }
 }
 
@@ -1874,6 +1977,21 @@ mod tests {
                 .expect("the configured repository key is checked"),
                 credential_profile: Some(profile),
             }],
+        }
+    }
+
+    fn workspace_provision_correlation() -> signalbox_runner_wire::ProvisionCorrelation {
+        signalbox_runner_wire::ProvisionCorrelation {
+            authorization_id: identity(5),
+            session_id: identity(6),
+            placement_revision: PositiveU64::try_new(1)
+                .expect("the fixture placement revision is positive"),
+            runner_id: identity(7),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the fixture registration revision is positive"),
+            repository: None,
+            sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
+            credential_profile: None,
         }
     }
 
@@ -2284,6 +2402,47 @@ mod tests {
         );
 
         served.expect("the pre-enrollment shutdown closes after rejection");
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn initial_workspace_provision_rejection_preserves_its_complete_correlation() {
+        let correlation = workspace_provision_correlation();
+        let advertisement = empty_advertisement();
+        let service = EnrollmentService {
+            response: enrolled_response(correlation.authorization_id, &advertisement),
+        };
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::WorkspaceProvision(signalbox_runner_wire::WorkspaceProvision {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await
+            .expect("the initial workspace provision frame is sent");
+            read_frame(&mut reader)
+                .await
+                .expect("the typed rejection is received")
+                .message
+        };
+
+        let (served, observed) = tokio::join!(server, client);
+        let expected = Message::Rejected(
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceProvision,
+                AvailableCorrelation::Provision(correlation),
+                RejectionCode::CorrelationMismatch,
+            )
+            .into_rejected(),
+        );
+
+        served.expect("the pre-enrollment workspace provision closes after rejection");
         assert_eq!(observed, expected);
     }
 
