@@ -1907,6 +1907,7 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
     const REPORTED_OUTPUT_TOKENS: u64 = 7;
     const REPORTED_CACHE_READ_INPUT_TOKENS: u64 = 80;
     const EXPECTED_TERMINAL_CALLS: usize = 2;
+    const EXPECTED_LABELED_USAGE_LINES: usize = 4;
 
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
@@ -2098,31 +2099,32 @@ context_window_tokens = 200000
     assert!(transcript.contains("turn_completed"));
     assert_eq!(
         transcript.matches("usage turn=").count(),
-        EXPECTED_TERMINAL_CALLS
+        EXPECTED_LABELED_USAGE_LINES
     );
     assert!(transcript.contains(&format!(
         "terminal_calls=1 input_tokens={REPORTED_INPUT_TOKENS} \
-         input_tokens_reported_calls=1/1 output_tokens={REPORTED_OUTPUT_TOKENS} \
-         output_tokens_reported_calls=1/1 cache_creation_input_tokens=unreported \
-         cache_creation_input_tokens_reported_calls=0/1 \
+         input_tokens_present_calls=1/1 output_tokens={REPORTED_OUTPUT_TOKENS} \
+         output_tokens_present_calls=1/1 cache_creation_input_tokens=unreported \
+         cache_creation_input_tokens_present_calls=0/1 \
          cache_read_input_tokens={REPORTED_CACHE_READ_INPUT_TOKENS} \
-         cache_read_input_tokens_reported_calls=1/1"
+         cache_read_input_tokens_present_calls=1/1"
     )));
     assert!(transcript.contains(
-        "terminal_calls=1 input_tokens=unreported input_tokens_reported_calls=0/1 \
-         output_tokens=unreported output_tokens_reported_calls=0/1 \
+        "terminal_calls=1 input_tokens=unreported input_tokens_present_calls=0/1 \
+         output_tokens=unreported output_tokens_present_calls=0/1 \
          cache_creation_input_tokens=unreported \
-         cache_creation_input_tokens_reported_calls=0/1 \
-         cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/1"
+         cache_creation_input_tokens_present_calls=0/1 \
+         cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1"
     ));
     assert!(transcript.contains(&format!(
-        "usage_total scope=session terminal_calls={EXPECTED_TERMINAL_CALLS} \
-         input_tokens={REPORTED_INPUT_TOKENS} input_tokens_reported_calls=1/2 \
-         output_tokens={REPORTED_OUTPUT_TOKENS} output_tokens_reported_calls=1/2 \
+        "usage_total scope=session usage_provenance=reported \
+         terminal_calls={EXPECTED_TERMINAL_CALLS} \
+         input_tokens={REPORTED_INPUT_TOKENS} input_tokens_present_calls=1/2 \
+         output_tokens={REPORTED_OUTPUT_TOKENS} output_tokens_present_calls=1/2 \
          cache_creation_input_tokens=unreported \
-         cache_creation_input_tokens_reported_calls=0/2 \
+         cache_creation_input_tokens_present_calls=0/2 \
          cache_read_input_tokens={REPORTED_CACHE_READ_INPUT_TOKENS} \
-         cache_read_input_tokens_reported_calls=1/2"
+         cache_read_input_tokens_present_calls=1/2"
     )));
 
     shutdown.send(true)?;

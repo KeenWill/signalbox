@@ -8067,7 +8067,7 @@ where
             usage.cache_creation_input_tokens(),
             usage.cache_read_input_tokens(),
         )
-        .map(|cost| {
+        .map(|cost| -> Result<_, ProcessConnectionError> {
             Ok(ModelCallDollarCost {
                 amount_usd: CanonicalDollarAmount::try_new(
                     cost.amount_usd().normalize().to_string(),

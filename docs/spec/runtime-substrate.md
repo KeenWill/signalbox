@@ -26,12 +26,13 @@ and ephemeral text-delta projection were verified through PR #300
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
 (`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
-single-split parity, and geometric work bound). It covers the provider-neutral
-operation, observation, and evidence vocabulary; SSE framing; structured-output
-and tool decode; `ScriptedModel`; the four provider adapters; and their
-credential boundaries. Layer-2 authorization and evidence classification
-([model-call-execution](model-call-execution.md)), credential channels,
-delivery, and rotation discipline
+single-split parity, and geometric work bound). Exact Codex CLI usage-axis
+projection is verified against this PR (`agent/cost-accounting`). It covers the
+provider-neutral operation, observation, and evidence vocabulary; SSE framing;
+structured-output and tool decode; `ScriptedModel`; the four provider adapters;
+and their credential boundaries. Layer-2 authorization and evidence
+classification ([model-call-execution](model-call-execution.md)), credential
+channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -515,8 +516,15 @@ ordered deltas and the same terminal evidence. A provider failure message
 consults the same held lookbehind state before it enters provider-error
 evidence: a message that extends a held credential candidate, or that arrives
 during oversized-credential suppression, is suppressed whole rather than
-statelessly re-redacted. Usage comes only from `turn.completed`; an omitted
-cache counter remains unreported rather than becoming a reported zero.
+statelessly re-redacted. Usage comes only from `turn.completed`. The adapter
+maps `input_tokens`, `output_tokens`, `cache_write_input_tokens`, and
+`cached_input_tokens` exactly to Signalbox input, output, cache-creation input,
+and cache-read input axes. Each decoded field is independently optional: an
+omitted field remains unreported rather than becoming zero. A partial event
+records only its present axes, and a total-only event records none because the
+adapter never distributes a total. The pinned CLI's separate
+`reasoning_output_tokens` counter and additive `total_tokens` siblings have no
+existing Signalbox usage axis; neither is folded into output or another field.
 
 The pinned CLI exposes no argv, configuration, or subscription request controls
 for output-token ceiling, temperature, top-p, or stop sequences. This adapter is

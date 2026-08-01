@@ -343,7 +343,7 @@ impl InputContent {
 }
 
 /// One closed review target subject at the process boundary.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReviewTargetSubject {
     /// A change request frozen at exact head and base revisions.
@@ -846,24 +846,24 @@ impl ContentFragment {
     }
 }
 
-/// Provider-reported token fields for one terminal model call.
+/// Independently nullable token fields for one terminal model call.
 ///
 /// Every field is required on the wire but independently nullable. A null is
-/// unreported evidence; a reported zero is encoded as the canonical string
+/// absent evidence; a present zero is encoded as the canonical string
 /// `"0"`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCallTokenUsage {
-    /// Provider-reported input-token count.
+    /// Input-token count from the call's named provenance.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub input_tokens: Option<CanonicalU64>,
-    /// Provider-reported output-token count.
+    /// Output-token count from the call's named provenance.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub output_tokens: Option<CanonicalU64>,
-    /// Provider-reported cache-creation input-token count.
+    /// Cache-creation input-token count from the call's named provenance.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cache_creation_input_tokens: Option<CanonicalU64>,
-    /// Provider-reported cache-read input-token count.
+    /// Cache-read input-token count from the call's named provenance.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cache_read_input_tokens: Option<CanonicalU64>,
 }
@@ -4056,7 +4056,7 @@ pub enum ServerMessage {
         /// Exact lifecycle state.
         state: TurnState,
     },
-    /// Exact provider-reported token fields for one terminal model call.
+    /// Exact independently nullable token fields for one terminal model call.
     TranscriptModelCallUsage {
         /// Zero-based model-call evidence index in this snapshot.
         model_call_index: CanonicalU64,
@@ -4066,7 +4066,7 @@ pub enum ServerMessage {
         model_call_id: CanonicalUuid,
         /// Closed source vocabulary for the independently nullable counts.
         usage_provenance: UsageProvenance,
-        /// Exact independently nullable provider fields.
+        /// Exact independently nullable fields from the named provenance.
         usage: ModelCallTokenUsage,
         /// Read-time configured-rate derivation, required null when unavailable.
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -6210,6 +6210,15 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"reported","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null},"cost":null}}"#,
         ))
         .expect_err("required-nullable evidence fields cannot be omitted");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[test]
+    fn usage_rejects_an_omitted_cost_member() {
+        let error = decode_server_line(&line(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"reported","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null,"cache_read_input_tokens":null}}}"#,
+        ))
+        .expect_err("the derived cost member is required nullable");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
     }
 

@@ -3,6 +3,9 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The durable usage-provenance column and read projection are verified against
+this PR (`agent/cost-accounting`).
+
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
@@ -71,15 +74,17 @@ The predecessor matrix:
   what was externally done, and rewriting it would let later facts silently
   change that record.
 
-The same terminal transition stores the provider's four token-usage fields —
-input, output, cache-creation input, and cache-read input — on the `model_call`
-row. Each field is independently nullable: null means the provider did not
-report that field, while a reported zero remains zero. Calls closed from
+The same terminal transition stores four token-usage fields — input, output,
+cache-creation input, and cache-read input — on the `model_call` row. Each field
+is independently nullable: null means that axis was not supplied, while a
+present zero remains zero. Every call also carries the closed
+`usage_provenance_kind` discriminator, exactly `reported` or `estimated`.
+Current execution paths produce only `reported`; `estimated` is reserved for a
+later explicit estimator and no present writer selects it. Calls closed from
 `ProvenUnsent`, `CancellationConfirmed`, capability failure, or restart recovery
 have all four fields unreported because no provider usage evidence exists.
 Historical rows likewise remain unreported. The terminal-row immutability rule
-makes this evidence write-once; no later path estimates, normalizes, or corrects
-it.
+makes this evidence write-once; no later path normalizes or corrects it.
 
 Storage enforces the matrix durably
 (`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
@@ -94,7 +99,11 @@ the schema backstops the aggregate against any buggy or racing writer, not just
 the audited one. Migration `202607290301_model_call_token_usage.sql` adds the
 terminal-only usage-field constraints and rejects reported usage on every direct
 `Prepared -> Terminal` transition, because that transition proves no send was
-authorized.
+authorized. Migration `202608020014_model_call_usage_provenance.sql` adds the
+non-null closed provenance column with `reported` as the existing-row and
+current-writer value. It rejects an unknown spelling and prevents provenance
+rewrites except when a nonterminal call and its usage become terminal in the
+same update.
 
 The provider target is pinned as a turn-level fact before any call exists: the
 turn's frozen selection resolves through an immutable configured
@@ -535,12 +544,13 @@ inferred from timing or injected I/O errors.
 
 For `Completed`, `Refused`, `ProviderError`, and `BoundaryLoss`, the bridge also
 copies the runtime terminal evidence's final absorbed `TokenUsage` fields into
-the correlated observation verbatim. Classification does not derive usage from
-the disposition, content, context, or provider family. The observation commit
-stores those fields atomically with the terminal disposition. A commit-ambiguity
-reread returns `AlreadyCommitted` only when the durable disposition, closure,
-and every independently nullable usage field equal the retained observation;
-different or newly absent usage is conflicting evidence, not an equal replay.
+the correlated observation verbatim. This is reported evidence. Classification
+does not derive usage from the disposition, content, context, or provider
+family. The observation commit stores those fields atomically with the terminal
+disposition. A commit-ambiguity reread returns `AlreadyCommitted` only when the
+durable disposition, closure, and every independently nullable usage field equal
+the retained observation; different or newly absent usage is conflicting
+evidence, not an equal replay.
 
 ### Provider-target identity
 

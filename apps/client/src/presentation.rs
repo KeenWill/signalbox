@@ -27,12 +27,12 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct ReportedTokenTotal {
+struct PresentTokenTotal {
     tokens: u128,
-    reported_calls: u64,
+    present_calls: u64,
 }
 
-impl ReportedTokenTotal {
+impl PresentTokenTotal {
     fn add(
         &mut self,
         value: Option<signalbox_process_protocol::CanonicalU64>,
@@ -44,15 +44,15 @@ impl ReportedTokenTotal {
             .tokens
             .checked_add(u128::from(value.value()))
             .ok_or(ClientError::Protocol("token usage total overflowed"))?;
-        self.reported_calls = self
-            .reported_calls
+        self.present_calls = self
+            .present_calls
             .checked_add(1)
             .ok_or(ClientError::Protocol("token usage coverage overflowed"))?;
         Ok(())
     }
 
     fn label(self) -> String {
-        if self.reported_calls == 0 {
+        if self.present_calls == 0 {
             String::from("unreported")
         } else {
             self.tokens.to_string()
@@ -63,10 +63,10 @@ impl ReportedTokenTotal {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct TokenUsageTotal {
     terminal_calls: u64,
-    input: ReportedTokenTotal,
-    output: ReportedTokenTotal,
-    cache_creation_input: ReportedTokenTotal,
-    cache_read_input: ReportedTokenTotal,
+    input: PresentTokenTotal,
+    output: PresentTokenTotal,
+    cache_creation_input: PresentTokenTotal,
+    cache_read_input: PresentTokenTotal,
 }
 
 impl TokenUsageTotal {
@@ -946,12 +946,13 @@ impl<'a> Output<'a> {
                 || String::from("cost_total scope=session"),
                 |turn| format!("cost turn={turn}"),
             );
+            let rate_version = control_safe(&key.rate_version, TextField::DelimitedOnLine);
             writeln!(
                 self.stdout,
                 "{prefix} usage_provenance={} label={} rate_version={} usd={} costed_calls={}",
                 usage_provenance_label(key.provenance),
                 cost_label(key.label),
-                key.rate_version,
+                rate_version,
                 cost.amount_usd.normalize(),
                 cost.calls,
             )?;
@@ -972,24 +973,24 @@ impl<'a> Output<'a> {
         writeln!(
             self.stdout,
             "{prefix} usage_provenance={} terminal_calls={} input_tokens={} \
-             input_tokens_reported_calls={}/{} \
-             output_tokens={} output_tokens_reported_calls={}/{} \
+             input_tokens_present_calls={}/{} \
+             output_tokens={} output_tokens_present_calls={}/{} \
              cache_creation_input_tokens={} \
-             cache_creation_input_tokens_reported_calls={}/{} cache_read_input_tokens={} \
-             cache_read_input_tokens_reported_calls={}/{}",
+             cache_creation_input_tokens_present_calls={}/{} cache_read_input_tokens={} \
+             cache_read_input_tokens_present_calls={}/{}",
             usage_provenance_label(provenance),
             total.terminal_calls,
             total.input.label(),
-            total.input.reported_calls,
+            total.input.present_calls,
             total.terminal_calls,
             total.output.label(),
-            total.output.reported_calls,
+            total.output.present_calls,
             total.terminal_calls,
             total.cache_creation_input.label(),
-            total.cache_creation_input.reported_calls,
+            total.cache_creation_input.present_calls,
             total.terminal_calls,
             total.cache_read_input.label(),
-            total.cache_read_input.reported_calls,
+            total.cache_read_input.present_calls,
             total.terminal_calls,
         )
     }
@@ -1997,13 +1998,15 @@ mod tests {
 
     use expect_test::expect;
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
-        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-        InputContent, MetadataActor, MetadataLastWriter, ModelCallState, ModelCallTokenUsage,
-        ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent,
-        TranscriptEntry, TranscriptTextEntry, TurnState,
+        BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ContentFragment,
+        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
+        FailedModelCallDisposition, FailedTerminalModelCall, ImportedContentKind,
+        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, MetadataActor,
+        MetadataLastWriter, ModelCallCostLabel, ModelCallDollarCost, ModelCallState,
+        ModelCallTokenUsage, ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject,
+        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+        UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -2547,7 +2550,8 @@ mod tests {
         expect![[r#"
             imported_user imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000004 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000002
             exact imported text
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2579,7 +2583,8 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
             imported_speaker_unattested kind=tool_call imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000006 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000005
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2854,7 +2859,8 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=active_running attempt=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 call_state=cancellation_requested
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2872,7 +2878,8 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=failed frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004 call_disposition=cancelled call_cause=none
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2887,7 +2894,8 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=cancelled frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=none
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2902,7 +2910,8 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 operation=model_call operation_id=00000000-0000-0000-0000-000000000004
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2920,7 +2929,8 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2937,34 +2947,40 @@ mod tests {
                     model_call_index: CanonicalU64::new(0),
                     turn_id: first_turn,
                     model_call_id: wire_uuid(11),
+                    usage_provenance: UsageProvenance::Reported,
                     usage: ModelCallTokenUsage {
                         input_tokens: Some(CanonicalU64::new(10)),
                         output_tokens: Some(CanonicalU64::new(0)),
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: Some(CanonicalU64::new(4)),
                     },
+                    cost: None,
                 },
                 ServerMessage::TranscriptModelCallUsage {
                     model_call_index: CanonicalU64::new(1),
                     turn_id: first_turn,
                     model_call_id: wire_uuid(12),
+                    usage_provenance: UsageProvenance::Reported,
                     usage: ModelCallTokenUsage {
                         input_tokens: None,
                         output_tokens: None,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                     },
+                    cost: None,
                 },
                 ServerMessage::TranscriptModelCallUsage {
                     model_call_index: CanonicalU64::new(2),
                     turn_id: second_turn,
                     model_call_id: wire_uuid(13),
+                    usage_provenance: UsageProvenance::Reported,
                     usage: ModelCallTokenUsage {
                         input_tokens: None,
                         output_tokens: None,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                     },
+                    cost: None,
                 },
             ],
         )
@@ -2977,9 +2993,90 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            usage turn=00000000-0000-0000-0000-000000000001 terminal_calls=2 input_tokens=10 input_tokens_reported_calls=1/2 output_tokens=0 output_tokens_reported_calls=1/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/2 cache_read_input_tokens=4 cache_read_input_tokens_reported_calls=1/2
-            usage turn=00000000-0000-0000-0000-000000000002 terminal_calls=1 input_tokens=unreported input_tokens_reported_calls=0/1 output_tokens=unreported output_tokens_reported_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/1
-            usage_total scope=session terminal_calls=3 input_tokens=10 input_tokens_reported_calls=1/3 output_tokens=0 output_tokens_reported_calls=1/3 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/3 cache_read_input_tokens=4 cache_read_input_tokens_reported_calls=1/3
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported terminal_calls=2 input_tokens=10 input_tokens_present_calls=1/2 output_tokens=0 output_tokens_present_calls=1/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=4 cache_read_input_tokens_present_calls=1/2
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage turn=00000000-0000-0000-0000-000000000002 usage_provenance=reported terminal_calls=1 input_tokens=unreported input_tokens_present_calls=0/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
+            usage turn=00000000-0000-0000-0000-000000000002 usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=3 input_tokens=10 input_tokens_present_calls=1/3 output_tokens=0 output_tokens_present_calls=1/3 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/3 cache_read_input_tokens=4 cache_read_input_tokens_present_calls=1/3
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn transcript_costs_aggregate_only_with_matching_provenance_and_labels() {
+        let turn = wire_uuid(1);
+        let usage = ModelCallTokenUsage {
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(0),
+                    turn_id: turn,
+                    model_call_id: wire_uuid(11),
+                    usage_provenance: UsageProvenance::Reported,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(String::from("0.1"))
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version: BillingRateVersion::try_new(String::from("rates-v1"))
+                            .expect("fixture rate version is valid"),
+                        label: ModelCallCostLabel::Real,
+                    }),
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(1),
+                    turn_id: turn,
+                    model_call_id: wire_uuid(12),
+                    usage_provenance: UsageProvenance::Reported,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(String::from("0.2"))
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version: BillingRateVersion::try_new(String::from("rates-v1"))
+                            .expect("fixture rate version is valid"),
+                        label: ModelCallCostLabel::Real,
+                    }),
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(2),
+                    turn_id: turn,
+                    model_call_id: wire_uuid(13),
+                    usage_provenance: UsageProvenance::Estimated,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(String::from("0.4"))
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version: BillingRateVersion::try_new(String::from("rates-v1"))
+                            .expect("fixture rate version is valid"),
+                        label: ModelCallCostLabel::MeteredEquivalent,
+                    }),
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("cost snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported terminal_calls=2 input_tokens=unreported input_tokens_present_calls=0/2 output_tokens=unreported output_tokens_present_calls=0/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/2
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated terminal_calls=1 input_tokens=unreported input_tokens_present_calls=0/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
+            cost turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported label=real rate_version=rates-v1 usd=0.3 costed_calls=2
+            cost turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated label=metered_equivalent rate_version=rates-v1 usd=0.4 costed_calls=1
+            usage_total scope=session usage_provenance=reported terminal_calls=2 input_tokens=unreported input_tokens_present_calls=0/2 output_tokens=unreported output_tokens_present_calls=0/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/2
+            usage_total scope=session usage_provenance=estimated terminal_calls=1 input_tokens=unreported input_tokens_present_calls=0/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
+            cost_total scope=session usage_provenance=reported label=real rate_version=rates-v1 usd=0.3 costed_calls=2
+            cost_total scope=session usage_provenance=estimated label=metered_equivalent rate_version=rates-v1 usd=0.4 costed_calls=1
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());

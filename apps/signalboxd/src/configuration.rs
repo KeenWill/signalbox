@@ -25,7 +25,7 @@ use signalbox_model_runtime_codex_cli::{
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
 };
-use signalbox_process_protocol::MAX_MODEL_ALIAS_CATALOG_ENTRIES;
+use signalbox_process_protocol::{MAX_MODEL_ALIAS_CATALOG_ENTRIES, MAX_RATE_VERSION_UTF8_BYTES};
 use signalbox_tools_basic::WebFetchEgressPolicy;
 use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
 use toml_edit::{DocumentMut, Item, Table};
@@ -44,7 +44,7 @@ const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 pub enum ModelAdapter {
     /// Anthropic's HTTP API adapter.
     Anthropic,
-    /// The subscription-authenticated Codex CLI adapter.
+    /// The Codex CLI adapter.
     CodexCli,
 }
 
@@ -79,7 +79,7 @@ impl BillingKind {
     }
 }
 
-/// One model's versioned USD rates per million reported tokens.
+/// One model's versioned USD rates per million usage tokens.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelBillingRates {
     version: Arc<str>,
@@ -96,7 +96,7 @@ impl ModelBillingRates {
     }
 }
 
-/// One dollar figure derived from configured rates and exactly reported axes.
+/// One dollar figure derived from configured rates and exactly present axes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DerivedModelCallCost {
     amount_usd: Decimal,
@@ -105,7 +105,7 @@ pub struct DerivedModelCallCost {
 }
 
 impl DerivedModelCallCost {
-    /// Exact decimal USD amount for the reported axes that were present.
+    /// Exact decimal USD amount for the usage axes that were present.
     pub const fn amount_usd(&self) -> Decimal {
         self.amount_usd
     }
@@ -425,7 +425,7 @@ impl HubModelConfiguration {
         let mut runtime_definitions = Vec::with_capacity(models.len());
         let mut direct_selections = HashSet::with_capacity(models.len());
         let mut routes = HashMap::with_capacity(models.len());
-        let mut billing_rates = HashMap::with_capacity(models.len());
+        let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
         for model in models {
             reject_unknown_fields(
@@ -461,8 +461,11 @@ impl HubModelConfiguration {
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
-            if let Some(rates) = parse_model_billing_rates(model)? {
-                billing_rates.insert(target, rates);
+            let rates = parse_model_billing_rates(model)?;
+            if let Some(previous) = target_billing_rates.insert(target, rates.clone())
+                && previous != rates
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
             }
             if let Some(previous) =
                 provider_model_adapters.insert(provider_model.to_owned(), mapping.adapter)
@@ -522,6 +525,10 @@ impl HubModelConfiguration {
             .map_err(|_| HubModelConfigurationError::DuplicateSelection)?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
+        let billing_rates = target_billing_rates
+            .into_iter()
+            .filter_map(|(target, rates)| rates.map(|rates| (target, rates)))
+            .collect();
         let credential_families =
             ModelCredentialFamilyCatalog::try_new(routes.values().map(|route| {
                 (
@@ -724,7 +731,7 @@ fn parse_model_billing_rates(
         return Err(HubModelConfigurationError::IncompleteBillingRates);
     }
     Ok(Some(ModelBillingRates {
-        version: validated_name(required_string(model, "rate_version")?)?,
+        version: validated_rate_version(required_string(model, "rate_version")?)?,
         input: required_billing_rate(model, "input_usd_per_million_tokens")?,
         output: required_billing_rate(model, "output_usd_per_million_tokens")?,
         cache_creation_input: required_billing_rate(
@@ -741,10 +748,19 @@ fn required_billing_rate(
 ) -> Result<Decimal, HubModelConfigurationError> {
     let rate = Decimal::from_str(required_string(model, field)?)
         .map_err(|_| HubModelConfigurationError::InvalidBillingRate)?;
-    if rate.is_sign_negative() || rate > Decimal::from(1_000_000_u64) || rate.scale() > 12 {
+    if rate.is_sign_negative() {
         Err(HubModelConfigurationError::InvalidBillingRate)
     } else {
         Ok(rate.normalize())
+    }
+}
+
+fn validated_rate_version(value: &str) -> Result<Arc<str>, HubModelConfigurationError> {
+    let version = validated_name(value)?;
+    if version.len() > MAX_RATE_VERSION_UTF8_BYTES {
+        Err(HubModelConfigurationError::InvalidBillingRate)
+    } else {
+        Ok(version)
     }
 }
 
@@ -1262,6 +1278,43 @@ working_directory = "{}"
         )
     }
 
+    fn configuration_with_api_metered_codex_model(
+        executable: &Path,
+        working_directory: &Path,
+    ) -> String {
+        format!(
+            r#"{CONFIGURATION}
+[[credential_profiles]]
+name = "codex-api-primary"
+billing_kind = "api_metered"
+
+[[adapter_mappings]]
+model_family = "codex-api"
+adapter = "codex_cli"
+credential_profile = "codex-api-primary"
+
+[codex_cli]
+executable = "{}"
+working_directory = "{}"
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "codex-api"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+rate_version = "fixture-codex-rates-v1"
+input_usd_per_million_tokens = "1"
+output_usd_per_million_tokens = "2"
+cache_creation_input_usd_per_million_tokens = "3"
+cache_read_input_usd_per_million_tokens = "4"
+"#,
+            executable.display(),
+            working_directory.display(),
+        )
+    }
+
     fn configuration_without_tool_mappings() -> String {
         let start = CONFIGURATION
             .find("[[tool_mappings]]")
@@ -1385,6 +1438,37 @@ working_directory = "{}"
     }
 
     #[test]
+    fn one_target_cannot_mix_rated_and_unrated_model_entries() {
+        let conflicting = format!(
+            r#"{CONFIGURATION}
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000001"
+model_family = "anthropic"
+provider_model = "claude-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&conflicting).err(),
+            Some(HubModelConfigurationError::ConflictingTarget)
+        );
+    }
+
+    #[test]
+    fn a_partial_model_rate_set_is_rejected() {
+        let partial =
+            CONFIGURATION.replace("cache_read_input_usd_per_million_tokens = \"0.30\"\n", "");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&partial).err(),
+            Some(HubModelConfigurationError::IncompleteBillingRates)
+        );
+    }
+
+    #[test]
     fn cost_label_follows_the_credential_profile() {
         let configuration =
             HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
@@ -1400,6 +1484,36 @@ working_directory = "{}"
             .expect("the historical subscription profile is declared");
 
         assert_eq!(cost.billing_kind(), BillingKind::Subscription);
+    }
+
+    #[test]
+    fn codex_cli_on_an_api_metered_profile_derives_real_cost() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = HubModelConfiguration::parse(
+            &configuration_with_api_metered_codex_model(&executable, temporary.path()),
+        )
+        .expect("the API-metered Codex fixture is valid");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000002").expect("fixture UUID is valid"),
+        );
+        let route = configuration
+            .resolve_direct_model(selection)
+            .expect("the Codex fixture has a route");
+        let cost = configuration
+            .derive_model_call_cost(
+                route.target(),
+                route.credential_profile(),
+                Some(1),
+                None,
+                None,
+                None,
+            )
+            .expect("the API-metered Codex fixture has rates");
+
+        assert_eq!(route.adapter(), ModelAdapter::CodexCli);
+        assert_eq!(route.credential_profile(), "codex-api-primary");
+        assert_eq!(cost.billing_kind(), BillingKind::ApiMetered);
     }
 
     #[test]

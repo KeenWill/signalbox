@@ -430,7 +430,7 @@ pub struct ProcessTranscriptTurn {
     state: ProcessTurnState,
 }
 
-/// Exact provider-reported token fields for one terminal model call.
+/// Exact token fields for one terminal model call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessModelCallTokenUsage {
     input_tokens: Option<u64>,
@@ -449,28 +449,28 @@ pub enum ProcessModelCallUsageProvenance {
 }
 
 impl ProcessModelCallTokenUsage {
-    /// Returns the provider-reported input-token count.
+    /// Returns the input-token count when present.
     pub const fn input_tokens(self) -> Option<u64> {
         self.input_tokens
     }
 
-    /// Returns the provider-reported output-token count.
+    /// Returns the output-token count when present.
     pub const fn output_tokens(self) -> Option<u64> {
         self.output_tokens
     }
 
-    /// Returns the provider-reported cache-creation input-token count.
+    /// Returns the cache-creation input-token count when present.
     pub const fn cache_creation_input_tokens(self) -> Option<u64> {
         self.cache_creation_input_tokens
     }
 
-    /// Returns the provider-reported cache-read input-token count.
+    /// Returns the cache-read input-token count when present.
     pub const fn cache_read_input_tokens(self) -> Option<u64> {
         self.cache_read_input_tokens
     }
 }
 
-/// One terminal model call's provider-reported token evidence.
+/// One terminal model call's typed token evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessTranscriptModelCallUsage {
     turn: TurnId,
@@ -508,7 +508,7 @@ impl ProcessTranscriptModelCallUsage {
     }
 
     /// Returns the exact independently optional provider fields.
-    pub const fn usage(self) -> ProcessModelCallTokenUsage {
+    pub const fn usage(&self) -> ProcessModelCallTokenUsage {
         self.usage
     }
 }
@@ -811,7 +811,7 @@ impl ProcessTranscriptSnapshot {
 pub enum ProcessTranscriptItem {
     /// One turn in acceptance order.
     Turn(ProcessTranscriptTurn),
-    /// One terminal model call's provider-reported token evidence.
+    /// One terminal model call's typed token evidence.
     ModelCallUsage(ProcessTranscriptModelCallUsage),
     /// One semantic entry in frontier order.
     Entry(ProcessTranscriptEntry),
