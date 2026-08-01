@@ -348,6 +348,8 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
                 Some(CargoDiagnosticsPreparationFailure::CargoHostUnavailable);
             return result;
         };
+        let runner_plan =
+            workspace_test_runner_plan(self.command_runner.pinned_workspace_root(), &cargo_host);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             let mut timed_out = host_result;
@@ -358,8 +360,6 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
                 CargoTestRunnerMode::ConfiguredRunnerPreserved,
             );
         }
-        let runner_plan =
-            workspace_test_runner_plan(self.command_runner.pinned_workspace_root(), &cargo_host);
         let exec_arguments = cargo_arguments(
             CargoDiagnosticsCommand::Test,
             timeout_seconds,
