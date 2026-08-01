@@ -24,7 +24,8 @@ storage version four were verified through PR #311
 (`agent/session-templates-spec`); and the context-compaction transaction and
 lock inventory were verified against PR #314
 (`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
-was verified against this PR (`agent/domain-cleanup`). The goal event
+was verified against this PR (`agent/domain-cleanup`); the session-plan event
+sequence was verified against this PR (`agent/plan-tool`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #383 (`agent/goal-mode`). This page covers the Postgres representation in
 `crates/persistence` (source and migrations), migration discipline, durable
@@ -113,11 +114,16 @@ triggers, locks, and races described below against a pinned Postgres image.
 ## Relational representation
 
 Storage is a normalized, purpose-specific relational schema of current-state
-rows and append-only immutable facts. There is no event store: the guarded row
-is the durable statement of record, and no state is rebuilt by replaying events
-(INV-005). Why: the database-level invariants (INV-009, INV-012) are declarative
-constraints over current-state rows; an event log would move them back into
-projection code.
+rows and append-only immutable facts. There is no general-purpose event store:
+outside session plans and commissioned goals, the guarded row is the durable
+statement of record and current state is not rebuilt by replaying events
+(INV-005). Session plans and commissioned goals are deliberate exceptions: each
+has a session-local append-only event sequence as its durable statement of
+record, and its current state is the checked fold of that complete history. The
+plan exception was verified against this PR (`agent/plan-tool`), and the goal
+exception through PR #383 (`agent/goal-mode`). Why: database-level invariants
+(INV-009, INV-012) stay declarative over current-state rows, while plan and goal
+history is retained product evidence rather than an implementation log.
 
 Implemented table families (across the forward-only migrations):
 
@@ -126,7 +132,8 @@ Implemented table families (across the forward-only migrations):
   `replace_session_defaults_command`, `replace_session_metadata_command`,
   `submit_input_command`, `decide_tool_request_command`,
   `replace_lost_runner_command`, `replace_lost_runner_result`,
-  `abandon_lost_runner_command`, and `promote_pending_runner_command`);
+  `abandon_lost_runner_command`, `promote_pending_runner_command`, and
+  `goal_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
 - `session_metadata` plus its current tag and attribute satellites,
@@ -158,6 +165,14 @@ Implemented table families (across the forward-only migrations):
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
+- `goal_event`, whose session-local positive ordinal sequence retains the
+  complete commissioned-goal lineage and state-transition provenance, plus
+  `goal_turn`, which correlates each pursuit-starting event or successful
+  predecessor with its accepted input and turn;
+- `session_plan_event`, whose session-local positive ordinal sequence retains
+  entry creation, text revision, and status change with exact trusted
+  tool-dispatch provenance, plus trigger-maintained `session_plan_head`, which
+  certifies the complete validated prefix for bounded current reads; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -458,19 +473,24 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Three explicit lock sites live in
-the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Five explicit lock statements live
+in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
-  `accepted_input` insert reaches commit; and
+  `accepted_input` insert reaches commit;
 - the metadata receipt-satellite insert trigger (migration `202607260101`) takes
   `FOR UPDATE` on the already-claimed `durable_command` row before it checks
-  whether the typed receipt parent has sealed the command; and
+  whether the typed receipt parent has sealed the command;
+- `next_session_plan_event_ordinal` (migration `202608020011`) takes
+  `FOR NO KEY UPDATE` on the plan's session before reading its certified head;
+- the session-plan append trigger in that migration reacquires the session
+  `FOR NO KEY UPDATE`, then takes `FOR SHARE` on the exact active `plan_write`
+  attempt while authenticating its request payload; and
 - the goal-event continuity trigger (migration `202608020013`) takes
-  `FOR UPDATE` on the event's session row before reading the preceding event,
-  serializing ordinal and generation assignment even when the Rust transaction
-  reached that row first with `FOR NO KEY UPDATE`.
+  `FOR NO KEY UPDATE` on the event's session row before reading the preceding
+  event, serializing ordinal and generation assignment even when the Rust
+  transaction reached that row first with `FOR NO KEY UPDATE`.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -512,10 +532,10 @@ Locks per transaction, in acquisition order:
   user-global registry, then every user, model, scheduler, and continuation
   transaction locks the session row `FOR NO KEY UPDATE` before reading the event
   stream. Applied transitions insert the event, whose continuity trigger
-  upgrades that same session-row lock to `FOR UPDATE` before it validates the
-  predecessor. Pursuing user transitions then read current defaults and insert
-  their queued goal turn; rejected commands commit without the trigger upgrade,
-  and exact user-command replay takes no row lock.
+  reacquires that session-row lock in `FOR NO KEY UPDATE` mode before it
+  validates the predecessor. Pursuing user transitions then read current
+  defaults and insert their queued goal turn; rejected commands commit without
+  firing the trigger, and exact user-command replay takes no row lock.
 - **StartEligibleTurn**, **startup recovery**, and the **model-call execution
   transactions** (prepare, authorize, observation commit, restart recovery — all
   in `model_execution.rs`, reusing the same inventory statement): the
@@ -550,6 +570,15 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
+- **SessionPlan append**: `next_session_plan_event_ordinal` first locks the
+  session row `FOR NO KEY UPDATE` and reads the trigger-maintained head. The
+  adapter then uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the
+  exact active tool attempt `FOR SHARE` while authenticating its request. The
+  insert trigger reacquires those same locks in session-then-attempt order,
+  validates the complete new event and its predecessor, and only then advances
+  `session_plan_head`; the head update's row lock is therefore last. A
+  repeatable-read plan read takes no explicit lock and compares that certified
+  head with the indexed latest event before opening its bounded projections.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or

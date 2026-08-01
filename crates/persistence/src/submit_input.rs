@@ -1397,9 +1397,10 @@ pub(crate) async fn load_scheduling_projection(
         let (accepted_lifecycle, origin_delivery, origin_configuration, binding) =
             if let Some(accepting_command) = accepting_command {
                 if goal_generation.is_some() {
-                    return Err(
-                        SubmitInputCorruption::Inconsistent("scheduling input ownership").into(),
-                    );
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "scheduling input correlation",
+                    )
+                    .into());
                 }
                 let accepting_command =
                     durable_command_id_from_uuid(accepting_command).map_err(|_| {

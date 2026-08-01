@@ -563,12 +563,14 @@ fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
 }
 
 fn event_starts_pursuit(event: &GoalEvent) -> bool {
-    matches!(
-        event.kind(),
+    match event.kind() {
         GoalEventKind::Commissioned { .. }
-            | GoalEventKind::Resumed { .. }
-            | GoalEventKind::Superseded { .. }
-    )
+        | GoalEventKind::Resumed { .. }
+        | GoalEventKind::Superseded { .. } => true,
+        GoalEventKind::Blocked { .. }
+        | GoalEventKind::Achieved { .. }
+        | GoalEventKind::UserStopped { .. } => false,
+    }
 }
 
 fn pursuit_input<'a>(goal: &'a Goal, event: &'a GoalEvent) -> Result<&'a str, GoalCorruption> {

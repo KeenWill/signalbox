@@ -12,9 +12,9 @@ from pathlib import Path
 CHECKER = Path(__file__).resolve().parent / "check_user_vocabulary.py"
 
 
-def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
+def run_checker(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(CHECKER), "--root", str(root)],
+        [sys.executable, str(CHECKER), "--root", str(root), *arguments],
         check=False,
         capture_output=True,
         text=True,
@@ -144,6 +144,8 @@ def main() -> int:
             "session_ownerid = nil",
             "SESSION_OWNERID = nil",
             "The oWnEr approves this tool.",
+            "The ownEr approves this tool.",
+            "The ownER approves this tool.",
         )
         mixed_storage_lines = (
             'const PROCESS_ACTOR: &str = "owner";',
@@ -157,7 +159,10 @@ def main() -> int:
             "CHECK (cause = 'owner_initiated');",
             "human_owner TEXT;",
         )
-        native_lines = ('let sessionOwner = "human who approves tools"',)
+        native_lines = (
+            'let sessionOwner = "human who approves tools"',
+            "enum HumanPrincipal { case owner }",
+        )
         reviewed_domain_lines = (
             "The foreign owner approves this tool.",
             "human_foreign_owner names the person who approves tools.",
@@ -198,12 +203,16 @@ def main() -> int:
         legacy_actor_lines = (
             'let human_principal = String::from("owner"); // approves tools',
             'let human = Principal { kind: "owner" }; // approves tools',
+            'let human = ("owner", None, None); // approves tools',
+            'let human = match role { "owner" | "model" => Human };',
+            'let human = ("owner", None); // approves tools',
         )
         application_import_lines = (
             "fn converted() {}",
             "define_human_role!(",
             "    owner,",
             ")",
+            'let returned_owner = "human who approves tools";',
         )
         allowed.parent.mkdir(parents=True)
         imported.parent.mkdir(parents=True)
@@ -366,7 +375,7 @@ def main() -> int:
             *expected_diagnostics(
                 "crates/application/src/conversation_import.rs",
                 application_import_lines,
-                (application_import_lines[2],),
+                (application_import_lines[2], application_import_lines[4]),
             ),
             *expected_diagnostics(
                 "crates/domain/src/session.rs", domain_record_lines
@@ -440,7 +449,10 @@ def main() -> int:
             "    consume(\n"
             "        owner,\n"
             "    );\n"
-            "}\n",
+            "}\n"
+            "let converter = FakeConverter {\n"
+            "    returned_owner: None,\n"
+            "};\n",
             encoding="utf-8",
         )
         frozen_migration.write_text(
@@ -450,8 +462,26 @@ def main() -> int:
             'let user_id = "human who approves tools";\n', encoding="utf-8"
         )
         legacy_actor.write_text(
-            "Actor::User => EncodedActor {\n"
-            '    kind: "owner",\n'
+            "fn encode_actor(actor: Actor) -> EncodedActor {\n"
+            "    match actor {\n"
+            "        Actor::User => EncodedActor {\n"
+            '            kind: "owner",\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "fn decode_actor() {\n"
+            "    match stored {\n"
+            '        ("owner", None, None) => Ok(Actor::User),\n'
+            '        ("owner" | "model" | "recovery" | "tool", _, _) => {\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "fn decode_command() {\n"
+            "    match stored {\n"
+            '        ("owner", None) => ReplaceSessionMetadata::new(command_id, session, content),\n'
+            '        ("owner", Some(_)) | ("tool", None) => {\n'
+            "        }\n"
+            "    }\n"
             "}\n",
             encoding="utf-8",
         )
@@ -465,7 +495,13 @@ def main() -> int:
             encoding="utf-8",
         )
         native_path.write_text(
-            "private enum SignalboxSnapshotModelCallOwnership {}\n",
+            "private enum SignalboxSnapshotRequiredModelCallOwnership {\n"
+            "  case identity(SignalboxCanonicalUUID)\n"
+            "  case owner\n"
+            "}\n"
+            "case .required(.owner):\n"
+            "  return .required(.owner)\n"
+            "case .impossible, .permitted, .required(.owner):\n",
             encoding="utf-8",
         )
         reviewed_domain_path.write_text(
@@ -484,6 +520,51 @@ def main() -> int:
         assert accepted.returncode == 0, (
             f"allowed vocabulary failed:\n{accepted.stdout}{accepted.stderr}"
         )
+
+        inventory = run_checker(root, "--show-allowlist-hash")
+        assert inventory.returncode == 0, (
+            f"allowlist inventory failed:\n{inventory.stdout}{inventory.stderr}"
+        )
+        reviewed_inventory = inventory.stdout.strip()
+        accepted_storage = mixed_storage_path.read_text(encoding="utf-8")
+        mixed_storage_path.write_text(
+            accepted_storage
+            + 'const HUMAN_PRINCIPAL: &str = "owner_command";\n',
+            encoding="utf-8",
+        )
+        drifted = run_checker(
+            root,
+            "--expected-allowlist-sha256",
+            reviewed_inventory,
+        )
+        assert drifted.returncode == 1, "allowlisted inventory drift passed"
+        assert "reviewed owner allowlist inventory changed" in drifted.stdout, (
+            f"inventory drift lacked exact diagnostic: {drifted.stdout}"
+        )
+        mixed_storage_path.write_text(accepted_storage, encoding="utf-8")
+        restored = run_checker(
+            root,
+            "--expected-allowlist-sha256",
+            reviewed_inventory,
+        )
+        assert restored.returncode == 0, (
+            f"restored inventory failed:\n{restored.stdout}{restored.stderr}"
+        )
+        reviewed_author_text = reviewed_author.read_text(encoding="utf-8")
+        reviewed_author.write_text(
+            "let unrelated = true;\n" + reviewed_author_text,
+            encoding="utf-8",
+        )
+        moved = run_checker(
+            root,
+            "--expected-allowlist-sha256",
+            reviewed_inventory,
+        )
+        assert moved.returncode == 1, "moved allowlisted line passed"
+        assert "reviewed owner allowlist inventory changed" in moved.stdout, (
+            f"moved inventory lacked exact diagnostic: {moved.stdout}"
+        )
+        reviewed_author.write_text(reviewed_author_text, encoding="utf-8")
     print("user-vocabulary checker self-test passed")
     return 0
 
