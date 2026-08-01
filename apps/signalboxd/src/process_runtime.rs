@@ -9748,8 +9748,8 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let protocol_error = match error {
-        GoalRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
-        GoalRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_unavailable(true),
+        GoalRepositoryError::Database(_) => ProtocolError::mutation_definitely_unavailable(),
+        GoalRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_commit_ambiguous(),
         GoalRepositoryError::DifferentCommandKind { .. } => {
             ProtocolError::without_detail(ErrorCode::ConflictingReuse)
         }
@@ -9818,11 +9818,19 @@ impl ProtocolError {
         }
     }
 
+    const fn mutation_definitely_unavailable() -> Self {
+        Self::without_detail(ErrorCode::Unavailable)
+    }
+
+    const fn mutation_commit_ambiguous() -> Self {
+        Self::without_detail(ErrorCode::CommitAmbiguous)
+    }
+
     const fn mutation_unavailable(commit_ambiguous: bool) -> Self {
         if commit_ambiguous {
-            Self::without_detail(ErrorCode::CommitAmbiguous)
+            Self::mutation_commit_ambiguous()
         } else {
-            Self::without_detail(ErrorCode::Unavailable)
+            Self::mutation_definitely_unavailable()
         }
     }
 
@@ -10939,11 +10947,11 @@ mod tests {
     #[test]
     fn commit_ambiguity_selects_the_stable_process_error_code() {
         assert_eq!(
-            ProtocolError::mutation_unavailable(false).code,
+            ProtocolError::mutation_definitely_unavailable().code,
             ErrorCode::Unavailable
         );
         assert_eq!(
-            ProtocolError::mutation_unavailable(true).code,
+            ProtocolError::mutation_commit_ambiguous().code,
             ErrorCode::CommitAmbiguous
         );
         assert!(
