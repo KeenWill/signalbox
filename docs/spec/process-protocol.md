@@ -6,7 +6,8 @@ The user-vocabulary surface on this page was re-verified through PR #378
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface in PR #349 (`agent/review-orchestrator-wiring`). This page is the
+surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
+import transport in PR #401 (`agent/import-chunks-protocol`). This page is the
 normative boundary between a local client process and `signalboxd`; domain
 values, PostgreSQL records, and wire messages remain distinct representations.
 
@@ -120,15 +121,18 @@ one owned request rather than cloning its payload. Submitted text moves into
 application admission: rejection drops it before awaiting response output, and
 acceptance reuses the decoded allocation. Conversation-import source bytes
 likewise move directly into a dedicated import admission path. At most one
-in-progress or single-shot import holds the import permit. An admitted
-`begin_conversation_import` that must wait for that permit releases its small
-decoded frame slot before waiting, preserving frame progress for the connection
-that owns the active chunked import. A source-bearing single-shot request
-retains its frame slot while waiting for the import permit. Once admitted, each
-append moves its decoded chunk from the inbound frame into the per-connection
-assembly and releases the frame slot; the configured total-source bound limits
-that assembly. Commit runs the existing whole-source conversion on the blocking
-pool so synchronous conversion does not occupy an asynchronous runtime worker.
+in-progress or single-shot import holds the import permit. One of the eight
+inbound-frame slots is reserved for the connection that owns an active chunked
+import; other connections share the remaining seven. An admitted
+`begin_conversation_import` that must wait for the import permit releases its
+small decoded frame slot before waiting. A source-bearing single-shot request
+retains its frame slot while waiting. The reservation therefore preserves frame
+progress for an active append or commit without allowing queued single-shot
+sources to escape the aggregate raw-frame bound. Once admitted, each append
+moves its decoded chunk from the inbound frame into the per-connection assembly
+and releases the frame slot; the configured total-source bound limits that
+assembly. Commit runs the existing whole-source conversion on the blocking pool
+so synchronous conversion does not occupy an asynchronous runtime worker.
 Commit, abort, rejection, or disconnect drops the assembly and releases the
 permit before response output. A peer that stops reading responses therefore
 cannot retain rejected input or completed import content.

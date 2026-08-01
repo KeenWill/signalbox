@@ -157,6 +157,9 @@ const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
 const MAX_CONCURRENT_IMPORTS: usize = 1;
+const RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES: usize = MAX_CONCURRENT_IMPORTS;
+const GENERAL_BUFFERED_INBOUND_FRAMES: usize =
+    MAX_BUFFERED_INBOUND_FRAMES - RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES;
 const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
@@ -195,10 +198,33 @@ struct ConnectionServices {
     context_compaction_model: Arc<dyn ContextCompactionModel>,
     template_configuration: Arc<SessionTemplateConfiguration>,
     fanouts: ProcessFanouts,
-    inbound_frame_budget: Arc<Semaphore>,
+    inbound_frame_budgets: InboundFrameBudgets,
     import_budget: Arc<Semaphore>,
     review_command_budget: Arc<Semaphore>,
     snapshot_reader_budget: Arc<Semaphore>,
+}
+
+#[derive(Clone, Debug)]
+struct InboundFrameBudgets {
+    general: Arc<Semaphore>,
+    active_import: Arc<Semaphore>,
+}
+
+impl InboundFrameBudgets {
+    fn new() -> Self {
+        Self {
+            general: Arc::new(Semaphore::new(GENERAL_BUFFERED_INBOUND_FRAMES)),
+            active_import: Arc::new(Semaphore::new(RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES)),
+        }
+    }
+
+    fn for_connection(&self, import_is_pending: bool) -> Arc<Semaphore> {
+        if import_is_pending {
+            Arc::clone(&self.active_import)
+        } else {
+            Arc::clone(&self.general)
+        }
+    }
 }
 
 /// The hub-owned local protocol runtime: one outbox dispatcher, one bounded
@@ -472,7 +498,7 @@ async fn serve_connections(
         context_compaction_model: dependencies.context_compaction_model,
         template_configuration: Arc::new(dependencies.template_configuration),
         fanouts: dependencies.fanouts,
-        inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
+        inbound_frame_budgets: InboundFrameBudgets::new(),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
@@ -552,9 +578,12 @@ async fn serve_connection(
         if shutdown_requested(&shutdown) {
             return Ok(());
         }
+        let inbound_frame_budget = services
+            .inbound_frame_budgets
+            .for_connection(pending_import.is_some());
         let Some(frame_buffer_permit) = acquire_inbound_frame_permit_after_input(
             &mut reader,
-            Arc::clone(&services.inbound_frame_budget),
+            inbound_frame_budget,
             &mut shutdown,
         )
         .await?
@@ -3809,33 +3838,26 @@ where
     let declared_size_bytes = CanonicalU64::new(pending.declared_size_bytes);
     let actual_size_bytes = CanonicalU64::new(pending.actual_size_bytes);
     if pending.actual_size_bytes > limit_bytes.value() {
-        return write_import_rejection(
-            writer,
-            version,
-            request_id,
-            RejectionDetail::ConversationImportSourceTooLarge {
-                limit_bytes,
-                declared_size_bytes,
-                actual_size_bytes: Some(actual_size_bytes),
-            },
-        )
-        .await;
+        let detail = RejectionDetail::ConversationImportSourceTooLarge {
+            limit_bytes,
+            declared_size_bytes,
+            actual_size_bytes: Some(actual_size_bytes),
+        };
+        drop(pending);
+        return write_import_rejection(writer, version, request_id, detail).await;
     }
     if pending.actual_size_bytes != pending.declared_size_bytes {
-        return write_import_rejection(
-            writer,
-            version,
-            request_id,
-            RejectionDetail::ConversationImportSourceSizeMismatch {
-                declared_size_bytes,
-                actual_size_bytes,
-            },
-        )
-        .await;
+        let detail = RejectionDetail::ConversationImportSourceSizeMismatch {
+            declared_size_bytes,
+            actual_size_bytes,
+        };
+        drop(pending);
+        return write_import_rejection(writer, version, request_id, detail).await;
     }
     let observed_source_size =
         u64::try_from(pending.source.len()).map_err(|_| ProcessConnectionError::EncodeInvariant)?;
     if observed_source_size != pending.actual_size_bytes {
+        drop(pending);
         return write_error(
             writer,
             version,
@@ -10450,18 +10472,20 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ContextCompactionRangeLoadError, ConversionFailureDisposition, INBOUND_READ_AHEAD_BYTES,
-        ImportedConversationRepositoryError, IncomingLine, InternalDiagnostic,
+        ContextCompactionRangeLoadError, ConversionFailureDisposition,
+        GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
+        ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
         MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
         OperationalImportError, PendingConversationImport, ProcessConnectionError,
         ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS,
-        RequestId, ReviewCommandAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
-        acquire_import_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_review_orchestration_snapshot_permit,
-        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
+        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
+        REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS, RequestId, ReviewCommandAdmission,
+        SnapshotSpoolError, SubmitInputModelExecutionDiagnostic, acquire_import_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_review_orchestration_snapshot_permit, acquire_snapshot_reader_permit,
+        admitted_user_content, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
         handle_append_conversation_import, handle_begin_conversation_import,
@@ -11698,10 +11722,10 @@ context_window_tokens = 200000
     async fn waiting_begin_releases_its_inbound_slot_before_import_admission()
     -> Result<(), Box<dyn Error>> {
         let capacity = 1;
-        let frame_budget = Arc::new(Semaphore::new(capacity));
+        let frame_budgets = InboundFrameBudgets::new();
         let import_budget = Arc::new(Semaphore::new(capacity));
         let occupied_import = Arc::clone(&import_budget).acquire_owned().await?;
-        let frame_permit = Arc::clone(&frame_budget).acquire_owned().await?;
+        let frame_permit = frame_budgets.for_connection(false).acquire_owned().await?;
         let begin = ClientRequest::BeginConversationImport {
             format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
             declared_size_bytes: CanonicalU64::new(u64::try_from(capacity)?),
@@ -11716,16 +11740,31 @@ context_window_tokens = 200000
         );
 
         assert!(retained.is_none());
-        assert_eq!(frame_budget.available_permits(), capacity);
         assert_eq!(import_budget.available_permits(), 0);
+        let general_slots = frame_budgets
+            .for_connection(false)
+            .acquire_many_owned(u32::try_from(GENERAL_BUFFERED_INBOUND_FRAMES)?)
+            .await?;
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
-        let active_frame = timeout(
+        let active_slot = timeout(
             Duration::from_secs(1),
-            acquire_inbound_frame_permit(Arc::clone(&frame_budget), &mut shutdown_receiver),
+            acquire_inbound_frame_permit(
+                frame_budgets.for_connection(true),
+                &mut shutdown_receiver,
+            ),
         )
         .await??
         .ok_or_else(|| io::Error::other("the active import must retain frame progress"))?;
-        assert_eq!(active_frame.num_permits(), capacity);
+
+        assert_eq!(general_slots.num_permits(), GENERAL_BUFFERED_INBOUND_FRAMES);
+        assert_eq!(
+            active_slot.num_permits(),
+            RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES
+        );
+        assert_eq!(
+            general_slots.num_permits() + active_slot.num_permits(),
+            MAX_BUFFERED_INBOUND_FRAMES
+        );
         drop(occupied_import);
         Ok(())
     }
@@ -11816,47 +11855,59 @@ context_window_tokens = 200000
 
     #[tokio::test]
     async fn commit_rejects_declared_and_actual_size_mismatch() -> Result<(), Box<dyn Error>> {
-        let budget = Arc::new(Semaphore::new(1));
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
         let permit = budget.clone().acquire_owned().await?;
+        let source = vec![b'x'];
+        let actual_size_bytes = u64::try_from(source.len())?;
+        let declared_size_bytes = actual_size_bytes + 1;
+        let request_id = RequestId::try_new(1)?;
+        let limit = 8;
         let mut pending = Some(PendingConversationImport {
             format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes: 2,
-            actual_size_bytes: 1,
-            source: vec![b'x'],
+            declared_size_bytes,
+            actual_size_bytes,
+            source,
             import_permit: permit,
         });
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
-        let (mut writer, mut reader) = duplex(1_024);
+        let (mut writer, mut reader) = duplex(1);
+        let write = tokio::spawn(async move {
+            let result = handle_commit_conversation_import(
+                &mut writer,
+                ProtocolVersion::One,
+                request_id,
+                limit,
+                &pool,
+                &mut pending,
+            )
+            .await;
+            (result, pending)
+        });
 
-        handle_commit_conversation_import(
-            &mut writer,
-            ProtocolVersion::One,
-            RequestId::try_new(1)?,
-            8,
-            &pool,
-            &mut pending,
-        )
-        .await?;
-        drop(writer);
+        let reacquired = timeout(Duration::from_secs(1), budget.acquire_owned()).await??;
         let mut encoded = Vec::new();
         reader.read_to_end(&mut encoded).await?;
+        let (write_result, pending) = write.await?;
+        write_result?;
         let observed = decode_server_line(&encoded)?;
         let expected = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
-            RequestId::try_new(1)?,
+            request_id,
             ServerMessage::Error {
                 code: ErrorCode::InvalidRequest,
                 message: String::from("conversation import was rejected"),
                 detail: ErrorDetail::invalid_request(
                     RejectionDetail::ConversationImportSourceSizeMismatch {
-                        declared_size_bytes: CanonicalU64::new(2),
-                        actual_size_bytes: CanonicalU64::new(1),
+                        declared_size_bytes: CanonicalU64::new(declared_size_bytes),
+                        actual_size_bytes: CanonicalU64::new(actual_size_bytes),
                     },
                 ),
             },
         )?;
 
+        assert_eq!(reacquired.num_permits(), capacity);
         assert_eq!(observed, expected);
         assert!(pending.is_none());
         Ok(())
