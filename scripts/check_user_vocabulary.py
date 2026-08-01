@@ -167,7 +167,7 @@ ALLOWLIST = (
             r"ExistingSocketOwnerMismatch|PeerOwnerMismatch|\bOwnerMismatch\b|"
             r"ancestor_owner_is_trusted|"
             r"ancestor_owner_must_be_root_or_the_effective_user|file owner|"
-            r"owner_access|dropping the owner|its owner, so it cannot shadow|"
+            r"dropping the owner|its owner, so it cannot shadow|"
             r"owner-vs-other|"
             r"guarded_bind_listens_only_with_owner_access",
             re.IGNORECASE,

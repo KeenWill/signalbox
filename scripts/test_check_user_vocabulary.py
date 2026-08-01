@@ -173,6 +173,7 @@ def main() -> int:
         )
         local_socket_lines = (
             "fn tool_is_approved(owner: u32) -> bool { owner == HUMAN_USER_ID }",
+            "fn owner_access() -> bool { true } // human who approves tools",
         )
         imported_lines = (
             "struct EntryFixture {",
@@ -392,7 +393,8 @@ def main() -> int:
         local_socket_path.write_text(
             "fn ancestor_owner_is_trusted(owner: u32, effective_user: u32) -> bool {\n"
             "    owner == 0 || owner == effective_user\n"
-            "}\n",
+            "}\n"
+            "fn guarded_bind_listens_only_with_owner_access() {}\n",
             encoding="utf-8",
         )
         imported.write_text(fixture_text(imported_lines[:-1]), encoding="utf-8")
