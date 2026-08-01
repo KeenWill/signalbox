@@ -468,9 +468,9 @@ the schema instead:
   `FOR UPDATE` on the already-claimed `durable_command` row before it checks
   whether the typed receipt parent has sealed the command; and
 - the goal-event continuity trigger (migration `202608020013`) takes
-  `FOR UPDATE` on the event's session row before reading the preceding event,
-  serializing ordinal and generation assignment even when the Rust transaction
-  reached that row first with `FOR NO KEY UPDATE`.
+  `FOR NO KEY UPDATE` on the event's session row before reading the preceding
+  event, serializing ordinal and generation assignment even when the Rust
+  transaction reached that row first with `FOR NO KEY UPDATE`.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here

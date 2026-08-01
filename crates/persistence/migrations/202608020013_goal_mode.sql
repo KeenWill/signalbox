@@ -801,7 +801,7 @@ DECLARE
     prior_kind text;
     current_generation numeric(20, 0);
 BEGIN
-    PERFORM 1 FROM session WHERE session_id = NEW.session_id FOR UPDATE;
+    PERFORM 1 FROM session WHERE session_id = NEW.session_id FOR NO KEY UPDATE;
     SELECT event_ordinal, generation, event_kind
       INTO prior_ordinal, prior_generation, prior_kind
       FROM goal_event
