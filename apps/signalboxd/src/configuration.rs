@@ -100,13 +100,24 @@ impl ModelBillingRates {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ModelCallInputUsage {
     tokens: Option<u64>,
-    semantics: ProcessModelCallInputTokenSemantics,
+    semantics: Option<ProcessModelCallInputTokenSemantics>,
 }
 
 impl ModelCallInputUsage {
+    #[cfg(test)]
     pub(crate) const fn new(
         tokens: Option<u64>,
         semantics: ProcessModelCallInputTokenSemantics,
+    ) -> Self {
+        Self {
+            tokens,
+            semantics: Some(semantics),
+        }
+    }
+
+    pub(crate) const fn from_persisted(
+        tokens: Option<u64>,
+        semantics: Option<ProcessModelCallInputTokenSemantics>,
     ) -> Self {
         Self { tokens, semantics }
     }
@@ -647,7 +658,8 @@ impl HubModelConfiguration {
     ///
     /// Absence means either this target has no declared rates, the historical
     /// credential profile has no declared billing kind, no token axis was
-    /// reported, or exact decimal arithmetic could not represent the result.
+    /// reported, the historical input semantics are unknown, or exact decimal
+    /// arithmetic could not represent the result.
     pub(crate) fn derive_model_call_cost(
         &self,
         target: ResolvedProviderTarget,
@@ -659,7 +671,7 @@ impl HubModelConfiguration {
     ) -> Option<DerivedModelCallCost> {
         let rates = self.billing_rates.get(&target)?;
         let billing_kind = *self.billing_kinds.get(credential_profile)?;
-        let input_tokens = match input.semantics {
+        let input_tokens = match input.semantics? {
             ProcessModelCallInputTokenSemantics::CacheInclusive => match input.tokens {
                 Some(total) => Some(
                     total.checked_sub(
@@ -1497,6 +1509,24 @@ cache_read_input_usd_per_million_tokens = "4"
         assert_eq!(cost.amount_usd().to_string(), "3.000033");
         assert_eq!(cost.rate_version(), "fixture-rates-v1");
         assert_eq!(cost.billing_kind(), BillingKind::ApiMetered);
+    }
+
+    #[test]
+    fn historical_unknown_input_semantics_yield_no_dollar_figure() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+
+        assert_eq!(
+            configuration.derive_model_call_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                ModelCallInputUsage::from_persisted(Some(1_000_000), None),
+                Some(2),
+                Some(3),
+                Some(4),
+            ),
+            None
+        );
     }
 
     #[test]

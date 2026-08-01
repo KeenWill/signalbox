@@ -8062,7 +8062,7 @@ where
         .derive_model_call_cost(
             evidence.target(),
             evidence.credential_profile(),
-            crate::configuration::ModelCallInputUsage::new(
+            crate::configuration::ModelCallInputUsage::from_persisted(
                 usage.input_tokens(),
                 evidence.input_token_semantics(),
             ),

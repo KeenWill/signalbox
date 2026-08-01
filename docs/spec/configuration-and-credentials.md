@@ -714,8 +714,9 @@ target selects the current configured rate version, and the exact credential
 profile stored on that call selects `api_metered` or `subscription`. An
 API-metered profile produces `real`; a subscription profile produces
 `metered_equivalent`, regardless of adapter kind. A missing rate set, missing
-historical profile declaration, or call with no present usage axis produces no
-dollar figure rather than zero. Codex CLI's reported `input_tokens` includes its
+historical profile declaration, call with no present usage axis, or historical
+call whose input/cache semantics predate the durable pin produces no dollar
+figure rather than zero. Codex CLI's reported `input_tokens` includes its
 reported cache-creation and cache-read breakdowns, so derivation subtracts the
 present cache counts from total input before applying the ordinary input rate
 and applies each cache rate once. That inclusive-input meaning is pinned on the

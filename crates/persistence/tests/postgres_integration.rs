@@ -459,7 +459,7 @@ async fn model_call_usage_keeps_credential_pin_after_update_event() -> Result<()
     );
     assert_eq!(
         usage.input_token_semantics(),
-        ProcessModelCallInputTokenSemantics::CacheExclusive
+        Some(ProcessModelCallInputTokenSemantics::CacheExclusive)
     );
 
     pool.close().await;
@@ -5702,6 +5702,29 @@ async fn model_call_input_semantics_are_immutable() -> Result<(), Box<dyn Error>
             .and_then(|error| error.constraint()),
         Some("model_call_usage_metadata_immutable")
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_input_semantics_keep_historical_unknown_and_new_default()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let (is_nullable, column_default): (String, Option<String>) = sqlx::query_as(
+        "SELECT is_nullable, column_default
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'model_call'
+            AND column_name = 'usage_input_includes_cache_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(is_nullable, "YES");
+    assert_eq!(column_default.as_deref(), Some("false"));
 
     pool.close().await;
     drop(container);

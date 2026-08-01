@@ -468,11 +468,11 @@ pub enum ProcessModelCallInputTokenSemantics {
 }
 
 impl ProcessModelCallInputTokenSemantics {
-    const fn from_storage(value: bool) -> Self {
-        if value {
-            Self::CacheInclusive
-        } else {
-            Self::CacheExclusive
+    const fn from_storage(value: Option<bool>) -> Option<Self> {
+        match value {
+            Some(true) => Some(Self::CacheInclusive),
+            Some(false) => Some(Self::CacheExclusive),
+            None => None,
         }
     }
 }
@@ -506,7 +506,7 @@ pub struct ProcessTranscriptModelCallUsage {
     call: ModelCallId,
     target: ResolvedProviderTarget,
     credential_profile: String,
-    input_token_semantics: ProcessModelCallInputTokenSemantics,
+    input_token_semantics: Option<ProcessModelCallInputTokenSemantics>,
     provenance: ProcessModelCallUsageProvenance,
     usage: ProcessModelCallTokenUsage,
 }
@@ -532,8 +532,10 @@ impl ProcessTranscriptModelCallUsage {
         &self.credential_profile
     }
 
-    /// Returns the closed meaning of this call's reported input-token count.
-    pub const fn input_token_semantics(&self) -> ProcessModelCallInputTokenSemantics {
+    /// Returns the pinned meaning of this call's reported input-token count.
+    ///
+    /// Absence identifies a call prepared before that semantic pin existed.
+    pub const fn input_token_semantics(&self) -> Option<ProcessModelCallInputTokenSemantics> {
         self.input_token_semantics
     }
 
@@ -2003,10 +2005,9 @@ fn decode_model_call_usage(
                 "resolved_provider_model_identity_id",
             )?)),
             credential_profile: required(row, "credential_reference")?,
-            input_token_semantics: ProcessModelCallInputTokenSemantics::from_storage(required(
-                row,
-                "usage_input_includes_cache_tokens",
-            )?),
+            input_token_semantics: ProcessModelCallInputTokenSemantics::from_storage(
+                row.try_get("usage_input_includes_cache_tokens")?,
+            ),
             provenance,
             usage: ProcessModelCallTokenUsage {
                 input_tokens,
@@ -3491,7 +3492,10 @@ mod tests {
     use signalbox_domain::TurnId;
     use sqlx::types::Uuid;
 
-    use super::{ProcessModelCallUsageProvenance, decode_execution_lineage_tip};
+    use super::{
+        ProcessModelCallInputTokenSemantics, ProcessModelCallUsageProvenance,
+        decode_execution_lineage_tip,
+    };
 
     fn turn(value: u128) -> TurnId {
         TurnId::from_uuid(Uuid::from_u128(value))
@@ -3530,6 +3534,22 @@ mod tests {
         assert_eq!(
             ProcessModelCallUsageProvenance::from_storage("inferred"),
             None
+        );
+    }
+
+    #[test]
+    fn historical_model_call_input_semantics_remain_unknown() {
+        assert_eq!(
+            ProcessModelCallInputTokenSemantics::from_storage(None),
+            None
+        );
+        assert_eq!(
+            ProcessModelCallInputTokenSemantics::from_storage(Some(false)),
+            Some(ProcessModelCallInputTokenSemantics::CacheExclusive)
+        );
+        assert_eq!(
+            ProcessModelCallInputTokenSemantics::from_storage(Some(true)),
+            Some(ProcessModelCallInputTokenSemantics::CacheInclusive)
         );
     }
 }

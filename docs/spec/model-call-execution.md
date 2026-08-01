@@ -81,13 +81,17 @@ present zero remains zero. Every call also carries the closed
 `usage_provenance_kind` discriminator, exactly `reported` or `estimated`. The
 prepared checkpoint also pins `usage_input_includes_cache_tokens`, which
 preserves whether input is inclusive of separately reported cache axes even if a
-later daemon configuration routes the target through another adapter. Current
-execution paths produce only `reported`; `estimated` is reserved for a later
-explicit estimator and no present writer selects it. Calls closed from
+later daemon configuration routes the target through another adapter. Calls
+prepared before that pin's migration retain null as an unknown historical
+meaning, so a read never derives cost from possibly cache-inclusive input.
+Current execution paths produce only `reported`; `estimated` is reserved for a
+later explicit estimator and no present writer selects it. Calls closed from
 `ProvenUnsent`, `CancellationConfirmed`, capability failure, or restart recovery
 have all four fields unreported because no provider usage evidence exists.
-Historical rows likewise remain unreported. The terminal-row immutability rule
-makes this evidence write-once; no later path normalizes or corrects it.
+Historical rows retain any reported axes exactly; the absent semantic pin, not
+rewriting those axes, prevents an invented dollar derivation. The terminal-row
+immutability rule makes this evidence write-once; no later path normalizes or
+corrects it.
 
 Storage enforces the matrix durably
 (`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
@@ -106,8 +110,9 @@ authorized. Migration `202608020014_model_call_usage_provenance.sql` adds the
 non-null closed provenance column with `reported` as the existing-row and
 current-writer value. It rejects an unknown spelling and prevents provenance
 rewrites except when a nonterminal call and its usage become terminal in the
-same update. The same migration adds the existing-row-default-false input
-semantic and rejects every rewrite after insertion.
+same update. The same migration leaves the input semantic null on existing rows,
+establishes cache-exclusive as the default for later inserts, and rejects every
+rewrite after insertion.
 
 The provider target is pinned as a turn-level fact before any call exists: the
 turn's frozen selection resolves through an immutable configured

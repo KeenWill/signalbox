@@ -3,10 +3,17 @@
 -- estimator may write `estimated` only as part of the call's terminal commit.
 
 ALTER TABLE model_call
-    ADD COLUMN usage_input_includes_cache_tokens boolean NOT NULL DEFAULT false,
+    ADD COLUMN usage_input_includes_cache_tokens boolean,
     ADD COLUMN usage_provenance_kind text NOT NULL DEFAULT 'reported',
     ADD CONSTRAINT model_call_usage_provenance_kind_closed
         CHECK (usage_provenance_kind IN ('reported', 'estimated'));
+
+-- Calls prepared before this migration may already carry Codex usage whose
+-- input/cache relationship cannot be reconstructed from durable facts. Keep
+-- that meaning unknown, while calls prepared after migration default to the
+-- cache-exclusive meaning unless their writer explicitly pins otherwise.
+ALTER TABLE model_call
+    ALTER COLUMN usage_input_includes_cache_tokens SET DEFAULT false;
 
 -- The original model-call guard already makes authorization facts immutable
 -- and every terminal row wholly immutable. Add provenance to the authorization
