@@ -4499,6 +4499,22 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::SessionEvent {
+                event:
+                    SessionEvent::ToolApprovalDecided {
+                        decider, rationale, ..
+                    },
+                ..
+            } => {
+                let shape_matches = matches!(
+                    (decider, rationale),
+                    (ToolApprovalEventDecider::User { .. }, None)
+                        | (ToolApprovalEventDecider::Delegate { .. }, Some(_))
+                );
+                if !shape_matches {
+                    return Err(FrameValidationError::ToolApprovalShape);
+                }
+            }
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -4790,6 +4806,8 @@ pub enum FrameValidationError {
     ReviewShape,
     /// A goal request, state, or event carried an invalid shape.
     GoalShape,
+    /// A tool approval event mismatched its decider and rationale.
+    ToolApprovalShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -4817,6 +4835,7 @@ impl fmt::Display for FrameValidationError {
             Self::TemplateShape => "session-template frame shape is inconsistent",
             Self::ReviewShape => "review workflow frame shape is inconsistent",
             Self::GoalShape => "commissioned-goal frame shape is inconsistent",
+            Self::ToolApprovalShape => "tool approval event shape is inconsistent",
         })
     }
 }
@@ -8268,7 +8287,14 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
-        )
+        )?;
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
+        );
+        Ok(())
     }
 
     /// INV-033: every stop rejection carries its exact closed wire shape.

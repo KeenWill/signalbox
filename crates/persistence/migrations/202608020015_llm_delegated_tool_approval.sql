@@ -159,6 +159,19 @@ BEGIN
         RAISE EXCEPTION 'prepared approval judge cannot record provider outcome'
             USING ERRCODE = '23514';
     END IF;
+    IF OLD.state_kind = 'prepared'
+       AND NEW.state_kind = 'terminal'
+       AND (
+            NEW.input_tokens IS NOT NULL
+            OR NEW.output_tokens IS NOT NULL
+            OR NEW.cache_read_input_tokens IS NOT NULL
+            OR NEW.cache_creation_input_tokens IS NOT NULL
+       )
+    THEN
+        RAISE EXCEPTION 'unsent approval judge cannot record provider usage'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'tool_approval_judge_unsent_has_no_usage';
+    END IF;
     IF NOT (
         (OLD.state_kind = 'prepared' AND NEW.state_kind IN ('in_flight', 'terminal'))
         OR (OLD.state_kind = 'in_flight' AND NEW.state_kind = 'terminal')
@@ -281,6 +294,31 @@ BEGIN
             RAISE EXCEPTION 'automatic decision exceeds frozen posture'
                 USING ERRCODE = '23514',
                       CONSTRAINT = 'tool_approval_automatic_requires_auto_posture';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF NEW.decision_source = 'owner_command' THEN
+        SELECT count(*) INTO matched
+          FROM tool_request AS request
+         WHERE request.request_id = NEW.request_id
+           AND (
+                request.approval_posture = 'human'
+                OR (
+                    request.approval_posture = 'delegated'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM tool_approval_judge_model_call AS judge
+                         WHERE judge.request_id = request.request_id
+                           AND judge.state_kind = 'terminal'
+                           AND judge.terminal_disposition_kind = 'completed'
+                           AND judge.recommendation_kind = 'escalate_to_human'
+                    )
+                )
+           );
+        IF matched <> 1 THEN
+            RAISE EXCEPTION 'user decision lacks human approval authority'
+                USING ERRCODE = '23514',
+                      CONSTRAINT = 'tool_approval_user_requires_human_authority';
         END IF;
         RETURN NULL;
     END IF;

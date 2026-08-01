@@ -2967,13 +2967,13 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
             tool_attempt_id: *tool_attempt_id,
             terminal_frontier_id: *terminal_frontier_id,
         }),
+        SessionEvent::ToolApprovalDecided { .. } => Some(SnapshotSelection::All),
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
-        | SessionEvent::ToolApprovalDecided { .. }
         | SessionEvent::ModelCallTransition { .. } => None,
     }
 }
@@ -4096,8 +4096,8 @@ mod tests {
         ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
         ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
         ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
-        encode_server_line,
+        SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState,
+        ToolDecision, TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -4937,6 +4937,24 @@ mod tests {
                 turn_id: turn,
                 model_call_id: call,
             })
+        );
+    }
+
+    #[test]
+    fn approval_decision_event_requests_authoritative_snapshot_refresh() {
+        let event = SessionEvent::ToolApprovalDecided {
+            turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            tool_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            decision: ToolApprovalEventDecision::Approve {},
+            decider: ToolApprovalEventDecider::User {
+                command_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            },
+            rationale: None,
+        };
+
+        assert_eq!(
+            terminal_snapshot_selection(&event),
+            Some(SnapshotSelection::All)
         );
     }
 
