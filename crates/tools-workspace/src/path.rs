@@ -444,7 +444,7 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
             bytes,
             total_bytes,
             truncated,
-            mode: status.st_mode,
+            mode: status.st_mode as _,
         })
     }
 }
