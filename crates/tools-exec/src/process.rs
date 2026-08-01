@@ -1273,8 +1273,8 @@ fn bwrap_request(
     .collect::<Vec<_>>();
     #[cfg(target_os = "linux")]
     bwrap_arguments.extend([
-        OsString::from("--bind-fd"),
-        OsString::from(context.bind_descriptor.to_string()),
+        OsString::from("--bind"),
+        descriptor_path(context.bind_descriptor).into_os_string(),
         OsString::from(SANDBOX_WORKSPACE),
     ]);
     #[cfg(not(target_os = "linux"))]
@@ -1286,8 +1286,8 @@ fn bwrap_request(
     #[cfg(target_os = "linux")]
     if let Some(working_directory_bind_descriptor) = context.working_directory_bind_descriptor {
         bwrap_arguments.extend([
-            OsString::from("--bind-fd"),
-            OsString::from(working_directory_bind_descriptor.to_string()),
+            OsString::from("--bind"),
+            descriptor_path(working_directory_bind_descriptor).into_os_string(),
             OsString::from(&sandbox_directory),
         ]);
     }
@@ -1301,8 +1301,8 @@ fn bwrap_request(
     }
     #[cfg(target_os = "linux")]
     bwrap_arguments.extend([
-        OsString::from("--ro-bind-fd"),
-        OsString::from(context.launcher_descriptor.to_string()),
+        OsString::from("--ro-bind"),
+        descriptor_path(context.launcher_descriptor).into_os_string(),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
     ]);
     #[cfg(not(target_os = "linux"))]
@@ -1337,6 +1337,11 @@ fn bwrap_request(
         environment_inheritance: ProcessEnvironment::Clear,
         status_protocol: ProcessStatusProtocol::SandboxDispatch,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_path(descriptor: i32) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{descriptor}"))
 }
 
 fn sandbox_path(workspace_root: &Path) -> OsString {
@@ -3851,8 +3856,8 @@ mod tests {
             .first()
             .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
         let bind_arguments = [
-            OsString::from("--bind-fd"),
-            OsString::from(bind_descriptor.to_string()),
+            OsString::from("--bind"),
+            descriptor_path(bind_descriptor).into_os_string(),
             OsString::from(SANDBOX_WORKSPACE),
         ];
         let chdir_arguments = [
@@ -3862,8 +3867,8 @@ mod tests {
         let working_directory_bind_destination =
             OsString::from(format!("{SANDBOX_WORKSPACE}/{SANDBOXED_WORKING_DIRECTORY}"));
         let launcher_arguments = [
-            OsString::from("--ro-bind-fd"),
-            OsString::from(TEST_SANDBOX_LAUNCHER_DESCRIPTOR.to_string()),
+            OsString::from("--ro-bind"),
+            descriptor_path(TEST_SANDBOX_LAUNCHER_DESCRIPTOR).into_os_string(),
             OsString::from(SANDBOX_DISPATCH_PROGRAM),
         ];
         let dispatch_arguments = [
@@ -3914,14 +3919,13 @@ mod tests {
             .arguments
             .windows(3)
             .find(|arguments| {
-                arguments[0] == "--bind-fd" && arguments[2] == working_directory_bind_destination
+                arguments[0] == "--bind" && arguments[2] == working_directory_bind_destination
             })
             .ok_or("nested working directory bind")?;
         assert!(
             working_directory_bind[1]
                 .to_string_lossy()
-                .parse::<i32>()
-                .is_ok()
+                .starts_with("/proc/self/fd/")
         );
         assert!(
             request
@@ -3959,7 +3963,7 @@ mod tests {
         let workspace_bind_count = request
             .arguments
             .windows(3)
-            .filter(|arguments| arguments[0] == "--bind-fd" && arguments[2] == SANDBOX_WORKSPACE)
+            .filter(|arguments| arguments[0] == "--bind" && arguments[2] == SANDBOX_WORKSPACE)
             .count();
 
         assert_eq!(workspace_bind_count, ROOT_WORKSPACE_BIND_COUNT);
