@@ -126,7 +126,7 @@ ALLOWLIST = (
             r"docs/spec/(?:configuration-and-credentials|runner-protocol|tool-loop)[.]md)$"
         ),
         re.compile(
-            r"owner/repository|owner/name|repos/owner/|repository\(owner:|"
+            r"owner/repository|owner/name|repos/owner/|"
             r"(?:arguments[.]repository[(][)]|repository)[.]owner[(][)]|"
             r"let owner = &value\[\.\.owner_end\]|\bowner_end\b|"
             r"let \(owner, name\) = repository|"
@@ -388,10 +388,18 @@ ALLOWLIST = (
         ),
         re.compile(
             r"\(\"owner\", (?:None|Some\(_\))(?:, None)?\)|"
-            r"\"owner\" \| \"model\"|kind:\s*\"owner\"|"
+            r"\"owner\" \| \"model\"|"
             r"expected_issuer\s*=\s*\(\"owner\"|"
             r"\(`owner`/(?:`model`|`tool`)"
         ),
+    ),
+    Allowance(
+        "legacy PostgreSQL actor encoder fields",
+        re.compile(
+            r"^crates/persistence/src/(?:session_metadata|submit_input)[.]rs$"
+        ),
+        re.compile(r'^\s*kind:\s*"owner",\s*$'),
+        previous_line=re.compile(r"^\s*Actor::User => EncodedActor \{\s*$"),
     ),
     Allowance(
         "legacy PostgreSQL SQL actor literals",

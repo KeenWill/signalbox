@@ -197,6 +197,7 @@ def main() -> int:
         domain_record_lines = ('let OwnerID = "human who approves tools";',)
         legacy_actor_lines = (
             'let human_principal = String::from("owner"); // approves tools',
+            'let human = Principal { kind: "owner" }; // approves tools',
         )
         application_import_lines = (
             "fn converted() {}",
@@ -227,6 +228,7 @@ def main() -> int:
             "        fn owner(&self) -> &str {",
             "let owner = human_owner + repository.owner_end;",
             "mutation Approve($owner: ID!) { approve(human: $owner) }",
+            "fn approve_repository(owner: HumanPrincipal) {}",
         )
         reviewed_author_lines = ('author: Some(String::from("owner")),',)
         author_violation_lines = (
@@ -349,6 +351,7 @@ def main() -> int:
                     github_accessor_lines[12],
                     github_accessor_lines[13],
                     github_accessor_lines[14],
+                    github_accessor_lines[15],
                 ),
             ),
             *expected_diagnostics(
@@ -447,7 +450,9 @@ def main() -> int:
             'let user_id = "human who approves tools";\n', encoding="utf-8"
         )
         legacy_actor.write_text(
-            "let kind = encode_actor(Actor::User).kind.to_owned();\n",
+            "Actor::User => EncodedActor {\n"
+            '    kind: "owner",\n'
+            "}\n",
             encoding="utf-8",
         )
         mixed_storage_path.write_text(
