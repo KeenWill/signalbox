@@ -797,6 +797,73 @@ impl WorkspaceIdentity {
                 && metadata.ino() == self.inode
         })
     }
+
+    fn pin_relative_directory(
+        &self,
+        path: &str,
+    ) -> Result<WorkspaceDirectoryIdentity, ProcessSpawnFailure> {
+        if invalid_relative_directory(path) {
+            return Err(ProcessSpawnFailure::Other);
+        }
+        let mut directory = None;
+        for component in Path::new(path).components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            let parent = directory.as_ref().unwrap_or(self._directory.as_ref());
+            directory = Some(
+                rustix::fs::openat(
+                    parent,
+                    name,
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(workspace_directory_failure)?,
+            );
+        }
+        let directory = match directory {
+            Some(directory) => directory,
+            None => rustix::fs::openat(
+                self._directory.as_ref(),
+                ".",
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(workspace_directory_failure)?,
+        };
+        let bind_source = PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            rustix::fd::AsRawFd::as_raw_fd(&directory)
+        ));
+        Ok(WorkspaceDirectoryIdentity {
+            bind_source,
+            _directory: directory,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct WorkspaceDirectoryIdentity {
+    bind_source: PathBuf,
+    _directory: rustix::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+fn workspace_directory_failure(error: rustix::io::Errno) -> ProcessSpawnFailure {
+    match error {
+        rustix::io::Errno::NOENT => ProcessSpawnFailure::NotFound,
+        rustix::io::Errno::ACCESS | rustix::io::Errno::PERM => {
+            ProcessSpawnFailure::PermissionDenied
+        }
+        _ => ProcessSpawnFailure::Other,
+    }
 }
 
 impl<Runner: ProcessRunner> CommandExecution for SandboxedCommandRunner<Runner> {
@@ -835,10 +902,34 @@ impl<Runner: ProcessRunner> UnsandboxedCommandRunner<Runner> {
 impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner> {
     async fn execute(&mut self, arguments: ExecArguments) -> ExecResult {
         #[cfg(target_os = "linux")]
-        let execution_root = &self.workspace_identity.bind_source;
+        let execution_directory = match self
+            .workspace_identity
+            .pin_relative_directory(&arguments.working_directory)
+        {
+            Ok(directory) => directory,
+            Err(reason) => {
+                return ExecResult {
+                    confinement: ExecutionConfinement::Unsandboxed,
+                    outcome: ProcessOutcome::SpawnFailed { reason },
+                    stdout: OutputCapture::empty(),
+                    stderr: OutputCapture::empty(),
+                };
+            }
+        };
+        #[cfg(target_os = "linux")]
+        let execution_root = &execution_directory.bind_source;
         #[cfg(not(target_os = "linux"))]
         let execution_root = &self.workspace_root;
-        let request = direct_request(execution_root, &arguments, EXEC_CAPTURE_BYTES);
+        #[cfg(target_os = "linux")]
+        let relative_working_directory = ".";
+        #[cfg(not(target_os = "linux"))]
+        let relative_working_directory = arguments.working_directory.as_str();
+        let request = direct_request(
+            execution_root,
+            relative_working_directory,
+            &arguments,
+            EXEC_CAPTURE_BYTES,
+        );
         process_result(
             ExecutionConfinement::Unsandboxed,
             self.runner.run(request).await,
@@ -862,11 +953,16 @@ fn canonical_workspace_root(root: &Path) -> Result<PathBuf, ExecToolConstruction
     Ok(canonical)
 }
 
-fn direct_request(root: &Path, arguments: &ExecArguments, capture_bytes: usize) -> ProcessRequest {
+fn direct_request(
+    root: &Path,
+    working_directory: &str,
+    arguments: &ExecArguments,
+    capture_bytes: usize,
+) -> ProcessRequest {
     ProcessRequest {
         program: OsString::from(&arguments.program),
         arguments: arguments.arguments.iter().map(OsString::from).collect(),
-        working_directory: root.join(&arguments.working_directory),
+        working_directory: root.join(working_directory),
         timeout: Duration::from_secs(arguments.timeout_seconds),
         capture_bytes,
         environment: BTreeMap::new(),
@@ -1427,13 +1523,19 @@ impl OuterProcessTreeGuard {
     }
 
     fn all_tracked_absent(&self) -> bool {
-        let descendants = self
-            .descendants
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        descendants.iter().all(|(raw_pid, process)| {
-            outer_process_start_time(*raw_pid)
-                .is_ok_and(|start_time| start_time != Some(process.start_time))
+        let snapshot = {
+            let descendants = self
+                .descendants
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            descendants
+                .iter()
+                .map(|(raw_pid, process)| (*raw_pid, process.start_time))
+                .collect::<Vec<_>>()
+        };
+        snapshot.into_iter().all(|(raw_pid, expected_start_time)| {
+            outer_process_start_time(raw_pid)
+                .is_ok_and(|start_time| start_time != Some(expected_start_time))
         })
     }
 
@@ -1467,20 +1569,25 @@ fn outer_observe_descendants(
     root: u32,
     descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
 ) -> Result<(), ()> {
-    let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut known = tracked.keys().copied().collect::<BTreeSet<_>>();
+    let mut known = {
+        let tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+        tracked
+            .iter()
+            .map(|(raw_pid, process)| (*raw_pid, process.start_time))
+            .collect::<BTreeMap<_, _>>()
+    };
     loop {
-        let before = known.len();
-        let parents = known.iter().copied().collect::<Vec<_>>();
-        for parent in parents {
-            let Some(expected_start_time) = tracked.get(&parent).map(|process| process.start_time)
-            else {
-                continue;
-            };
+        let parents = known
+            .iter()
+            .map(|(raw_pid, start_time)| (*raw_pid, *start_time))
+            .collect::<Vec<_>>();
+        let mut additions = Vec::new();
+        let mut retired = Vec::new();
+        for (parent, expected_start_time) in parents {
             if outer_process_start_time(parent)? != Some(expected_start_time) {
                 if parent != root {
-                    tracked.remove(&parent);
                     known.remove(&parent);
+                    retired.push((parent, expected_start_time));
                 }
                 continue;
             }
@@ -1488,53 +1595,84 @@ fn outer_observe_descendants(
                 Ok(children) => children,
                 Err(OuterProcessChildrenError::Gone) if parent == root => continue,
                 Err(OuterProcessChildrenError::Gone) => {
-                    tracked.remove(&parent);
                     known.remove(&parent);
+                    retired.push((parent, expected_start_time));
                     continue;
                 }
                 Err(OuterProcessChildrenError::Unsupported) => return Err(()),
             };
             if outer_process_start_time(parent)? != Some(expected_start_time) {
                 if parent != root {
-                    tracked.remove(&parent);
                     known.remove(&parent);
+                    retired.push((parent, expected_start_time));
                 }
                 continue;
             }
             for raw_pid in children {
-                if known.contains(&raw_pid) {
+                if known.contains_key(&raw_pid) {
                     continue;
                 }
                 if let Some(process) = outer_pin_process(raw_pid)? {
-                    tracked.insert(raw_pid, process);
-                    known.insert(raw_pid);
+                    known.insert(raw_pid, process.start_time);
+                    additions.push((raw_pid, process));
                 }
             }
         }
-        if known.len() == before {
+        let discovered = !additions.is_empty();
+        if !retired.is_empty() || discovered {
+            let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+            for (raw_pid, expected_start_time) in retired {
+                if tracked
+                    .get(&raw_pid)
+                    .is_some_and(|process| process.start_time == expected_start_time)
+                {
+                    tracked.remove(&raw_pid);
+                }
+            }
+            for (raw_pid, process) in additions {
+                if tracked
+                    .get(&raw_pid)
+                    .is_none_or(|tracked| tracked.start_time != process.start_time)
+                {
+                    tracked.insert(raw_pid, process);
+                }
+            }
+        }
+        if !discovered {
             break;
         }
     }
-    outer_retire_reused(root, &mut tracked)
+    outer_retire_reused(root, descendants)
 }
 
 #[cfg(target_os = "linux")]
 fn outer_retire_reused(
     root: u32,
-    tracked: &mut BTreeMap<u32, OuterTrackedProcess>,
+    descendants: &Arc<Mutex<BTreeMap<u32, OuterTrackedProcess>>>,
 ) -> Result<(), ()> {
+    let snapshot = {
+        let tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+        tracked
+            .iter()
+            .filter_map(|(raw_pid, process)| {
+                (*raw_pid != root).then_some((*raw_pid, process.start_time))
+            })
+            .collect::<Vec<_>>()
+    };
     let mut retired = Vec::new();
-    for (raw_pid, process) in tracked.iter() {
-        if *raw_pid == root {
-            continue;
-        }
-        let identity_changed = outer_process_start_time(*raw_pid)? != Some(process.start_time);
-        if identity_changed {
-            retired.push(*raw_pid);
+    for (raw_pid, expected_start_time) in snapshot {
+        if outer_process_start_time(raw_pid)? != Some(expected_start_time) {
+            retired.push((raw_pid, expected_start_time));
         }
     }
-    for raw_pid in retired {
-        tracked.remove(&raw_pid);
+    let mut tracked = descendants.lock().unwrap_or_else(PoisonError::into_inner);
+    for (raw_pid, expected_start_time) in retired {
+        if tracked
+            .get(&raw_pid)
+            .is_some_and(|process| process.start_time == expected_start_time)
+        {
+            tracked.remove(&raw_pid);
+        }
     }
     Ok(())
 }
@@ -1798,7 +1936,6 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
         let _ = child.kill().await;
         waited = tokio::time::timeout(OUTER_PROCESS_CLEANUP_DEADLINE, child.wait()).await;
     }
-    kill_supervisor_process_group(supervisor_pid);
     let mut wait_failure = if request_timed_out {
         Some(ProcessOutcome::TimedOut)
     } else if observation_failed {
@@ -1921,7 +2058,7 @@ fn empty_process_result(outcome: ProcessOutcome) -> ProcessRunResult {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::sync::{Arc, Mutex, PoisonError};
 
     use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
@@ -2373,7 +2510,6 @@ mod tests {
         );
         let observation = runner.clone();
         let mut command_runner = UnsandboxedCommandRunner::try_new(runner, &workspace.path)?;
-        let pinned_root = command_runner.workspace_identity.bind_source.clone();
         workspace.replace()?;
         let arguments = ExecArguments {
             program: String::from("cargo"),
@@ -2389,8 +2525,45 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("one direct process request"))?;
 
         assert_eq!(result.confinement, ExecutionConfinement::Unsandboxed);
-        assert_eq!(request.working_directory, pinned_root.join("."));
+        assert!(
+            request
+                .working_directory
+                .starts_with(Path::new("/proc/self/fd"))
+        );
         assert_ne!(request.working_directory, workspace.path);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unsandboxed_runner_rejects_a_symlinked_working_directory_before_dispatch()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let outside = ReplacementWorkspace::new()?;
+        symlink(&outside.path, workspace.path.join("escape"))?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_process(b"must remain unused"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = UnsandboxedCommandRunner::try_new(runner, &workspace.path)?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("escape"),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::Unsandboxed);
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::Other,
+            }
+        );
+        assert_eq!(observation.recorded_requests(), Vec::new());
         Ok(())
     }
 
