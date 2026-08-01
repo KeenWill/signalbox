@@ -23,6 +23,7 @@ use signalbox_model_runtime::{
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
+use unicode_normalization::UnicodeNormalization;
 
 /// Registry name for bounded web search.
 pub const WEB_SEARCH_NAME: &str = "web_search";
@@ -1235,11 +1236,8 @@ where
                 known_failure_evidence(self.request_failed_detail.clone(), &scrubber)
             }
             Err(WebSearchTransportFailure::ProviderRejected(error)) => {
-                provider_error_detail(error, &scrubber).map(|detail| {
-                    ToolExecutorEvidence::KnownFailed {
-                        detail: Some(detail),
-                    }
-                })
+                provider_error_detail(error, &scrubber)
+                    .map(|detail| ToolExecutorEvidence::KnownFailed { detail })
             }
             Err(
                 WebSearchTransportFailure::InvalidResponse
@@ -1623,7 +1621,7 @@ fn known_failure_evidence(
 fn provider_error_detail(
     error: WebSearchProviderError,
     scrubber: &CredentialScrubber,
-) -> Result<ToolExecutionErrorDetail, WebSearchExecutorError> {
+) -> Result<Option<ToolExecutionErrorDetail>, WebSearchExecutorError> {
     let redacted = scrubber.redact_body(&error.body);
     let normalized = redacted
         .chars()
@@ -1649,9 +1647,11 @@ fn provider_error_detail(
     };
     let bounded = truncate_after_redaction(detail);
     if scrubber.contains_credential(&bounded) {
-        return Err(WebSearchExecutorError::EvidenceEncoding);
+        return Ok(None);
     }
-    ToolExecutionErrorDetail::try_new(bounded).map_err(|_| WebSearchExecutorError::EvidenceEncoding)
+    ToolExecutionErrorDetail::try_new(bounded)
+        .map(Some)
+        .map_err(|_| WebSearchExecutorError::EvidenceEncoding)
 }
 
 fn truncate_after_redaction(detail: String) -> String {
@@ -1830,7 +1830,13 @@ fn decode_html_character_references(text: &str) -> Option<(String, bool)> {
 }
 
 fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {
-    !needle.is_empty() && haystack.to_lowercase().contains(&needle.to_lowercase())
+    let normalized_needle = needle.to_lowercase().nfc().collect::<String>();
+    !normalized_needle.is_empty()
+        && haystack
+            .to_lowercase()
+            .nfc()
+            .collect::<String>()
+            .contains(&normalized_needle)
 }
 
 fn decode_html_character_reference(entity: &str) -> Option<String> {
@@ -1977,6 +1983,7 @@ mod tests {
     const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
     const URL_EMBEDDED_HOST_COLLISION_KEY: &str = "ABCDEF";
     const URL_UNICODE_HOST_COLLISION_KEY: &str = "BÜCHER";
+    const URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY: &str = "BU\u{0308}CHER";
     const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
     const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
     const HTML_NESTED_ENTITY_COLLISION_VALUE: &str = "abc&amp;amp;def";
@@ -2059,6 +2066,19 @@ mod tests {
         }
     }
 
+    struct ProviderStatusCredentials;
+
+    impl CredentialAccess for ProviderStatusCredentials {
+        async fn resolve(
+            &self,
+            _reference: &CredentialReference,
+        ) -> Result<CredentialValue, CredentialAccessError> {
+            Ok(CredentialValue::new(
+                PROVIDER_REJECTION_STATUS.to_string().into_bytes(),
+            ))
+        }
+    }
+
     struct SanitizedDispatchUnknownTransport;
 
     impl WebSearchTransport for SanitizedDispatchUnknownTransport {
@@ -2086,6 +2106,29 @@ mod tests {
         ) -> WebSearchTransportOutcome {
             self.searches.fetch_add(1, Ordering::Relaxed);
             WebSearchTransportOutcome::failed(WebSearchTransportFailure::RequestFailed, credential)
+        }
+    }
+
+    struct ProviderRejectedTransport {
+        searches: Arc<AtomicUsize>,
+    }
+
+    impl WebSearchTransport for ProviderRejectedTransport {
+        async fn search(
+            &mut self,
+            _request: WebSearchRequest,
+            credential: &CredentialValue,
+        ) -> WebSearchTransportOutcome {
+            self.searches.fetch_add(1, Ordering::Relaxed);
+            let error = WebSearchProviderError::new(
+                PROVIDER_REJECTION_STATUS,
+                br#"{"message":"synthetic rejection"}"#.to_vec(),
+            )
+            .expect("fixture provider error is admitted");
+            WebSearchTransportOutcome::failed(
+                WebSearchTransportFailure::ProviderRejected(error),
+                credential,
+            )
         }
     }
 
@@ -2387,6 +2430,32 @@ mod tests {
         (outcome, searches.load(Ordering::Relaxed))
     }
 
+    async fn execute_provider_rejection_through_service() -> (ToolExecutionServiceOutcome, usize) {
+        let searches = Arc::new(AtomicUsize::new(0));
+        let transport = ProviderRejectedTransport {
+            searches: Arc::clone(&searches),
+        };
+        let (catalog, executor) =
+            WebSearchTool::try_new(ProviderStatusCredentials, transport, configuration())
+                .expect("fixture web_search tool compiles")
+                .into_parts();
+        let batch = prepared_web_search_batch();
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            ExecutorFixtureTransaction {
+                batch: batch.clone(),
+            },
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("provider rejection commits definitive evidence");
+        (outcome, searches.load(Ordering::Relaxed))
+    }
+
     fn is_committed_known_failure(outcome: &ToolExecutionServiceOutcome) -> bool {
         matches!(
             outcome,
@@ -2394,6 +2463,18 @@ mod tests {
                 if matches!(
                     ended.end(),
                     signalbox_domain::ToolAttemptEnd::KnownFailed { .. }
+                )
+        )
+    }
+
+    fn is_committed_known_failure_without_detail(outcome: &ToolExecutionServiceOutcome) -> bool {
+        matches!(
+            outcome,
+            ToolExecutionServiceOutcome::ObservationCommitted(ended)
+                if matches!(
+                    ended.end(),
+                    signalbox_domain::ToolAttemptEnd::KnownFailed { error }
+                        if error.detail().is_none()
                 )
         )
     }
@@ -3037,6 +3118,31 @@ mod tests {
         );
     }
 
+    /// INV-035: canonical Unicode normalization cannot conceal a decomposed
+    /// credential reflected in a provider result host.
+    #[test]
+    fn web_search_rejects_unicode_normalized_credential_in_result_host() {
+        let reflected = WebSearchResult::try_new(WebSearchResultFields {
+            title: String::from(FIXTURE_RESULT_TITLE),
+            url: String::from(FIXTURE_UNICODE_EMBEDDED_HOST_RESULT_URL),
+            snippet: String::from(FIXTURE_RESULT_SNIPPET),
+        })
+        .expect("Unicode host fixture result is admitted");
+        let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+            .expect("fixture response is admitted");
+        let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+            URL_DECOMPOSED_UNICODE_HOST_COLLISION_KEY
+                .as_bytes()
+                .to_vec(),
+        ))
+        .expect("fixture credential is usable");
+
+        assert_eq!(
+            success_evidence(response, &scrubber),
+            Err(WebSearchExecutorError::EvidenceEncoding)
+        );
+    }
+
     /// INV-035: case-insensitive scheme canonicalization cannot conceal a
     /// credential reflected in a provider result URL.
     #[test]
@@ -3340,7 +3446,9 @@ mod tests {
         let body = br#"{"message":"fixture-search-\u006bey"}"#.to_vec();
         let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
             .expect("fixture error body is bounded");
-        let detail = provider_error_detail(error, &scrubber()).expect("detail is admitted");
+        let detail = provider_error_detail(error, &scrubber())
+            .expect("detail is admitted")
+            .expect("detail does not collide");
 
         assert!(!detail.as_str().contains(SYNTHETIC_KEY));
     }
@@ -3357,7 +3465,9 @@ mod tests {
         );
         let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, reflected.into_bytes())
             .expect("fixture error body is bounded");
-        let detail = provider_error_detail(error, &scrubber()).expect("detail is admitted");
+        let detail = provider_error_detail(error, &scrubber())
+            .expect("detail is admitted")
+            .expect("detail does not collide");
 
         assert!(!detail.as_str().contains(SYNTHETIC_KEY));
         assert!(detail.as_str().ends_with(TRUNCATION_SUFFIX));
@@ -3378,10 +3488,7 @@ mod tests {
         )
         .expect("fixture error body is bounded");
 
-        assert_eq!(
-            provider_error_detail(error, &scrubber),
-            Err(WebSearchExecutorError::EvidenceEncoding)
-        );
+        assert_eq!(provider_error_detail(error, &scrubber), Ok(None));
     }
 
     /// The Brave provider mapping owns the exact endpoint and bounded web-only
@@ -3809,6 +3916,16 @@ mod tests {
             execute_request_failure_through_service(REQUEST_DETAIL_COLLISION_KEY).await;
 
         assert!(is_committed_known_failure(&outcome));
+        assert_eq!(searches, 1);
+    }
+
+    /// INV-035: a dynamic provider-rejection detail that collides with the
+    /// credential is omitted while the public service commits known failure.
+    #[tokio::test]
+    async fn credential_collision_commits_provider_rejection_without_crash() {
+        let (outcome, searches) = execute_provider_rejection_through_service().await;
+
+        assert!(is_committed_known_failure_without_detail(&outcome));
         assert_eq!(searches, 1);
     }
 
