@@ -454,6 +454,24 @@ async fn insert_prepared(
     .await
     .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
 
+    sqlx::query(
+        "INSERT INTO session_placement_event
+            (session_id, version, prior_version, event_kind, placement_path,
+             root_global_read_intent, provenance_command_id, recorded_at)
+         VALUES ($1, 1, NULL, 'created', NULL, FALSE, $2, transaction_timestamp())",
+    )
+    .bind(session_id_to_uuid(session.id()))
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_current_placement (session_id, current_version)
+         VALUES ($1, 1)",
+    )
+    .bind(session_id_to_uuid(session.id()))
+    .execute(&mut *connection)
+    .await?;
+
     crate::session_credentials::insert_initial_session_credential_event(
         connection,
         session_id_to_uuid(session.id()),

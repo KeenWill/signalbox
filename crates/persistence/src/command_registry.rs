@@ -46,7 +46,7 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 11] = [
         spelling: CREATE_SESSION_KIND,
         typed_table: "create_session_command",
         minimum_version: 1,
-        maximum_version: 4,
+        maximum_version: 6,
     },
     CommandKindDefinition {
         kind: CommandKind::CreateSessionFromImportedFrontier,
