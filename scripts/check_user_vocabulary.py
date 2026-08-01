@@ -34,11 +34,19 @@ class Allowance:
             for allowed in self.lines.finditer(line)
         )
 
-ANY_PATH = re.compile(r".")
 ALLOWLIST = (
     Allowance(
         "GitHub owner/repository coordinates and API fields",
-        ANY_PATH,
+        re.compile(
+            r"^(?:apps/client/src/(?:arguments|presentation)[.]rs|"
+            r"apps/client/tests/end_to_end[.]rs|"
+            r"apps/signalboxd/tests/offline_tool_loop[.]rs|"
+            r"crates/application/src/review_orchestration[.]rs|"
+            r"crates/process-protocol/src/lib[.]rs|crates/runner-wire/src/tests[.]rs|"
+            r"crates/tools-code-host/src/code_host/.+[.]rs|"
+            r"crates/tools-github/src/lib[.]rs|"
+            r"docs/spec/(?:configuration-and-credentials|runner-protocol|tool-loop)[.]md)$"
+        ),
         re.compile(
             r"owner/repository|owner/name|repos/owner/|repository\(owner:|\$owner\b|"
             r"[\"']owner[\"']:\s*owner|[\"']owner[\"']\s*:|"
@@ -54,7 +62,14 @@ ALLOWLIST = (
     ),
     Allowance(
         "Unix file-owner and permission semantics",
-        ANY_PATH,
+        re.compile(
+            r"^(?:apps/signalbox-runner/src/(?:configuration|protocol|state)[.]rs|"
+            r"apps/signalboxd/src/(?:local_socket|runner_protocol_runtime)[.]rs|"
+            r"apps/signalboxd/tests/process_substrate[.]rs|"
+            r"crates/model-runtime-codex-cli/tests/live_smoke[.]rs|"
+            r"docs/spec/(?:configuration-and-credentials|process-protocol|"
+            r"runner-protocol)[.]md)$"
+        ),
         re.compile(
             r"owner-(?:only|private)|wrong-owner|"
             r"wrong owner|unprivileged different owner|untrusted owner|effective-user ownership|"
@@ -115,12 +130,26 @@ ALLOWLIST = (
     ),
     Allowance(
         "external imported wire fields",
-        ANY_PATH,
+        re.compile(
+            r"^(?:clients/native/SignalboxNativeTests/SignalboxNativeTests[.]swift|"
+            r"clients/native/Sources/SignalboxApp/MockSignalboxFixtures[.]swift|"
+            r"clients/native/Sources/SignalboxModels/SignalboxEvents[.]swift|"
+            r"clients/native/Tests/SignalboxModelsTests/SignalboxModelsTests[.]swift|"
+            r"crates/model-runtime-codex-cli/tests/live_smoke[.]rs)$"
+        ),
         re.compile(r"isCollapsedByOwner|is_collapsed_by_owner|workspace_owner_usage_nudge"),
     ),
     Allowance(
         "legacy PostgreSQL user encodings",
-        re.compile(r"^(?:crates/persistence/|apps/signalboxd/tests/offline_tool_loop[.]rs$|docs/spec/)"),
+        re.compile(
+            r"^(?:apps/signalboxd/tests/offline_tool_loop[.]rs|"
+            r"crates/persistence/src/(?:create_session|"
+            r"create_session_from_imported_frontier|model_execution|session|"
+            r"session_metadata|submit_input|tool_loop)[.]rs|"
+            r"crates/persistence/tests/(?:conversation_import_postgres|postgres_integration|"
+            r"runner_protocol_postgres|session_metadata_postgres)[.]rs|"
+            r"docs/spec/identity-and-commands[.]md)$"
+        ),
         re.compile(
             r"[\"']owner_initiated[\"']|[\"']owner_command(?:_id)?[\"']|"
             r"[\"']owner[\"']|`owner`|legacy owner|owner/tool|"

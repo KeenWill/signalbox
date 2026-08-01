@@ -30,7 +30,7 @@ def git(root: Path, *arguments: str) -> None:
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="signalbox-user-vocabulary-") as directory:
         root = Path(directory)
-        allowed = root / "crates" / "example" / "src" / "lib.rs"
+        allowed = root / "crates" / "tools-github" / "src" / "lib.rs"
         imported = root / "crates" / "domain" / "src" / "imported_conversation.rs"
         violation = root / "docs" / "spec" / "example.md"
         allowed.parent.mkdir(parents=True)
@@ -53,7 +53,11 @@ def main() -> int:
             "The owner field identifies the human who approves this tool.\n"
             "sessionOwner2 = nil\n"
             "sessionOwner2Id = nil\n"
-            "The current owner prevents the tool from running.\n",
+            "The current owner prevents the tool from running.\n"
+            "The wrong owner approves this tool.\n"
+            "The process protocol emits {\"type\":\"owner\"}.\n"
+            "A request by an owner, member, or collaborator approves tools.\n"
+            "isCollapsedByOwner = true\n",
             encoding="utf-8",
         )
         imported.write_text(
@@ -74,7 +78,7 @@ def main() -> int:
             root,
             "add",
             "crates/domain/src/imported_conversation.rs",
-            "crates/example/src/lib.rs",
+            "crates/tools-github/src/lib.rs",
             "docs/spec/example.md",
         )
         rejected = run_checker(root)
@@ -102,6 +106,19 @@ def main() -> int:
         unreviewed_path_allowance = (
             "docs/spec/example.md:14: "
             "The current owner prevents the tool from running."
+        )
+        unix_owner_outside_reviewed_path = (
+            "docs/spec/example.md:15: The wrong owner approves this tool."
+        )
+        stale_wire_value = (
+            'docs/spec/example.md:16: The process protocol emits {"type":"owner"}.'
+        )
+        github_role_outside_reviewed_path = (
+            "docs/spec/example.md:17: "
+            "A request by an owner, member, or collaborator approves tools."
+        )
+        external_field_outside_reviewed_path = (
+            "docs/spec/example.md:18: isCollapsedByOwner = true"
         )
         imported_role_owner = (
             "crates/domain/src/imported_conversation.rs:10: "
@@ -148,6 +165,18 @@ def main() -> int:
         )
         assert unreviewed_path_allowance in rejected.stdout, (
             f"unreviewed-path allowance violation missing:\n{rejected.stdout}"
+        )
+        assert unix_owner_outside_reviewed_path in rejected.stdout, (
+            f"Unix-owner allowance violation missing:\n{rejected.stdout}"
+        )
+        assert stale_wire_value in rejected.stdout, (
+            f"stale wire-value violation missing:\n{rejected.stdout}"
+        )
+        assert github_role_outside_reviewed_path in rejected.stdout, (
+            f"GitHub-role allowance violation missing:\n{rejected.stdout}"
+        )
+        assert external_field_outside_reviewed_path in rejected.stdout, (
+            f"external-field allowance violation missing:\n{rejected.stdout}"
         )
         assert imported_role_owner in rejected.stdout, (
             f"imported-file role violation missing:\n{rejected.stdout}"
