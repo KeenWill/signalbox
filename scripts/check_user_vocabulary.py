@@ -129,7 +129,20 @@ ALLOWLIST = (
     ),
     Allowance(
         "Rust and domain-record ownership phrasing",
-        ANY_PATH,
+        re.compile(
+            r"^(?:apps/signalbox-runner/src/state[.]rs|"
+            r"apps/signalboxd/src/runner_protocol_runtime[.]rs|"
+            r"apps/signalboxd/tests/process_protocol_runtime[.]rs|"
+            r"clients/native/Sources/SignalboxClient/SessionSynchronization[.]swift|"
+            r"crates/application/src/(?:conversation_import|scheduler)[.]rs|"
+            r"crates/domain/src/(?:context_frontier|imported_session|model_execution|"
+            r"replace_session_defaults|review_workflow|runner|session|submit_input|"
+            r"tool_execution|turn_eligibility)[.]rs|"
+            r"crates/persistence/tests/(?:postgres_integration|review_workflow_postgres)[.]rs|"
+            r"docs/spec/(?:conversation-import|model-call-execution|persistence-protocol|"
+            r"process-protocol|review-workflows|sessions-and-transcript|"
+            r"turn-lifecycle-and-scheduling)[.]md)$"
+        ),
         re.compile(
             r"[A-Za-z0-9_]*Ownership[A-Za-z0-9_]*|ownership|\bowned\b|\bowning\b|"
             r"active slot owner|active-slot owner|slot owner|lease owner|"
@@ -145,8 +158,7 @@ ALLOWLIST = (
             r"cross-wired owner|foreign-owner|foreign owner|member.s owner|"
             r"let owner = stored[.]owning_session|owner != session|owner, non-successor|"
             r"already-claimed owner|process-lifetime root owner|extension owners|"
-            r"named as owner|validated owner|checked owner placement|file-owner|"
-            r"one owner for bounds|current owner prevents|one owner:|owner must equal",
+            r"named as owner|validated owner|checked owner placement|file-owner",
             re.IGNORECASE,
         ),
     ),

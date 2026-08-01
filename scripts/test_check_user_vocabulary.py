@@ -52,7 +52,8 @@ def main() -> int:
             "The session owner approves this tool.\n"
             "The owner field identifies the human who approves this tool.\n"
             "sessionOwner2 = nil\n"
-            "sessionOwner2Id = nil\n",
+            "sessionOwner2Id = nil\n"
+            "The current owner prevents the tool from running.\n",
             encoding="utf-8",
         )
         imported.write_text(
@@ -98,6 +99,10 @@ def main() -> int:
         )
         embedded_numeric = "docs/spec/example.md:12: sessionOwner2 = nil"
         embedded_continued_numeric = "docs/spec/example.md:13: sessionOwner2Id = nil"
+        unreviewed_path_allowance = (
+            "docs/spec/example.md:14: "
+            "The current owner prevents the tool from running."
+        )
         imported_role_owner = (
             "crates/domain/src/imported_conversation.rs:10: "
             "// The owner approves this tool."
@@ -140,6 +145,9 @@ def main() -> int:
         )
         assert embedded_continued_numeric in rejected.stdout, (
             f"embedded continued numeric violation missing:\n{rejected.stdout}"
+        )
+        assert unreviewed_path_allowance in rejected.stdout, (
+            f"unreviewed-path allowance violation missing:\n{rejected.stdout}"
         )
         assert imported_role_owner in rejected.stdout, (
             f"imported-file role violation missing:\n{rejected.stdout}"
