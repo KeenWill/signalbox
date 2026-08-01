@@ -1336,7 +1336,7 @@ async fn code_host_tool_completes_offline(
     if approval == ExpectedCodeHostApproval::Confirm {
         assert!(
             code_host.operations().is_empty(),
-            "confirmed code-host mutations cannot dispatch before owner approval"
+            "confirmed code-host mutations cannot dispatch before user approval"
         );
         let receipt = approve_through_process(&fixture, request, 0x3c01).await?;
         assert_approved_receipt(receipt, request);
@@ -2222,8 +2222,8 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
     Ok(())
 }
 
-/// S10: workspace mutation remains parked with no filesystem effect until an
-/// owner approval is recorded through the process protocol.
+/// S10: workspace mutation remains parked with no filesystem effect until a
+/// user approval is recorded through the process protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s10_workspace_write_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
@@ -2275,8 +2275,8 @@ async fn s10_workspace_write_gates_through_process_protocol() -> Result<(), Box<
     Ok(())
 }
 
-/// S10: review publication remains parked with no transport effect until an
-/// owner approval is recorded through the process protocol.
+/// S10: review publication remains parked with no transport effect until a
+/// user approval is recorded through the process protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s10_github_publish_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
