@@ -47,6 +47,32 @@ allowed_origins = [
   "https://github.com",
 ]
 
+# Tool dependencies use the same closed mapping-table pattern as model
+# adapters. The two GitHub-backed families share one non-secret profile; the
+# credential value still arrives only through GITHUB_TOKEN_FILE. Workspace
+# tools pin this exact root, and conversation tools use daemon-composed
+# application reads over the configured database.
+[[tool_mappings]]
+family = "code_host"
+adapter = "github"
+credential_profile = "github-primary"
+egress_policy = "github_api_only"
+
+[[tool_mappings]]
+family = "github"
+adapter = "github"
+credential_profile = "github-primary"
+egress_policy = "github_api_only"
+
+[[tool_mappings]]
+family = "workspace"
+adapter = "local"
+workspace_root = "/srv/signalbox/workspace"
+
+[[tool_mappings]]
+family = "conversations"
+adapter = "application"
+
 # Anthropic's most capable widely released model. Hard cap: 128000.
 [[models]]
 selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"

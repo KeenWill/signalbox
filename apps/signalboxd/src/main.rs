@@ -885,6 +885,7 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
+    let daemon_tool_configuration = model_configuration.daemon_tools();
     let template_configuration = SessionTemplateConfiguration::read(
         configuration.template_configuration_file(),
         || env::var_os("HOME").map(PathBuf::from),
@@ -973,13 +974,25 @@ async fn run_hub(
             erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
         })?;
     let pool = database.pool().clone();
-    let (tool_catalog, tool_executor) = match DaemonTools::try_new_production(
-        SystemCurrentTimeClock,
-        pool.clone(),
-        code_host_credentials,
-        code_host_transport,
-        model_configuration.web_fetch_egress_policy(),
-    ) {
+    let tools = match daemon_tool_configuration {
+        Some(tool_configuration) => DaemonTools::try_new_production(
+            SystemCurrentTimeClock,
+            pool.clone(),
+            code_host_credentials,
+            code_host_transport,
+            tool_configuration.github_egress_policy(),
+            tool_configuration.workspace_root(),
+            model_configuration.web_fetch_egress_policy(),
+        ),
+        None => DaemonTools::try_new_without_tool_mappings(
+            SystemCurrentTimeClock,
+            pool.clone(),
+            code_host_credentials,
+            code_host_transport,
+            model_configuration.web_fetch_egress_policy(),
+        ),
+    };
+    let (tool_catalog, tool_executor) = match tools {
         Ok(tools) => tools.into_parts(),
         Err(error) => {
             let failure = erase_startup_cause(
