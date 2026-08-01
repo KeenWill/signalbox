@@ -3167,6 +3167,7 @@ dependencies = [
  "signalbox-domain",
  "signalbox-tool-contract",
  "tokio",
+ "toml",
 ]
 
 [[package]]
