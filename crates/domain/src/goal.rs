@@ -1008,6 +1008,31 @@ mod tests {
         );
     }
 
+    /// INV-048: pursuing is the sole scheduler-continuing state; every other
+    /// lifecycle state stops that generation.
+    #[test]
+    fn inv048_only_pursuing_state_continues_scheduler_turns() {
+        let blocked = GoalState::Blocked {
+            reason: GoalBlockedReasonKind::AuthorizationRequired,
+            need: need("authorization for the deployment"),
+        };
+        let achieved = GoalState::Achieved {
+            report: model().report_ref(),
+        };
+        let user_stopped = GoalState::UserStopped;
+        let superseded = GoalState::Superseded {
+            by_generation: GoalGeneration::new(
+                NonZeroU64::new(2).expect("fixture successor generation is positive"),
+            ),
+        };
+
+        assert!(GoalState::Pursuing.is_pursuing());
+        assert!(!blocked.is_pursuing());
+        assert!(!achieved.is_pursuing());
+        assert!(!user_stopped.is_pursuing());
+        assert!(!superseded.is_pursuing());
+    }
+
     /// INV-048: the complete event history replays to the identical aggregate.
     #[test]
     fn event_history_round_trips_through_checked_reconstitution() {
