@@ -341,10 +341,12 @@ the maximum assembled source size and defaults to 268,435,456 bytes (256 MiB).
 Begin rejects a larger declared size before retaining source bytes. Commit
 rechecks the bound and requires actual appended bytes to equal the declaration,
 so a file that changes size after metadata observation is rejected with both
-exact counts. The assembly and import permit are per-connection state and are
-released on commit, abort, rejection, or disconnect; no persistence migration is
-involved. Commit then supplies the whole assembled source to the same converter
-and `ImportConversationService` call as the single-shot path. Conversion remains
+exact counts. The assembly and import permit are per-connection state. Commit,
+abort, a terminal size or conversion rejection, and disconnect release them; an
+`already_in_progress` refusal leaves the existing assembly available for append,
+commit, or explicit abort. No persistence migration is involved. Commit then
+supplies the whole assembled source to the same converter and
+`ImportConversationService` call as the single-shot path. Conversion remains
 whole-source and unchanged. The service executes away from asynchronous runtime
 workers against the append-only Postgres repository and admits one in-progress
 or single-shot import at a time.
@@ -359,7 +361,8 @@ closed class and ordinal inventory in the
 Errors and logs contain classes and ordinals only, never source content,
 source-derived identifiers, paths, or parser excerpts. Database failure remains
 conservatively `commit_ambiguous`, so the operator may retry the exact format
-and source bytes; integrity failure remains `internal`.
+and source bytes. Assembly allocation exhaustion is `unavailable`; integrity
+failure remains `internal`.
 
 A new exact snapshot returns
 `conversation_import_inserted { imported_conversation_id }`; exact reingestion

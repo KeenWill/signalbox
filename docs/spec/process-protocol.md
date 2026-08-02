@@ -127,8 +127,10 @@ likewise move directly into a dedicated import admission path. At most one
 in-progress or single-shot import holds the import permit. One of the eight
 inbound-frame slots is reserved for the connection that owns an active chunked
 import; other connections share the remaining seven. An admitted
-`begin_conversation_import` that must wait for the import permit releases its
-small decoded frame slot before waiting. A source-bearing single-shot request
+`begin_conversation_import` that must wait for the import permit first enters a
+separate seven-waiter bound, then releases its small decoded frame slot before
+waiting. Further begins retain a general frame slot until a waiter place opens.
+A source-bearing single-shot request
 retains its frame slot while waiting. The reservation therefore preserves frame
 progress for an active append or commit without allowing queued single-shot
 sources to escape the aggregate raw-frame bound. Once admitted, each append
@@ -136,9 +138,12 @@ moves its decoded chunk from the inbound frame into the per-connection assembly
 and releases the frame slot; the configured total-source bound limits that
 assembly. Commit runs the existing whole-source conversion on the blocking pool
 so synchronous conversion does not occupy an asynchronous runtime worker.
-Commit, abort, rejection, or disconnect drops the assembly and releases the
-permit before response output. A peer that stops reading responses therefore
-cannot retain rejected input or completed import content.
+Commit, abort, terminal size or conversion rejection, or disconnect drops the
+assembly and releases the permit before response output. An
+`already_in_progress` refusal is nonterminal and leaves the existing assembly
+available for append, commit, or explicit abort. A peer that stops reading a
+terminal response therefore cannot retain rejected input or completed import
+content.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
@@ -1174,7 +1179,8 @@ refusals above map to `invalid_request`. The current repository error does not
 retain the failing database phase, so every import database error maps
 conservatively to `commit_ambiguous`; retrying the exact format and bytes
 returns either the first inserted identity or the existing identity. Import
-integrity failures map to `internal`.
+assembly allocation exhaustion maps to `unavailable`; integrity failures map to
+`internal`.
 
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.

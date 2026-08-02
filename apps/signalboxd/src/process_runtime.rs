@@ -166,6 +166,7 @@ const MAX_CONCURRENT_IMPORTS: usize = 1;
 const RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES: usize = MAX_CONCURRENT_IMPORTS;
 const GENERAL_BUFFERED_INBOUND_FRAMES: usize =
     MAX_BUFFERED_INBOUND_FRAMES - RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES;
+const MAX_IMPORT_ADMISSION_WAITERS: usize = GENERAL_BUFFERED_INBOUND_FRAMES;
 const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
@@ -206,6 +207,7 @@ struct ConnectionServices {
     fanouts: ProcessFanouts,
     inbound_frame_budgets: InboundFrameBudgets,
     import_budget: Arc<Semaphore>,
+    import_waiter_budget: Arc<Semaphore>,
     review_command_budget: Arc<Semaphore>,
     snapshot_reader_budget: Arc<Semaphore>,
 }
@@ -507,6 +509,7 @@ async fn serve_connections(
         fanouts: dependencies.fanouts,
         inbound_frame_budgets: InboundFrameBudgets::new(),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
+        import_waiter_budget: Arc::new(Semaphore::new(MAX_IMPORT_ADMISSION_WAITERS)),
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
     };
@@ -655,6 +658,21 @@ async fn serve_connection(
             pending_import.is_some(),
             import_limit,
         );
+        let import_waiter_permit = if import_requires_permit
+            && matches!(&request, ClientRequest::BeginConversationImport { .. })
+        {
+            let Some(permit) = acquire_import_waiter_permit(
+                Arc::clone(&services.import_waiter_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            Some(permit)
+        } else {
+            None
+        };
         let frame_buffer_permit = retain_inbound_frame_permit_during_import_admission(
             &request,
             import_requires_permit,
@@ -670,6 +688,7 @@ async fn serve_connection(
         } else {
             None
         };
+        drop(import_waiter_permit);
         let Some((frame_buffer_permit, review_command_permit)) =
             acquire_review_command_permit_while_buffered(
                 ReviewCommandAdmission::for_request(&request),
@@ -833,6 +852,18 @@ fn retain_inbound_frame_permit_during_import_admission(
 }
 
 async fn acquire_import_permit(
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => Ok(None),
+        permit = budget.acquire_owned() => permit
+            .map(Some)
+            .map_err(|_| ProcessConnectionError::ImportBudgetClosed),
+    }
+}
+
+async fn acquire_import_waiter_permit(
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
@@ -3983,10 +4014,7 @@ where
             writer,
             version,
             request_id,
-            internal_protocol_error(
-                None,
-                InternalDiagnostic::ConversationImportAllocationFailure,
-            ),
+            unavailable_protocol_error(InternalDiagnostic::ConversationImportAllocationFailure),
         )
         .await;
     }
@@ -9663,8 +9691,10 @@ impl InternalDiagnostic {
             | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
             },
+            Self::ConversationImportAllocationFailure => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
             Self::ReviewOrchestrationServiceContract
-            | Self::ConversationImportAllocationFailure
             | Self::ConversationImportContractDefect
             | Self::ConversationImportWorkerTerminated
             | Self::ImportedSessionCommandKindMismatch
@@ -9817,6 +9847,18 @@ fn internal_protocol_error(
 ) -> ProtocolError {
     record_internal_diagnostic(session_id, diagnostic);
     ProtocolError::without_detail(ErrorCode::Internal)
+}
+
+fn unavailable_protocol_error(diagnostic: InternalDiagnostic) -> ProtocolError {
+    let failure_class = diagnostic.failure_class();
+    let cause_code = diagnostic.cause_code();
+    tracing::error!(
+        ?failure_class,
+        cause_code,
+        session_id = tracing::field::Empty,
+        "requested operation is unavailable"
+    );
+    ProtocolError::without_detail(ErrorCode::Unavailable)
 }
 
 async fn write_error<Writer>(
@@ -11022,16 +11064,16 @@ mod tests {
         GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
-        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
-        OperationalImportError, PendingConversationImport, ProcessConnectionError,
-        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS,
+        MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, PendingConversationImport,
+        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
         REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS, RequestId, ReviewCommandAdmission,
         SnapshotSpoolError, SubmitInputModelExecutionDiagnostic, acquire_import_permit,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_review_orchestration_snapshot_permit, acquire_snapshot_reader_permit,
-        admitted_user_content, canonical_review_request_digest,
+        acquire_import_waiter_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_review_command_permit_while_buffered, acquire_review_orchestration_snapshot_permit,
+        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
         handle_append_conversation_import, handle_begin_conversation_import,
@@ -11042,11 +11084,39 @@ mod tests {
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
-        submit_input_model_execution_diagnostic, wire_goal_event, wire_model_call_state,
-        wire_tool_decision, wire_turn_state, wire_uuid, write_content,
+        submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
+        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
         write_context_compaction_repository_error, write_snapshot_spool_error,
         write_transcript_entry,
     };
+
+    macro_rules! assert_import_failure_ordinal {
+        ($mapping:path, $ordinal:literal, $failure:expr, $class:path) => {{
+            let ordinal = $ordinal;
+            assert_eq!(
+                $mapping(($failure)(ordinal)),
+                ConversionFailureDisposition::Rejected(import_evidence($class, Some(ordinal)))
+            );
+        }};
+    }
+
+    macro_rules! assert_simple_import_failures {
+        (
+            $mapping:path,
+            $failure_type:ident;
+            $( $ordinal:literal => $failure:ident => $class:path ),+ $(,)?
+        ) => {
+            $(
+                assert_import_failure_ordinal!(
+                    $mapping,
+                    $ordinal,
+                    |line| $failure_type::$failure { line },
+                    $class
+                );
+            )+
+        };
+    }
+
     impl super::ClassifyConversationImportError for io::Error {
         fn disposition(self) -> super::ConversionFailureDisposition {
             super::ConversionFailureDisposition::Rejected(super::import_evidence(
@@ -12085,64 +12155,36 @@ context_window_tokens = 200000
             claude_conversion_failure_disposition(Failure::EmptySource),
             Rejected(import_evidence(Class::EmptySource, None))
         );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::BlankLine { line: 2 }),
-            Rejected(import_evidence(Class::BlankLine, Some(2)))
+        assert_simple_import_failures!(
+            claude_conversion_failure_disposition,
+            Failure;
+            2 => BlankLine => Class::BlankLine,
+            3 => InvalidUtf8 => Class::InvalidUtf8,
+            4 => InvalidJson => Class::InvalidJson,
+            5 => JsonDepthExceeded => Class::JsonDepthExceeded,
+            6 => TopLevelNotObject => Class::TopLevelNotObject,
+            7 => InvalidRecordType => Class::InvalidRecordType,
+            8 => InvalidSourceMetadata => Class::InvalidSourceMetadata,
+            9 => InvalidMessageEnvelope => Class::InvalidMessageEnvelope,
+            10 => InvalidMessageRole => Class::InvalidMessageRole,
+            11 => MessageRoleMismatch => Class::MessageRoleMismatch,
+            12 => InvalidMessageContent => Class::InvalidMessageContent,
         );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidUtf8 { line: 3 }),
-            Rejected(import_evidence(Class::InvalidUtf8, Some(3)))
+        assert_import_failure_ordinal!(
+            claude_conversion_failure_disposition,
+            13,
+            |line| Failure::InvalidContentBlock { line, block: 1 },
+            Class::InvalidContentBlock
         );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidJson { line: 4 }),
-            Rejected(import_evidence(Class::InvalidJson, Some(4)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::JsonDepthExceeded { line: 5 }),
-            Rejected(import_evidence(Class::JsonDepthExceeded, Some(5)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::TopLevelNotObject { line: 6 }),
-            Rejected(import_evidence(Class::TopLevelNotObject, Some(6)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidRecordType { line: 7 }),
-            Rejected(import_evidence(Class::InvalidRecordType, Some(7)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidSourceMetadata { line: 8 }),
-            Rejected(import_evidence(Class::InvalidSourceMetadata, Some(8)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidMessageEnvelope { line: 9 }),
-            Rejected(import_evidence(Class::InvalidMessageEnvelope, Some(9)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidMessageRole { line: 10 }),
-            Rejected(import_evidence(Class::InvalidMessageRole, Some(10)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::MessageRoleMismatch { line: 11 }),
-            Rejected(import_evidence(Class::MessageRoleMismatch, Some(11)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidMessageContent { line: 12 }),
-            Rejected(import_evidence(Class::InvalidMessageContent, Some(12)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidContentBlock {
-                line: 13,
-                block: 1,
-            }),
-            Rejected(import_evidence(Class::InvalidContentBlock, Some(13)))
-        );
-        assert_eq!(
-            claude_conversion_failure_disposition(Failure::InvalidToolResultBlock {
-                line: 14,
+        assert_import_failure_ordinal!(
+            claude_conversion_failure_disposition,
+            14,
+            |line| Failure::InvalidToolResultBlock {
+                line,
                 block: 1,
                 result_block: 2,
-            }),
-            Rejected(import_evidence(Class::InvalidToolResultBlock, Some(14)))
+            },
+            Class::InvalidToolResultBlock
         );
         assert_eq!(
             claude_conversion_failure_disposition(Failure::PositionExhausted),
@@ -12160,82 +12202,41 @@ context_window_tokens = 200000
             codex_conversion_failure_disposition(Failure::EmptySource),
             Rejected(import_evidence(Class::EmptySource, None))
         );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::BlankLine { line: 2 }),
-            Rejected(import_evidence(Class::BlankLine, Some(2)))
+        assert_simple_import_failures!(
+            codex_conversion_failure_disposition,
+            Failure;
+            2 => BlankLine => Class::BlankLine,
+            3 => InvalidUtf8 => Class::InvalidUtf8,
+            4 => InvalidJson => Class::InvalidJson,
+            5 => JsonDepthExceeded => Class::JsonDepthExceeded,
+            6 => TopLevelNotObject => Class::TopLevelNotObject,
+            7 => InvalidRecordType => Class::InvalidRecordType,
+            8 => InvalidResponseItemType => Class::InvalidRecordType,
+            9 => InvalidSourceMetadata => Class::InvalidSourceMetadata,
+            10 => InvalidResponseItemEnvelope => Class::InvalidMessageEnvelope,
+            11 => InvalidMessageRole => Class::InvalidMessageRole,
+            12 => InvalidMessageContent => Class::InvalidMessageContent,
+            14 => InvalidReasoning => Class::InvalidReasoning,
+            16 => InvalidToolCall => Class::InvalidToolCall,
+            17 => InvalidToolResult => Class::InvalidToolResult,
         );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidUtf8 { line: 3 }),
-            Rejected(import_evidence(Class::InvalidUtf8, Some(3)))
+        assert_import_failure_ordinal!(
+            codex_conversion_failure_disposition,
+            13,
+            |line| Failure::InvalidMessageBlock { line, block: 1 },
+            Class::InvalidContentBlock
         );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidJson { line: 4 }),
-            Rejected(import_evidence(Class::InvalidJson, Some(4)))
+        assert_import_failure_ordinal!(
+            codex_conversion_failure_disposition,
+            15,
+            |line| Failure::InvalidReasoningBlock { line, block: 1 },
+            Class::InvalidReasoning
         );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::JsonDepthExceeded { line: 5 }),
-            Rejected(import_evidence(Class::JsonDepthExceeded, Some(5)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::TopLevelNotObject { line: 6 }),
-            Rejected(import_evidence(Class::TopLevelNotObject, Some(6)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidRecordType { line: 7 }),
-            Rejected(import_evidence(Class::InvalidRecordType, Some(7)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidResponseItemType { line: 8 }),
-            Rejected(import_evidence(Class::InvalidRecordType, Some(8)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidSourceMetadata { line: 9 }),
-            Rejected(import_evidence(Class::InvalidSourceMetadata, Some(9)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidResponseItemEnvelope { line: 10 }),
-            Rejected(import_evidence(Class::InvalidMessageEnvelope, Some(10)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidMessageRole { line: 11 }),
-            Rejected(import_evidence(Class::InvalidMessageRole, Some(11)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidMessageContent { line: 12 }),
-            Rejected(import_evidence(Class::InvalidMessageContent, Some(12)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidMessageBlock {
-                line: 13,
-                block: 1,
-            }),
-            Rejected(import_evidence(Class::InvalidContentBlock, Some(13)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidReasoning { line: 14 }),
-            Rejected(import_evidence(Class::InvalidReasoning, Some(14)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidReasoningBlock {
-                line: 15,
-                block: 1,
-            }),
-            Rejected(import_evidence(Class::InvalidReasoning, Some(15)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidToolCall { line: 16 }),
-            Rejected(import_evidence(Class::InvalidToolCall, Some(16)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidToolResult { line: 17 }),
-            Rejected(import_evidence(Class::InvalidToolResult, Some(17)))
-        );
-        assert_eq!(
-            codex_conversion_failure_disposition(Failure::InvalidToolResultBlock {
-                line: 18,
-                block: 1,
-            }),
-            Rejected(import_evidence(Class::InvalidToolResultBlock, Some(18)))
+        assert_import_failure_ordinal!(
+            codex_conversion_failure_disposition,
+            18,
+            |line| Failure::InvalidToolResultBlock { line, block: 1 },
+            Class::InvalidToolResultBlock
         );
         assert_eq!(
             codex_conversion_failure_disposition(Failure::PositionExhausted),
@@ -12263,6 +12264,61 @@ context_window_tokens = 200000
         assert!(!super::conversation_import_request_requires_permit(
             &admitted, true, 8,
         ));
+    }
+
+    #[tokio::test]
+    async fn duplicate_begin_refusal_preserves_the_active_import() -> Result<(), Box<dyn Error>> {
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let permit = Arc::clone(&budget).acquire_owned().await?;
+        let format = signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1;
+        let source = b"partial".to_vec();
+        let expected_source = source.clone();
+        let declared_size_bytes = u64::try_from(source.len())?;
+        let mut pending = Some(PendingConversationImport {
+            format,
+            declared_size_bytes,
+            actual_size_bytes: declared_size_bytes,
+            source,
+            import_permit: permit,
+        });
+        let request_id = RequestId::try_new(1)?;
+        let (mut writer, mut reader) = duplex(1_024);
+
+        handle_begin_conversation_import(
+            &mut writer,
+            ProtocolVersion::One,
+            request_id,
+            format,
+            CanonicalU64::new(declared_size_bytes),
+            usize::try_from(declared_size_bytes)?,
+            None,
+            &mut pending,
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let observed = decode_server_line(&encoded)?;
+        let expected = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request_id,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportAlreadyInProgress {},
+                ),
+            },
+        )?;
+        let active = pending
+            .as_ref()
+            .expect("the active import remains available");
+
+        assert_eq!(observed, expected);
+        assert_eq!(active.source, expected_source);
+        assert_eq!(budget.available_permits(), capacity - 1);
+        Ok(())
     }
 
     #[tokio::test]
@@ -12314,6 +12370,48 @@ context_window_tokens = 200000
         );
         drop(occupied_import);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn released_begin_waiters_have_a_separate_bound() -> Result<(), Box<dyn Error>> {
+        let capacity = MAX_IMPORT_ADMISSION_WAITERS;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let occupied = Arc::clone(&budget)
+            .acquire_many_owned(u32::try_from(capacity)?)
+            .await?;
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let acquire = acquire_import_waiter_permit(Arc::clone(&budget), &mut shutdown_receiver);
+        tokio::pin!(acquire);
+
+        assert!(
+            timeout(Duration::from_millis(20), &mut acquire)
+                .await
+                .is_err()
+        );
+        assert_eq!(occupied.num_permits(), capacity);
+
+        drop(occupied);
+        let admitted = timeout(Duration::from_secs(1), &mut acquire)
+            .await??
+            .ok_or_else(|| io::Error::other("a released waiter place must admit the begin"))?;
+
+        assert_eq!(admitted.num_permits(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn conversation_import_allocation_exhaustion_is_unavailable() {
+        let diagnostic = InternalDiagnostic::ConversationImportAllocationFailure;
+        let error = unavailable_protocol_error(diagnostic);
+
+        assert_eq!(error.code, ErrorCode::Unavailable);
+        assert_eq!(error.detail, ErrorDetail::none());
+        assert_eq!(
+            diagnostic.failure_class(),
+            signalbox_application::OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        );
     }
 
     #[tokio::test]
