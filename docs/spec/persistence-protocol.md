@@ -25,7 +25,8 @@ storage version four were verified through PR #311
 lock inventory were verified against PR #314
 (`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
 was verified against this PR (`agent/domain-cleanup`); the session-plan event
-sequence was verified against this PR (`agent/plan-tool`); and the goal event
+sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
+extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through this PR (`agent/approval-judge-storage`).
@@ -172,15 +173,15 @@ Implemented table families (across the forward-only migrations):
   complete commissioned-goal lineage and state-transition provenance, plus
   `goal_turn`, which correlates each pursuit-starting event or successful
   predecessor with its accepted input and turn;
-- `session_plan_event`, whose session-local positive ordinal sequence retains
-  entry creation, text revision, and status change with exact trusted
-  tool-dispatch provenance, plus trigger-maintained `session_plan_head`, which
-  certifies the complete validated prefix for bounded current reads; and
+- `session_plan_event` retains every exact-provenance event. On access, the
+  trigger-only first-distinct-edge projection (max 32/entry) rejects headless,
+  duplicate, nonchronological, over-limit, or cyclic state; `session_plan_head`
+  certifies both tips;
 - migration `202608020015` freezes `approval_posture` on each tool request,
   records dedicated approval-judge calls in the global model-call identity
   namespace only while their request is the current active approval wait, and
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale;
+  recommendation, and rationale; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -589,15 +590,14 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
-- **SessionPlan append**: `next_session_plan_event_ordinal` first locks the
-  session row `FOR NO KEY UPDATE` and reads the trigger-maintained head. The
-  adapter then uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the
-  exact active tool attempt `FOR SHARE` while authenticating its request. The
-  insert trigger reacquires those same locks in session-then-attempt order,
-  validates the complete new event and its predecessor, and only then advances
-  `session_plan_head`; the head update's row lock is therefore last. A
-  repeatable-read plan read takes no explicit lock and compares that certified
-  head with the indexed latest event before opening its bounded projections.
+- **SessionPlan append**: ordinal allocation locks the session row
+  `FOR NO KEY UPDATE` before reading the trigger-maintained head. The adapter
+  uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the exact active
+  tool attempt `FOR SHARE` while authenticating its request. The insert trigger
+  reacquires locks session-then-attempt, caps distinct edges, and rejects cycles
+  with node-deduplicated reachability. It projects first occurrences while
+  advancing both heads. Reads fetch at most 32 direct dependencies per returned
+  entry after verifying both heads; they never load transitive closure.
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or
