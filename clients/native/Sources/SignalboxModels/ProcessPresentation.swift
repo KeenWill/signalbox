@@ -419,6 +419,13 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
         debugDescription: "Imported source attribution contradicts the message role."
       )
     }
+    guard unrecognizedKind == nil || sourceAttribution == nil else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .sourceAttribution,
+        in: container,
+        debugDescription: "Imported source attribution contradicts unrecognized speaker evidence."
+      )
+    }
     self.role = role
     self.sourceAttribution = sourceAttribution
   }
