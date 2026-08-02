@@ -3062,6 +3062,64 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(failure_categories(failures), [])
 
+    def test_verification_ref_rejects_a_pr_naming_itself_as_carrier(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-top")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #77 (`agent/typo`; via PR #77 "
+            "`agent/stack-top`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "names itself as its own `via` carrier", failures[0].message
+        )
+
+    def test_inherited_carrier_is_revalidated_against_current_state(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        carried_page = (
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/inner`; via PR #77 "
+            "`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n"
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            carried_page, encoding="utf-8"
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "carried base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "cites carrier PR #77 (`agent/stack-base`)", failures[0].message
+        )
+
     def test_inherited_carrier_reference_cannot_shed_its_tail(self) -> None:
         run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
         (self.root / "docs/spec/example.md").write_text(

@@ -33,12 +33,15 @@ The check is deterministic and offline. It verifies:
    match one — or the carrier is the single in-flight PR (the event identity,
    or the checked-out branch locally), since the carrying merge cannot precede
    the carrier's own pull request. It is a violation otherwise, including when
-   ``#N`` has its own merge commit. Inherited identities preserve carrier
-   state, so a base page's carried reference cannot shed its tail under
-   inheritance. The carrier components may wrap across block-quote
-   continuation lines; quote markers count as scaffolding only at line
-   prefixes, at least one gap character must follow the semicolon, and any
-   tail not matching the exact form is ordinary unvalidated scope text.
+   ``#N`` has its own merge commit, and a PR can never name itself as its
+   carrier. Inherited identities preserve carrier state so a base page's
+   carried reference cannot shed its tail under inheritance, but an inherited
+   carrier is still revalidated against the current history and event —
+   inheritance protects the reference's shape, never a stale carrier claim.
+   The carrier components may wrap across block-quote continuation lines;
+   quote markers count as scaffolding only at line prefixes, at least one gap
+   character must follow the semicolon, and any tail not matching the exact
+   form is ordinary unvalidated scope text.
 
 External links and semantic freshness beyond reachability are outside this
 check. Run from any directory; exits nonzero with one stable line per
@@ -3559,8 +3562,6 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     and (event_match or local_match)
                 )
                 if carrier is not None:
-                    if inherited_match:
-                        continue
                     if history_error is not None:
                         violations.append(
                             Violation(
@@ -3597,6 +3598,17 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                         )
                         continue
                     carrier_number, carrier_branch = carrier_identity
+                    if carrier_number == number:
+                        violations.append(
+                            Violation(
+                                source_label,
+                                line,
+                                "spec-verification-history",
+                                f"PR #{number} names itself as its own "
+                                "`via` carrier",
+                            )
+                        )
+                        continue
                     carrier_in_history = (
                         carrier_number in integration_branches
                         and carrier_branch
