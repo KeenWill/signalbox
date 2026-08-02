@@ -111,6 +111,10 @@ pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE: &str = "nbsp";
 
 pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_VALUE: &str = "\u{a0}";
 
+pub(super) const SIGNED_JSON_UNICODE_ESCAPE: &str = r"\u+12a";
+
+pub(super) const SIGNED_HTML_NUMERIC_REFERENCE: &str = "#+65";
+
 pub(super) const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
 
 pub(super) const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";
@@ -407,6 +411,8 @@ pub(super) const ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Err(E";
 
 pub(super) const KNOWN_FAILURE_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(K";
 
+pub(super) const POPULATED_RESPONSE_OPTION_DEBUG_COLLISION_KEY: &str = "Some(W";
+
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 
 pub(super) const POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY: &str = "ToolExecutionErrorDetail";
@@ -464,6 +470,7 @@ pub(super) fn fixture_result_url_with_path_segment(segment: &str) -> String {
     format!("{FIXTURE_ORIGIN_ONLY_RESULT_URL}/{segment}")
 }
 
+#[track_caller]
 pub(super) fn completed_text(evidence: ToolExecutorEvidence) -> String {
     match evidence {
         ToolExecutorEvidence::CompletedText(content) => content,

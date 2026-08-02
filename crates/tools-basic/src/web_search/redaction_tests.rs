@@ -58,6 +58,24 @@ fn web_search_rejects_credentials_colliding_with_fixed_result_diagnostics() {
     assert!(placeholder_collision.is_none());
 }
 
+/// INV-035: a credential spanning the populated response `Option` wrapper and
+/// its result type is rejected before a constructor result can be rendered.
+#[test]
+fn web_search_rejects_credential_colliding_with_response_option() {
+    let collision = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_RESPONSE_OPTION_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
+    let rendered = format!(
+        "{:?}",
+        WebSearchResponse::new(Vec::new(), WebSearchPageCompleteness::Complete)
+    );
+
+    assert!(collision.is_none());
+    assert!(rendered.contains(POPULATED_RESPONSE_OPTION_DEBUG_COLLISION_KEY));
+}
+
 /// INV-035: credentials colliding with fixed provider, policy, or
 /// configuration Debug labels are rejected before egress objects can render.
 #[test]
@@ -363,6 +381,17 @@ fn web_search_decodes_supported_named_nonbreaking_space_reference() {
     assert_eq!(
         decode_html_character_reference(SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE).as_deref(),
         Some(SUPPORTED_NAMED_NONBREAKING_SPACE_VALUE)
+    );
+}
+
+/// INV-035: signed digits are not valid JSON Unicode or HTML numeric
+/// references and cannot be normalized into provider evidence.
+#[test]
+fn web_search_rejects_signed_numeric_escape_digits() {
+    assert_eq!(decode_json_code_unit(SIGNED_JSON_UNICODE_ESCAPE), None);
+    assert_eq!(
+        decode_html_character_reference(SIGNED_HTML_NUMERIC_REFERENCE),
+        None
     );
 }
 
