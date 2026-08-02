@@ -3156,3 +3156,7 @@ extension Decoder {
     )
   }
 }
+
+extension SignalboxProcessProtocol {
+  public static let maximumPlanTextUnicodeScalars = 4_096
+}

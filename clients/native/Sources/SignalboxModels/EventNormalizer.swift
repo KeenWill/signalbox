@@ -191,8 +191,6 @@ fileprivate enum SignalboxTimelineLinkage {
 }
 
 public enum SignalboxEventNormalizer {
-    private static let maximumPlanTextUnicodeScalars = 4_096
-
     public static func normalize(_ records: [SignalboxStoredEvent]) -> [SignalboxTimelineItem] {
         var metrics = SignalboxEventNormalizationMetrics()
         return normalize(records, recording: &metrics)
@@ -262,7 +260,7 @@ public enum SignalboxEventNormalizer {
                     thinkingText: nil,
                     isStreaming: false,
                     createdAt: nil,
-                    label: nil,
+                    label: event.sourceAttribution?.presentationLabel,
                     systemImage: nil
                 )
             )
@@ -437,6 +435,7 @@ public enum SignalboxEventNormalizer {
         let text: String?
         let status: String?
         let dependencyID: UInt64?
+        let provenance: PlanEventProvenance
 
         private enum CodingKeys: String, CodingKey {
             case ordinal
@@ -445,6 +444,132 @@ public enum SignalboxEventNormalizer {
             case text
             case status
             case dependencyID = "dependency_id"
+            case provenance
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            ordinal = try container.decode(UInt64.self, forKey: .ordinal)
+            kind = try container.decode(String.self, forKey: .kind)
+            entryID = try container.decode(UInt64.self, forKey: .entryID)
+            provenance = try container.decode(PlanEventProvenance.self, forKey: .provenance)
+            guard ordinal > 0, entryID > 0 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .ordinal,
+                    in: container,
+                    debugDescription: "Plan event identities must be positive."
+                )
+            }
+            switch kind {
+            case "created":
+                try payload.rejectUnadmittedFields(
+                    ["ordinal", "kind", "entry_id", "text", "provenance"],
+                    decoder: decoder
+                )
+                text = try container.decode(String.self, forKey: .text)
+                status = nil
+                dependencyID = nil
+                guard entryID == ordinal, text.map(SignalboxEventNormalizer.validPlanText) == true
+                else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .text,
+                        in: container,
+                        debugDescription: "Created plan event is invalid."
+                    )
+                }
+            case "text_revised":
+                try payload.rejectUnadmittedFields(
+                    ["ordinal", "kind", "entry_id", "text", "provenance"],
+                    decoder: decoder
+                )
+                text = try container.decode(String.self, forKey: .text)
+                status = nil
+                dependencyID = nil
+                guard text.map(SignalboxEventNormalizer.validPlanText) == true else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .text,
+                        in: container,
+                        debugDescription: "Revised plan text is invalid."
+                    )
+                }
+            case "status_changed":
+                try payload.rejectUnadmittedFields(
+                    ["ordinal", "kind", "entry_id", "status", "provenance"],
+                    decoder: decoder
+                )
+                text = nil
+                status = try container.decode(String.self, forKey: .status)
+                dependencyID = nil
+                guard status.map(SignalboxEventNormalizer.validPlanStatus) == true else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .status,
+                        in: container,
+                        debugDescription: "Plan event status is invalid."
+                    )
+                }
+            case "depends_on":
+                try payload.rejectUnadmittedFields(
+                    ["ordinal", "kind", "entry_id", "dependency_id", "provenance"],
+                    decoder: decoder
+                )
+                text = nil
+                status = nil
+                dependencyID = try container.decode(UInt64.self, forKey: .dependencyID)
+                guard dependencyID.map({ $0 > 0 }) == true else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .dependencyID,
+                        in: container,
+                        debugDescription: "Plan dependency identity must be positive."
+                    )
+                }
+            default:
+                throw DecodingError.dataCorruptedError(
+                    forKey: .kind,
+                    in: container,
+                    debugDescription: "Plan event kind is unrecognized."
+                )
+            }
+        }
+    }
+
+    private struct PlanEventProvenance: Decodable {
+        let turnID: SignalboxCanonicalUUID
+        let issuingAttemptID: SignalboxCanonicalUUID
+        let requestID: SignalboxCanonicalUUID
+        let attemptID: SignalboxCanonicalUUID
+        let generation: UInt64
+
+        private enum CodingKeys: String, CodingKey {
+            case turnID = "turn_id"
+            case issuingAttemptID = "issuing_attempt_id"
+            case requestID = "request_id"
+            case attemptID = "attempt_id"
+            case generation
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            try payload.rejectUnadmittedFields(
+                ["turn_id", "issuing_attempt_id", "request_id", "attempt_id", "generation"],
+                decoder: decoder
+            )
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            turnID = try container.decode(SignalboxCanonicalUUID.self, forKey: .turnID)
+            issuingAttemptID = try container.decode(
+                SignalboxCanonicalUUID.self,
+                forKey: .issuingAttemptID
+            )
+            requestID = try container.decode(SignalboxCanonicalUUID.self, forKey: .requestID)
+            attemptID = try container.decode(SignalboxCanonicalUUID.self, forKey: .attemptID)
+            generation = try container.decode(UInt64.self, forKey: .generation)
+            guard generation > 0 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .generation,
+                    in: container,
+                    debugDescription: "Plan event generation must be positive."
+                )
+            }
         }
     }
 
@@ -618,7 +743,8 @@ public enum SignalboxEventNormalizer {
 
     private static func validPlanText(_ text: String) -> Bool {
         !text.isEmpty
-            && text.unicodeScalars.count <= maximumPlanTextUnicodeScalars
+            && text.unicodeScalars.count
+                <= SignalboxProcessProtocol.maximumPlanTextUnicodeScalars
             && text.unicodeScalars.allSatisfy { $0.value != 0 }
     }
 
@@ -630,13 +756,21 @@ public enum SignalboxEventNormalizer {
     }
 
     private static func formattedPlanEvent(_ event: PlanEvent) -> String {
-        "Event #\(event.ordinal): " + formattedPlanOperation(
+        let operation = "Event #\(event.ordinal): " + formattedPlanOperation(
             kind: event.kind,
             entryID: event.entryID,
             text: event.text,
             status: event.status,
             dependencyID: event.dependencyID
         )
+        return [
+            operation,
+            "Turn: \(event.provenance.turnID.rawValue)",
+            "Issuing attempt: \(event.provenance.issuingAttemptID.rawValue)",
+            "Request: \(event.provenance.requestID.rawValue)",
+            "Attempt: \(event.provenance.attemptID.rawValue)",
+            "Generation: \(event.provenance.generation)",
+        ].joined(separator: "\n")
     }
 
     private static func formattedPlanOperation(

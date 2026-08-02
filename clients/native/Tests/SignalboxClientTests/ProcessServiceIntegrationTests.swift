@@ -559,18 +559,102 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
-  func testPlanToolsUseTypedFaithfulTimelineSummaries() throws {
-    let records = ProcessProjectionFixture.planToolRecords()
+  func testPlanReadUsesTypedFaithfulTimelineSummary() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
 
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: records)
-    let tools = ProcessProjectionFixture.toolCards(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tools.map(\.displayName), ProcessProjectionFixture.planDisplayNames)
+    XCTAssertEqual(tool.displayName, ProcessProjectionFixture.planReadDisplayName)
     XCTAssertEqual(
-      tools.map(\.compactArgumentSummary),
-      ProcessProjectionFixture.planArgumentPresentations
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.planReadArgumentPresentation
     )
-    XCTAssertEqual(tools.map(\.outputPreview), ProcessProjectionFixture.planOutputPresentations)
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReadOutputPresentation)
+  }
+
+  func testPlanCreateUsesTypedFaithfulTimelineSummary() throws {
+    let record = ProcessProjectionFixture.planCreateToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.displayName, ProcessProjectionFixture.planWriteDisplayName)
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.planCreateArgumentPresentation
+    )
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateOutputPresentation)
+  }
+
+  func testPlanRevisionUsesTypedFaithfulTimelineSummary() throws {
+    let record = ProcessProjectionFixture.planReviseToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.displayName, ProcessProjectionFixture.planWriteDisplayName)
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.planReviseArgumentPresentation
+    )
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReviseOutputPresentation)
+  }
+
+  func testPlanStatusUsesTypedFaithfulTimelineSummary() throws {
+    let record = ProcessProjectionFixture.planStatusToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.displayName, ProcessProjectionFixture.planWriteDisplayName)
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.planStatusArgumentPresentation
+    )
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planStatusOutputPresentation)
+  }
+
+  func testPlanDependencyUsesTypedFaithfulTimelineSummary() throws {
+    let record = ProcessProjectionFixture.planDependencyToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.displayName, ProcessProjectionFixture.planWriteDisplayName)
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.planDependencyArgumentPresentation
+    )
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planDependencyOutputPresentation)
+  }
+
+  func testMalformedPlanWriteKeepsRawArgumentsVisible() throws {
+    let record = ProcessProjectionFixture.malformedPlanWriteToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.malformedPlanArguments
+    )
+  }
+
+  func testMalformedPlanReadKeepsRawArgumentsVisible() throws {
+    let record = ProcessProjectionFixture.malformedPlanReadToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.malformedPlanReadArguments
+    )
+  }
+
+  func testPlanEventWithoutProvenanceKeepsRawOutputVisible() throws {
+    let record = ProcessProjectionFixture.planOutputWithoutProvenanceToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.planOutputWithoutProvenance
+    )
   }
 
   func testCompletionSideProjectionExcludesModelIdentityMarker() throws {
@@ -650,6 +734,29 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       message.unrecognizedKind,
       ProcessProjectionFixture.unknownAttestedSpeakerLabel
+    )
+  }
+
+  func testImportedUserRoleTextRetainsWireRoleLabel() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedTextSpeaker(
+      #"{"type":"attested","speaker":"user"}"#
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+    let timelineMessage = try ProcessProjectionFixture.onlyTimelineMessage(
+      in: normalizer.timelineItems
+    )
+
+    XCTAssertEqual(
+      message.sourceAttribution,
+      ProcessProjectionFixture.importedUserRoleAttribution
+    )
+    XCTAssertEqual(
+      timelineMessage.label,
+      ProcessProjectionFixture.importedUserRoleLabel
     )
   }
 
@@ -4972,6 +5079,8 @@ private enum ProcessProjectionFixture {
   static let importedSpeakerLabels = [
     "Speaker not attested", "Assistant role", "Assistant role", "User role",
   ]
+  static let importedUserRoleLabel = "User role"
+  static let importedUserRoleAttribution = SignalboxProcessMessageSourceAttribution.importedUserRole
   static let modelNoticeTitles = ["Model changed", "Model usage"]
   static let modelIdentityDefaultsVersion = UInt64(7)
   static let modelInputTokens = UInt64(12)
@@ -5014,40 +5123,66 @@ private enum ProcessProjectionFixture {
   static let planStatusRequestID = "ffffffff-5555-4555-8555-555555555555"
   static let malformedPlanRequestID = "ffffffff-5555-4555-8555-555555555556"
   static let malformedPlanReadRequestID = "ffffffff-5555-4555-8555-555555555557"
+  static let planTurnID = "aaaaaaaa-5555-4555-8555-555555555551"
+  static let planIssuingAttemptID = "aaaaaaaa-5555-4555-8555-555555555552"
+  static let planProvenanceRequestID = "aaaaaaaa-5555-4555-8555-555555555553"
+  static let planAttemptID = "aaaaaaaa-5555-4555-8555-555555555554"
+  static let planGeneration = UInt64(3)
+  static let planProvenance = #""provenance":{"turn_id":"\#(planTurnID)","issuing_attempt_id":"\#(planIssuingAttemptID)","request_id":"\#(planProvenanceRequestID)","attempt_id":"\#(planAttemptID)","generation":\#(planGeneration)}"#
   static let planReadArguments = #"{"include_history":true}"#
   static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress","dependencies":[2],"readiness":"waiting"}],"next_after_entry_id":null,"plan_truncated":false,"history":[],"history_truncated":false}"#
   static let planCreateArguments = #"{"kind":"create","text":"Draft protocol"}"#
-  static let planCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol","provenance":{}}}"#
+  static let planCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planProvenance)}}"#
+  static let planOutputWithoutProvenance =
+    #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol"}}"#
   static let planReviseArguments = #"{"kind":"revise","entry_id":1,"text":"Audit protocol"}"#
-  static let planReviseOutput = #"{"event":{"ordinal":2,"kind":"text_revised","entry_id":1,"text":"Audit protocol","provenance":{}}}"#
+  static let planReviseOutput = #"{"event":{"ordinal":2,"kind":"text_revised","entry_id":1,"text":"Audit protocol",\#(planProvenance)}}"#
   static let planStatusArguments = #"{"kind":"set_status","entry_id":1,"status":"completed"}"#
-  static let planStatusOutput = #"{"event":{"ordinal":3,"kind":"status_changed","entry_id":1,"status":"completed","provenance":{}}}"#
+  static let planStatusOutput = #"{"event":{"ordinal":3,"kind":"status_changed","entry_id":1,"status":"completed",\#(planProvenance)}}"#
   static let planWriteArguments = #"{"kind":"depends_on","entry_id":1,"dependency_id":2}"#
-  static let planWriteOutput = #"{"event":{"ordinal":4,"kind":"depends_on","entry_id":1,"dependency_id":2,"provenance":{}}}"#
+  static let planWriteOutput = #"{"event":{"ordinal":4,"kind":"depends_on","entry_id":1,"dependency_id":2,\#(planProvenance)}}"#
   static let malformedPlanArguments = #"{"kind":"set_status","entry_id":0,"status":"completed"}"#
   static let malformedPlanReadArguments = #"{"after_entry_id":0,"unexpected":true}"#
-  static let planDisplayNames = [
-    "Plan read", "Plan update", "Plan update", "Plan update", "Plan update", "Plan update",
-    "Plan read",
-  ]
-  static let planArgumentPresentations = [
-    "After entry: Beginning\nInclude history: Yes",
-    "Create entry: Draft protocol",
-    "Revise entry #1: Audit protocol",
-    "Set entry #1 to Completed",
-    "Make entry #1 depend on entry #2",
-    malformedPlanArguments,
-    malformedPlanReadArguments,
-  ]
-  static let planOutputPresentations = [
-    "Entries\n#1 [In progress, Waiting] Audit protocol\nDependencies: #2\nNext entry: None\nPlan truncated: No\nHistory\nNone\nHistory truncated: No",
-    "Event #1: Create entry #1: Draft protocol",
-    "Event #2: Revise entry #1: Audit protocol",
-    "Event #3: Set entry #1 to Completed",
-    "Event #4: Make entry #1 depend on entry #2",
-    "No output yet",
-    "No output yet",
-  ]
+  static let planReadDisplayName = "Plan read"
+  static let planWriteDisplayName = "Plan update"
+  static let planReadArgumentPresentation = "After entry: Beginning\nInclude history: Yes"
+  static let planCreateArgumentPresentation = "Create entry: Draft protocol"
+  static let planReviseArgumentPresentation = "Revise entry #1: Audit protocol"
+  static let planStatusArgumentPresentation = "Set entry #1 to Completed"
+  static let planDependencyArgumentPresentation = "Make entry #1 depend on entry #2"
+  static let planReadOutputPresentation = "Entries\n#1 [In progress, Waiting] Audit protocol\nDependencies: #2\nNext entry: None\nPlan truncated: No\nHistory\nNone\nHistory truncated: No"
+  static let planCreateOutputPresentation = """
+    Event #1: Create entry #1: Draft protocol
+    Turn: \(planTurnID)
+    Issuing attempt: \(planIssuingAttemptID)
+    Request: \(planProvenanceRequestID)
+    Attempt: \(planAttemptID)
+    Generation: \(planGeneration)
+    """
+  static let planReviseOutputPresentation = """
+    Event #2: Revise entry #1: Audit protocol
+    Turn: \(planTurnID)
+    Issuing attempt: \(planIssuingAttemptID)
+    Request: \(planProvenanceRequestID)
+    Attempt: \(planAttemptID)
+    Generation: \(planGeneration)
+    """
+  static let planStatusOutputPresentation = """
+    Event #3: Set entry #1 to Completed
+    Turn: \(planTurnID)
+    Issuing attempt: \(planIssuingAttemptID)
+    Request: \(planProvenanceRequestID)
+    Attempt: \(planAttemptID)
+    Generation: \(planGeneration)
+    """
+  static let planDependencyOutputPresentation = """
+    Event #4: Make entry #1 depend on entry #2
+    Turn: \(planTurnID)
+    Issuing attempt: \(planIssuingAttemptID)
+    Request: \(planProvenanceRequestID)
+    Attempt: \(planAttemptID)
+    Generation: \(planGeneration)
+    """
   static let firstPendingID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
   static let secondPendingID = "00000000-0000-4000-8000-000000000001"
   static let firstPendingTurn = "ffffffff-ffff-4fff-8fff-fffffffffffe"
@@ -6453,93 +6588,105 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func planToolRecords() -> [SignalboxStoredEvent] {
-    [
-      SignalboxStoredEvent(
-        eventID: SignalboxEventID(rawValue: 1),
-        event: .processTool(
-          SignalboxProcessToolEvent(
-            toolRequestID: SignalboxToolInvocationID(rawValue: planReadRequestID),
-            toolName: "plan_read",
-            arguments: planReadArguments,
-            output: planReadOutput,
-            status: .completed
-          )
+  static func planReadToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: planReadArguments,
+      output: planReadOutput,
+      status: .completed
+    )
+  }
+
+  static func planCreateToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: planCreateArguments,
+      output: planCreateOutput,
+      status: .completed
+    )
+  }
+
+  static func planReviseToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReviseRequestID,
+      toolName: "plan_write",
+      arguments: planReviseArguments,
+      output: planReviseOutput,
+      status: .completed
+    )
+  }
+
+  static func planStatusToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planStatusRequestID,
+      toolName: "plan_write",
+      arguments: planStatusArguments,
+      output: planStatusOutput,
+      status: .completed
+    )
+  }
+
+  static func planDependencyToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planWriteRequestID,
+      toolName: "plan_write",
+      arguments: planWriteArguments,
+      output: planWriteOutput,
+      status: .completed
+    )
+  }
+
+  static func malformedPlanWriteToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: malformedPlanRequestID,
+      toolName: "plan_write",
+      arguments: malformedPlanArguments,
+      output: nil,
+      status: .proposed
+    )
+  }
+
+  static func malformedPlanReadToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: malformedPlanReadRequestID,
+      toolName: "plan_read",
+      arguments: malformedPlanReadArguments,
+      output: nil,
+      status: .proposed
+    )
+  }
+
+  static func planOutputWithoutProvenanceToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: planCreateArguments,
+      output: planOutputWithoutProvenance,
+      status: .completed
+    )
+  }
+
+  private static func planToolRecord(
+    requestID: String,
+    toolName: String,
+    arguments: String,
+    output: String?,
+    status: SignalboxProcessToolStatus
+  ) -> SignalboxStoredEvent {
+    SignalboxStoredEvent(
+      eventID: SignalboxEventID(rawValue: 1),
+      event: .processTool(
+        SignalboxProcessToolEvent(
+          toolRequestID: SignalboxToolInvocationID(rawValue: requestID),
+          toolName: toolName,
+          arguments: arguments,
+          output: output,
+          status: status
         )
-      ),
-      SignalboxStoredEvent(
-        eventID: SignalboxEventID(rawValue: 2),
-        event: .processTool(
-          SignalboxProcessToolEvent(
-            toolRequestID: SignalboxToolInvocationID(rawValue: planCreateRequestID),
-            toolName: "plan_write",
-            arguments: planCreateArguments,
-            output: planCreateOutput,
-            status: .completed
-          )
-        )
-      ),
-      SignalboxStoredEvent(
-        eventID: SignalboxEventID(rawValue: 3),
-        event: .processTool(
-          SignalboxProcessToolEvent(
-            toolRequestID: SignalboxToolInvocationID(rawValue: planReviseRequestID),
-            toolName: "plan_write",
-            arguments: planReviseArguments,
-            output: planReviseOutput,
-            status: .completed
-          )
-        )
-      ),
-      SignalboxStoredEvent(
-        eventID: SignalboxEventID(rawValue: 4),
-        event: .processTool(
-          SignalboxProcessToolEvent(
-            toolRequestID: SignalboxToolInvocationID(rawValue: planStatusRequestID),
-            toolName: "plan_write",
-            arguments: planStatusArguments,
-            output: planStatusOutput,
-            status: .completed
-          )
-        )
-      ),
-      SignalboxStoredEvent(
-        eventID: SignalboxEventID(rawValue: 5),
-        event: .processTool(
-          SignalboxProcessToolEvent(
-            toolRequestID: SignalboxToolInvocationID(rawValue: planWriteRequestID),
-            toolName: "plan_write",
-            arguments: planWriteArguments,
-            output: planWriteOutput,
-            status: .completed
-          )
-        )
-      ),
-      SignalboxStoredEvent(
-        eventID: SignalboxEventID(rawValue: 6),
-        event: .processTool(
-          SignalboxProcessToolEvent(
-            toolRequestID: SignalboxToolInvocationID(rawValue: malformedPlanRequestID),
-            toolName: "plan_write",
-            arguments: malformedPlanArguments,
-            output: nil,
-            status: .proposed
-          )
-        )
-      ),
-      SignalboxStoredEvent(
-        eventID: SignalboxEventID(rawValue: 7),
-        event: .processTool(
-          SignalboxProcessToolEvent(
-            toolRequestID: SignalboxToolInvocationID(rawValue: malformedPlanReadRequestID),
-            toolName: "plan_read",
-            arguments: malformedPlanReadArguments,
-            output: nil,
-            status: .proposed
-          )
-        )
-      ),
-    ]
+      )
+    )
   }
 
   static func importedContentKinds(

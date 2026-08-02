@@ -274,7 +274,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         SignalboxProcessMessageEvent(
           role: presentation.role,
           text: content,
-          unrecognizedKind: presentation.unrecognizedKind
+          unrecognizedKind: presentation.unrecognizedKind,
+          sourceAttribution: presentation.sourceAttribution
         )
       )
     case .unknown(let kind, _, _):
@@ -843,12 +844,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func importedPresentation(
     _ speaker: SignalboxImportedSourceSpeaker
-  ) -> (role: SignalboxMessageRole, unrecognizedKind: String?, sourceLabel: String) {
+  ) -> (
+    role: SignalboxMessageRole,
+    unrecognizedKind: String?,
+    sourceLabel: String,
+    sourceAttribution: SignalboxProcessMessageSourceAttribution?
+  ) {
     switch speaker {
     case .attested(.user):
-      return (.user, nil, "User role")
+      return (.user, nil, "User role", .importedUserRole)
     case .attested(.assistant):
-      return (.assistant, nil, "Assistant role")
+      return (.assistant, nil, "Assistant role", .importedAssistantRole)
     case .attested(.unknown(let value)):
       let label = SignalboxProcessPresentation.retainedLabel(
         "Unrecognized speaker (\(value))"
@@ -856,19 +862,21 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return (
         .unknown,
         label,
-        label
+        label,
+        nil
       )
     case .unknown(let kind, _):
       let label = SignalboxProcessPresentation.retainedLabel("Unknown speaker (\(kind))")
       return (
         .unknown,
         label,
-        label
+        label,
+        nil
       )
     case .notAttested:
-      return (.unknown, nil, "Speaker not attested")
+      return (.unknown, nil, "Speaker not attested", nil)
     case .attestedAbsent:
-      return (.unknown, nil, "Speaker absent")
+      return (.unknown, nil, "Speaker absent", nil)
     }
   }
 

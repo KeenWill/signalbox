@@ -336,23 +336,40 @@ public struct SignalboxProcessActivity: Equatable, Sendable {
   )
 }
 
+public enum SignalboxProcessMessageSourceAttribution: String, Codable, Equatable, Sendable {
+  case importedUserRole = "imported_user_role"
+  case importedAssistantRole = "imported_assistant_role"
+
+  public var presentationLabel: String {
+    switch self {
+    case .importedUserRole:
+      return "User role"
+    case .importedAssistantRole:
+      return "Assistant role"
+    }
+  }
+}
+
 public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case kind
     case role
     case text
     case unrecognizedKind = "unrecognized_kind"
+    case sourceAttribution = "source_attribution"
   }
 
   public let kind: String
   public let role: SignalboxMessageRole
   public let text: String
   public let unrecognizedKind: String?
+  public let sourceAttribution: SignalboxProcessMessageSourceAttribution?
 
   public init(
     role: SignalboxMessageRole,
     text: String,
-    unrecognizedKind: String? = nil
+    unrecognizedKind: String? = nil,
+    sourceAttribution: SignalboxProcessMessageSourceAttribution? = nil
   ) {
     self.kind = "process_message"
     self.role = role
@@ -360,6 +377,7 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     self.unrecognizedKind = unrecognizedKind.map {
       SignalboxProcessPresentation.retainedLabel($0)
     }
+    self.sourceAttribution = sourceAttribution
   }
 
   public init(from decoder: Decoder) throws {
@@ -373,6 +391,10 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     ).map {
       SignalboxProcessPresentation.retainedLabel($0)
     }
+    self.sourceAttribution = try container.decodeIfPresent(
+      SignalboxProcessMessageSourceAttribution.self,
+      forKey: .sourceAttribution
+    )
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -381,6 +403,7 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     try container.encode(role, forKey: .role)
     try container.encode(text, forKey: .text)
     try container.encodeIfPresent(unrecognizedKind, forKey: .unrecognizedKind)
+    try container.encodeIfPresent(sourceAttribution, forKey: .sourceAttribution)
   }
 }
 
