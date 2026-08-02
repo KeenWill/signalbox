@@ -27,6 +27,7 @@ mod review_workflow;
 mod runner;
 mod semantic_entry;
 mod session;
+mod session_delegation;
 mod session_metadata;
 mod session_template;
 mod submit_input;
@@ -211,6 +212,15 @@ pub use session::{
     SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
     TranscriptFrontier,
 };
+pub use session_delegation::{
+    BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,
+    DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationContentFailure,
+    DelegationMessage, DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome,
+    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
+    DelegationRequestFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
+    ParentTerminationAuthority, ParentTerminationCommandSource, ParentTerminationKind,
+    TerminalChildTurn,
+};
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
     ReplaceSessionMetadataAppliedResult, ReplaceSessionMetadataReconstitutionError,
@@ -350,6 +360,11 @@ define_identity!(
 define_identity!(
     /// Identifies one durable, independently browsable conversation.
     SessionId
+);
+
+define_identity!(
+    /// Identifies one immutable message within a delegated-session relation.
+    DelegationMessageId
 );
 
 define_identity!(
