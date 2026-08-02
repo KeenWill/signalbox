@@ -2373,6 +2373,134 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testUnknownTurnStateKindCountsTowardSnapshotUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(
+        maximumRecords: 10,
+        maximumUTF8Bytes: SynchronizationFixture.unknownTurnStatePayloadUTF8Bytes
+      )
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownTurnState()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testUnknownCurrentModelCallStateKindCountsTowardSnapshotUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(
+        maximumRecords: 10,
+        maximumUTF8Bytes: SynchronizationFixture.unknownCurrentCallStatePayloadUTF8Bytes
+      )
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.activeRunningUnknownCurrentCallState()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testUnknownEntryKindCountsTowardSnapshotUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(
+        maximumRecords: 10,
+        maximumUTF8Bytes: SynchronizationFixture.unknownEntryPayloadUTF8Bytes
+      )
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownSnapshotEntry()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testUnknownTextEntryKindCountsTowardSnapshotUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(
+        maximumRecords: 10,
+        maximumUTF8Bytes: SynchronizationFixture.unknownTextEntryPayloadUTF8Bytes
+      )
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownSnapshotTextEntry()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testUnknownSessionEventKindCountsTowardBufferedUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor,
+      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(
+        maximumUTF8Bytes: SynchronizationFixture.unknownSessionEventPayloadUTF8Bytes
+      )
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownKindOnlyEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
+    )
+  }
+
   func testFutureEntryVariantCompletesAuthoritativeSnapshot() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -2786,6 +2914,24 @@ private enum SynchronizationFixture {
   static let contextCompactedCursor: UInt64 = 26
   static let recoveredCursor: UInt64 = 30
   static let capacityBelowEncodedFutureEvent: UInt = 32
+  static let unknownTurnStateKind = "fixture_future_turn_state"
+  static let unknownCurrentCallStateKind = "fixture_future_current_call_state"
+  static let unknownEntryKind = "fixture_future_entry"
+  static let unknownTextEntryKind = "fixture_future_text_entry"
+  static let unknownSessionEventKind = "fixture_future_session_event"
+  static let unknownTurnStatePayloadUTF8Bytes = taggedPayloadUTF8Bytes(
+    kind: unknownTurnStateKind
+  )
+  static let unknownCurrentCallStatePayloadUTF8Bytes = taggedPayloadUTF8Bytes(
+    kind: unknownCurrentCallStateKind
+  )
+  static let unknownEntryPayloadUTF8Bytes = taggedPayloadUTF8Bytes(kind: unknownEntryKind)
+  static let unknownTextEntryPayloadUTF8Bytes = taggedPayloadUTF8Bytes(
+    kind: unknownTextEntryKind
+  )
+  static let unknownSessionEventPayloadUTF8Bytes = taggedPayloadUTF8Bytes(
+    kind: unknownSessionEventKind
+  )
   static let session = "11111111-1111-4111-8111-111111111111"
   static let foreignSession = "11111111-1111-4111-8111-111111111112"
   static let turn = "22222222-2222-4222-8222-222222222222"
@@ -3500,6 +3646,23 @@ private enum SynchronizationFixture {
     try activeRunningTurn(currentModelCallState: "cancellation_requested")
   }
 
+  static func unknownTurnState() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{"type":"\(unknownTurnStateKind)"}
+      }
+      """
+    )
+  }
+
+  static func activeRunningUnknownCurrentCallState() throws -> SignalboxProcessServerMessage {
+    try activeRunningTurn(currentModelCallState: unknownCurrentCallStateKind)
+  }
+
   private static func activeRunningTurn(
     currentModelCallState: String
   ) throws -> SignalboxProcessServerMessage {
@@ -3557,6 +3720,34 @@ private enum SynchronizationFixture {
         "source_session_id":"\(session)",
         "entry_id":"\(entryID)",
         "entry":{"type":"turn_completed","turn_id":"\(turn)"}
+      }
+      """
+    )
+  }
+
+  static func unknownSnapshotEntry() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_entry",
+        "entry_index":"0",
+        "source_session_id":"\(session)",
+        "entry_id":"\(entry)",
+        "entry":{"type":"\(unknownEntryKind)"}
+      }
+      """
+    )
+  }
+
+  static func unknownSnapshotTextEntry() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_text_entry",
+        "entry_index":"0",
+        "source_session_id":"\(session)",
+        "entry_id":"\(entry)",
+        "entry":{"type":"\(unknownTextEntryKind)"}
       }
       """
     )
@@ -3902,6 +4093,21 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func unknownKindOnlyEvent(
+    cursor: UInt64
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{"type":"\(unknownSessionEventKind)"}
+      }
+      """
+    )
+  }
+
   static func malformedKnownEvent(cursor: UInt64) throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -3990,6 +4196,10 @@ private enum SynchronizationFixture {
         .frame(generation: 1, message: try unknownTopLevelMessage())
       )
     }
+  }
+
+  private static func taggedPayloadUTF8Bytes(kind: String) -> UInt {
+    UInt("{\"type\":\"\(kind)\"}".utf8.count)
   }
 
   static func message(_ object: String) throws -> SignalboxProcessServerMessage {

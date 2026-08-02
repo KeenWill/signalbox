@@ -1728,8 +1728,8 @@ extension SignalboxTranscriptTurnState {
       return UInt(content.utf8.count)
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
-    case .unknown(_, let payload, let diagnostic):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload, let diagnostic):
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
@@ -1771,8 +1771,8 @@ extension SignalboxSnapshotAccumulator {
 extension SignalboxCurrentModelCallState {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
-    case .unknown(_, let payload):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload):
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
     case .prepared, .inFlight, .cancellationRequested:
       return 0
     }
@@ -1838,8 +1838,9 @@ extension SignalboxTranscriptEntry {
       return UInt(content.utf8.count)
     case .imported(_, _, let sourceSpeaker, let contentKind):
       return sourceSpeaker.retainedUTF8Bytes.saturatedAdding(contentKind.retainedUTF8Bytes)
-    case .unknown(_, let payload, let diagnostic):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload, let diagnostic):
+      return UInt(kind.utf8.count)
+        .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled:
       return 0
@@ -1888,8 +1889,9 @@ extension SignalboxTranscriptTextEntry {
     switch self {
     case .imported(_, _, let sourceSpeaker):
       return sourceSpeaker.retainedUTF8Bytes
-    case .unknown(_, let payload, let diagnostic):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload, let diagnostic):
+      return UInt(kind.utf8.count)
+        .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .user, .assistant, .contextSummary:
       return 0
@@ -1989,8 +1991,9 @@ extension SignalboxProcessSessionEvent {
       return state.retainedUTF8Bytes
     case .toolBatchTransition(_, _, let state):
       return state.retainedUTF8Bytes
-    case .unknown(_, let payload, let diagnostic):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload, let diagnostic):
+      return UInt(kind.utf8.count)
+        .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .sessionCreated, .turnActivated, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,

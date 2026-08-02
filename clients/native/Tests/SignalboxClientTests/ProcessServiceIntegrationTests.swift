@@ -469,21 +469,16 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(message.role, .assistant)
   }
 
-  func testCompletionSideProjectionIncludesModelIdentityMarker() throws {
+  func testCompletionSideProjectionExcludesModelIdentityMarker() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
     let trigger = try ProcessProjectionFixture.completedTrigger()
     var projector = SignalboxProcessTranscriptProjector()
 
     let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-    let record = try XCTUnwrap(projection.records.first)
-    let marker = try ProcessProjectionFixture.conservativeEvent(in: record)
+    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
 
-    XCTAssertEqual(
-      projection.records.count,
-      ProcessProjectionFixture.modelIdentityCompletionRecordCount
-    )
-    XCTAssertEqual(marker.kind, ProcessProjectionFixture.modelIdentityKind)
-    XCTAssertEqual(marker.diagnostic, ProcessProjectionFixture.modelIdentityDiagnostic)
+    XCTAssertEqual(projection.records.count, ProcessProjectionFixture.singleRecordCount)
+    XCTAssertEqual(message.text, ProcessProjectionFixture.completedAssistantText)
   }
 
   func testUnknownTranscriptEntryPresentationKindIsBounded() throws {
@@ -4846,10 +4841,6 @@ private enum ProcessProjectionFixture {
   static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
   static let completedAssistantTranscriptRowID = "timeline-message-1"
   static let singleRecordCount = 1
-  static let modelIdentityCompletionRecordCount = 2
-  static let modelIdentityKind = "model_identity_changed"
-  static let modelIdentityDiagnostic =
-    "Turn \(ProcessDriverFixture.turn) selected model \(ProcessDriverFixture.modelCall) at defaults version 1; source session \(ProcessDriverFixture.session), entry \(proposedToolEntry)."
   static let unknownTextEntryKind = "fixture_future_text_entry"
   static let unknownTextEntryContent = "Fixture future text."
   static let unknownSpeakerWrapperLabel = "Unknown speaker (fixture_future_speaker_wrapper)"

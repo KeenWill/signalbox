@@ -497,9 +497,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ message: SignalboxTranscriptEntryMessage,
     isAttributableTo trigger: SignalboxProcessSessionEvent
   ) -> Bool {
-    if modelIdentityEntry(message.entry, isAttributableTo: trigger) {
-      return true
-    }
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
@@ -537,30 +534,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }
-  }
-
-  private func modelIdentityEntry(
-    _ entry: SignalboxTranscriptEntry,
-    isAttributableTo trigger: SignalboxProcessSessionEvent
-  ) -> Bool {
-    guard case .modelIdentityChanged(let entryTurnID, _, _) = entry else {
-      return false
-    }
-    let triggerTurnID: SignalboxCanonicalUUID
-    switch trigger {
-    case .toolBatchTransition(let turnID, _, _),
-      .turnCompleted(let turnID, _, _, _),
-      .turnFailed(let turnID, _, _),
-      .turnRefused(let turnID, _, _),
-      .turnCancelled(let turnID, _, _),
-      .turnReconciliationRequired(let turnID, _, _),
-      .turnToolReconciliationRequired(let turnID, _, _):
-      triggerTurnID = turnID
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .contextCompacted, .unknown:
-      return false
-    }
-    return entryTurnID == triggerTurnID
   }
 
   private func toolEntry(

@@ -341,7 +341,7 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     case kind
     case role
     case text
-    case unrecognizedKind
+    case unrecognizedKind = "unrecognized_kind"
   }
 
   public let kind: String

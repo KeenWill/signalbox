@@ -164,7 +164,7 @@ final class SignalboxModelsTests: XCTestCase {
                 "kind": "process_message",
                 "role": "unknown",
                 "text": "Future message.",
-                "unrecognizedKind": value,
+                "unrecognized_kind": value,
             ]
         )
 
