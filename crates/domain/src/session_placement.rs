@@ -1,11 +1,6 @@
 //! Validated session placement and path-scoped conversation-read decisions.
 
-use std::{
-    error::Error,
-    fmt,
-    hash::{Hash, Hasher},
-    num::NonZeroU64,
-};
+use std::{error::Error, fmt, num::NonZeroU64};
 
 use crate::{DurableCommandId, SessionId};
 
@@ -313,35 +308,6 @@ impl VersionedSessionPlacement {
     }
 }
 
-/// Durable command payload for appending one explicit placement update event.
-#[derive(Clone, Debug)]
-pub struct UpdateSessionPlacement {
-    command_id: DurableCommandId,
-    session: SessionId,
-    expected_version: SessionPlacementVersion,
-    replacement: SessionPlacement,
-}
-
-/// docs/spec/identity-and-commands.md comparison equality covers every
-/// caller field except the command identifier itself.
-impl PartialEq for UpdateSessionPlacement {
-    fn eq(&self, other: &Self) -> bool {
-        self.session == other.session
-            && self.expected_version == other.expected_version
-            && self.replacement == other.replacement
-    }
-}
-
-impl Eq for UpdateSessionPlacement {}
-
-impl Hash for UpdateSessionPlacement {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.session.hash(state);
-        self.expected_version.hash(state);
-        self.replacement.hash(state);
-    }
-}
-
 /// Kind of one immutable placement-history event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionPlacementEventKind {
@@ -406,72 +372,12 @@ impl SessionPlacementEvent {
     }
 }
 
-/// Typed terminal result recorded for an explicit placement update.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UpdateSessionPlacementResult {
-    Applied(SessionPlacementEvent),
-    Rejected(UpdateSessionPlacementRejection),
-}
-
-/// Closed authoritative rejection of a placement update.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UpdateSessionPlacementRejection {
-    SessionNotFound {
-        session: SessionId,
-    },
-    CurrentVersionMismatch {
-        session: SessionId,
-        expected: SessionPlacementVersion,
-        current: SessionPlacementVersion,
-    },
-    VersionExhausted {
-        session: SessionId,
-        current: SessionPlacementVersion,
-    },
-}
-
-impl UpdateSessionPlacement {
-    pub const fn new(
-        command_id: DurableCommandId,
-        session: SessionId,
-        expected_version: SessionPlacementVersion,
-        replacement: SessionPlacement,
-    ) -> Self {
-        Self {
-            command_id,
-            session,
-            expected_version,
-            replacement,
-        }
-    }
-    pub const fn command_id(&self) -> DurableCommandId {
-        self.command_id
-    }
-    pub const fn session(&self) -> SessionId {
-        self.session
-    }
-    pub const fn expected_version(&self) -> SessionPlacementVersion {
-        self.expected_version
-    }
-    pub const fn replacement(&self) -> &SessionPlacement {
-        &self.replacement
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::hash_map::DefaultHasher;
-
     use super::*;
 
     fn scoped(value: &str) -> SessionPlacement {
         SessionPlacement::scoped(SessionPlacementPath::try_new(value.to_owned()).unwrap()).unwrap()
-    }
-
-    fn hash(value: &UpdateSessionPlacement) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        value.hash(&mut hasher);
-        hasher.finish()
     }
 
     #[test]
@@ -614,26 +520,5 @@ mod tests {
         );
         assert_eq!(event.placement().placement(), &replacement);
         assert_eq!(event.command_id(), command);
-    }
-
-    #[test]
-    fn placement_update_payload_equality_excludes_the_lookup_identity() {
-        let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
-        let replacement = scoped("projects.foo.session");
-        let left = UpdateSessionPlacement::new(
-            DurableCommandId::from_uuid(uuid::Uuid::from_u128(2)),
-            session,
-            SessionPlacementVersion::INITIAL,
-            replacement.clone(),
-        );
-        let right = UpdateSessionPlacement::new(
-            DurableCommandId::from_uuid(uuid::Uuid::from_u128(3)),
-            session,
-            SessionPlacementVersion::INITIAL,
-            replacement,
-        );
-
-        assert_eq!(left, right);
-        assert_eq!(hash(&left), hash(&right));
     }
 }

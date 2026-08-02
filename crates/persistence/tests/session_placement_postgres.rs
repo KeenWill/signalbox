@@ -19,7 +19,6 @@ use signalbox_persistence::{
     },
     local_test_connection_options, migrate,
     session::SessionRepository,
-    session_placement::{SessionPlacementRepository, SessionPlacementRepositoryError},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -161,8 +160,8 @@ async fn s36_pathless_creation_keeps_the_legacy_unscoped_value() -> Result<(), B
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_missing_placement_head_fails_closed_for_current_and_creation_reads()
--> Result<(), Box<dyn Error>> {
+async fn s36_missing_placement_head_fails_closed_for_creation_reads() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(0x204);
     let creation = creation(command(0x105), session_id, SessionPlacement::pathless());
@@ -176,15 +175,6 @@ async fn s36_missing_placement_head_fails_closed_for_current_and_creation_reads(
     )
     .execute(&pool)
     .await?;
-
-    let read_error = SessionPlacementRepository::new(pool.clone())
-        .load_current(session_id)
-        .await
-        .expect_err("a public read must reject a present session without a placement head");
-    let SessionPlacementRepositoryError::Corruption(read_reason) = read_error else {
-        panic!("missing placement history fails a public read with typed corruption")
-    };
-    assert_eq!(read_reason, "session placement head missing");
 
     let creation_error = CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation)
@@ -246,6 +236,51 @@ async fn s36_creation_replay_rejects_cross_wired_placement_provenance() -> Resul
     };
     assert_eq!(field, "stored_placement_version");
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    let command_id = command(0x116);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, $2, $3, transaction_timestamp())",
+    )
+    .bind(*command_id.as_uuid())
+    .bind("update_session_placement")
+    .bind(1_i16)
+    .execute(&mut *transaction)
+    .await?;
+    let malformed = sqlx::query(
+        "INSERT INTO update_session_placement_command
+            (command_id, command_kind, storage_version, session_id,
+             expected_version, replacement_path, root_global_read_intent,
+             result_kind, rejection_kind, result_version, result_current_version)
+         VALUES ($1, 'update_session_placement', 1, $2,
+                 7, NULL, FALSE, 'applied', NULL, 2, NULL)",
+    )
+    .bind(*command_id.as_uuid())
+    .bind(*session(0x20a).as_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("an applied update receipt must advance its expected predecessor");
+    let database_error = malformed
+        .as_database_error()
+        .expect("PostgreSQL reports the applied-result shape constraint");
+
+    assert_eq!(
+        database_error.constraint(),
+        Some("update_session_placement_command_result_shape")
+    );
+
+    transaction.rollback().await?;
     pool.close().await;
     drop(container);
     Ok(())
