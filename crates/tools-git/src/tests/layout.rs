@@ -115,6 +115,51 @@ fn repository_config_rejects_an_unsupported_reference_storage_extension() {
 }
 
 #[test]
+fn repository_config_rejects_an_unsupported_format_version() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(&config_path, "[core]\nrepositoryformatversion = 2\n")
+        .expect("future repository format config writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("future repository format version rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_config_rejects_sha256_under_format_version_zero() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[core]\nrepositoryformatversion = 0\n[extensions]\nobjectformat = sha256\n",
+    )
+    .expect("mismatched object format config writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("SHA-256 under format version zero rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_config_rejects_duplicate_format_versions() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[core]\nrepositoryformatversion = 0\nrepositoryformatversion = 1\n",
+    )
+    .expect("duplicate repository format config writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("duplicate repository format versions reject");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
 fn repository_open_parses_the_validated_config_snapshot() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");

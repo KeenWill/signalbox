@@ -242,6 +242,7 @@ fn validate_repository_config_descriptor(
     let mut section = "";
     let mut object_format = ObjectFormat::Sha1;
     let mut object_format_seen = false;
+    let mut repository_format_version = None;
     for line in config.lines() {
         let mut normalized = line.trim().to_ascii_lowercase();
         if normalized.is_empty() || normalized.starts_with('#') || normalized.starts_with(';') {
@@ -272,7 +273,16 @@ fn validate_repository_config_descriptor(
             normalized = trailing.to_owned();
         }
         if section == "core" {
-            let file_valued = normalized.split_once('=').is_some_and(|(key, _)| {
+            let key_value = normalized.split_once('=');
+            if key_value.is_none()
+                && normalized
+                    .split_ascii_whitespace()
+                    .next()
+                    .is_some_and(|key| key == "repositoryformatversion")
+            {
+                return Err(LocalGitToolsConstructionError::Repository);
+            }
+            let file_valued = key_value.is_some_and(|(key, _)| {
                 matches!(
                     key.trim(),
                     "worktree" | "excludesfile" | "attributesfile" | "hookspath" | "fsmonitor"
@@ -280,6 +290,19 @@ fn validate_repository_config_descriptor(
             });
             if file_valued {
                 return Err(LocalGitToolsConstructionError::Repository);
+            }
+            if let Some((key, value)) = key_value
+                && key.trim() == "repositoryformatversion"
+            {
+                if repository_format_version.is_some() {
+                    return Err(LocalGitToolsConstructionError::Repository);
+                }
+                repository_format_version = Some(
+                    value
+                        .trim()
+                        .parse::<u32>()
+                        .map_err(|_| LocalGitToolsConstructionError::Repository)?,
+                );
             }
         }
         if section == "extensions" {
@@ -300,6 +323,10 @@ fn validate_repository_config_descriptor(
                 }
             }
         }
+    }
+    match (repository_format_version.unwrap_or(0), object_format_seen) {
+        (0, false) | (1, _) => {}
+        _ => return Err(LocalGitToolsConstructionError::Repository),
     }
     let mut snapshot =
         tempfile::tempfile().map_err(|_| LocalGitToolsConstructionError::Repository)?;

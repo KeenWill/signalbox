@@ -236,6 +236,54 @@ fn symbolic_reference_preparation_truncates_injected_trailing_bytes() {
 }
 
 #[test]
+fn symbolic_reference_preparation_rejects_a_non_reference_target_without_mutation() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let actor_payload = b"actor payload remains unchanged".to_vec();
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    fs::write(&lock_path, &actor_payload).expect("actor payload enters reference lock");
+
+    let failure = lock
+        .prepare_symbolic(&authority, "HEAD")
+        .expect_err("non-reference symbolic target rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(lock_path).expect("unmodified reference lock reads"),
+        actor_payload
+    );
+}
+
+#[test]
+fn symbolic_reference_preparation_rejects_a_newline_target_without_mutation() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let actor_payload = b"actor payload remains unchanged".to_vec();
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    fs::write(&lock_path, &actor_payload).expect("actor payload enters reference lock");
+
+    let failure = lock
+        .prepare_symbolic(&authority, "refs/heads/main\nrefs/heads/other")
+        .expect_err("newline symbolic target rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(lock_path).expect("unmodified reference lock reads"),
+        actor_payload
+    );
+}
+
+#[test]
 fn reference_publication_preserves_a_directory_replacing_the_cleanup_path() {
     let fixture = Fixture::new();
     let name = "refs/heads/topic";
@@ -405,4 +453,94 @@ fn reference_publication_rolls_back_a_racing_packed_namespace_conflict() {
 
     assert_eq!(failure, LocalGitFailure::Operation);
     assert!(!reference_path.exists());
+}
+
+#[test]
+fn absent_reference_rollback_preserves_a_replacement_after_validation() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let packed_path = fixture.root().join(".git/packed-refs");
+    let actor_replacement = b"actor replacement remains\n".to_vec();
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("missing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_rollback_test_hook(
+            &authority,
+            &expected,
+            || {
+                fs::write(
+                    &packed_path,
+                    format!("{} refs/heads/topic/child\n", fixture.initial),
+                )
+                .expect("racing packed namespace conflict writes");
+            },
+            || {
+                fs::remove_file(&reference_path).expect("prepared publication removes");
+                fs::write(&reference_path, &actor_replacement)
+                    .expect("actor publication replacement writes");
+            },
+        )
+        .expect_err("post-validation absent replacement rejects rollback");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(reference_path).expect("actor publication replacement reads"),
+        actor_replacement
+    );
+}
+
+#[test]
+fn exchange_rollback_preserves_a_displaced_replacement_after_validation() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let packed_path = fixture.root().join(".git/packed-refs");
+    let actor_replacement = b"actor displaced replacement\n".to_vec();
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_rollback_test_hook(
+            &authority,
+            &expected,
+            || {
+                fs::write(
+                    &packed_path,
+                    format!("{} refs/heads/topic/child\n", fixture.initial),
+                )
+                .expect("racing packed namespace conflict writes");
+            },
+            || {
+                fs::remove_file(&lock_path).expect("displaced reference removes");
+                fs::write(&lock_path, &actor_replacement)
+                    .expect("actor displaced replacement writes");
+            },
+        )
+        .expect_err("post-validation displaced replacement rejects rollback");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("prepared live reference reads"),
+        format!("{}\n", git2::Oid::ZERO_SHA1)
+    );
+    assert_eq!(
+        fs::read(lock_path).expect("actor displaced replacement reads"),
+        actor_replacement
+    );
 }

@@ -161,6 +161,9 @@ impl ReferenceLock {
         authority: &PinnedRepository,
         target: &str,
     ) -> Result<(), LocalGitFailure> {
+        if !target.starts_with("refs/") || !git2::Reference::is_valid_name(target) {
+            return Err(LocalGitFailure::Operation);
+        }
         self.lock
             .set_len(0)
             .and_then(|()| self.lock.rewind())
@@ -190,13 +193,21 @@ impl ReferenceLock {
         expected: &PinnedReferenceValue,
         before_absent_publish: Hook,
     ) -> Result<(), LocalGitFailure> {
-        self.publish_with_hooks(authority, expected, before_absent_publish, || {}, || {})
+        self.publish_with_hooks(
+            authority,
+            expected,
+            before_absent_publish,
+            || {},
+            || {},
+            || {},
+        )
     }
 
     fn publish_with_hooks<
         BeforeAbsent: FnOnce(),
         AfterPublish: FnOnce(),
         BeforeCleanup: FnOnce(),
+        BeforeRollback: FnOnce(),
     >(
         mut self,
         authority: &PinnedRepository,
@@ -204,7 +215,9 @@ impl ReferenceLock {
         before_absent_publish: BeforeAbsent,
         after_publish: AfterPublish,
         before_cleanup: BeforeCleanup,
+        before_rollback: BeforeRollback,
     ) -> Result<(), LocalGitFailure> {
+        let mut before_rollback = Some(before_rollback);
         if !self.path_still_owned()
             || !self.prepared_lock_is_current()
             || !self.hierarchy_is_current(authority)
@@ -243,8 +256,11 @@ impl ReferenceLock {
                 || !packed_namespace_is_clear
                 || !self.hierarchy_is_current(authority)
             {
-                if publication_is_current && self.prepared_publication_is_current() {
-                    let _ = unlinkat(&self.parent, &self.leaf, AtFlags::empty());
+                before_rollback.take().ok_or(LocalGitFailure::Operation)?();
+                if publication_is_current {
+                    let prepared = self.prepared.ok_or(LocalGitFailure::Operation)?;
+                    let _ =
+                        remove_displaced_reference_if_current(&self.parent, &self.leaf, prepared);
                 }
                 return Err(LocalGitFailure::Operation);
             }
@@ -279,15 +295,15 @@ impl ReferenceLock {
             || !packed_namespace_is_clear
             || !self.hierarchy_is_current(authority)
         {
+            before_rollback.take().ok_or(LocalGitFailure::Operation)?();
             if displaced_snapshot_is_current && publication_is_current {
-                renameat_with(
-                    &self.parent,
-                    &self.lock_name,
+                let _ = rollback_reference_exchange_if_current(
                     &self.parent,
                     &self.leaf,
-                    RenameFlags::EXCHANGE,
-                )
-                .map_err(|_| LocalGitFailure::Operation)?;
+                    &self.lock_name,
+                    expected_leaf_snapshot,
+                    self.prepared.ok_or(LocalGitFailure::Operation)?,
+                );
             }
             return Err(LocalGitFailure::Operation);
         }
@@ -322,6 +338,7 @@ impl ReferenceLock {
             before_absent_publish,
             after_publish,
             || {},
+            || {},
         )
     }
 
@@ -332,7 +349,28 @@ impl ReferenceLock {
         expected: &PinnedReferenceValue,
         before_cleanup: BeforeCleanup,
     ) -> Result<(), LocalGitFailure> {
-        self.publish_with_hooks(authority, expected, || {}, || {}, before_cleanup)
+        self.publish_with_hooks(authority, expected, || {}, || {}, before_cleanup, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn publish_with_rollback_test_hook<
+        AfterPublish: FnOnce(),
+        BeforeRollback: FnOnce(),
+    >(
+        self,
+        authority: &PinnedRepository,
+        expected: &PinnedReferenceValue,
+        after_publish: AfterPublish,
+        before_rollback: BeforeRollback,
+    ) -> Result<(), LocalGitFailure> {
+        self.publish_with_hooks(
+            authority,
+            expected,
+            || {},
+            after_publish,
+            || {},
+            before_rollback,
+        )
     }
 
     #[cfg(test)]
@@ -430,6 +468,91 @@ fn remove_displaced_reference_if_current(
         return Err(LocalGitFailure::Operation);
     }
     Ok(())
+}
+
+fn rollback_reference_exchange_if_current(
+    parent: &OwnedFd,
+    leaf: &OsStr,
+    lock_name: &OsStr,
+    displaced: ReferenceSnapshotIdentity,
+    publication: ReferenceSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    let quarantine = QuarantineDirectory::create(parent)?;
+    let quarantined_displaced = OsStr::new("displaced");
+    let quarantined_publication = OsStr::new("publication");
+    renameat_with(
+        parent,
+        lock_name,
+        quarantine.descriptor(),
+        quarantined_displaced,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_displaced)
+        != Ok(Some(displaced))
+    {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_displaced,
+            parent,
+            lock_name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if renameat_with(
+        parent,
+        leaf,
+        quarantine.descriptor(),
+        quarantined_publication,
+        RenameFlags::NOREPLACE,
+    )
+    .is_err()
+    {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_displaced,
+            parent,
+            lock_name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_publication)
+        != Ok(Some(publication))
+    {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_publication,
+            parent,
+            leaf,
+            RenameFlags::NOREPLACE,
+        );
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_displaced,
+            parent,
+            lock_name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    renameat_with(
+        quarantine.descriptor(),
+        quarantined_displaced,
+        parent,
+        leaf,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    renameat_with(
+        quarantine.descriptor(),
+        quarantined_publication,
+        parent,
+        lock_name,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LocalGitFailure::Operation)
 }
 
 fn reference_snapshot_identity(

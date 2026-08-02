@@ -7,7 +7,7 @@ use rustix::fs::{CWD, Mode, mkfifoat};
 use sha1::{Digest, Sha1};
 
 use crate::failure::LocalGitFailure;
-use crate::index_lock::{IndexLock, write_index_entries};
+use crate::index_lock::{IndexLock, copy_index_snapshot_with_test_hook, write_index_entries};
 use crate::limits::MAX_INDEX_BYTES;
 use crate::tests::support::{Fixture, Sha256Fixture};
 
@@ -177,6 +177,45 @@ fn index_lock_rejects_prepared_bytes_rewritten_before_private_clone() {
         original_index
     );
     assert_ne!(actor_bytes, original_index);
+}
+
+#[test]
+fn index_snapshot_rejects_same_length_rewrite_after_metadata_capture() {
+    let fixture = Fixture::new();
+    let actor_fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let original_bytes = fs::read(&index_path).expect("fixture index reads");
+    fs::write(actor_fixture.root().join("tracked.txt"), "actor content\n")
+        .expect("actor fixture file rewrites");
+    let actor_repository =
+        git2::Repository::open(actor_fixture.root()).expect("actor fixture repository opens");
+    let mut actor_index = actor_repository.index().expect("actor fixture index opens");
+    actor_index
+        .add_path(std::path::Path::new("tracked.txt"))
+        .expect("actor fixture path stages");
+    actor_index.write().expect("actor fixture index writes");
+    let actor_bytes =
+        fs::read(actor_fixture.root().join(".git/index")).expect("actor fixture index reads");
+    let mut destination = tempfile::tempfile().expect("private index snapshot constructs");
+
+    let failure = copy_index_snapshot_with_test_hook(
+        &index_path,
+        &mut destination,
+        ObjectFormat::Sha1,
+        || fs::write(&index_path, &actor_bytes).expect("live index rewrites in place"),
+    )
+    .expect_err("same-length index rewrite rejects snapshot");
+
+    assert_eq!(original_bytes.len(), actor_bytes.len());
+    assert_ne!(original_bytes, actor_bytes);
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        destination
+            .metadata()
+            .expect("private snapshot metadata reads")
+            .len(),
+        0
+    );
 }
 
 #[test]

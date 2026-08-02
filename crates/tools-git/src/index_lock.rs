@@ -16,7 +16,8 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
 use crate::descriptor::{
-    FileIdentity, QuarantineDirectory, descriptor_path, file_identity, remove_entry_if_identity,
+    FileIdentity, QuarantineDirectory, descriptor_path, file_identity, file_snapshot_identity,
+    remove_entry_if_identity,
 };
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
@@ -616,6 +617,22 @@ fn copy_open_index_snapshot(
     preserve_permissions: bool,
     object_format: ObjectFormat,
 ) -> Result<IndexSnapshotIdentity, LocalGitFailure> {
+    copy_open_index_snapshot_with_hook(
+        descriptor,
+        destination,
+        preserve_permissions,
+        object_format,
+        || {},
+    )
+}
+
+fn copy_open_index_snapshot_with_hook<AfterMetadata: FnOnce()>(
+    descriptor: OwnedFd,
+    destination: &mut fs::File,
+    preserve_permissions: bool,
+    object_format: ObjectFormat,
+    after_metadata: AfterMetadata,
+) -> Result<IndexSnapshotIdentity, LocalGitFailure> {
     let mut source = fs::File::from(descriptor);
     let metadata = source.metadata().map_err(|_| LocalGitFailure::Repository)?;
     if !metadata.is_file() || metadata.len() > MAX_INDEX_BYTES as u64 {
@@ -626,12 +643,17 @@ fn copy_open_index_snapshot(
             .set_permissions(metadata.permissions())
             .map_err(|_| LocalGitFailure::Operation)?;
     }
+    after_metadata();
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     Read::by_ref(&mut source)
         .take((MAX_INDEX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| LocalGitFailure::Operation)?;
-    if bytes.len() as u64 != metadata.len() || bytes.len() > MAX_INDEX_BYTES {
+    let after_read = source.metadata().map_err(|_| LocalGitFailure::Repository)?;
+    if bytes.len() as u64 != metadata.len()
+        || bytes.len() > MAX_INDEX_BYTES
+        || file_snapshot_identity(&metadata) != file_snapshot_identity(&after_read)
+    {
         return Err(LocalGitFailure::Repository);
     }
     reject_split_index(&bytes, object_format)?;
@@ -643,6 +665,30 @@ fn copy_open_index_snapshot(
         length: metadata.len(),
         digest: Sha256::digest(&bytes).into(),
     })
+}
+
+#[cfg(test)]
+pub(super) fn copy_index_snapshot_with_test_hook<AfterMetadata: FnOnce()>(
+    index_path: &Path,
+    destination: &mut fs::File,
+    object_format: ObjectFormat,
+    after_metadata: AfterMetadata,
+) -> Result<(), LocalGitFailure> {
+    let descriptor = openat(
+        CWD,
+        index_path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitFailure::Repository)?;
+    copy_open_index_snapshot_with_hook(
+        descriptor,
+        destination,
+        false,
+        object_format,
+        after_metadata,
+    )
+    .map(drop)
 }
 
 impl Drop for IndexLock {
