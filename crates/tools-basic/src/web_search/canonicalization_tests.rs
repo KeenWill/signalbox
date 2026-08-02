@@ -257,6 +257,29 @@ fn web_search_rejects_dot_segment_normalized_credential_in_result_url() {
     );
 }
 
+/// INV-035: a credential spanning a terminal dot segment and its trailing
+/// slash is rejected after URL path normalization retains that slash.
+#[test]
+fn web_search_rejects_terminal_dot_segment_slash_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_TERMINAL_DOT_SEGMENT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("terminal dot-segment fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_TERMINAL_DOT_SEGMENT_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: URL preprocessing composes with path dot-segment removal before
 /// completed provider result evidence is retained.
 #[test]

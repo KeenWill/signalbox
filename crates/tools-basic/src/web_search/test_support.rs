@@ -165,6 +165,10 @@ pub(super) const URL_DOT_SEGMENT_COLLISION_KEY: &str = "abc/./def";
 
 pub(super) const URL_DOT_SEGMENT_NORMALIZED_VALUE: &str = "abc/def";
 
+pub(super) const URL_TERMINAL_DOT_SEGMENT_COLLISION_KEY: &str = "./";
+
+pub(super) const FIXTURE_TERMINAL_DOT_SEGMENT_RESULT_URL: &str = "https://example.com/a/../";
+
 pub(super) const URL_PREPROCESSED_DOT_SEGMENT_COLLISION_KEY: &str = "x\t/a/../b";
 
 pub(super) const URL_PREPROCESSED_AUTHORITY_PORT_COLLISION_KEY: &str = "m:\t04";
@@ -418,6 +422,8 @@ pub(super) const KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY: &str = "KnownFailed
 pub(super) const SUCCESS_RESULT_DEBUG_COLLISION_KEY: &str = "Ok";
 
 pub(super) const SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(C";
+
+pub(super) const POPULATED_SUCCESS_RESULT_SUFFIX_COLLISION_KEY: &str = "}\"))";
 
 pub(super) const ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Err(E";
 
