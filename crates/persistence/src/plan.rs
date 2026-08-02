@@ -222,39 +222,37 @@ const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
 
 const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain AS (
     SELECT edge.session_id, edge.entry_ordinal, edge.dependency_ordinal,
-           edge.first_event_ordinal, edge.prior_first_event_ordinal,
-           ARRAY[edge.first_event_ordinal]::numeric[] AS
-               visited_first_event_ordinals,
-           FALSE AS repeated_predecessor
+           edge.first_event_ordinal, edge.prior_first_event_ordinal
       FROM session_plan_head AS chain_head
       JOIN session_plan_current_dependency AS edge
         ON edge.session_id = chain_head.session_id
        AND edge.first_event_ordinal = chain_head.dependency_event_ordinal
      WHERE chain_head.session_id = $1
-    UNION ALL
+    UNION
     SELECT predecessor.session_id, predecessor.entry_ordinal,
            predecessor.dependency_ordinal, predecessor.first_event_ordinal,
-           predecessor.prior_first_event_ordinal,
-           successor.visited_first_event_ordinals ||
-               ARRAY[predecessor.first_event_ordinal],
-           predecessor.first_event_ordinal =
-               ANY(successor.visited_first_event_ordinals)
+           predecessor.prior_first_event_ordinal
       FROM dependency_chain AS successor
       JOIN session_plan_current_dependency AS predecessor
         ON predecessor.session_id = successor.session_id
        AND predecessor.first_event_ordinal =
             successor.prior_first_event_ordinal
-     WHERE NOT successor.repeated_predecessor
+), dependency_inventory AS (
+    SELECT count(*) AS edge_count,
+           count(DISTINCT first_event_ordinal) AS distinct_first_event_count,
+           count(*) FILTER (WHERE prior_first_event_ordinal IS NULL) AS root_count
+      FROM session_plan_current_dependency
+     WHERE session_id = $1
 ), dependency_certification AS (
     SELECT (
-        (
-            SELECT count(*)
-              FROM dependency_chain
-        ) = (
-            SELECT count(*)
-              FROM session_plan_current_dependency
-             WHERE session_id = $1
-        )
+        (SELECT count(*) FROM dependency_chain) =
+            dependency_inventory.edge_count
+        AND dependency_inventory.edge_count =
+            dependency_inventory.distinct_first_event_count
+        AND dependency_inventory.root_count =
+            CASE dependency_inventory.edge_count
+                WHEN 0 THEN 0 ELSE 1
+            END
         AND NOT EXISTS (
             SELECT 1
               FROM dependency_chain AS edge
@@ -269,8 +267,7 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
                 ON dependency.session_id = edge.session_id
                AND dependency.event_ordinal = edge.dependency_ordinal
                AND dependency.event_kind = 'created'
-             WHERE edge.repeated_predecessor
-                OR first_event.event_ordinal IS NULL
+             WHERE first_event.event_ordinal IS NULL
                 OR first_event.event_kind IS DISTINCT FROM 'depends_on'
                 OR first_event.entry_ordinal IS DISTINCT FROM edge.entry_ordinal
                 OR first_event.dependency_ordinal IS DISTINCT FROM
@@ -287,6 +284,7 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
                 OR NOT session_plan_event_has_authority(dependency)
         )
     ) AS valid
+      FROM dependency_inventory
 )
 SELECT CASE
            WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL
@@ -1654,7 +1652,11 @@ mod tests {
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("FROM dependency_chain AS edge"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("dependency_certification.valid"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority"));
-        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("repeated_predecessor"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("    UNION\n"));
+        assert!(!INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("UNION ALL"));
+        assert!(!INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("ARRAY["));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("distinct_first_event_count"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("root_count"));
         assert!(
             INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority(entry)")
         );
