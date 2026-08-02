@@ -1,6 +1,7 @@
 name: Tool live smokes
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - "crates/egress-transport/**"
@@ -57,19 +58,78 @@ jobs:
         run: >-
           cargo test --no-fail-fast -p signalbox-tools-github
           --test live_smoke -- --ignored
-      # Gated inside the test rather than on this step: an absent secret
-      # expands to an empty value, which the smoke reports and skips on. That
-      # keeps the same skip path covering local runs with no credential file.
-      - name: Run web search smoke
-        continue-on-error: true
-        env:
-          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-        run: >-
-          cargo test --no-fail-fast -p signalbox-tools-web
-          --lib -- --ignored --nocapture web_search::live_smoke_tests
       - name: Run whole-daemon tool exercise
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           cargo test --no-fail-fast -p signalboxd
           --test live_tool_exercise -- --ignored
+
+  # Live web search smoke for crates/tools-web. It spends one real Brave query
+  # through the production transport, so a provider response-shape change is
+  # proven against the live API rather than assumed from the fixture suite.
+  #
+  # It is a separate job from the smokes above because it is the only one that
+  # consumes a deployment credential rather than the ambient Actions token, and
+  # a credentialed job earns its own trust boundary, environment binding, and
+  # serialization.
+  #
+  # Accepted trust boundary. The query must execute the proposed repository
+  # adapter code against the live provider; that is the purpose of the smoke.
+  # The test process that performs it therefore receives the key in its
+  # environment and could read it. The job trusts anyone with write access to
+  # this repository, the same trust already required to push executable code to
+  # main. It does not trust fork authors: GitHub withholds secrets from ordinary
+  # fork pull_request runs regardless of environment policy, so a fork run
+  # receives an empty value and takes the skip path below rather than spending
+  # or exposing anything.
+  #
+  # The environment scopes WHICH jobs may read the credential; it makes no
+  # author-trust decision, and its branch availability setting supplies no
+  # security boundary. The exclusion of forks rests on GitHub's secret
+  # withholding described above.
+  #
+  # The credential is referenced only in the final step, never echoed, never
+  # passed in argv, and never written to disk. The test binary is compiled in an
+  # earlier step whose environment does not hold it, so no build script or
+  # procedural macro executes while the key is readable.
+  web-smoke:
+    name: Web search live smoke (report only)
+    continue-on-error: true
+    permissions:
+      contents: read
+    # Repository → Settings → Environments → web-smoke holds BRAVE_API_KEY. Its
+    # availability setting is documented above and deliberately supplies no
+    # additional author-trust decision.
+    environment: web-smoke
+    concurrency:
+      group: web-smoke
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: web-smoke
+      # Compile before the credential exists in any step environment, so the
+      # credentialed run below recompiles nothing.
+      - name: Build the smoke test binary
+        run: >-
+          cargo test --no-fail-fast -p signalbox-tools-web
+          --lib --no-run
+      # Gated inside the test rather than on this step: an absent environment
+      # secret expands to an empty value, which the smoke reports and skips on.
+      # That keeps one skip path covering CI before the secret exists, fork runs
+      # that never receive it, and local runs with no credential file.
+      - name: Run web search smoke
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        run: >-
+          cargo test --no-fail-fast -p signalbox-tools-web
+          --lib -- --ignored --nocapture web_search::live_smoke_tests

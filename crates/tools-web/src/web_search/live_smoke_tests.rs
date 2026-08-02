@@ -10,7 +10,7 @@
 //! What this proves beyond the fixture suite: a real Brave response, not a
 //! synthetic one, still satisfies the bounded decoding the executor depends on.
 
-use std::{env, path::PathBuf};
+use std::{env, future::Future, path::PathBuf};
 
 use signalbox_model_runtime::CredentialValue;
 
@@ -30,6 +30,25 @@ const SMOKE_QUERY: &str = "rust programming language";
 /// rather than part of the secret, matching how the daemon narrows the same
 /// files.
 const CREDENTIAL_LINE_TERMINATORS: [u8; 2] = *b"\n\r";
+
+/// Runs one smoke against the resolved credential, or reports which sources
+/// were empty and skips.
+///
+/// The availability branch lives here rather than in the test body, mirroring
+/// the `with_github_token` helper the GitHub live smokes use.
+async fn with_smoke_credential<Smoke, SmokeFuture>(smoke: Smoke)
+where
+    Smoke: FnOnce(CredentialValue) -> SmokeFuture,
+    SmokeFuture: Future<Output = ()>,
+{
+    let Some(credential) = smoke_credential() else {
+        eprintln!(
+            "skipping live web search smoke: neither {CREDENTIAL_ENVIRONMENT} nor ~/{CREDENTIAL_FILE} holds a credential"
+        );
+        return;
+    };
+    smoke(credential).await;
+}
 
 /// Resolves the smoke credential from the environment, then from the
 /// deployment file, and returns nothing when neither source holds one.
@@ -59,6 +78,32 @@ fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
     &file_bytes[..end]
 }
 
+/// The terminator a writing tool appends is not part of the secret.
+#[test]
+fn credential_file_bytes_drop_trailing_line_termination() {
+    assert_eq!(
+        credential_bytes(b"fixture-search-key\r\n"),
+        b"fixture-search-key"
+    );
+}
+
+/// Every other byte is retained exactly, so a key that legitimately carries
+/// interior or leading whitespace still reaches the provider unchanged.
+#[test]
+fn credential_file_bytes_retain_leading_and_interior_whitespace() {
+    assert_eq!(
+        credential_bytes(b" fixture search\tkey\n"),
+        b" fixture search\tkey"
+    );
+}
+
+/// A file holding nothing but terminators narrows to an empty value, which
+/// resolution then treats as no credential at all.
+#[test]
+fn credential_file_bytes_narrow_a_terminator_only_file_to_empty() {
+    assert_eq!(credential_bytes(b"\n\r\n"), b"");
+}
+
 /// One real Brave exchange decodes into a bounded page of results.
 ///
 /// The credential is passed to the transport and never rendered, compared, or
@@ -67,25 +112,22 @@ fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
 #[tokio::test]
 #[ignore = "performs one real Brave Search request when a credential is present"]
 async fn brave_search_decodes_a_bounded_live_page() {
-    let Some(credential) = smoke_credential() else {
-        eprintln!(
-            "skipping live web search smoke: neither {CREDENTIAL_ENVIRONMENT} nor ~/{CREDENTIAL_FILE} holds a credential"
-        );
-        return;
-    };
-    let mut transport = ReqwestWebSearchTransport::try_new(DEFAULT_EXCHANGE_TIMEOUT)
-        .expect("production search client builds");
-    let request = WebSearchRequest {
-        provider: WebSearchProvider::Brave,
-        query: String::from(SMOKE_QUERY),
-    };
+    with_smoke_credential(|credential| async move {
+        let mut transport = ReqwestWebSearchTransport::try_new(DEFAULT_EXCHANGE_TIMEOUT)
+            .expect("production search client builds");
+        let request = WebSearchRequest {
+            provider: WebSearchProvider::Brave,
+            query: String::from(SMOKE_QUERY),
+        };
 
-    let response = transport
-        .search(request, &credential)
-        .await
-        .into_result()
-        .expect("Brave returns one complete bounded page");
+        let response = transport
+            .search(request, &credential)
+            .await
+            .into_result()
+            .expect("Brave returns one complete bounded page");
 
-    assert!(!response.results().is_empty());
-    assert!(response.results().len() <= MAX_PROVIDER_RESULTS);
+        assert!(!response.results().is_empty());
+        assert!(response.results().len() <= MAX_PROVIDER_RESULTS);
+    })
+    .await;
 }
