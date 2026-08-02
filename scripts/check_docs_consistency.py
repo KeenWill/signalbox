@@ -12,10 +12,11 @@ The check is deterministic and offline. It verifies:
 3. every subsystem page under ``docs/spec/`` has an offline verification
    reference whose PR token uses ``PR #N (`branch-ref`)``, optionally narrowed
    to the surface that PR settled by a semicolon tail: ``PR #N (`branch-ref`;
-   <scope>)``. The scope tail is free-form prose: its content is not validated,
-   but it must render as more than whitespace and quote markers, may name code
-   in backticks without the span's parentheses closing the reference, and may
-   not leave the reference's own block. ``docs/spec/README.md`` states this
+   <scope>)``. The scope tail is free-form prose whose content is not validated
+   — except for the exact carrier form described below — but it must render as
+   more than whitespace and quote markers, may name code in backticks without
+   the span's parentheses closing the reference, and may not leave the
+   reference's own block. ``docs/spec/README.md`` states this
    format; this check enforces it and verifies that each historical token
    names the exact source branch of a PR merge commit on the first-parent
    history of the protected integration branch.
@@ -24,10 +25,12 @@ The check is deterministic and offline. It verifies:
    event build also accepts unmerged verification identities inherited from the
    event's exact base commit.
    A PR that landed inside another PR's merge (a stack merged from the top has
-   no first-parent merge commits for its inner PRs) cites its carrier in the
-   scope tail — ``PR #N (`branch-ref`; via PR #M `carrier-branch`)`` — and the
-   token is accepted when the carrier's number and branch match a first-parent
-   merge commit.
+   no first-parent merge commits for its inner PRs) cites its carrier as the
+   entire scope tail, anchored to the exact form
+   ``PR #N (`branch-ref`; via PR #M `carrier-branch`)``. The token is accepted
+   only when ``#N`` has no first-parent merge commit of its own and the
+   carrier's number and branch match one; any other tail containing
+   carrier-like prose is ordinary unvalidated scope text.
 
 External links and semantic freshness beyond reachability are outside this
 check. Run from any directory; exits nonzero with one stable line per
@@ -188,8 +191,11 @@ PR_TOKEN = re.compile(
     rf"(?:{SCOPED_DETAIL_TAIL})?"
     r"\)"
 )
-VIA_CARRIER = re.compile(
-    r"\bvia[ \t\r\n]+PR[ \t]*#([1-9][0-9]*)[ \t\r\n]+`([^\s`]+)`"
+CARRIED_PR_TOKEN = re.compile(
+    r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
+    r"`([^\s`]+)`;[ \t\r\n]*"
+    r"via[ \t\r\n]+PR[ \t]*#([1-9][0-9]*)[ \t\r\n]+`([^\s`]+)`"
+    r"\)"
 )
 INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
 CLAUSE_BOUNDARY = (
@@ -3515,13 +3521,13 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     not github_event_present and branch == checkout_branch
                 )
                 inherited_match = (number, branch) in inherited_identities
-                carrier = VIA_CARRIER.search(token.group(0))
+                carrier = CARRIED_PR_TOKEN.match(text, candidate_start)
                 carrier_match = (
                     carrier is not None
                     and number not in integration_branches
-                    and int(carrier.group(1)) in integration_branches
-                    and carrier.group(2)
-                    in integration_branches[int(carrier.group(1))]
+                    and int(carrier.group(3)) in integration_branches
+                    and carrier.group(4)
+                    in integration_branches[int(carrier.group(3))]
                 )
                 in_flight_match = (
                     number not in integration_branches
@@ -3546,8 +3552,8 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     message = "only one unmerged verification PR identity is permitted"
                 elif carrier is not None and number not in integration_branches:
                     message = (
-                        f"PR #{number} cites carrier PR #{carrier.group(1)} "
-                        f"(`{carrier.group(2)}`), which has no matching "
+                        f"PR #{number} cites carrier PR #{carrier.group(3)} "
+                        f"(`{carrier.group(4)}`), which has no matching "
                         f"merge commit in the `{INTEGRATION_BRANCH}` "
                         "integration history"
                     )

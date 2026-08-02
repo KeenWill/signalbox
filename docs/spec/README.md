@@ -13,10 +13,15 @@ as prose following the parenthetical; a scope tail is free-form prose that must
 render as more than whitespace and block-quote markers, may name code in
 backticks without the span's own parentheses closing the reference, and must
 stay inside the reference's own block, and a page may carry one reference per
-verified surface. `scripts/check_docs_consistency.py` enforces this form. The
-historical ADR corpus these pages distilled is retired: the
-[ADR mapping](#adr-mapping) below resolves every record number to its
-destination, and git history is the archive.
+verified surface. One tail form is semantically special: a pull request that
+landed inside another pull request's merge (a stack merged from its top leaves
+inner pull requests with no first-parent merge commits) cites its carrier with
+the exact tail `` PR #N (`branch-ref`; via PR #M `carrier-branch`) ``, and the
+reference is accepted only when the carrier's number and branch match a
+first-parent merge commit and `#N` itself has none.
+`scripts/check_docs_consistency.py` enforces this form. The historical ADR
+corpus these pages distilled is retired: the [ADR mapping](#adr-mapping) below
+resolves every record number to its destination, and git history is the archive.
 
 Conventions: pages state implemented behavior, plus the committed unimplemented
 functionality that constrains it, per the three prose categories

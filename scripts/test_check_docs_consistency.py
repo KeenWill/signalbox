@@ -2868,10 +2868,12 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertEqual(failure_categories(failures), [])
 
     def test_verification_ref_rejects_unmerged_carrier(self) -> None:
+        carrier_number = 88
+        carrier_branch = "agent/also-missing"
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
-            "Verified through PR #99 (`agent/missing`; via PR #88 "
-            "`agent/also-missing`).\n\n"
+            f"Verified through PR #99 (`agent/missing`; via PR #{carrier_number} "
+            f"`{carrier_branch}`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n\n"
             "## Repeat\n",
@@ -2885,15 +2887,17 @@ class DocsConsistencyTests(unittest.TestCase):
             ["spec-verification-history"],
         )
         self.assertIn(
-            "cites carrier PR #88 (`agent/also-missing`)",
+            f"cites carrier PR #{carrier_number} (`{carrier_branch}`)",
             failures[0].message,
         )
 
     def test_verification_ref_rejects_carrier_with_wrong_branch(self) -> None:
+        carrier_number = 12
+        carrier_branch = "agent/not-the-merged-branch"
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
-            "Verified through PR #99 (`agent/missing`; via PR #12 "
-            "`agent/not-the-merged-branch`).\n\n"
+            f"Verified through PR #99 (`agent/missing`; via PR #{carrier_number} "
+            f"`{carrier_branch}`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n\n"
             "## Repeat\n",
@@ -2907,7 +2911,31 @@ class DocsConsistencyTests(unittest.TestCase):
             ["spec-verification-history"],
         )
         self.assertIn(
-            "cites carrier PR #12 (`agent/not-the-merged-branch`)",
+            f"cites carrier PR #{carrier_number} (`{carrier_branch}`)",
+            failures[0].message,
+        )
+
+    def test_verification_ref_ignores_carrier_prose_outside_the_exact_form(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`; not via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
             failures[0].message,
         )
 
