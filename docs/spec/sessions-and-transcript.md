@@ -913,11 +913,6 @@ outcome with the parent event, exact spawn request, and user command provenance.
 No path deletes the child or its history, and neither a continued child nor a
 terminated child can become a silent orphan or silent kill.
 
-One parent may have at most 32 active direct children. The fixed bound is part
-of admission, needs no configuration knob, and does not bound completed
-relationships or descendant depth. Exceeding it is a typed spawn refusal and
-creates no child.
-
 Delegation messages are immutable, bounded, nonempty content records with a
 distinct `DelegationMessageId`, the spawning relationship, exact sender and
 recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
