@@ -12605,49 +12605,7 @@ mod tests {
                 ModelSelectionOverride::UseSessionDefault,
             ),
         };
-        let cases = [
-            (
-                TerminalAttemptEndReconstitutionInput::without_stop(
-                    UnstoppedAttemptDisposition::TurnCompleted,
-                ),
-                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
-            ),
-            (
-                TerminalAttemptEndReconstitutionInput::without_stop(
-                    UnstoppedAttemptDisposition::Lost,
-                ),
-                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
-            ),
-            (
-                TerminalAttemptEndReconstitutionInput::after_cancellation(
-                    CancellationStopDisposition::TurnCompleted,
-                    interrupt,
-                ),
-                successor.record_with(
-                    &session,
-                    OriginRecordFacts {
-                        order: successor_order,
-                        delivery: interrupt_delivery,
-                        state: AcceptedInputTurnSchedulingRecordState::Queued,
-                    },
-                ),
-            ),
-            (
-                TerminalAttemptEndReconstitutionInput::after_cancellation(
-                    CancellationStopDisposition::Lost,
-                    interrupt,
-                ),
-                successor.record_with(
-                    &session,
-                    OriginRecordFacts {
-                        order: successor_order,
-                        delivery: interrupt_delivery,
-                        state: AcceptedInputTurnSchedulingRecordState::Queued,
-                    },
-                ),
-            ),
-        ];
-        let assert_case = |(completing_attempt_end, queued_record)| {
+        let assert_case = |completing_attempt_end, queued_record| {
             let terminal_record = predecessor.record(
                 &session,
                 AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
@@ -12767,16 +12725,45 @@ mod tests {
                 ]
             );
         };
-        let [
-            completed_direct,
-            completed_lost,
-            completed_cancelled,
-            completed_cancelled_lost,
-        ] = cases;
-        assert_case(completed_direct);
-        assert_case(completed_lost);
-        assert_case(completed_cancelled);
-        assert_case(completed_cancelled_lost);
+
+        assert_case(
+            TerminalAttemptEndReconstitutionInput::without_stop(
+                UnstoppedAttemptDisposition::TurnCompleted,
+            ),
+            successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
+        );
+        assert_case(
+            TerminalAttemptEndReconstitutionInput::without_stop(UnstoppedAttemptDisposition::Lost),
+            successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
+        );
+        assert_case(
+            TerminalAttemptEndReconstitutionInput::after_cancellation(
+                CancellationStopDisposition::TurnCompleted,
+                interrupt,
+            ),
+            successor.record_with(
+                &session,
+                OriginRecordFacts {
+                    order: successor_order,
+                    delivery: interrupt_delivery,
+                    state: AcceptedInputTurnSchedulingRecordState::Queued,
+                },
+            ),
+        );
+        assert_case(
+            TerminalAttemptEndReconstitutionInput::after_cancellation(
+                CancellationStopDisposition::Lost,
+                interrupt,
+            ),
+            successor.record_with(
+                &session,
+                OriginRecordFacts {
+                    order: successor_order,
+                    delivery: interrupt_delivery,
+                    state: AcceptedInputTurnSchedulingRecordState::Queued,
+                },
+            ),
+        );
     }
 
     /// S02 / S04 / INV-006 / INV-009: one physical attempt identity cannot
@@ -12965,49 +12952,7 @@ mod tests {
                 ModelSelectionOverride::UseSessionDefault,
             ),
         };
-        let cases = [
-            (
-                TerminalAttemptEndReconstitutionInput::without_stop(
-                    UnstoppedAttemptDisposition::TurnRefused,
-                ),
-                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
-            ),
-            (
-                TerminalAttemptEndReconstitutionInput::without_stop(
-                    UnstoppedAttemptDisposition::Lost,
-                ),
-                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
-            ),
-            (
-                TerminalAttemptEndReconstitutionInput::after_cancellation(
-                    CancellationStopDisposition::TurnRefused,
-                    interrupt,
-                ),
-                successor.record_with(
-                    &session,
-                    OriginRecordFacts {
-                        order: successor_order,
-                        delivery: interrupt_delivery,
-                        state: AcceptedInputTurnSchedulingRecordState::Queued,
-                    },
-                ),
-            ),
-            (
-                TerminalAttemptEndReconstitutionInput::after_cancellation(
-                    CancellationStopDisposition::Lost,
-                    interrupt,
-                ),
-                successor.record_with(
-                    &session,
-                    OriginRecordFacts {
-                        order: successor_order,
-                        delivery: interrupt_delivery,
-                        state: AcceptedInputTurnSchedulingRecordState::Queued,
-                    },
-                ),
-            ),
-        ];
-        let assert_case = |(refusing_attempt_end, queued_record)| {
+        let assert_case = |refusing_attempt_end, queued_record| {
             let terminal_record = predecessor.record(
                 &session,
                 AcceptedInputTurnSchedulingRecordState::TerminalRefused {
@@ -13085,16 +13030,45 @@ mod tests {
                 ]
             );
         };
-        let [
-            refused_direct,
-            refused_lost,
-            refused_cancelled,
-            refused_cancelled_lost,
-        ] = cases;
-        assert_case(refused_direct);
-        assert_case(refused_lost);
-        assert_case(refused_cancelled);
-        assert_case(refused_cancelled_lost);
+
+        assert_case(
+            TerminalAttemptEndReconstitutionInput::without_stop(
+                UnstoppedAttemptDisposition::TurnRefused,
+            ),
+            successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
+        );
+        assert_case(
+            TerminalAttemptEndReconstitutionInput::without_stop(UnstoppedAttemptDisposition::Lost),
+            successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
+        );
+        assert_case(
+            TerminalAttemptEndReconstitutionInput::after_cancellation(
+                CancellationStopDisposition::TurnRefused,
+                interrupt,
+            ),
+            successor.record_with(
+                &session,
+                OriginRecordFacts {
+                    order: successor_order,
+                    delivery: interrupt_delivery,
+                    state: AcceptedInputTurnSchedulingRecordState::Queued,
+                },
+            ),
+        );
+        assert_case(
+            TerminalAttemptEndReconstitutionInput::after_cancellation(
+                CancellationStopDisposition::Lost,
+                interrupt,
+            ),
+            successor.record_with(
+                &session,
+                OriginRecordFacts {
+                    order: successor_order,
+                    delivery: interrupt_delivery,
+                    state: AcceptedInputTurnSchedulingRecordState::Queued,
+                },
+            ),
+        );
     }
 
     /// S02 / INV-005: assistant text cannot name a refused call because only

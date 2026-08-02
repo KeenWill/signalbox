@@ -154,8 +154,8 @@ mod tests {
     #[test]
     fn s07_inv008_inv028_interrupt_carries_target_and_choices() {
         let expected_active_turn = turn_id(1);
-        let descendant_scope = DescendantTerminationScope::ParentAlone;
         let configuration = choices();
+        let descendant_scope = DescendantTerminationScope::ParentAlone;
         let request = DeliveryRequest::Interrupt {
             expected_active_turn,
             descendant_scope,
@@ -256,6 +256,14 @@ mod tests {
             interrupt,
             DeliveryRequest::Interrupt {
                 expected_active_turn: turn_id(2),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration,
+            }
+        );
+        assert_eq!(
+            interrupt,
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration,
             }

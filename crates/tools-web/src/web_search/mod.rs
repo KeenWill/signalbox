@@ -29,6 +29,8 @@ mod evidence_tests;
 #[cfg(test)]
 mod executor_tests;
 #[cfg(test)]
+mod live_smoke_tests;
+#[cfg(test)]
 mod property_support;
 #[cfg(test)]
 mod redaction_property_tests;

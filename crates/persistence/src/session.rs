@@ -576,3 +576,89 @@ fn decode_selection(
         system_prompt,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
+    use sqlx::types::Uuid;
+
+    use super::{SessionCorruption, SessionRepositoryError, decode_provenance};
+
+    fn spawning_request() -> Uuid {
+        Uuid::from_u128(1)
+    }
+
+    fn corruption(error: SessionRepositoryError) -> SessionCorruption {
+        let SessionRepositoryError::Corruption(corruption) = error else {
+            panic!("the mapping failure is durable corruption")
+        };
+        corruption
+    }
+
+    /// S18 / INV-003: the durable delegated spelling retains its exact request.
+    #[test]
+    fn s18_inv003_delegated_provenance_decodes_exactly() {
+        let request = spawning_request();
+        let provenance = decode_provenance(
+            String::from("delegated"),
+            String::from("none"),
+            Some(request),
+        )
+        .expect("the complete delegated storage shape decodes");
+
+        assert_eq!(
+            provenance.cause(),
+            SessionCreationCause::Delegated {
+                spawning_request: signalbox_domain::ToolRequestId::from_uuid(request),
+            }
+        );
+        assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
+    }
+
+    /// S18 / INV-003: delegated storage cannot omit its spawning request.
+    #[test]
+    fn s18_inv003_delegated_provenance_requires_spawning_request() {
+        let error = decode_provenance(String::from("delegated"), String::from("none"), None)
+            .expect_err("delegated provenance without its request is corrupt");
+
+        assert_eq!(
+            corruption(error),
+            SessionCorruption::Inconsistent("creation cause provenance")
+        );
+    }
+
+    /// S01 / INV-003: user-initiated storage cannot claim a spawning request.
+    #[test]
+    fn s01_inv003_user_initiated_provenance_rejects_spawning_request() {
+        let error = decode_provenance(
+            String::from("owner_initiated"),
+            String::from("none"),
+            Some(spawning_request()),
+        )
+        .expect_err("user-initiated provenance cannot carry delegated authority");
+
+        assert_eq!(
+            corruption(error),
+            SessionCorruption::Inconsistent("creation cause provenance")
+        );
+    }
+
+    /// S18 / INV-003: delegated creation cannot acquire transcript ancestry.
+    #[test]
+    fn s18_inv003_delegated_provenance_rejects_non_none_ancestry() {
+        let error = decode_provenance(
+            String::from("delegated"),
+            String::from("single_source"),
+            Some(spawning_request()),
+        )
+        .expect_err("delegated provenance cannot inherit transcript ancestry");
+
+        assert_eq!(
+            corruption(error),
+            SessionCorruption::Unsupported {
+                field: "ancestry kind",
+                value: String::from("single_source"),
+            }
+        );
+    }
+}

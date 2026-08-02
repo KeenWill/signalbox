@@ -17,7 +17,7 @@ input-delivery surface and its user-reachable steering boundary were verified
 through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
 provenance and creation mode were verified through PR #311
 (`agent/session-templates-spec`). Delegated creation provenance and its durable
-mapping were verified through `agent/delegation-persistence-relations-split`.
+mapping were verified through PR #431 (`agent/delegation-creation-provenance`).
 The append-only context-compaction record and projection were verified through
 PR #312 (`agent/context-compaction-core`); the command path and canonical
 visible-range selection were verified through PR #314
@@ -528,11 +528,11 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because both `UserInitiated` and `Delegated` creation lack actor attribution,
-and neither cause grants or implies visibility, the implemented default view is
-exactly all non-archived sessions. No visibility taxonomy, creation-time
-override, or inference from creation provenance or missing attribution is
-stored. The dependency for future creation-derived visibility is recorded in
+Because `UserInitiated` is the only constructible creation cause and every
+current session-creation boundary lacks actor attribution, the implemented
+default view is exactly all non-archived sessions. No visibility taxonomy,
+creation-time override, or inference from missing attribution is stored. The
+dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 ## The session aggregate

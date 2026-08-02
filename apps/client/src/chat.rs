@@ -7,8 +7,9 @@ use std::{
 };
 
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent, ModelSelection,
-    ServerMessage, SessionEvent, SystemPromptMember, ToolDecision, TurnState,
+    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, DescendantTerminationScope, ErrorCode,
+    InputContent, ModelSelection, ServerMessage, SessionEvent, SystemPromptMember, ToolDecision,
+    TurnState,
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, ReadBuf},
@@ -1039,6 +1040,7 @@ async fn stop(
         active_turn,
         InputContent::new(content),
         defaults_version,
+        DescendantTerminationScope::ParentAlone,
     )
     .await
 }
