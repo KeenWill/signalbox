@@ -5,8 +5,8 @@ use std::num::NonZeroU64;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DelegationMessageId, DurableCommandId, NonEmptyUnicodeText, SessionCreationProvenance,
-    SessionId, ToolRequest, ToolRequestId, TurnId,
+    DelegationMessageId, DurableCommandId, NonEmptyUnicodeText, SessionId, ToolRequest,
+    ToolRequestId, TurnId,
 };
 
 const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
@@ -1006,10 +1006,6 @@ impl SessionDelegation {
         &self.events
     }
 
-    pub const fn child_creation_provenance(&self) -> SessionCreationProvenance {
-        SessionCreationProvenance::delegated(self.spawning_request)
-    }
-
     pub fn register_wait(
         &self,
         awaiting_request: &DelegationAwaitRequest,
@@ -1888,7 +1884,7 @@ mod tests {
 mod aggregate_tests {
     use super::*;
     use crate::{
-        NormalizedToolArguments, ToolCallProposal, ToolName, ToolRequestOrdinal,
+        ModelCallId, NormalizedToolArguments, ToolCallProposal, ToolName, ToolRequestOrdinal,
         model_execution::completed_turn_fixture,
         test_support::{
             command_id, delegation_message_id, model_call_id, session_id, tool_request_id, turn_id,
@@ -1897,20 +1893,54 @@ mod aggregate_tests {
 
     const TEST_TASK: &str = "inspect aggregate work";
 
-    /// Canonical aggregate request fixture: `source` selects the source
-    /// session, while `request_seed` independently derives request +1000, turn
-    /// +10, call +20, and ordinal zero.
+    #[derive(Clone, Copy)]
+    enum RequestFixture {
+        Spawn,
+        Await,
+        ParentMessage,
+        ChildMessage,
+        AnotherParentMessage,
+    }
+
+    impl RequestFixture {
+        /// Canonical request identities are deliberately decorrelated across
+        /// each named fixture. Reusing one fixture is the explicit way a test
+        /// requests the same tool-request authority.
+        fn identities(self) -> (ToolRequestId, TurnId, ModelCallId) {
+            match self {
+                Self::Spawn => (tool_request_id(101), turn_id(43), model_call_id(89)),
+                Self::Await => (tool_request_id(103), turn_id(41), model_call_id(83)),
+                Self::ParentMessage => (tool_request_id(107), turn_id(37), model_call_id(79)),
+                Self::ChildMessage => (tool_request_id(109), turn_id(31), model_call_id(73)),
+                Self::AnotherParentMessage => {
+                    (tool_request_id(113), turn_id(29), model_call_id(71))
+                }
+            }
+        }
+
+        fn source(self) -> SessionId {
+            match self {
+                Self::ChildMessage => session_id(3),
+                Self::Spawn | Self::Await | Self::ParentMessage | Self::AnotherParentMessage => {
+                    session_id(2)
+                }
+            }
+        }
+    }
+
+    /// Canonical aggregate request fixture. Each named logical purpose owns its
+    /// source and fixed, decorrelated identity.
     fn named_request(
-        source: u128,
-        request_seed: u128,
+        fixture: RequestFixture,
         name: &str,
         arguments: serde_json::Value,
     ) -> ToolRequest {
+        let (request, turn, call) = fixture.identities();
         ToolRequest::from_model_proposal(
-            tool_request_id(request_seed + 1000),
-            session_id(source),
-            turn_id(request_seed + 10),
-            model_call_id(request_seed + 20),
+            request,
+            fixture.source(),
+            turn,
+            call,
             ToolRequestOrdinal::from_u32(0),
             ToolCallProposal::new(
                 ToolName::try_new(name.into()).expect("valid fixture name"),
@@ -1920,16 +1950,11 @@ mod aggregate_tests {
         )
     }
 
-    fn spawn_request(
-        parent: u128,
-        request_seed: u128,
-        policy: ChildRelationshipPolicy,
-    ) -> DelegatedSpawnRequest {
+    fn spawn_request(policy: ChildRelationshipPolicy) -> DelegatedSpawnRequest {
         let relationship = relationship_argument(policy);
         DelegatedSpawnRequest::parse(
             named_request(
-                parent,
-                request_seed,
+                RequestFixture::Spawn,
                 SPAWN_SESSION_TOOL_NAME,
                 serde_json::json!({
                     "relationship": relationship,
@@ -1943,15 +1968,13 @@ mod aggregate_tests {
     }
 
     fn await_request(
-        parent: u128,
-        request_seed: u128,
+        fixture: RequestFixture,
         child: SessionId,
         mode: DelegationWaitMode,
     ) -> DelegationAwaitRequest {
         DelegationAwaitRequest::parse(
             named_request(
-                parent,
-                request_seed,
+                fixture,
                 AWAIT_SESSION_TOOL_NAME,
                 serde_json::json!({
                     "child_session_id": child.as_uuid().to_string(),
@@ -1965,15 +1988,13 @@ mod aggregate_tests {
     }
 
     fn message_request(
-        source: u128,
-        request_seed: u128,
+        fixture: RequestFixture,
         peer: SessionId,
         value: &str,
     ) -> DelegationMessageRequest {
         DelegationMessageRequest::parse(
             named_request(
-                source,
-                request_seed,
+                fixture,
                 SEND_SESSION_MESSAGE_TOOL_NAME,
                 serde_json::json!({
                     "content": value,
@@ -1990,18 +2011,38 @@ mod aggregate_tests {
         DelegationContent::try_new(value.into()).expect("bounded fixture content")
     }
 
-    fn relation(parent: u128, child: u128, policy: ChildRelationshipPolicy) -> SessionDelegation {
-        SessionDelegation::spawn_fixture(spawn_request(parent, 1, policy), session_id(child))
+    fn relation(policy: ChildRelationshipPolicy) -> SessionDelegation {
+        SessionDelegation::spawn_fixture(spawn_request(policy), session_id(3))
             .expect("fixture parent and child are distinct")
     }
 
+    fn completed_child_relation(policy: ChildRelationshipPolicy) -> SessionDelegation {
+        SessionDelegation::spawn_fixture(spawn_request(policy), session_id(1))
+            .expect("completed-turn fixture child is distinct from parent")
+    }
+
+    #[derive(Clone, Copy)]
+    enum TerminationAuthoritySource {
+        Parent,
+        ForeignParent,
+    }
+
+    impl TerminationAuthoritySource {
+        fn session(self) -> SessionId {
+            match self {
+                Self::Parent => session_id(2),
+                Self::ForeignParent => session_id(9),
+            }
+        }
+    }
+
     fn parent_authority(
-        parent: u128,
+        source: TerminationAuthoritySource,
         kind: ParentTerminationKind,
         scope: DescendantTerminationScope,
     ) -> ParentTerminationAuthority {
         ParentTerminationAuthority {
-            parent: session_id(parent),
+            parent: source.session(),
             turn: turn_id(5),
             command: command_id(6),
             kind,
@@ -2079,14 +2120,14 @@ mod aggregate_tests {
         assert_standard_error::<DelegationTransitionError>();
     }
 
-    /// S18 / INV-003 / INV-010: spawn retains sealed request facts and no ancestry.
+    /// S18 / INV-010: spawn retains the exact sealed request facts.
     #[test]
-    fn s18_inv003_inv010_aggregate_spawn_retains_policy_task_and_provenance() {
+    fn s18_inv010_aggregate_spawn_retains_policy_task_and_provenance() {
         let policy = ChildRelationshipPolicy::Bound {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let request = spawn_request(2, 1, policy);
+        let request = spawn_request(policy);
         let spawning_request = request.request().id();
         let relation =
             SessionDelegation::spawn_fixture(request, session_id(3)).expect("distinct child");
@@ -2095,20 +2136,12 @@ mod aggregate_tests {
         assert_eq!(relation.task(), &content(TEST_TASK));
         assert_eq!(relation.policy(), policy);
         assert_eq!(relation.events()[0].ordinal().get(), 1);
-        assert_eq!(
-            relation.child_creation_provenance().cause(),
-            crate::SessionCreationCause::Delegated { spawning_request }
-        );
-        assert_eq!(
-            relation.child_creation_provenance().ancestry(),
-            crate::TranscriptAncestry::None
-        );
     }
 
     /// S18 / INV-010: a session cannot delegate to itself, and rejection is lossless.
     #[test]
     fn s18_inv010_same_session_spawn_rejection_returns_exact_inputs() {
-        let request = spawn_request(2, 1, ChildRelationshipPolicy::Background);
+        let request = spawn_request(ChildRelationshipPolicy::Background);
         let child = session_id(2);
         let error = SessionDelegation::spawn_fixture(request.clone(), child)
             .expect_err("a child must be distinct from its parent");
@@ -2122,8 +2155,12 @@ mod aggregate_tests {
     /// S18 / INV-010: foreground wait retains the exact child subject.
     #[test]
     fn s18_inv010_foreground_registration_yields_exact_child_wait() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let awaiting = await_request(2, 2, relation.child(), DelegationWaitMode::Foreground);
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Foreground,
+        );
         let expected_request = awaiting.request().id();
         let wait = relation
             .register_wait(&awaiting)
@@ -2140,8 +2177,12 @@ mod aggregate_tests {
     /// S18 / INV-010: background wait releases the parent turn subject.
     #[test]
     fn s18_inv010_background_registration_has_no_child_wait() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let awaiting = await_request(2, 2, relation.child(), DelegationWaitMode::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
         let wait = relation
             .register_wait(&awaiting)
             .expect("parent may await its exact child");
@@ -2153,8 +2194,12 @@ mod aggregate_tests {
     /// S18 / INV-010: a typed await for another child cannot cross relations.
     #[test]
     fn s18_inv010_wait_registration_rejects_relation_child_cross_wiring() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let awaiting = await_request(2, 2, session_id(9), DelegationWaitMode::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            session_id(9),
+            DelegationWaitMode::Background,
+        );
         let error = relation
             .register_wait(&awaiting)
             .expect_err("another child cannot reuse this relation");
@@ -2168,8 +2213,12 @@ mod aggregate_tests {
     /// S18 / INV-010: one request cannot both spawn and await a child.
     #[test]
     fn s18_inv010_wait_registration_requires_distinct_parent_work() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let awaiting = await_request(2, 1, relation.child(), DelegationWaitMode::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Spawn,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
         let error = relation
             .register_wait(&awaiting)
             .expect_err("spawn request identity cannot also register a wait");
@@ -2183,9 +2232,17 @@ mod aggregate_tests {
     /// S18 / INV-010: messages are relation-directed and request-provenanced.
     #[test]
     fn s18_inv010_messages_are_bidirectional_and_ordered() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let parent_message = message_request(2, 3, relation.child(), "parent update");
-        let child_message = message_request(3, 4, relation.parent(), "child update");
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let parent_message = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "parent update",
+        );
+        let child_message = message_request(
+            RequestFixture::ChildMessage,
+            relation.parent(),
+            "child update",
+        );
         let (relation, first) = relation
             .deliver_message(parent_message, delegation_message_id(5))
             .expect("parent message is related");
@@ -2209,8 +2266,8 @@ mod aggregate_tests {
     /// S18 / INV-010: a typed message for another peer returns exact inputs.
     #[test]
     fn s18_inv010_message_rejects_relation_peer_cross_wiring_and_returns_input() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let request = message_request(2, 3, session_id(9), "misdirected");
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let request = message_request(RequestFixture::ParentMessage, session_id(9), "misdirected");
         let id = delegation_message_id(5);
         let error = relation
             .clone()
@@ -2226,8 +2283,8 @@ mod aggregate_tests {
     /// S18 / INV-012: one logical message request appends at most one event.
     #[test]
     fn s18_inv012_message_request_replay_returns_persisted_event() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let request = message_request(2, 3, relation.child(), "once");
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let request = message_request(RequestFixture::ParentMessage, relation.child(), "once");
         let (relation, first) = relation
             .deliver_message(request.clone(), delegation_message_id(5))
             .expect("first delivery appends");
@@ -2242,9 +2299,13 @@ mod aggregate_tests {
     /// S18 / INV-012: a message identity cannot name another logical request.
     #[test]
     fn s18_inv012_duplicate_message_identity_returns_attempted_request() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let first = message_request(2, 3, relation.child(), "first");
-        let second = message_request(2, 4, relation.child(), "second");
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let first = message_request(RequestFixture::ParentMessage, relation.child(), "first");
+        let second = message_request(
+            RequestFixture::AnotherParentMessage,
+            relation.child(),
+            "second",
+        );
         let id = delegation_message_id(5);
         let (relation, _) = relation
             .deliver_message(first, id)
@@ -2263,9 +2324,10 @@ mod aggregate_tests {
     /// S18 / INV-012: a replay cannot change content under one request authority.
     #[test]
     fn s18_inv012_conflicting_message_replay_reports_code_and_returns_inputs() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
-        let first = message_request(2, 3, relation.child(), "first");
-        let conflicting = message_request(2, 3, relation.child(), "changed");
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let first = message_request(RequestFixture::ParentMessage, relation.child(), "first");
+        let conflicting =
+            message_request(RequestFixture::ParentMessage, relation.child(), "changed");
         let (relation, _) = relation
             .deliver_message(first, delegation_message_id(5))
             .expect("first request authority appends");
@@ -2287,7 +2349,7 @@ mod aggregate_tests {
     /// S18 / INV-010: returned child result terminalizes exactly once.
     #[test]
     fn s18_inv010_returned_result_terminalizes_and_replays() {
-        let relation = relation(2, 1, ChildRelationshipPolicy::Background);
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background);
         let outcome = returned_outcome("child result");
         let relation = relation
             .record_outcome(outcome.clone())
@@ -2305,7 +2367,7 @@ mod aggregate_tests {
     /// S18 / INV-010: a different authority cannot append after terminalization.
     #[test]
     fn s18_inv010_already_terminal_rejection_reports_code_and_returns_inputs() {
-        let relation = relation(2, 1, ChildRelationshipPolicy::Background)
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background)
             .record_outcome(returned_outcome("terminal result"))
             .expect("returned result terminalizes relation");
         let outcome = cancelled_outcome(relation.child());
@@ -2330,9 +2392,9 @@ mod aggregate_tests {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let relation = relation(2, 3, policy);
+        let relation = relation(policy);
         let authority = parent_authority(
-            2,
+            TerminationAuthoritySource::Parent,
             ParentTerminationKind::Stopped,
             DescendantTerminationScope::ParentAndDescendants,
         );
@@ -2361,7 +2423,7 @@ mod aggregate_tests {
     /// S18 / INV-010: another child's sealed result returns unchanged.
     #[test]
     fn s18_inv010_returned_result_rejects_foreign_child_proof() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
         let outcome = returned_outcome("foreign child result");
         let error = relation
             .clone()
@@ -2376,10 +2438,14 @@ mod aggregate_tests {
     /// S18 / INV-010: a terminal result still accepts a late wait registration.
     #[test]
     fn s18_inv010_terminal_result_accepts_late_wait() {
-        let relation = relation(2, 1, ChildRelationshipPolicy::Background)
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background)
             .record_outcome(returned_outcome("late result"))
             .expect("child result terminalizes relation");
-        let awaiting = await_request(2, 2, relation.child(), DelegationWaitMode::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
         let wait = relation
             .register_wait(&awaiting)
             .expect("late wait registration remains valid");
@@ -2391,10 +2457,10 @@ mod aggregate_tests {
     /// S18 / INV-010: messages remain available after child terminalization.
     #[test]
     fn s18_inv010_message_is_recorded_after_child_terminalizes() {
-        let relation = relation(2, 1, ChildRelationshipPolicy::Background)
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background)
             .record_outcome(returned_outcome("done"))
             .expect("child result terminalizes relation");
-        let request = message_request(2, 3, relation.child(), "afterward");
+        let request = message_request(RequestFixture::ParentMessage, relation.child(), "afterward");
         let (relation, event) = relation
             .deliver_message(request, delegation_message_id(5))
             .expect("terminal relation still records messages");
@@ -2406,7 +2472,7 @@ mod aggregate_tests {
     /// S19 / INV-010: child cancellation retains child-turn provenance.
     #[test]
     fn s19_inv010_child_cancel_records_child_turn_provenance() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
         let outcome = cancelled_outcome(relation.child());
         let relation = relation
             .record_outcome(outcome)
@@ -2427,9 +2493,9 @@ mod aggregate_tests {
             on_parent_stopped: BoundChildAction::KeepRunning,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let relation = relation(2, 3, policy);
+        let relation = relation(policy);
         let authority = parent_authority(
-            2,
+            TerminationAuthoritySource::Parent,
             ParentTerminationKind::Stopped,
             DescendantTerminationScope::ParentAndDescendants,
         );
@@ -2447,9 +2513,9 @@ mod aggregate_tests {
     /// S19 / INV-012: continue-running replay does not append another event.
     #[test]
     fn s19_inv012_continue_running_replay_is_idempotent() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
         let authority = parent_authority(
-            2,
+            TerminationAuthoritySource::Parent,
             ParentTerminationKind::Stopped,
             DescendantTerminationScope::ParentAndDescendants,
         );
@@ -2471,9 +2537,9 @@ mod aggregate_tests {
     /// S19 / INV-010: background child survives parent stop explicitly.
     #[test]
     fn s19_inv010_background_child_survives_parent_stop_with_typed_outcome() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
         let authority = parent_authority(
-            2,
+            TerminationAuthoritySource::Parent,
             ParentTerminationKind::Stopped,
             DescendantTerminationScope::ParentAndDescendants,
         );
@@ -2497,9 +2563,9 @@ mod aggregate_tests {
     /// S19 / INV-010: background child survives parent cancellation explicitly.
     #[test]
     fn s19_inv010_background_child_survives_parent_cancel_with_typed_outcome() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
         let authority = parent_authority(
-            2,
+            TerminationAuthoritySource::Parent,
             ParentTerminationKind::Cancelled,
             DescendantTerminationScope::ParentAndDescendants,
         );
@@ -2529,9 +2595,9 @@ mod aggregate_tests {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let relation = relation(2, 3, policy);
+        let relation = relation(policy);
         let authority = parent_authority(
-            2,
+            TerminationAuthoritySource::Parent,
             ParentTerminationKind::Stopped,
             DescendantTerminationScope::ParentAndDescendants,
         );
@@ -2558,9 +2624,9 @@ mod aggregate_tests {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let relation = relation(2, 3, policy);
+        let relation = relation(policy);
         let authority = parent_authority(
-            2,
+            TerminationAuthoritySource::Parent,
             ParentTerminationKind::Cancelled,
             DescendantTerminationScope::ParentAndDescendants,
         );
@@ -2587,9 +2653,9 @@ mod aggregate_tests {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let relation = relation(2, 3, policy);
+        let relation = relation(policy);
         let authority = parent_authority(
-            2,
+            TerminationAuthoritySource::Parent,
             ParentTerminationKind::Stopped,
             DescendantTerminationScope::ParentAndDescendants,
         );
@@ -2608,9 +2674,9 @@ mod aggregate_tests {
     /// S19 / INV-010: foreign parent authority returns aggregate and outcome.
     #[test]
     fn s19_inv010_parent_outcome_rejects_foreign_termination_authority() {
-        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
+        let relation = relation(ChildRelationshipPolicy::Background);
         let authority = parent_authority(
-            9,
+            TerminationAuthoritySource::ForeignParent,
             ParentTerminationKind::Stopped,
             DescendantTerminationScope::ParentAndDescendants,
         );

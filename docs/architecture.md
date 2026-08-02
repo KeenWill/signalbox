@@ -167,14 +167,16 @@ regardless of placement.
 
 Session creation cause and transcript ancestry are independent immutable facts.
 [sessions-and-transcript](spec/sessions-and-transcript.md) defines user
-initiation and an exact spawning tool request as the two session-creation
-causes, while ancestry remains none or one exact source frontier. Session
-configuration defaults are a separate versioned value: creation establishes the
-first version, while later updates affect only future input acceptance. The
-owning [turn-lifecycle contract](spec/turn-lifecycle-and-scheduling.md) defines
-delegated wait, result, and parent-termination transitions. Forking initializes
-a user-created session from a selected transcript frontier without claiming that
-the new session was delegated. Future merging remains an open
+initiation and commits an exact spawning tool request as the delegated
+session-creation cause, while ancestry remains none or one exact source
+frontier. Session configuration defaults are a separate versioned value:
+creation establishes the first version, while later updates affect only future
+input acceptance. The owning
+[turn-lifecycle contract](spec/turn-lifecycle-and-scheduling.md) defines
+delegated wait, result, and parent-termination transitions. Imported-frontier
+forking initializes a user-created session without claiming that the new session
+was delegated. Native frontier selection remains unimplemented. Future merging
+remains an open
 [transcript-ancestry question](open-questions.md#transcript-ancestry).
 
 ## Dependency direction

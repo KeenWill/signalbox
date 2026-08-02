@@ -761,7 +761,10 @@ never from model arguments.
   child wait and produces its tool result only when the child's delivered
   content or typed terminal outcome exists. Background records delivery and
   immediately returns a registration receipt; completion later wakes the parent.
-  A result already present is delivered immediately in either mode.
+  When the result already exists, background still records delivery and returns
+  `session_await_registered`, while foreground returns the child outcome.
+  Replaying an already delivered wait returns that same mode-specific receipt or
+  outcome.
 - `send_session_message` takes the related peer identity and bounded nonempty
   content. It verifies that the invoker is exactly the parent or child, appends
   the next relationship message, and returns its identity and ordinal. Either

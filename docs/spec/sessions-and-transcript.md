@@ -34,10 +34,9 @@ A session is one durable, independently browsable conversation with its own
 records two required, independent, immutable creation facts, paired as
 `SessionCreationProvenance` (INV-003):
 
-- **Creation cause** — why the session exists. The constructible variants are
-  `UserInitiated` and `Delegated { spawning_request }`. The delegated variant is
-  produced only by the spawning-request path and fixes ancestry to `None`;
-  application and schedule causes are not represented as placeholders.
+- **Creation cause** — why the session exists. The only constructible variant in
+  this foundation slice is `UserInitiated`. Application, schedule, and
+  delegation causes are not represented as placeholders.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one
@@ -48,6 +47,11 @@ records two required, independent, immutable creation facts, paired as
 
 Why: deriving one fact from the other would make ordinary forks look delegated
 and force delegated children to inherit transcripts.
+
+**Committed unimplemented functionality.** The delegation persistence slice in
+this stack introduces `Delegated { spawning_request }` with durable storage and
+fixes its ancestry independently to `None`. No present session-provenance value
+or persistence path exposes that delegated creation cause.
 
 Neither fact can be rewritten after creation, and later source-session activity
 cannot change a descendant's recorded ancestry (INV-030). The `session` table
@@ -492,11 +496,11 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because both `UserInitiated` and `Delegated` creation lack actor attribution,
-and neither cause grants or implies visibility, the implemented default view is
-exactly all non-archived sessions. No visibility taxonomy, creation-time
-override, or inference from creation provenance or missing attribution is
-stored. The dependency for future creation-derived visibility is recorded in
+Because `UserInitiated` is the only constructible creation cause and every
+current session-creation boundary lacks actor attribution, the implemented
+default view is exactly all non-archived sessions. No visibility taxonomy,
+creation-time override, or inference from missing attribution is stored. The
+dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 ## The session aggregate
@@ -880,12 +884,13 @@ edges of [model-call-execution](model-call-execution.md).
 ## Session delegation
 
 This section is the foundation proposal at the bottom of the session-delegation
-stack and becomes verified only with that stack's scheduling and tool/client
-pull requests. A delegated child is a distinct, independently browsable session.
-Its `SessionCreationCause::Delegated` names the exact spawning `ToolRequestId`;
-its `TranscriptAncestry` is independently `None`. Delegation does not copy,
-reference, merge, or expose the parent transcript, and it does not widen the
-none-or-one ancestry baseline.
+stack and becomes verified only with that stack's persistence, scheduling, and
+tool/client pull requests. A delegated child is a distinct, independently
+browsable session. The persistence slice introduces
+`SessionCreationCause::Delegated { spawning_request }` and stores the exact
+spawning `ToolRequestId`; `TranscriptAncestry` independently remains `None`.
+Delegation does not copy, reference, merge, or expose the parent transcript, and
+it does not widen the none-or-one ancestry baseline.
 
 The child copies the complete `SessionConfigurationDefaults` value from the
 immutable defaults epoch frozen to the parent turn that owns the spawning
@@ -902,9 +907,8 @@ nor an unsealed relationship slice as evidence of that uniqueness. Aggregate
 construction remains sealed in the foundation slice; the persistence slice in
 this stack admits a spawn only from the complete parent relationship inventory
 held under the spawn transaction's lock, together with the child-session
-uniqueness check.
-The relationship records the exact parent session and turn, child session, and
-one parent-chosen policy:
+uniqueness check. The relationship records the exact parent session and turn,
+child session, and one parent-chosen policy:
 
 - `Background` never derives a child stop or cancellation from a parent state;
 - `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
@@ -912,13 +916,13 @@ one parent-chosen policy:
 
 The `SessionDelegation` aggregate records an admitted sealed
 `DelegatedSpawnRequest`'s parent, bounded task, policy, child, and spawn
-provenance as the first event in one contiguous history. Typed
-await and message requests may act only on their exact relationship; consuming
-transition failures return the unchanged aggregate and attempted input. Message
-delivery remains available after a terminal outcome. Outcome authority is
-checked against the relationship before recording: an equal
-authority-and-outcome replay is idempotent, `ContinueRunning` preserves the
-active lifecycle, and every other outcome terminalizes it.
+provenance as the first event in one contiguous history. Typed await and message
+requests may act only on their exact relationship; consuming transition failures
+return the unchanged aggregate and attempted input. Message delivery remains
+available after a terminal outcome. Outcome authority is checked against the
+relationship before recording: an equal authority-and-outcome replay is
+idempotent, `ContinueRunning` preserves the active lifecycle, and every other
+outcome terminalizes it.
 
 A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
 `ParentAlone` does not evaluate descendants. The descendant form walks the

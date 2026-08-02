@@ -1356,6 +1356,29 @@ imported content and verbatim raw source remain authoritative only in the
 immutable imported-conversation aggregate; the wire snapshot neither fabricates
 native evidence nor replaces that authority.
 
+**Session-delegation foundation proposal.** The delegation stack adds two
+non-text `transcript_entry` arms:
+
+- `delegation_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, content }`;
+- `delegation_result { spawning_request_id, child_session_id, outcome, content, reason, provenance }`.
+
+The message arm resolves the immutable message record referenced by the semantic
+entry and requires `source_session_id` to equal its recipient. The result arm
+resolves the immutable child-result record referenced by the semantic entry and
+requires `source_session_id` to equal its parent. `content` is required for a
+returned result and null for every other closed outcome; `reason` and
+`provenance` use the same closed shapes as the corresponding `session_event`. A
+missing record, mismatched relationship or endpoint, or incompatible outcome
+fails the snapshot before transmission.
+
+Snapshot deduplication uses the complete `(source_session_id, entry_id)`
+semantic identity. Neither `message_id` nor `spawning_request_id` is a
+substitute for that source-qualified key, and a second occurrence of the same
+key fails the snapshot. Each delegation arm increments `entry_count` exactly
+once and consumes one contiguous `entry_index`; its inline content emits no
+`transcript_content` frames. Distinct source-qualified entries remain distinct
+even if they resolve through one relationship.
+
 `entry_index` is zero-based and contiguous in frontier-member order; the first
 entry is zero and each later entry is exactly its predecessor plus one.
 
@@ -1388,10 +1411,12 @@ object, and returns
 `session_await_registered { tool_request_id, child_session_id, mode }` for
 background or the already-delivered child outcome for foreground.
 `send_session_message` carries the related peer and bounded content, and returns
-`session_message_sent { tool_request_id, message_id, direction, ordinal }`.
-Replaying an already-applied logical request returns its recorded receipt. Task
-and message strings must fit both the delegation-content ceiling and their
-complete normalized JSON argument envelope; the 1 MiB ceiling is exact only for
+`session_message_sent { tool_request_id, message_id, direction, ordinal }`. For
+a result that predates the wait, background records delivery and returns
+`session_await_registered`, while foreground returns the child outcome. Equal
+replay returns that same mode-specific receipt or outcome. Task and message
+strings must fit both the delegation-content ceiling and their complete
+normalized JSON argument envelope; the 1 MiB ceiling is exact only for
 standalone returned-result content.
 
 Session-follow updates add these closed event shapes:
