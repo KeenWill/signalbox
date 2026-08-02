@@ -27,8 +27,8 @@ use signalbox_persistence::{
     process_read::ProcessModelCallInputTokenSemantics,
 };
 use signalbox_process_protocol::{MAX_MODEL_ALIAS_CATALOG_ENTRIES, MAX_RATE_VERSION_UTF8_BYTES};
-use signalbox_tools_basic::WebFetchEgressPolicy;
 use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
+use signalbox_tools_web::WebFetchEgressPolicy;
 use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
@@ -1325,7 +1325,7 @@ mod tests {
     use signalbox_domain::{DirectModelSelection, ModelAlias, ModelSelectionRequest};
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
-    use signalbox_tools_basic::WebFetchEgressPolicy;
+    use signalbox_tools_web::WebFetchEgressPolicy;
     use uuid::Uuid;
 
     use super::{
