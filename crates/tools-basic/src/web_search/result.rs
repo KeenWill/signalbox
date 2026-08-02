@@ -365,7 +365,7 @@ impl fmt::Display for WebSearchProviderError {
 
 impl Error for WebSearchProviderError {}
 
-pub(super) fn fixed_result_diagnostic_outputs() -> [String; 8] {
+pub(super) fn fixed_result_diagnostic_outputs() -> [String; 9] {
     let fields = WebSearchResultFields {
         title: String::new(),
         url: String::new(),
@@ -402,6 +402,7 @@ pub(super) fn fixed_result_diagnostic_outputs() -> [String; 8] {
         format!("{fields:?}"),
         format!("{result:?}"),
         format!("{:?}", Some(complete_response.clone())),
+        format!("{:?}", Some(partial_response.clone())),
         format!("{complete_response:?}"),
         format!("{partial_response:?}"),
         format!("{:?}", Some(&provider_error)),
