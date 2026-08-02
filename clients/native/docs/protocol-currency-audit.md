@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `2fc6cc42` on 2026-08-02.
+Verified against repository head `35538d33` on 2026-08-02.
 
 ## Scope and method
 
@@ -24,6 +24,10 @@ The audit compared:
 Live read-only observation covered existing native and imported conversations,
 including a 1,023-row catalog and a 7,713-entry imported detail transcript. No
 model-bearing send was required.
+
+The process specification's committed but unimplemented session-delegation
+proposal defines no present daemon/client frames, so it is not counted as drift
+from the current protocol.
 
 The current Rust protocol has 46 client request verbs and 62 server message
 kinds. Before this work, native modeled 16 request verbs and 34 server message
