@@ -2957,6 +2957,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "expect-test",
+ "rust_decimal",
  "rustix",
  "serde",
  "serde_json",
@@ -3323,6 +3324,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prometheus",
  "reqwest",
+ "rust_decimal",
  "rustix",
  "rustls",
  "serde",
