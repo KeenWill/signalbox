@@ -22,7 +22,8 @@ use signalbox_domain::{
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
     SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementEventKind,
-    SessionPlacementVersion, TranscriptAncestry, VersionedSessionPlacement,
+    SessionPlacementReconstitutionFacts, SessionPlacementVersion, TranscriptAncestry,
+    VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -942,10 +943,12 @@ pub(crate) fn reconstitute_bounded_current(
         defaults_session,
         defaults_version,
         defaults,
-        current_placement_session,
-        current_placement_version,
-        placement_session,
-        current_placement,
+        SessionPlacementReconstitutionFacts {
+            current_pointer_session: current_placement_session,
+            current_pointer_version: current_placement_version,
+            selected_event_session: placement_session,
+            selected_event: current_placement,
+        },
         seed_records,
         seed_headers,
     )
@@ -978,10 +981,12 @@ pub(crate) async fn load_complete_current(
         session.id(),
         current_defaults.version(),
         current_defaults.defaults().clone(),
-        session.id(),
-        session.current_placement().version(),
-        session.id(),
-        session.current_placement().clone(),
+        SessionPlacementReconstitutionFacts {
+            current_pointer_session: session.id(),
+            current_pointer_version: session.current_placement().version(),
+            selected_event_session: session.id(),
+            selected_event: session.current_placement().clone(),
+        },
         conversation,
         projection.seed_records,
         projection.seed_snapshots,
