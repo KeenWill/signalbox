@@ -253,8 +253,8 @@ async fn web_search_bound_known_failure_token_omits_credential_substring_collisi
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: fixed populated-detail framing is checked before dispatch and
-/// a collision preserves definitive detail-free failure evidence.
+/// INV-035: fixed populated-detail framing is rejected during credential
+/// admission and preserves definitive credential-unavailable evidence.
 #[tokio::test]
 async fn web_search_populated_failure_detail_collision_commits_before_dispatch() {
     let searches = Arc::new(AtomicUsize::new(0));
@@ -275,7 +275,10 @@ async fn web_search_populated_failure_detail_collision_commits_before_dispatch()
         .into_result()
         .expect("populated detail collision is definitive pre-dispatch evidence");
 
-    assert_eq!(known_failure_detail(evidence), None);
+    assert_eq!(
+        known_failure_detail(evidence).as_deref(),
+        Some(CREDENTIAL_UNAVAILABLE_DETAIL)
+    );
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
