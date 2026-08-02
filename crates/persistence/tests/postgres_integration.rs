@@ -203,6 +203,24 @@ async fn prepare_raw_delegation(
     })
 }
 
+async fn prepare_canonical_raw_delegation(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<RawDelegationFixture, Box<dyn Error>> {
+    let spawn_arguments = serde_json::json!({
+        "relationship": { "kind": "background" },
+        "task": RAW_DELEGATED_TASK,
+    })
+    .to_string();
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
+    let message_arguments = serde_json::json!({
+        "content": RAW_DELEGATED_MESSAGE,
+        "peer_session_id": child.as_uuid().to_string(),
+    })
+    .to_string();
+    prepare_raw_delegation(pool, seed, &spawn_arguments, &message_arguments).await
+}
+
 async fn insert_raw_delegation(
     connection: &mut PgConnection,
     fixture: RawDelegationFixture,
@@ -504,6 +522,154 @@ async fn append_raw_result_wake(
     Ok(())
 }
 
+async fn append_raw_message_wake(
+    connection: &mut PgConnection,
+    fixture: RawDelegationFixture,
+    recipient: SessionId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_wake', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_wake_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             spawning_tool_request_id, subject_kind,
+             result_spawning_request_id, message_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $2, 'message', NULL, $3 FROM header",
+    )
+    .bind(recipient.into_uuid())
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.message_id)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn insert_raw_delegation_with_update(
+    connection: &mut PgConnection,
+    fixture: RawDelegationFixture,
+) -> Result<(), sqlx::Error> {
+    insert_raw_delegation(connection, fixture).await?;
+    append_raw_delegation_update(
+        connection,
+        fixture,
+        RawDelegationUpdate {
+            session: fixture.parent,
+            kind: "child_spawned",
+            awaiting_request: None,
+            event_ordinal: Some(1),
+            event_kind: Some("spawned"),
+            result_request: None,
+            message_id: None,
+        },
+    )
+    .await
+}
+
+async fn insert_raw_wait_and_message_with_delivery(
+    connection: &mut PgConnection,
+    fixture: RawDelegationFixture,
+) -> Result<(), sqlx::Error> {
+    insert_raw_wait_and_message(connection, fixture).await?;
+    append_raw_delegation_update(
+        connection,
+        fixture,
+        RawDelegationUpdate {
+            session: fixture.child,
+            kind: "child_waiting",
+            awaiting_request: Some(fixture.awaiting_request.into_uuid()),
+            event_ordinal: None,
+            event_kind: None,
+            result_request: None,
+            message_id: None,
+        },
+    )
+    .await?;
+    append_raw_delegation_update(
+        connection,
+        fixture,
+        RawDelegationUpdate {
+            session: fixture.child,
+            kind: "session_message",
+            awaiting_request: None,
+            event_ordinal: None,
+            event_kind: None,
+            result_request: None,
+            message_id: Some(fixture.message_id),
+        },
+    )
+    .await?;
+    append_raw_message_wake(connection, fixture, fixture.child).await
+}
+
+async fn insert_raw_message(
+    connection: &mut PgConnection,
+    fixture: RawDelegationFixture,
+    direction: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH event AS (
+            INSERT INTO session_delegation_event
+                (spawning_tool_request_id, event_ordinal, event_kind,
+                 provenance_kind, provenance_session_id, provenance_turn_id,
+                 provenance_tool_request_id)
+            VALUES ($1, 2, 'message_delivered', 'tool_request', $2, $3, $4)
+            RETURNING spawning_tool_request_id, event_ordinal, event_kind
+         )
+         INSERT INTO session_message
+            (message_id, spawning_tool_request_id, event_ordinal,
+             event_kind, direction, content_text)
+         SELECT $5, spawning_tool_request_id, event_ordinal, event_kind, $6, $7
+           FROM event",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.parent.into_uuid())
+    .bind(fixture.parent_turn.into_uuid())
+    .bind(fixture.message_request.into_uuid())
+    .bind(fixture.message_id)
+    .bind(direction)
+    .bind(RAW_DELEGATED_MESSAGE)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_raw_message_update(
+    connection: &mut PgConnection,
+    fixture: RawDelegationFixture,
+    stream: SessionId,
+    sender: SessionId,
+    recipient: SessionId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, message_id,
+             sender_session_id, recipient_session_id, message_ordinal,
+             content_text)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'session_message', $2, $3, $4, $5, 2, $6
+           FROM header",
+    )
+    .bind(stream.into_uuid())
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.message_id)
+    .bind(sender.into_uuid())
+    .bind(recipient.into_uuid())
+    .bind(RAW_DELEGATED_MESSAGE)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 fn constraint_name(error: &sqlx::Error) -> Option<&str> {
     error
         .as_database_error()
@@ -608,6 +774,7 @@ async fn delegation_outbox_closes_update_subjects_and_separates_wakes() -> Resul
         },
     )
     .await?;
+    append_raw_message_wake(&mut transaction, fixture, fixture.child).await?;
     append_raw_result_wake(&mut transaction, fixture).await?;
     transaction.commit().await?;
     let update_count: i64 =
@@ -653,7 +820,7 @@ async fn delegation_outbox_closes_update_subjects_and_separates_wakes() -> Resul
     duplicate.rollback().await?;
 
     assert_eq!(update_count, 5);
-    assert_eq!(wake_count, 1);
+    assert_eq!(wake_count, 2);
     assert_eq!(
         constraint_name(&shape_error),
         Some("delegation_update_subject_shape")
@@ -661,6 +828,284 @@ async fn delegation_outbox_closes_update_subjects_and_separates_wakes() -> Resul
     assert_eq!(
         constraint_name(&duplicate_error),
         Some("delegation_child_result_update_once")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let unannounced = prepare_canonical_raw_delegation(&pool, 0xd700).await?;
+    let mut relation_only = pool.begin().await?;
+    insert_raw_delegation(&mut relation_only, unannounced).await?;
+    let spawn_update_error = relation_only
+        .commit()
+        .await
+        .expect_err("a delegation relation cannot commit without its spawn update");
+
+    let fixture = prepare_canonical_raw_delegation(&pool, 0xd710).await?;
+    let mut base = pool.begin().await?;
+    insert_raw_delegation_with_update(&mut base, fixture).await?;
+    base.commit().await?;
+
+    let mut wait_only = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         VALUES ($1, $2, $3, $4, $5, 'foreground')",
+    )
+    .bind(fixture.awaiting_request.into_uuid())
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.parent.into_uuid())
+    .bind(fixture.parent_turn.into_uuid())
+    .bind(fixture.child.into_uuid())
+    .execute(&mut *wait_only)
+    .await?;
+    let wait_update_error = wait_only
+        .commit()
+        .await
+        .expect_err("a wait cannot commit without its child-stream update");
+
+    let mut outcome_only = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE session_delegation_event
+         DISABLE TRIGGER session_delegation_event_requires_payload",
+    )
+    .execute(&mut *outcome_only)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id)
+         VALUES ($1, 2, 'outcome_recorded', 'child_failed',
+                 'child_execution_failed', 'child_turn', $2, $3)",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.initial_turn.into_uuid())
+    .execute(&mut *outcome_only)
+    .await?;
+    let lifecycle_update_error = outcome_only
+        .commit()
+        .await
+        .expect_err("an outcome cannot commit without its parent-stream lifecycle update");
+
+    let mut message_without_update = pool.begin().await?;
+    insert_raw_message(&mut message_without_update, fixture, "parent_to_child").await?;
+    append_raw_message_wake(&mut message_without_update, fixture, fixture.child).await?;
+    let message_update_error = message_without_update
+        .commit()
+        .await
+        .expect_err("a message cannot commit without its recipient-stream update");
+
+    let mut result_without_update = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE session_delegation_event
+         DISABLE TRIGGER session_delegation_event_requires_payload",
+    )
+    .execute(&mut *result_without_update)
+    .await?;
+    insert_raw_wait_and_message_with_delivery(&mut result_without_update, fixture).await?;
+    insert_raw_failed_outcome(&mut result_without_update, fixture, fixture.initial_turn).await?;
+    append_raw_delegation_update(
+        &mut result_without_update,
+        fixture,
+        RawDelegationUpdate {
+            session: fixture.parent,
+            kind: "child_lifecycle_disposition",
+            awaiting_request: None,
+            event_ordinal: Some(3),
+            event_kind: Some("outcome_recorded"),
+            result_request: None,
+            message_id: None,
+        },
+    )
+    .await?;
+    append_raw_result_wake(&mut result_without_update, fixture).await?;
+    let result_update_error = result_without_update
+        .commit()
+        .await
+        .expect_err("a result cannot commit without its parent-stream result update");
+
+    let mut message_without_wake = pool.begin().await?;
+    insert_raw_message(&mut message_without_wake, fixture, "parent_to_child").await?;
+    append_raw_message_update(
+        &mut message_without_wake,
+        fixture,
+        fixture.child,
+        fixture.parent,
+        fixture.child,
+    )
+    .await?;
+    let message_wake_error = message_without_wake
+        .commit()
+        .await
+        .expect_err("every message requires its distinct recipient wake");
+
+    let mut result_without_wake = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE session_delegation_event
+         DISABLE TRIGGER session_delegation_event_requires_payload",
+    )
+    .execute(&mut *result_without_wake)
+    .await?;
+    insert_raw_wait_and_message_with_delivery(&mut result_without_wake, fixture).await?;
+    insert_raw_failed_outcome(&mut result_without_wake, fixture, fixture.initial_turn).await?;
+    append_raw_delegation_update(
+        &mut result_without_wake,
+        fixture,
+        RawDelegationUpdate {
+            session: fixture.parent,
+            kind: "child_lifecycle_disposition",
+            awaiting_request: None,
+            event_ordinal: Some(3),
+            event_kind: Some("outcome_recorded"),
+            result_request: None,
+            message_id: None,
+        },
+    )
+    .await?;
+    append_raw_delegation_update(
+        &mut result_without_wake,
+        fixture,
+        RawDelegationUpdate {
+            session: fixture.parent,
+            kind: "child_result",
+            awaiting_request: None,
+            event_ordinal: None,
+            event_kind: None,
+            result_request: Some(fixture.spawning_request.into_uuid()),
+            message_id: None,
+        },
+    )
+    .await?;
+    let result_wake_error = result_without_wake
+        .commit()
+        .await
+        .expect_err("every result requires its distinct parent wake");
+
+    let mut wrong_parent_to_child = pool.begin().await?;
+    insert_raw_message(&mut wrong_parent_to_child, fixture, "parent_to_child").await?;
+    append_raw_message_update(
+        &mut wrong_parent_to_child,
+        fixture,
+        fixture.parent,
+        fixture.parent,
+        fixture.child,
+    )
+    .await?;
+    append_raw_message_wake(&mut wrong_parent_to_child, fixture, fixture.child).await?;
+    let parent_to_child_endpoint_error =
+        sqlx::query("SET CONSTRAINTS delegation_update_subject IMMEDIATE")
+            .execute(&mut *wrong_parent_to_child)
+            .await
+            .expect_err("a parent-to-child update belongs only to the child stream");
+    wrong_parent_to_child.rollback().await?;
+
+    let mut wrong_child_to_parent = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE session_delegation_event
+         DISABLE TRIGGER session_delegation_event_requires_payload",
+    )
+    .execute(&mut *wrong_child_to_parent)
+    .await?;
+    insert_raw_message(&mut wrong_child_to_parent, fixture, "child_to_parent").await?;
+    append_raw_message_update(
+        &mut wrong_child_to_parent,
+        fixture,
+        fixture.child,
+        fixture.child,
+        fixture.parent,
+    )
+    .await?;
+    append_raw_message_wake(&mut wrong_child_to_parent, fixture, fixture.parent).await?;
+    let child_to_parent_endpoint_error =
+        sqlx::query("SET CONSTRAINTS delegation_update_subject IMMEDIATE")
+            .execute(&mut *wrong_child_to_parent)
+            .await
+            .expect_err("a child-to-parent update belongs only to the parent stream");
+    wrong_child_to_parent.rollback().await?;
+
+    let mut cross_endpoint_duplicate = pool.begin().await?;
+    insert_raw_message(&mut cross_endpoint_duplicate, fixture, "parent_to_child").await?;
+    append_raw_message_update(
+        &mut cross_endpoint_duplicate,
+        fixture,
+        fixture.child,
+        fixture.parent,
+        fixture.child,
+    )
+    .await?;
+    let duplicate_error = append_raw_message_update(
+        &mut cross_endpoint_duplicate,
+        fixture,
+        fixture.parent,
+        fixture.parent,
+        fixture.child,
+    )
+    .await
+    .expect_err("one message cannot be duplicated onto another endpoint");
+    cross_endpoint_duplicate.rollback().await?;
+
+    let mut reverse_order = pool.begin().await?;
+    append_raw_message_update(
+        &mut reverse_order,
+        fixture,
+        fixture.child,
+        fixture.parent,
+        fixture.child,
+    )
+    .await?;
+    append_raw_message_wake(&mut reverse_order, fixture, fixture.child).await?;
+    insert_raw_message(&mut reverse_order, fixture, "parent_to_child").await?;
+    reverse_order.commit().await?;
+
+    assert_eq!(
+        constraint_name(&spawn_update_error),
+        Some("delegation_child_spawned_update_required")
+    );
+    assert_eq!(
+        constraint_name(&wait_update_error),
+        Some("delegation_child_waiting_update_required")
+    );
+    assert_eq!(
+        constraint_name(&lifecycle_update_error),
+        Some("delegation_lifecycle_update_required")
+    );
+    assert_eq!(
+        constraint_name(&message_update_error),
+        Some("delegation_session_message_update_required")
+    );
+    assert_eq!(
+        constraint_name(&result_update_error),
+        Some("delegation_child_result_update_required")
+    );
+    assert_eq!(
+        constraint_name(&message_wake_error),
+        Some("delegation_message_wake_required")
+    );
+    assert_eq!(
+        constraint_name(&result_wake_error),
+        Some("delegation_result_wake_required")
+    );
+    assert_eq!(
+        constraint_name(&parent_to_child_endpoint_error),
+        Some("delegation_update_subject")
+    );
+    assert_eq!(
+        constraint_name(&child_to_parent_endpoint_error),
+        Some("delegation_update_subject")
+    );
+    assert_eq!(
+        constraint_name(&duplicate_error),
+        Some("delegation_session_message_update_once")
     );
 
     pool.close().await;
@@ -686,8 +1131,8 @@ async fn delegation_history_exact_turn_and_wake_shape_fail_closed() -> Result<()
     let fixture =
         prepare_raw_delegation(&pool, 0xd610, &spawn_arguments, &message_arguments).await?;
     let mut setup = pool.begin().await?;
-    insert_raw_delegation(&mut setup, fixture).await?;
-    insert_raw_wait_and_message(&mut setup, fixture).await?;
+    insert_raw_delegation_with_update(&mut setup, fixture).await?;
+    insert_raw_wait_and_message_with_delivery(&mut setup, fixture).await?;
     setup.commit().await?;
     let mut history = pool.begin().await?;
     sqlx::query(
@@ -751,7 +1196,7 @@ async fn delegation_history_exact_turn_and_wake_shape_fail_closed() -> Result<()
 
     assert_eq!(
         constraint_name(&history_error),
-        Some("session_delegation_initial_task_history")
+        Some("semantic_transcript_entry_delegated_task_fk")
     );
     assert_eq!(
         constraint_name(&turn_error),
@@ -786,7 +1231,7 @@ async fn delegation_tool_purposes_require_exact_json() -> Result<(), Box<dyn Err
     let spawn_fixture =
         prepare_raw_delegation(&pool, 0xd620, &extra_spawn, &canonical_message).await?;
     let mut spawn = pool.begin().await?;
-    insert_raw_delegation(&mut spawn, spawn_fixture).await?;
+    insert_raw_delegation_with_update(&mut spawn, spawn_fixture).await?;
     let spawn_error = spawn
         .commit()
         .await
@@ -806,8 +1251,8 @@ async fn delegation_tool_purposes_require_exact_json() -> Result<(), Box<dyn Err
     let message_fixture =
         prepare_raw_delegation(&pool, 0xd630, &canonical_spawn, &extra_message).await?;
     let mut message = pool.begin().await?;
-    insert_raw_delegation(&mut message, message_fixture).await?;
-    insert_raw_wait_and_message(&mut message, message_fixture).await?;
+    insert_raw_delegation_with_update(&mut message, message_fixture).await?;
+    insert_raw_wait_and_message_with_delivery(&mut message, message_fixture).await?;
     let message_error = message
         .commit()
         .await
@@ -851,8 +1296,8 @@ async fn delegation_cascade_rejects_unrelated_disposition_source() -> Result<(),
     let source = prepare_raw_delegation(&pool, 0xd640, &spawn_arguments, &first_message).await?;
     let target = prepare_raw_delegation(&pool, 0xd650, &spawn_arguments, &second_message).await?;
     let mut setup = pool.begin().await?;
-    insert_raw_delegation(&mut setup, source).await?;
-    insert_raw_delegation(&mut setup, target).await?;
+    insert_raw_delegation_with_update(&mut setup, source).await?;
+    insert_raw_delegation_with_update(&mut setup, target).await?;
     setup.commit().await?;
     let root_command = DurableCommandId::from_uuid(Uuid::from_u128(0xe640));
     let mut cascade = pool.begin().await?;
@@ -877,6 +1322,24 @@ async fn delegation_cascade_rejects_unrelated_disposition_source() -> Result<(),
     .execute(&mut *cascade)
     .await?;
     sqlx::query(
+        "ALTER TABLE session_delegation_event
+         DISABLE TRIGGER session_delegation_event_zz_requires_lifecycle_update",
+    )
+    .execute(&mut *cascade)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_child_result
+         DISABLE TRIGGER session_child_result_zz_requires_update",
+    )
+    .execute(&mut *cascade)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_child_result
+         DISABLE TRIGGER session_child_result_zz_requires_wake",
+    )
+    .execute(&mut *cascade)
+    .await?;
+    sqlx::query(
         "ALTER TABLE session_delegation
          DISABLE TRIGGER session_delegation_is_append_only",
     )
@@ -894,26 +1357,28 @@ async fn delegation_cascade_rejects_unrelated_disposition_source() -> Result<(),
     .await?;
     sqlx::query(
         "INSERT INTO session_delegation_termination_cascade
-            (root_command_id, root_session_id, root_turn_id,
+            (root_command_id, root_session_id, root_source_kind,
+             root_turn_id, root_goal_generation,
              termination_kind, descendant_scope, disposition_count)
-         VALUES ($1, $2, $3, 'stopped', 'parent_and_descendants', 2)",
+         VALUES ($1, $2, 'goal_command', NULL, 1,
+                 'stopped', 'parent_and_descendants', 2)",
     )
     .bind(root_command.into_uuid())
     .bind(source.parent.into_uuid())
-    .bind(source.parent_turn.into_uuid())
     .execute(&mut *cascade)
     .await?;
     sqlx::query(
         "INSERT INTO session_delegation_parent_termination
             (spawning_tool_request_id, root_command_id,
-             parent_session_id, parent_turn_id, termination_kind,
+             parent_session_id, command_source_kind, parent_turn_id,
+             parent_goal_generation, termination_kind,
              source_kind, source_spawning_tool_request_id)
-         VALUES ($1, $2, $3, $4, 'stopped', 'root', NULL)",
+         VALUES ($1, $2, $3, 'goal_command', NULL, 1,
+                 'stopped', 'root', NULL)",
     )
     .bind(source.spawning_request.into_uuid())
     .bind(root_command.into_uuid())
     .bind(source.parent.into_uuid())
-    .bind(source.parent_turn.into_uuid())
     .execute(&mut *cascade)
     .await?;
     sqlx::query(
@@ -922,10 +1387,11 @@ async fn delegation_cascade_rejects_unrelated_disposition_source() -> Result<(),
                 (spawning_tool_request_id, event_ordinal, event_kind,
                  outcome_kind, reason_kind, provenance_kind,
                  provenance_session_id, provenance_turn_id,
+                 provenance_goal_generation,
                  provenance_command_id)
             VALUES ($1, 2, 'outcome_recorded', 'child_stopped',
-                    'parent_stopped_parent_and_descendants', 'parent_command',
-                    $2, $3, $4)
+                    'parent_stopped_parent_and_descendants',
+                    'parent_goal_command', $2, NULL, 1, $3)
             RETURNING spawning_tool_request_id, event_ordinal, event_kind,
                       outcome_kind
          )
@@ -937,21 +1403,21 @@ async fn delegation_cascade_rejects_unrelated_disposition_source() -> Result<(),
     )
     .bind(source.spawning_request.into_uuid())
     .bind(source.parent.into_uuid())
-    .bind(source.parent_turn.into_uuid())
     .bind(root_command.into_uuid())
     .execute(&mut *cascade)
     .await?;
     sqlx::query(
         "INSERT INTO session_delegation_parent_termination
             (spawning_tool_request_id, root_command_id,
-             parent_session_id, parent_turn_id, termination_kind,
+             parent_session_id, command_source_kind, parent_turn_id,
+             parent_goal_generation, termination_kind,
              source_kind, source_spawning_tool_request_id)
-         VALUES ($1, $2, $3, $4, 'stopped', 'parent_disposition', $5)",
+         VALUES ($1, $2, $3, 'goal_command', NULL, 1,
+                 'stopped', 'parent_disposition', $4)",
     )
     .bind(target.spawning_request.into_uuid())
     .bind(root_command.into_uuid())
     .bind(target.parent.into_uuid())
-    .bind(target.parent_turn.into_uuid())
     .bind(source.spawning_request.into_uuid())
     .execute(&mut *cascade)
     .await?;

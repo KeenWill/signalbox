@@ -1037,10 +1037,11 @@ outgoing relationships, so a terminal intermediate session cannot hide live
 descendants.
 
 The scheduler sweep treats a deliverable foreground result, an undelivered
-background result, and a pending message inbox as durable hints. Result/message
-commit also writes a parent- or recipient-scoped `delegation_wake` outbox event
-in the same transaction. The ordinary nudge remains best effort and the durable
-predicate is authoritative after restart.
+background result, and a pending message inbox as durable hints. Every result
+and message commit also writes exactly one distinct parent- or recipient-scoped
+`delegation_wake` outbox event in the same transaction. A consumer may ignore
+the nudge while that session is already active; the ordinary nudge remains best
+effort and the durable predicate is authoritative after restart.
 
 ## Transactional outbox
 
@@ -1104,8 +1105,11 @@ with the rest of the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
-disposition, result, or message. A result or message that makes dormant work
-runnable appends a distinct `delegation_wake` record in that same transaction;
+disposition, result, or message. Spawn, lifecycle, and result updates go only to
+the parent stream, waiting updates only to the child stream, and message updates
+only to the payload recipient. Every result and message appends exactly one
+distinct `delegation_wake` record for that same recipient in the same
+transaction, even when the recipient is already active and may ignore the nudge;
 the internal wake subject does not stand in for the client-visible result or
 message update. A guarded transition that changes no durable state appends no
 update. State without its promised update, or an update without its state, is
