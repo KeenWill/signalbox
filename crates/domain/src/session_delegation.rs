@@ -1814,7 +1814,7 @@ mod aggregate_tests {
     use super::*;
     use crate::{
         NormalizedToolArguments, ToolCallProposal, ToolName, ToolRequestOrdinal,
-        model_execution::tests::completed_turn_fixture,
+        model_execution::completed_turn_fixture,
         test_support::{
             command_id, delegation_message_id, model_call_id, session_id, tool_request_id, turn_id,
         },
