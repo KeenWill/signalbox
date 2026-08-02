@@ -43,6 +43,7 @@ owned by a sibling page is linked, never restated.
 - [Model-runtime substrate](runtime-substrate.md)
 - [Configuration and credentials](configuration-and-credentials.md)
 - [Process protocol](process-protocol.md)
+- [Repository watch and event dispatch](repo-watch.md)
 
 ## ADR mapping
 

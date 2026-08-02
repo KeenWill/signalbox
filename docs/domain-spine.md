@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-two identities defined in `lib.rs`:
+The twenty-four identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -79,6 +79,8 @@ pub struct ReviewRunId(/* private */);
 pub struct ReviewPassId(/* private */);
 pub struct ReviewFindingId(/* private */);
 pub struct ReviewExternalLinkId(/* private */);
+pub struct RepoWatchEventId(/* private */);
+pub struct RepoWatchDispatchId(/* private */);
 ```
 
 Six more identities with the same shape are defined in their owning modules and
@@ -7424,6 +7426,336 @@ impl ReconstitutedGoalCommand {
 }
 ```
 
+## domain: repo_watch
+
+```rust
+pub enum RepoWatchTextError {
+    Empty,
+    ContainsNull,
+    TooLong { bytes: usize, maximum: usize },
+    Malformed,
+    UnanchoredPattern,
+    InvalidPattern,
+}
+// implements Error.
+
+pub struct RepositorySlug(/* private String */);
+impl RepositorySlug {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+
+pub struct BranchName(/* private String */);
+pub struct LabelName(/* private String */);
+pub struct RepoWatchAuthorLogin(/* private String */);
+pub struct CheckRunName(/* private String */);
+pub struct WorkflowName(/* private String */);
+pub struct ReactionContent(/* private String */);
+pub struct RepoWatchRuleId(/* private String */);
+pub struct ReviewThreadId(/* private String */);
+pub struct PullRequestTitle(/* private String */);
+// Each bounded text type has try_new(), as_str(), and into_string().
+
+pub struct PullRequestBody(/* private String */);
+impl PullRequestBody {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+
+pub struct CommitSha(/* private String */);
+impl CommitSha {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+
+pub struct PullRequestNumber(/* private NonZeroU64 */);
+impl PullRequestNumber {
+    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+
+pub struct GitHubObjectId(/* private NonZeroU64 */);
+impl GitHubObjectId {
+    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+
+pub struct RepoWatchPattern(/* private String */);
+impl RepoWatchPattern {
+    pub const MAX_UTF8_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), is_match()
+}
+
+pub struct RepoWatchRuleVersion(/* private NonZeroU64 */);
+impl RepoWatchRuleVersion {
+    pub const V1: Self;
+    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+
+pub enum RepoWatchEventKindNameV1 {
+    PullRequestOpened,
+    PullRequestClosed,
+    PullRequestMerged,
+    HeadChanged,
+    MergeableStateChanged,
+    ChecksCompleted,
+    CheckRunCompleted,
+    BranchWorkflowRunCompleted,
+    ReviewSubmitted,
+    ThreadOpened,
+    ThreadResolved,
+    Labeled,
+    Unlabeled,
+    BaseAdvanced,
+    ReactionChanged,
+}
+
+pub enum ChecksOutcome {
+    Success,
+    Failure,
+}
+
+pub enum CheckConclusion {
+    Success,
+    Failure,
+    Neutral,
+    Cancelled,
+    Skipped,
+    TimedOut,
+    ActionRequired,
+    Stale,
+    StartupFailure,
+}
+
+pub enum MergeableState {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+pub enum ReviewState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+}
+
+pub enum ReactionChange {
+    Added,
+    Removed,
+}
+
+pub enum ReactionSubject {
+    PullRequestBody,
+    IssueComment { id: GitHubObjectId },
+    ReviewComment { id: GitHubObjectId },
+}
+
+pub enum RepoWatchEventKindV1 {
+    PullRequestOpened,
+    PullRequestClosed,
+    PullRequestMerged,
+    HeadChanged { previous: CommitSha, current: CommitSha },
+    MergeableStateChanged { current: MergeableState },
+    ChecksCompleted { outcome: ChecksOutcome },
+    CheckRunCompleted { name: CheckRunName, conclusion: CheckConclusion },
+    BranchWorkflowRunCompleted {
+        branch: BranchName,
+        workflow: WorkflowName,
+        conclusion: CheckConclusion,
+    },
+    ReviewSubmitted {
+        reviewer: RepoWatchAuthorLogin,
+        state: ReviewState,
+        commit: CommitSha,
+    },
+    ThreadOpened { thread: ReviewThreadId },
+    ThreadResolved { thread: ReviewThreadId },
+    Labeled { label: LabelName },
+    Unlabeled { label: LabelName },
+    BaseAdvanced { branch: BranchName },
+    ReactionChanged {
+        subject: ReactionSubject,
+        reactor: RepoWatchAuthorLogin,
+        content: ReactionContent,
+        change: ReactionChange,
+    },
+}
+impl RepoWatchEventKindV1 {
+    pub const fn name(&self) -> RepoWatchEventKindNameV1;
+}
+
+pub struct PullRequestEventContext { /* private */ }
+impl PullRequestEventContext {
+    pub fn new(
+        number: PullRequestNumber,
+        head_sha: CommitSha,
+        base_branch: BranchName,
+        head_branch: BranchName,
+        title: PullRequestTitle,
+        body: PullRequestBody,
+        labels: Vec<LabelName>,
+        draft: bool,
+        author: RepoWatchAuthorLogin,
+    ) -> Self;
+    // accessors: number(), head_sha(), base_branch(), head_branch(), title(),
+    //   body(), labels(), draft(), author()
+}
+
+pub enum RepoWatchEventTarget {
+    PullRequest(PullRequestEventContext),
+    Branch,
+}
+
+pub struct RepoWatchEvent { /* private */ }
+impl RepoWatchEvent {
+    pub fn try_pull_request(
+        id: RepoWatchEventId,
+        repository: RepositorySlug,
+        context: PullRequestEventContext,
+        kind: RepoWatchEventKindV1,
+    ) -> Result<Self, RepoWatchEventConstructionError>;
+    pub const fn branch_workflow(
+        id: RepoWatchEventId,
+        repository: RepositorySlug,
+        branch: BranchName,
+        workflow: WorkflowName,
+        conclusion: CheckConclusion,
+    ) -> Self;
+    // accessors: id(), repository(), target(), kind()
+}
+
+pub enum RepoWatchEventConstructionError {
+    BranchKindOnPullRequest,
+}
+// implements Error.
+
+pub struct RepoWatchLabelMatcher { /* private */ }
+impl RepoWatchLabelMatcher {
+    pub fn new(
+        any_of: Vec<LabelName>,
+        all_of: Vec<LabelName>,
+        none_of: Vec<LabelName>,
+    ) -> Self;
+    // accessors: any_of(), all_of(), none_of()
+}
+
+pub struct RepoWatchMatcherV1 { /* private */ }
+impl RepoWatchMatcherV1 {
+    pub fn new(
+        event_kinds: Vec<RepoWatchEventKindNameV1>,
+        repository: Option<RepositorySlug>,
+        base_branch: Option<BranchName>,
+        head_branch: Option<RepoWatchPattern>,
+        title: Option<RepoWatchPattern>,
+        body: Option<RepoWatchPattern>,
+        labels: RepoWatchLabelMatcher,
+        draft: Option<bool>,
+        author: Option<RepoWatchAuthorLogin>,
+        mergeable_state: Vec<MergeableState>,
+        conclusion: Vec<CheckConclusion>,
+    ) -> Self;
+    // accessors: event_kinds(), repository(), base_branch(), head_branch(),
+    //   title(), body(), labels(), draft(), author(), mergeable_state(),
+    //   conclusion()
+}
+
+pub enum RepoWatchSingletonScope {
+    PullRequest,
+    Stack,
+    Rule,
+    Repository,
+}
+
+pub enum RepoWatchDispatchContextShape {
+    PullRequest,
+    Branch,
+}
+
+pub struct RepoWatchTemplateContextDeclaration { /* private */ }
+impl RepoWatchTemplateContextDeclaration {
+    pub fn new(
+        template: SessionTemplateName,
+        accepted: Vec<RepoWatchDispatchContextShape>,
+    ) -> Self;
+    // accessors: template(), accepted(), accepts()
+}
+
+pub struct PullRequestContext { /* private */ }
+// sealed: DispatchSessionParameters::try_from_event().
+// accessors: repository(), number(), head_sha(), event()
+
+pub struct BranchContext { /* private */ }
+// sealed: DispatchSessionParameters::try_from_event().
+// accessors: repository(), branch(), workflow(), conclusion(), event()
+
+pub enum DispatchSessionParameters {
+    PullRequest(PullRequestContext),
+    Branch(BranchContext),
+}
+impl DispatchSessionParameters {
+    pub fn try_from_event(
+        event: RepoWatchEvent,
+    ) -> Result<Self, RepoWatchDispatchContextError>;
+    // accessors: shape(), event()
+}
+
+pub enum RepoWatchDispatchContextError {
+    InvalidBranchEvent,
+}
+// implements Error.
+
+pub enum RepoWatchRuleActionV1 {
+    DispatchSession { template: SessionTemplateName },
+}
+impl RepoWatchRuleActionV1 {
+    pub const fn template(&self) -> &SessionTemplateName;
+}
+
+pub struct DispatchSessionAction { /* private */ }
+impl DispatchSessionAction {
+    pub const fn new(
+        template: SessionTemplateName,
+        params: DispatchSessionParameters,
+    ) -> Self;
+    // accessors: template(), params()
+}
+
+pub enum RepoWatchActionV1 {
+    DispatchSession(DispatchSessionAction),
+}
+
+pub enum RepoWatchRuleValidationError {
+    NoActions,
+    TemplateNotDeclared { template: SessionTemplateName },
+    TemplateRejectsContext {
+        template: SessionTemplateName,
+        shape: RepoWatchDispatchContextShape,
+    },
+}
+// implements Error.
+
+pub struct RepoWatchRule { /* private */ }
+impl RepoWatchRule {
+    pub fn try_new(
+        id: RepoWatchRuleId,
+        matcher: RepoWatchMatcherV1,
+        actions: Vec<RepoWatchRuleActionV1>,
+        singleton_per: RepoWatchSingletonScope,
+        cooldown: Duration,
+    ) -> Result<Self, RepoWatchRuleValidationError>;
+    pub fn required_context_shapes(&self) -> Vec<RepoWatchDispatchContextShape>;
+    pub fn validate_template_contexts(
+        &self,
+        declarations: &[RepoWatchTemplateContextDeclaration],
+    ) -> Result<(), RepoWatchRuleValidationError>;
+    // accessors: id(), version(), matcher(), actions(), singleton_per(),
+    //   cooldown()
+}
+```
+
 ## domain: review_workflow
 
 ```rust
@@ -8228,7 +8560,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 22                   |
+| domain: lib.rs identities                          | 24                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
@@ -8242,6 +8574,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: user_content                               | 4                    |
 | domain: submit_input                               | 32                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
+| domain: repo_watch                                 | 43                   |
 | domain: turn_lifecycle                             | 10                   |
 | domain: turn_eligibility                           | 29                   |
 | domain: turn_attempt                               | 13                   |
@@ -8262,7 +8595,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **648 (+7 free fn)** |
+| **signalbox-domain total**                         | **693 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

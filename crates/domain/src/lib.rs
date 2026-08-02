@@ -23,6 +23,7 @@ mod model_execution;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
+mod repo_watch;
 mod review_workflow;
 mod runner;
 mod semantic_entry;
@@ -148,6 +149,19 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsReconstitutionFailure, ReplaceSessionDefaultsReconstitutionInput,
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
+};
+pub use repo_watch::{
+    BranchContext, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
+    DispatchSessionAction, DispatchSessionParameters, GitHubObjectId, LabelName, MergeableState,
+    PullRequestBody, PullRequestContext, PullRequestEventContext, PullRequestNumber,
+    PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject, RepoWatchActionV1,
+    RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchContextShape,
+    RepoWatchEvent, RepoWatchEventConstructionError, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher, RepoWatchMatcherV1,
+    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
+    RepoWatchRuleValidationError, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchTemplateContextDeclaration, RepoWatchTextError, RepositorySlug, ReviewState,
+    ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -467,6 +481,16 @@ define_identity!(
 define_identity!(
     /// Identifies one durable external-object reservation.
     ReviewExternalLinkId
+);
+
+define_identity!(
+    /// Identifies one durable repository-watch event.
+    RepoWatchEventId
+);
+
+define_identity!(
+    /// Identifies one durable repository-watch dispatch audit record.
+    RepoWatchDispatchId
 );
 
 #[cfg(test)]
