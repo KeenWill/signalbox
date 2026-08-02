@@ -297,7 +297,7 @@ fn extend_url_collision_variants(
         if let Some(normalized) = canonicalized_authority_port_zero_fragment(&variant) {
             retain_url_collision_variant(variants, &normalized);
         }
-        for normalized in canonicalized_port_path_zero_fragments(&variant) {
+        if let Some(normalized) = canonicalized_port_path_zero_fragment(&variant) {
             retain_url_collision_variant(variants, &normalized);
         }
         if let Some(normalized) = canonicalized_complete_url(&variant) {
@@ -388,7 +388,7 @@ pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
         })
 }
 
-fn fixed_evidence_diagnostic_outputs() -> Option<[String; 5]> {
+fn fixed_evidence_diagnostic_outputs() -> Option<[String; 6]> {
     const DETAIL_SHAPE_PROBE: &str = "diagnostic probe";
     let populated_detail =
         ToolExecutionErrorDetail::try_new(String::from(DETAIL_SHAPE_PROBE)).ok()?;
@@ -409,6 +409,10 @@ fn fixed_evidence_diagnostic_outputs() -> Option<[String; 5]> {
         format!(
             "{:?}",
             ToolExecutorEvidence::CompletedText(String::from("\""))
+        ),
+        format!(
+            "{:?}",
+            Ok::<ToolExecutorEvidence, ()>(ToolExecutorEvidence::CompletedText(String::new()))
         ),
         format!("{:?}", ToolExecutorEvidence::KnownFailed { detail: None }),
         populated_failure_shape,

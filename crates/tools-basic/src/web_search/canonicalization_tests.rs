@@ -1325,6 +1325,55 @@ fn web_search_rejects_port_path_zero_credential_in_result_url() {
     );
 }
 
+/// INV-035: discarded leading port zeros cannot conceal a credential whose
+/// retained spelling spans authority context, normalized port digits, and
+/// the result path.
+#[test]
+fn web_search_rejects_authority_port_path_zero_credential_in_result_url() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_PORT_PATH_ZERO_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("authority/port/path zero fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_AUTHORITY_PORT_PATH_ZERO_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a maximum-length credential with a zero-prefixed port is reduced
+/// directly to its one canonical port/path spelling before evidence admission.
+#[test]
+fn web_search_bounds_maximum_zero_prefixed_port_path_canonicalization() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: maximum_zero_prefixed_port_path_result_url(),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("maximum zero-prefixed port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        maximum_zero_prefixed_port_path_collision_key().into_bytes(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: removal of a scheme-default port cannot conceal a credential
 /// whose retained spelling spans authority context and the result path.
 #[test]
