@@ -3919,9 +3919,17 @@ where
         .checked_add(chunk_size)
         .ok_or(ProcessConnectionError::EncodeInvariant)?;
     let limit_bytes = wire_size(limit)?;
-    if active_import.actual_size_bytes <= limit_bytes.value()
-        && active_import.source.try_reserve_exact(chunk.len()).is_err()
-    {
+    if active_import.actual_size_bytes > limit_bytes.value() {
+        let detail = RejectionDetail::ConversationImportSourceTooLarge {
+            limit_bytes,
+            declared_size_bytes: CanonicalU64::new(active_import.declared_size_bytes),
+            actual_size_bytes: Some(CanonicalU64::new(active_import.actual_size_bytes)),
+        };
+        drop(chunk);
+        drop(pending.take());
+        return write_import_rejection(writer, version, request_id, detail).await;
+    }
+    if active_import.source.try_reserve_exact(chunk.len()).is_err() {
         drop(chunk);
         drop(pending.take());
         return write_error(
@@ -3935,9 +3943,7 @@ where
         )
         .await;
     }
-    if active_import.actual_size_bytes <= limit_bytes.value() {
-        active_import.source.extend_from_slice(&chunk);
-    }
+    active_import.source.extend_from_slice(&chunk);
     drop(chunk);
     write_message(
         writer,
@@ -12346,6 +12352,62 @@ context_window_tokens = 200000
             },
         )?;
 
+        assert_eq!(observed, expected);
+        assert!(pending.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_observed_size_above_the_configured_bound() -> Result<(), Box<dyn Error>>
+    {
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let permit = budget.clone().acquire_owned().await?;
+        let request_id = RequestId::try_new(1)?;
+        let limit = 8;
+        let declared_size_bytes = u64::try_from(limit)?;
+        let prior_size_bytes = 7;
+        let observed_size_bytes = 9;
+        let mut pending = Some(PendingConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes,
+            actual_size_bytes: prior_size_bytes,
+            source: vec![b'x'; usize::try_from(prior_size_bytes)?],
+            import_permit: permit,
+        });
+        let chunk = vec![b'x'; 2];
+        let (mut writer, mut reader) = duplex(1_024);
+
+        handle_append_conversation_import(
+            &mut writer,
+            ProtocolVersion::One,
+            request_id,
+            chunk,
+            limit,
+            &mut pending,
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let observed = decode_server_line(&encoded)?;
+        let expected = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request_id,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportSourceTooLarge {
+                        limit_bytes: CanonicalU64::new(u64::try_from(limit)?),
+                        declared_size_bytes: CanonicalU64::new(declared_size_bytes),
+                        actual_size_bytes: Some(CanonicalU64::new(observed_size_bytes)),
+                    },
+                ),
+            },
+        )?;
+
+        assert_eq!(budget.available_permits(), capacity);
         assert_eq!(observed, expected);
         assert!(pending.is_none());
         Ok(())

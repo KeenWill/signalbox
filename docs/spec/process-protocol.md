@@ -641,8 +641,8 @@ boundary before application construction or mutation and returns
 JSON escaping when the same accepted content is projected in a queued turn or
 durable update event. This section owns the exact capacity.
 
-The conversation-import transport in this section was verified against
-`agent/import-chunks-protocol` and `agent/import-chunks`.
+The conversation-import transport in this section was verified against PR #401
+(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`).
 
 An import source is an exact byte sequence encoded with RFC 4648
 standard-alphabet padded base64. A noncanonical spelling is a malformed frame.
@@ -1120,7 +1120,7 @@ Conversation-import refusals instead use `code = "invalid_request"` with one
 required typed `detail`: `conversation_import_already_in_progress {}`;
 `conversation_import_not_in_progress {}`;
 `conversation_import_source_too_large { limit_bytes, declared_size_bytes, actual_size_bytes }`,
-where actual size is null at begin and exact at commit;
+where actual size is null at begin and exact at append or commit;
 `conversation_import_source_size_mismatch { declared_size_bytes, actual_size_bytes }`;
 or `conversation_import_conversion_failed { class, record_ordinal }`, where the
 one-based physical-record ordinal is null only when the converter has none. The

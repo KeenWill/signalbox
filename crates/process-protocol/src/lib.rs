@@ -3130,7 +3130,7 @@ pub enum RejectionDetail {
         limit_bytes: CanonicalU64,
         /// Exact total source size declared at begin.
         declared_size_bytes: CanonicalU64,
-        /// Exact observed source size at commit, or null for begin rejection.
+        /// Exact observed size at append or commit, or null at begin.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         actual_size_bytes: Option<CanonicalU64>,
     },
@@ -4916,7 +4916,25 @@ fn validate_conversation_import_detail(
                 record_ordinal.is_some_and(|ordinal| ordinal.value() > 0)
             }
         },
-        _ => false,
+        RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::ActiveTurnMismatch { .. }
+        | RejectionDetail::NoActiveTurn { .. }
+        | RejectionDetail::TurnNotAwaitingReconciliation { .. }
+        | RejectionDetail::InterruptAlreadyApplied { .. }
+        | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::SafePointUnavailableWhileStopping { .. }
+        | RejectionDetail::ToolRequestNotFound { .. }
+        | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
+        | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::DefaultsVersionMismatch { .. }
+        | RejectionDetail::UnknownModelAlias { .. }
+        | RejectionDetail::AcceptancePositionExhausted { .. }
+        | RejectionDetail::DefaultsVersionExhausted { .. }
+        | RejectionDetail::ImportedConversationNotFound { .. }
+        | RejectionDetail::ImportedFrontierPositionOutOfRange { .. } => false,
     };
     if valid {
         Ok(())

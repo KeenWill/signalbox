@@ -15,10 +15,11 @@ surface was verified against the implementing stack through PR #252
 backfill through PR #304 (`agent/unified-conversation-listing`); and the
 imported-conversation inspection read through PR #303
 (`agent/imported-conversation-inspection`); and the chunked transport, total
-bound, and typed rejection evidence against `agent/import-chunks-protocol` and
-`agent/import-chunks`. Later session creation from one imported frontier is
-owned by [sessions-and-transcript](sessions-and-transcript.md); native turn
-activation and model-call rendering are owned by
+bound, and typed rejection evidence against PR #401
+(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`). Later
+session creation from one imported frontier is owned by
+[sessions-and-transcript](sessions-and-transcript.md); native turn activation
+and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
@@ -351,18 +352,14 @@ or single-shot import at a time.
 Every import refusal is `invalid_request` with typed, content-silent evidence.
 State refusals name `conversation_import_already_in_progress` or
 `conversation_import_not_in_progress`. Size refusals name the configured limit,
-declared size, and actual size when commit knows it; a declaration/assembly
-mismatch names both counts. Converter refusal names one of the closed classes
-`empty_source`, `blank_line`, `invalid_utf8`, `invalid_json`,
-`json_depth_exceeded`, `top_level_not_object`, `invalid_record_type`,
-`invalid_source_metadata`, `invalid_message_envelope`, `invalid_message_role`,
-`message_role_mismatch`, `invalid_message_content`, `invalid_content_block`,
-`invalid_tool_result_block`, `invalid_reasoning`, `invalid_tool_call`, or
-`invalid_tool_result`, plus the one-based offending physical-record ordinal when
-the converter knows it. Errors and logs contain classes and ordinals only, never
-source content, source-derived identifiers, paths, or parser excerpts. Database
-failure remains conservatively `commit_ambiguous`, so the operator may retry the
-exact format and source bytes; integrity failure remains `internal`.
+declared size, and actual size when append or commit knows it; a
+declaration/assembly mismatch names both counts. Converter refusals use the
+closed class and ordinal inventory in the
+[process protocol's conversation-import refusal mapping](process-protocol.md#server-messages).
+Errors and logs contain classes and ordinals only, never source content,
+source-derived identifiers, paths, or parser excerpts. Database failure remains
+conservatively `commit_ambiguous`, so the operator may retry the exact format
+and source bytes; integrity failure remains `internal`.
 
 A new exact snapshot returns
 `conversation_import_inserted { imported_conversation_id }`; exact reingestion
