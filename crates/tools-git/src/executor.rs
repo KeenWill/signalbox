@@ -47,8 +47,9 @@ use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain_from;
 use crate::result::{BranchResult, LocalGitResult, StageResult, encode_result};
 use crate::rollback::{
-    CheckoutRollbackContext, checkout_tree_with_rollback, restore_index,
-    rollback_checkout_atomically, validate_checkout_path,
+    CheckoutRollbackContext, capture_rollback_identities, capture_worktree_rollback_state,
+    checkout_tree_with_rollback, restore_index, rollback_checkout_atomically,
+    validate_checkout_path,
 };
 use crate::status::{status, tracked_directories};
 
@@ -882,6 +883,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .map_err(|_| LocalGitFailure::Operation)
             },
         )?;
+        let checkout_state =
+            capture_worktree_rollback_state(&self.filesystem, &self.root, &checkout_paths)?;
+        let checkout_identities = capture_rollback_identities(
+            &self.repository_authority.root,
+            Path::new(""),
+            &checkout_state,
+        )?;
         post_checkout();
         let published_index_identity = match index_lock.commit() {
             Ok(identity) => identity,
@@ -891,9 +899,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     current_tree.as_ref(),
                     &target_tree,
                     &checkout_paths,
-                    &self.filesystem,
-                    &self.root,
-                    &self.repository_authority,
+                    CheckoutRollbackContext {
+                        filesystem: &self.filesystem,
+                        root: &self.root,
+                        authority: &self.repository_authority,
+                    },
+                    Some(&checkout_identities),
                 )?;
                 return Err(LocalGitFailure::Operation);
             }
@@ -950,9 +961,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 current_tree.as_ref(),
                 &target_tree,
                 &checkout_paths,
-                &self.filesystem,
-                &self.root,
-                &self.repository_authority,
+                CheckoutRollbackContext {
+                    filesystem: &self.filesystem,
+                    root: &self.root,
+                    authority: &self.repository_authority,
+                },
+                Some(&checkout_identities),
             );
             let index_rollback = restore_index(
                 &self.repository_authority,

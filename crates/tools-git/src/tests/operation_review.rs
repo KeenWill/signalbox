@@ -1,7 +1,9 @@
 //! Review regressions for operation authority and Git-format parity.
 
 use std::{
+    collections::BTreeSet,
     fs,
+    io::Write,
     os::unix::fs::{PermissionsExt, symlink},
     path::Path,
 };
@@ -24,6 +26,10 @@ use crate::limits::{
     MAX_REVISION_BYTES, MAX_STAGE_PATHS,
 };
 use crate::pinning::{PinnedObjectDatabase, parse_pack_index};
+use crate::reflog::ReferenceLogLock;
+use crate::rollback::{
+    atomic_restore_checkout_path, capture_rollback_identities, capture_worktree_rollback_state,
+};
 use crate::status_reference::StatusHeadSnapshot;
 use crate::tests::support::{
     CHANGED_CONTENT, FIX_BRANCH, Fixture, INITIAL_CONTENT, MODEL_MESSAGE, Sha256Fixture,
@@ -300,6 +306,86 @@ fn branch_switch_rejects_operation_state_created_before_head_publication() {
     assert_eq!(
         observed.head().expect("original HEAD remains").shorthand(),
         Ok("main")
+    );
+}
+
+#[test]
+fn checkout_rollback_preserves_a_same_content_foreign_replacement() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let tracked_path = Path::new(TRACKED_PATH);
+    fs::write(fixture.root().join(tracked_path), CHANGED_CONTENT)
+        .expect("checked-out fixture content writes");
+    let checkout_paths = BTreeSet::from([tracked_path.to_path_buf()]);
+    let expected =
+        capture_worktree_rollback_state(&executor.filesystem, &executor.root, &checkout_paths)
+            .expect("checked-out state captures");
+    let expected_identities = capture_rollback_identities(
+        &executor.repository_authority.root,
+        Path::new(""),
+        &expected,
+    )
+    .expect("checked-out identities capture");
+    let original_prefix = Path::new(".rollback-original");
+    fs::create_dir(fixture.root().join(original_prefix))
+        .expect("rollback original directory creates");
+    fs::write(
+        fixture.root().join(original_prefix).join(tracked_path),
+        INITIAL_CONTENT,
+    )
+    .expect("rollback original content writes");
+    let replacement_path = fixture.root().join("foreign-replacement");
+    fs::write(&replacement_path, CHANGED_CONTENT).expect("foreign replacement writes");
+    fs::rename(&replacement_path, fixture.root().join(tracked_path))
+        .expect("foreign replacement publishes");
+
+    atomic_restore_checkout_path(
+        &executor.filesystem,
+        &executor.root,
+        &executor.repository_authority,
+        original_prefix,
+        tracked_path,
+        &expected,
+        Some(&expected_identities),
+    )
+    .expect("foreign replacement is preserved");
+
+    assert_eq!(
+        fs::read(fixture.root().join(tracked_path)).expect("foreign replacement reads"),
+        CHANGED_CONTENT.as_bytes()
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(original_prefix).join(tracked_path))
+            .expect("rollback original reads"),
+        INITIAL_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn reflog_publication_rejects_a_live_leaf_changed_after_snapshot() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let reflog_path = fixture.root().join(".git/logs/HEAD");
+    let foreign_record = b"foreign reflog record\n";
+    let mut expected_live = fs::read(&reflog_path).expect("original reflog reads");
+    expected_live.extend_from_slice(foreign_record);
+    let mut lock = ReferenceLogLock::acquire(&executor.repository_authority, "HEAD")
+        .expect("reflog lock acquires");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&reflog_path)
+        .expect("live reflog opens for append")
+        .write_all(foreign_record)
+        .expect("foreign reflog record appends");
+
+    let failure = lock
+        .publish()
+        .expect_err("changed live reflog rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(&reflog_path).expect("foreign live reflog reads"),
+        expected_live
     );
 }
 

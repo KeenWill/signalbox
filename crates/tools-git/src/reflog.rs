@@ -14,6 +14,7 @@ use rustix::{
     fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat_with, unlinkat},
     io::dup,
 };
+use sha2::{Digest, Sha256};
 
 use crate::descriptor::{FileIdentity, file_identity};
 use crate::failure::LocalGitFailure;
@@ -30,8 +31,16 @@ pub(super) struct ReferenceLogLock {
     identity: FileIdentity,
     backup: Option<fs::File>,
     original_permissions: Option<fs::Permissions>,
+    original_snapshot: Option<ReferenceLogSnapshot>,
     _created_directories: CreatedReferenceDirectories,
     committed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReferenceLogSnapshot {
+    identity: FileIdentity,
+    length: u64,
+    digest: [u8; 32],
 }
 
 impl ReferenceLogLock {
@@ -91,6 +100,7 @@ impl ReferenceLogLock {
             identity,
             backup: None,
             original_permissions: None,
+            original_snapshot: None,
             _created_directories: created_directories,
             committed: false,
         };
@@ -123,27 +133,34 @@ impl ReferenceLogLock {
         self.lock
             .set_permissions(permissions.clone())
             .map_err(|_| LocalGitFailure::Operation)?;
-        let copied = std::io::copy(
-            &mut Read::by_ref(&mut source).take((MAX_REFLOG_BYTES + 1) as u64),
-            &mut self.lock,
-        )
-        .map_err(|_| LocalGitFailure::Operation)?;
-        if copied != metadata.len() || copied > MAX_REFLOG_BYTES as u64 {
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        Read::by_ref(&mut source)
+            .take((MAX_REFLOG_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let after_read = source.metadata().map_err(|_| LocalGitFailure::Operation)?;
+        if bytes.len() as u64 != metadata.len()
+            || bytes.len() > MAX_REFLOG_BYTES
+            || file_identity(&after_read) != file_identity(&metadata)
+            || after_read.len() != metadata.len()
+        {
             return Err(LocalGitFailure::Operation);
         }
-        source.rewind().map_err(|_| LocalGitFailure::Operation)?;
+        self.lock
+            .write_all(&bytes)
+            .map_err(|_| LocalGitFailure::Operation)?;
         let mut backup = tempfile::tempfile().map_err(|_| LocalGitFailure::Operation)?;
-        let backup_bytes = std::io::copy(
-            &mut Read::by_ref(&mut source).take((MAX_REFLOG_BYTES + 1) as u64),
-            &mut backup,
-        )
-        .map_err(|_| LocalGitFailure::Operation)?;
-        if backup_bytes != metadata.len() || backup_bytes > MAX_REFLOG_BYTES as u64 {
-            return Err(LocalGitFailure::Operation);
-        }
+        backup
+            .write_all(&bytes)
+            .map_err(|_| LocalGitFailure::Operation)?;
         backup.rewind().map_err(|_| LocalGitFailure::Operation)?;
         self.backup = Some(backup);
         self.original_permissions = Some(permissions);
+        self.original_snapshot = Some(ReferenceLogSnapshot {
+            identity: file_identity(&metadata),
+            length: metadata.len(),
+            digest: Sha256::digest(&bytes).into(),
+        });
         Ok(())
     }
 
@@ -181,7 +198,7 @@ impl ReferenceLogLock {
     }
 
     pub(super) fn publish(&mut self) -> Result<(), LocalGitFailure> {
-        if !self.path_still_owned() {
+        if !self.path_still_owned() || !self.original_still_matches()? {
             return Err(LocalGitFailure::Operation);
         }
         renameat_with(
@@ -306,6 +323,43 @@ impl ReferenceLogLock {
         .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
         .map(|metadata| file_identity(&metadata));
         descriptor_identity == Some(self.identity) && path_identity == Some(self.identity)
+    }
+
+    fn original_still_matches(&self) -> Result<bool, LocalGitFailure> {
+        let descriptor = match openat(
+            &self.parent,
+            &self.leaf,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(error) if error == rustix::io::Errno::NOENT => {
+                return Ok(self.original_snapshot.is_none());
+            }
+            Err(_) => return Err(LocalGitFailure::Operation),
+        };
+        let mut source = fs::File::from(descriptor);
+        let metadata = source.metadata().map_err(|_| LocalGitFailure::Operation)?;
+        if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > MAX_REFLOG_BYTES as u64
+        {
+            return Ok(false);
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        Read::by_ref(&mut source)
+            .take((MAX_REFLOG_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let after_read = source.metadata().map_err(|_| LocalGitFailure::Operation)?;
+        let observed = ReferenceLogSnapshot {
+            identity: file_identity(&metadata),
+            length: metadata.len(),
+            digest: Sha256::digest(&bytes).into(),
+        };
+        Ok(bytes.len() as u64 == metadata.len()
+            && bytes.len() <= MAX_REFLOG_BYTES
+            && file_identity(&after_read) == file_identity(&metadata)
+            && after_read.len() == metadata.len()
+            && self.original_snapshot == Some(observed))
     }
 }
 
