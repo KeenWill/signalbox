@@ -1871,22 +1871,29 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     in snapshot: SignalboxSynchronizationSnapshot
   ) -> [SignalboxCanonicalUUID: MutationBlockReason] {
     var blocks: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
+    var unresolvedUnknownTurnID: SignalboxCanonicalUUID?
     for record in snapshot.records {
       guard case .turn(let turn) = record else {
         continue
       }
       switch turn.state {
       case .unknown:
-        blocks[turn.turnID] = .unknownTurnState
+        unresolvedUnknownTurnID = turn.turnID
       case .activeRunning(_, let currentModelCall):
+        unresolvedUnknownTurnID = nil
         if let currentModelCall, case .unknown = currentModelCall.state {
           blocks[turn.turnID] = .unknownNestedState
         }
-      case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      case .queued:
+        break
+      case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
         .reconciliationRequired, .toolReconciliationRequired:
-        break
+        unresolvedUnknownTurnID = nil
       }
+    }
+    if let unresolvedUnknownTurnID {
+      blocks[unresolvedUnknownTurnID] = .unknownTurnState
     }
     return blocks
   }

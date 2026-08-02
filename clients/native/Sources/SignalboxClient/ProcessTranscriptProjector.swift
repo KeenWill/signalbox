@@ -121,6 +121,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         latestActivity = activity(for: turn.state)
         if case .unknown = turn.state {
           unknownTurnActivity = latestActivity
+        } else if case .queued = turn.state {
+          // A queued successor does not prove that an unknown earlier turn is terminal.
+        } else {
+          unknownTurnActivity = nil
         }
         if turnStateIsActive(turn.state) {
           activeActivity = latestActivity

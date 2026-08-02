@@ -1321,6 +1321,23 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testHistoricalUnknownTurnDoesNotGateMutationsAfterKnownTerminalSuccessor() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let snapshot = try ProcessProjectionFixture.snapshotWithHistoricalUnknownTurn()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.cancelledActivity)
+    XCTAssertTrue(viewModel.canSend)
+  }
+
+  @MainActor
   func testTerminalEventClearsUnknownTurnMutationGate() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -4903,6 +4920,51 @@ private enum ProcessProjectionFixture {
       {"type":"fixture_future_turn_state","retained":true}
       """,
       cursor: cursor
+    )
+  }
+
+  static func snapshotWithHistoricalUnknownTurn() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{"type":"fixture_future_turn_state","retained":true}
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(secondPendingTurn)",
+          "acceptance_position":"2",
+          "state":{
+            "type":"cancelled",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":null
+          }
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"2",
+          "entry_count":"0"
+        }
+        """,
+      ]
     )
   }
 
