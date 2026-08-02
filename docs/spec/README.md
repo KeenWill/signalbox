@@ -17,8 +17,10 @@ verified surface. One tail form is semantically special: a pull request that
 landed inside another pull request's merge (a stack merged from its top leaves
 inner pull requests with no first-parent merge commits) cites its carrier with
 the exact tail `` PR #N (`branch-ref`; via PR #M `carrier-branch`) ``, and the
-reference is accepted only when the carrier's number and branch match a
-first-parent merge commit and `#N` itself has none.
+reference is accepted only when `#N` itself has no first-parent merge commit and
+the carrier's number and branch either match one or name the single in-flight
+pull request (the event identity, or the checked-out branch locally) — a
+carrying merge cannot precede the carrier's own pull request.
 `scripts/check_docs_consistency.py` enforces this form. The historical ADR
 corpus these pages distilled is retired: the [ADR mapping](#adr-mapping) below
 resolves every record number to its destination, and git history is the archive.

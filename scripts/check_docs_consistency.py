@@ -3572,6 +3572,17 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                             )
                         )
                         continue
+                    if event_error is not None:
+                        violations.append(
+                            Violation(
+                                source_label,
+                                line,
+                                "spec-verification-history",
+                                "cannot inspect GitHub pull-request event: "
+                                f"{event_error}",
+                            )
+                        )
+                        continue
                     if number in integration_branches:
                         violations.append(
                             Violation(
