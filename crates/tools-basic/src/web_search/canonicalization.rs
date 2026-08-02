@@ -11,9 +11,10 @@ pub(super) fn normalize_url_path_dot_segments(path: &str) -> Option<String> {
             "." => changed = true,
             ".." => {
                 changed = true;
-                if normalized_segments
-                    .last()
-                    .is_some_and(|prior| !prior.is_empty())
+                if normalized_segments.len() > 1
+                    || normalized_segments
+                        .last()
+                        .is_some_and(|prior| !prior.is_empty())
                 {
                     normalized_segments.pop();
                 }
@@ -165,6 +166,11 @@ pub(super) fn legacy_ipv4_component_contains(value: &str, address: std::net::Ipv
             spelling.contains(&lowercase)
                 || trailing_dot_fragment.is_some_and(|fragment| spelling.ends_with(fragment))
         })
+        || normalized_separator_bound_ipv4_fragment(value).is_some_and(|fragment| {
+            legacy_ipv4_address_spellings(address)
+                .iter()
+                .any(|spelling| spelling.contains(&fragment))
+        })
         || ipv4_radix_padding_may_contain(value)
         || normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
             component_values
@@ -190,6 +196,34 @@ pub(super) fn legacy_ipv4_component_contains(value: &str, address: std::net::Ipv
                     .iter()
                     .any(|component| format!("{component:x}").contains(&fragment))
             })
+}
+
+fn normalized_separator_bound_ipv4_fragment(value: &str) -> Option<String> {
+    let (leading_separator, value) = match value.strip_prefix('.') {
+        Some(value) => (true, value),
+        None => (false, value),
+    };
+    let (trailing_separator, value) = match value.strip_suffix('.') {
+        Some(value) => (true, value),
+        None => (false, value),
+    };
+    if !leading_separator && !trailing_separator {
+        return None;
+    }
+    let lowercase = value.to_ascii_lowercase();
+    let normalized = if let Some(digits) = lowercase.strip_prefix("0x") {
+        format!("0x{}", normalized_radix_fragment(digits, 16, None)?)
+    } else if lowercase.len() > 1 && lowercase.starts_with('0') {
+        format!("0{}", normalized_radix_fragment(&lowercase[1..], 8, None)?)
+    } else {
+        normalized_radix_fragment(&lowercase, 10, None)?
+    };
+    Some(format!(
+        "{}{}{}",
+        if leading_separator { "." } else { "" },
+        normalized,
+        if trailing_separator { "." } else { "" }
+    ))
 }
 
 fn legacy_ipv4_address_spellings(address: std::net::Ipv4Addr) -> Vec<String> {
@@ -417,6 +451,30 @@ pub(super) fn canonicalized_ipv4_tail_fragments(value: &str) -> Vec<Vec<u8>> {
         }
     }
     fragments
+}
+
+pub(super) fn ipv4_tail_component_contains(value: &str, octets: &[u8]) -> bool {
+    normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
+        octets
+            .iter()
+            .any(|component| component.to_string().contains(&fragment))
+    }) || normalized_radix_fragment(value, 8, Some("0")).is_some_and(|fragment| {
+        octets
+            .iter()
+            .any(|component| format!("{component:o}").contains(&fragment))
+    }) || normalized_radix_fragment(value, 16, Some("0x")).is_some_and(|fragment| {
+        octets
+            .iter()
+            .any(|component| format!("{component:x}").contains(&fragment))
+    }) || value
+        .strip_prefix('x')
+        .or_else(|| value.strip_prefix('X'))
+        .and_then(|digits| normalized_radix_fragment(digits, 16, None))
+        .is_some_and(|fragment| {
+            octets
+                .iter()
+                .any(|component| format!("{component:x}").contains(&fragment))
+        })
 }
 
 pub(super) fn canonicalized_mixed_ipv6_ipv4_tail_fragments(

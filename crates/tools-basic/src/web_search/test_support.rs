@@ -23,6 +23,9 @@ pub(super) const FIXTURE_HEX_AFFIX_IPV4_RESULT_URL: &str = "http://0x7f.0.0.1/";
 
 pub(super) const FIXTURE_SEPARATOR_SPANNING_HEX_IPV4_RESULT_URL: &str = "http://1.0x7f.0.1/";
 
+pub(super) const FIXTURE_PADDED_SEPARATOR_SPANNING_HEX_IPV4_RESULT_URL: &str =
+    "http://1.0x007f.0.1/";
+
 pub(super) const FIXTURE_TRAILING_DOT_IPV4_RESULT_URL: &str = "http://127.0.0.1./";
 
 pub(super) const FIXTURE_OCTAL_AFFIX_IPV4_RESULT_URL: &str = "http://0177.0.0.1/";
@@ -116,6 +119,10 @@ pub(super) const URL_DOT_SEGMENT_NORMALIZED_VALUE: &str = "abc/def";
 
 pub(super) const URL_PREPROCESSED_DOT_SEGMENT_COLLISION_KEY: &str = "x\t/a/../b";
 
+pub(super) const URL_PREPROCESSED_AUTHORITY_PORT_COLLISION_KEY: &str = "m:\t04";
+
+pub(super) const URL_EMPTY_SEGMENT_DOT_COLLISION_KEY: &str = "a//../b";
+
 pub(super) const URL_SCHEME_CASE_COLLISION_KEY: &str = "HTTPS";
 
 pub(super) const URL_ENCODED_COLLISION_KEY: &str = "secret/key";
@@ -152,6 +159,8 @@ pub(super) const URL_HEX_PREFIX_SPANNING_COLLISION_KEY: &str = "x7";
 
 pub(super) const URL_IPV4_SEPARATOR_SPANNING_COLLISION_KEY: &str = ".0x7";
 
+pub(super) const URL_IPV4_PADDED_SEPARATOR_SPANNING_COLLISION_KEY: &str = ".0x007";
+
 pub(super) const URL_IPV4_TRAILING_DOT_COLLISION_KEY: &str = ".1.";
 
 pub(super) const URL_DISCARDED_PORT_ZERO_COLLISION_KEY: &str = ":0";
@@ -177,6 +186,8 @@ pub(super) const URL_IPV6_BRACKET_BOUND_COLLISION_KEY: &str = "[2001:0db8";
 pub(super) const URL_IPV6_COMPRESSED_FRAGMENT_COLLISION_KEY: &str = "0db8::1";
 
 pub(super) const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
+
+pub(super) const URL_IPV4_TAIL_DIGIT_SUBSTRING_COLLISION_KEY: &str = "68";
 
 pub(super) const URL_MIXED_COMPRESSED_IPV6_TAIL_COLLISION_KEY: &str = "::ffff:192.168";
 
@@ -283,6 +294,10 @@ pub(super) const PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY: &str = "[provider-con
 pub(super) const COMPLETED_EVIDENCE_DEBUG_COLLISION_KEY: &str = "CompletedText";
 
 pub(super) const KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY: &str = "KnownFailed";
+
+pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
+
+pub(super) const POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY: &str = "ToolExecutionErrorDetail";
 
 pub(super) const DEBUG_RESULT_COUNT_COLLISION_COUNT: usize = 1;
 

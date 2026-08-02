@@ -1,3 +1,5 @@
+use signalbox_application::ToolExecutorEvidence;
+use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_model_runtime::CredentialValue;
 
 use super::{
@@ -68,9 +70,31 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
             .as_bytes()
             .to_vec(),
     ));
+    let populated_option_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
+    let populated_detail_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
+    let detail = ToolExecutionErrorDetail::try_new(String::from(FIXTURE_PROVIDER_ERROR_DETAIL))
+        .expect("fixture error detail is admitted");
+    let populated = format!(
+        "{:?}",
+        ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail)
+        }
+    );
 
     assert!(completed_collision.is_none());
     assert!(known_failure_collision.is_none());
+    assert!(populated_option_collision.is_none());
+    assert!(populated_detail_collision.is_none());
+    assert!(populated.contains(POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY));
+    assert!(populated.contains(POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY));
 }
 
 /// INV-035: JSON Unicode escapes in provider text are decoded within the
