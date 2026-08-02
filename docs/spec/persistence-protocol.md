@@ -906,21 +906,33 @@ unchanged.
 `tool_request_id`. It correlates that request's parent session and turn, one
 unique child session, the closed relationship-policy kind, and the two bound
 actions where required. Composite foreign keys prevent cross-session request
-use. Admission locks the parent relationship inventory, counts only active
-direct children, rejects the thirty-third, and inserts the child session,
-scheduler/default rows, initial task work, relationship, and spawn event in one
-transaction. The same transaction resolves the immutable defaults row named by
-the parent turn's frozen defaults version and copies its complete value into the
-child's defaults version one; the mutable current-defaults pointer is not a
-source for delegated creation.
+use. Admission locks the parent relationship inventory, checks request and child
+uniqueness without a fixed active-child-count limit, and inserts the child
+session, scheduler/default rows, initial task work, relationship, and spawn
+event in one transaction. The same transaction resolves the immutable defaults
+row named by the parent turn's frozen defaults version and copies its complete
+value into the child's defaults version one; the mutable current-defaults
+pointer is not a source for delegated creation.
+
+Initial task work is one delegated-task origin row plus its semantic entry and
+first queued turn. The origin references the spawning request and repeats no
+independent actor claim; deferred checks resolve that request's checked task,
+parent session and turn, child relationship, semantic entry, and turn starting
+frontier as one closed shape. No accepted-input row is inserted.
 
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
-typed reason and complete provenance columns: the spawning request, relevant
-session and turn, and either the exact child turn or the exact parent durable
-command. Continue-running is a real event kind, not absence of a terminal row.
+typed reason and complete provenance columns: the spawning request and either
+the exact child turn, the exact parent turn command, or the exact parent goal
+command. Parent-turn provenance carries parent session, turn, and durable
+command; parent-goal provenance instead carries parent session, positive goal
+generation, and durable command, with no turn column populated. The two
+parent-command arms are exclusive. Continue-running and already-terminal are
+real event kinds, not absence of an evaluation row. An already-terminal event
+requires the relationship's unique prior child-result row, records the new
+parent command that evaluated the edge, and creates no second child result.
 Deferred relationship-state checks reject a terminal or continued outcome
-without its event, two terminal outcomes, ordinal gaps, and an event whose
+without its event, two terminal child results, ordinal gaps, and an event whose
 reason/provenance shape does not match its kind.
 
 `session_delegation_wait` records the exact awaiting tool request, relationship,
@@ -931,16 +943,26 @@ parent/child sender and recipient plus the sending tool request.
 `session_child_result` has at most one row per spawning request and carries
 exactly one returned-text, failed, stopped, or cancelled shape with child turn
 provenance for returned, failed, result-unavailable, and child-originated
-terminal outcomes, or exact parent session/turn/command provenance for a
-policy-driven stop or cancellation. Delivery satellites bind messages/results to
-their exact semantic entries; no transcript query supplies result content.
+terminal outcomes, or one of the same exclusive parent-turn-command and
+parent-goal-command provenance arms for a policy-driven stop or cancellation.
+Delivery satellites bind messages/results to their exact semantic entries; no
+transcript query supplies result content. Every pending message and background
+result delivery additionally receives one positive recipient-wide
+`delivery_sequence` under the recipient session lock. That sequence is unique
+and gap-free per recipient across both kinds; relationship ordinals remain
+relationship-local evidence and never order two different relationships.
+Foreground results stay ordered by their exact awaiting request and do not
+consume an inbox sequence.
 
 Parent-and-descendants termination locks relationship rows in stable spawning
 request order before it writes any disposition. The command and every evaluated
 edge commit together; a crash can leave all prior durable state or the complete
 typed evaluation, never an unrecorded partial cascade. Parent-alone takes no
 descendant authority. Background and bound-keep-running edges still receive a
-continue-running event when evaluated.
+continue-running event when evaluated. An already-terminal edge receives its
+typed already-terminal event and traversal continues through that child's
+outgoing relationships, so a terminal intermediate session cannot hide live
+descendants.
 
 The scheduler sweep treats a deliverable foreground result, an undelivered
 background result, and a pending message inbox as durable hints. Result/message

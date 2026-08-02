@@ -901,6 +901,14 @@ this choice, so replacement after parent-turn acceptance, including replacement
 while the spawn request awaits approval or execution, cannot change the child.
 Tool arguments supply no defaults field.
 
+The checked spawn task becomes one `DelegatedTask` semantic entry in the child,
+referencing the exact spawning request and its parent session and turn. It is
+model/tool-authored delegation work, not accepted input and not `Actor::User`;
+the child's first turn has a distinct delegation-task origin and starts from
+that entry. Reconstitution resolves the request and requires its checked task
+bytes, parent, turn, child relationship, and entry to agree before the task
+becomes model-visible.
+
 Each spawning request creates at most one immutable parent/child relationship.
 The public domain surface accepts neither a caller-supplied relationship count
 nor an unsealed relationship slice as evidence of that uniqueness. Aggregate
@@ -917,21 +925,26 @@ child session, and one parent-chosen policy:
 The `SessionDelegation` aggregate records an admitted sealed
 `DelegatedSpawnRequest`'s parent, bounded task, policy, child, and spawn
 provenance as the first event in one contiguous history. Typed await and message
-requests may act only on their exact relationship; consuming transition failures
-return the unchanged aggregate and attempted input. Message delivery remains
-available after a terminal outcome. Outcome authority is checked against the
-relationship before recording: an equal authority-and-outcome replay is
-idempotent, `ContinueRunning` preserves the active lifecycle, and every other
-outcome terminalizes it.
+requests may act only on their exact relationship and only under the correlated
+in-flight dispatch for that same request, session, and turn; consuming
+transition failures return the unchanged aggregate and attempted input. Message
+delivery remains available after a terminal outcome. Outcome authority is
+checked against the relationship before recording: an equal
+authority-and-outcome replay is idempotent, `ContinueRunning` preserves the
+active lifecycle, and every other outcome terminalizes it.
 
 A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
 `ParentAlone` does not evaluate descendants. The descendant form walks the
 durable relationship tree: background edges and bound `KeepRunning` edges
 produce explicit continue-running dispositions, while bound stop/cancel actions
-produce the corresponding typed outcome. Every evaluated relationship records an
-outcome with the parent event, exact spawn request, and user command provenance.
-No path deletes the child or its history, and neither a continued child nor a
-terminated child can become a silent orphan or silent kill.
+produce the corresponding typed outcome. If the child already has its unique
+terminal result, the edge instead records `AlreadyTerminal` with the new parent
+command provenance and an exact check of that prior result; it creates no second
+terminal result. Traversal still visits that child's outgoing relationships.
+Every evaluated relationship therefore records an outcome with the parent event,
+exact spawn request, and user command provenance. No path deletes the child or
+its history, and neither a continued child nor a terminated child can become a
+silent orphan or silent kill.
 
 Delegation messages are immutable, bounded, nonempty content records with a
 distinct `DelegationMessageId`, the spawning relationship, exact sender and
@@ -939,10 +952,13 @@ recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
 child may each send to the other before or after either session stops, cancels,
 or completes. `DelegationMessage` semantic entries refer to those records; they
 do not reclassify model-authored content as input from the user. Undelivered
-messages remain FIFO. An active recipient consumes them at the next model-call
-safe point in ordinal order. An idle recipient gets one delegation-origin queued
-turn, and further messages coalesce into its starting frontier in the same order
-until activation.
+messages and background results share one positive, gap-free `delivery_sequence`
+allocated under the recipient session lock. An active recipient consumes pending
+items at the next model-call safe point in that recipient-wide order. An idle
+recipient gets one delegation-origin queued turn, and further items coalesce
+into its starting frontier in the same order until activation. Per-relationship
+message ordinals remain provenance and do not serve as a cross-relationship
+tie-break.
 
 A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned
@@ -957,17 +973,21 @@ functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or
 semantic entries. A parent-policy stop or cancellation instead carries opaque
-authority from the exact applied parent termination result, exposing its parent
-session, turn, durable user command, command kind, and descendant scope. Raw
-identities cannot construct that authority, `parent_alone` authority cannot
-produce a child disposition, and the recorded outcome reason must match its
-command kind and scope. `ChildStopped` is produced only by a parent-policy stop;
-the existing child scheduling projection proves cancellation but does not
-fabricate a distinct stopped outcome from that evidence. Delivery appends a
-`DelegationResult` semantic entry only to the target parent and is idempotent by
-the spawning request. A detached child may return after the parent has stopped
-or cancelled; the result remains durable and independently inspectable even when
-no parent turn can consume it.
+authority from the exact applied parent termination result. Every authority
+exposes its parent session, durable user command, command kind, and descendant
+scope; a turn interrupt additionally names its exact turn, while a goal stop
+names the exact goal generation and carries no turn. Raw identities cannot
+construct that authority, `parent_alone` authority cannot produce a child
+disposition, and the recorded outcome reason must match its command kind and
+scope. `ChildStopped` is produced only by a parent-policy stop; the existing
+child scheduling projection proves cancellation but does not fabricate a
+distinct stopped outcome from that evidence. Delivery appends a
+`DelegationResult` semantic entry only to the target parent, names the exact
+awaiting request that receives the result, and is idempotent by that awaiting
+request. The immutable child result remains keyed by the spawning request. A
+detached child may return after the parent has stopped or cancelled; the result
+remains durable and independently inspectable even when no parent turn can
+consume it.
 
 **Committed unimplemented functionality.** A spawned child defaults into its
 parent's directory. No present delegation or placement surface implements or
