@@ -309,6 +309,33 @@ fn web_search_rejects_preprocessed_authority_port_credential_in_result_url() {
     );
 }
 
+/// INV-035: URL preprocessing is closed under reversible decoding before
+/// decoded dot segments are removed from completed result URLs.
+#[test]
+fn web_search_rejects_preprocessed_then_decoded_dot_segment_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: format!(
+            "{FIXTURE_ORIGIN_ONLY_RESULT_URL}/{URL_PREPROCESSED_DECODED_DOT_COLLISION_KEY}"
+        ),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("preprocessed decoded-dot fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_PREPROCESSED_DECODED_DOT_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: URL path shortening removes the empty segment immediately before
 /// a parent segment before completed evidence is retained.
 #[test]
@@ -548,6 +575,31 @@ fn web_search_rejects_separator_spanning_ipv6_hextet_credential() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_IPV6_SEPARATOR_SPANNING_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a separator-bound zero hextet also accounts for the compressed
+/// separator spelling produced by a run of zero IPv6 components.
+#[test]
+fn web_search_rejects_separator_bound_zero_hextet_compression() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_COMPRESSED_ZERO_HEXTET_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("compressed zero-hextet fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV6_COMPRESSED_ZERO_SEPARATOR_COLLISION_KEY
             .as_bytes()
             .to_vec(),
     ))
@@ -1189,6 +1241,31 @@ fn web_search_rejects_port_path_zero_credential_in_result_url() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_PORT_PATH_ZERO_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: removal of a scheme-default port cannot conceal a credential
+/// whose retained spelling spans authority context and the result path.
+#[test]
+fn web_search_rejects_removed_default_port_path_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_DEFAULT_PORT_PATH_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("default-port path fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
     ))
     .expect("fixture credential is usable");
 

@@ -80,6 +80,11 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
             .as_bytes()
             .to_vec(),
     ));
+    let populated_success_escape_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_SUCCESS_DEBUG_ESCAPE_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
     let detail = ToolExecutionErrorDetail::try_new(String::from(FIXTURE_PROVIDER_ERROR_DETAIL))
         .expect("fixture error detail is admitted");
     let populated = format!(
@@ -88,13 +93,35 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
             detail: Some(detail)
         }
     );
+    let empty_response = WebSearchResponse::new(Vec::new(), WebSearchPageCompleteness::Complete)
+        .expect("empty fixture response is admitted");
+    let empty_page_evidence =
+        success_evidence(empty_response, &scrubber()).expect("empty response encodes");
+    let rendered_empty_page = format!("{empty_page_evidence:?}");
 
     assert!(completed_collision.is_none());
     assert!(known_failure_collision.is_none());
     assert!(populated_option_collision.is_none());
     assert!(populated_detail_collision.is_none());
+    assert!(populated_success_escape_collision.is_none());
     assert!(populated.contains(POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY));
     assert!(populated.contains(POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY));
+    assert!(rendered_empty_page.contains(POPULATED_SUCCESS_DEBUG_ESCAPE_COLLISION_KEY));
+}
+
+/// Removing the arbitrary detail probe payload from the fixed Debug inventory
+/// does not reject otherwise usable credentials that match its words.
+#[test]
+fn web_search_accepts_credentials_matching_removed_diagnostic_probe_text() {
+    let diagnostic = CredentialScrubber::try_new(&CredentialValue::new(
+        REMOVED_DIAGNOSTIC_PROBE_WORD.as_bytes().to_vec(),
+    ));
+    let probe = CredentialScrubber::try_new(&CredentialValue::new(
+        REMOVED_DETAIL_PROBE_WORD.as_bytes().to_vec(),
+    ));
+
+    assert!(diagnostic.is_some());
+    assert!(probe.is_some());
 }
 
 /// INV-035: JSON Unicode escapes in provider text are decoded within the
