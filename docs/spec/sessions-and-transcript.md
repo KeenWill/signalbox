@@ -1013,7 +1013,8 @@ names the exact goal generation and carries no turn. Raw identities cannot
 construct that authority, `parent_alone` authority cannot produce a child
 disposition, and the recorded outcome reason must match its command kind and
 scope. `ChildStopped` is produced only by a parent-policy stop; the existing
-child scheduling projection proves cancellation but does not fabricate a
+proof-bearing failed, refused, and cancelled model-call turn candidates can name
+any turn origin, including the delegated-task origin, but do not fabricate a
 distinct stopped outcome from that evidence. Delivery appends a
 `DelegationResult` semantic entry only to the target parent, names the exact
 awaiting request that receives the result, and is idempotent by that awaiting
