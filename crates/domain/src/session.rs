@@ -769,13 +769,8 @@ impl SessionReconstitutionInput {
             Some(SessionReconstitutionFailure::DefaultsSessionMismatch)
         } else if self.current_defaults_version != self.defaults_version {
             Some(SessionReconstitutionFailure::CurrentDefaultsVersionMismatch)
-        } else if matches!(
-            self.provenance.ancestry(),
-            TranscriptAncestry::ImportedConversation { .. }
-        ) {
-            Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
         } else {
-            None
+            session_provenance_failure(self.provenance)
         };
         if let Some(failure) = failure {
             return Err(SessionReconstitutionError {
@@ -796,6 +791,26 @@ impl SessionReconstitutionInput {
     }
 }
 
+const fn session_provenance_failure(
+    provenance: SessionCreationProvenance,
+) -> Option<SessionReconstitutionFailure> {
+    match (provenance.cause(), provenance.ancestry()) {
+        (
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None | TranscriptAncestry::SingleSource { .. },
+        )
+        | (SessionCreationCause::Delegated { .. }, TranscriptAncestry::None) => None,
+        (SessionCreationCause::UserInitiated, TranscriptAncestry::ImportedConversation { .. }) => {
+            Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
+        }
+        (
+            SessionCreationCause::Delegated { .. },
+            TranscriptAncestry::SingleSource { .. }
+            | TranscriptAncestry::ImportedConversation { .. },
+        ) => Some(SessionReconstitutionFailure::DelegatedAncestryMismatch),
+    }
+}
+
 /// Why complete typed durable facts cannot reconstruct a current session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionReconstitutionFailure {
@@ -810,6 +825,8 @@ pub enum SessionReconstitutionFailure {
     /// Imported ancestry requires the separate exact-prefix seed
     /// reconstitution seam.
     ImportedSessionSeedUnavailable,
+    /// Delegated creation is independently constrained to no ancestry.
+    DelegatedAncestryMismatch,
 }
 
 /// A failed current-session reconstitution retaining every typed input
@@ -1628,6 +1645,28 @@ mod tests {
         assert_eq!(returned, input);
         assert_eq!(returned_failure, failure);
         failure
+    }
+
+    /// S18 / INV-003: delegated current sessions reject independently stored ancestry.
+    #[test]
+    fn s18_inv003_current_session_rejects_delegated_ancestry() {
+        let spawning_request = crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(2));
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated { spawning_request },
+            TranscriptAncestry::SingleSource {
+                source_session: session_id(3),
+                source_frontier: test_frontier(4),
+            },
+        );
+        let failure = current_session_reconstitution_failure(CurrentSessionFacts {
+            provenance,
+            ..CurrentSessionFacts::matching(session_id(1))
+        });
+
+        assert_eq!(
+            failure,
+            SessionReconstitutionFailure::DelegatedAncestryMismatch
+        );
     }
 
     /// S01 / INV-002 / INV-008: every requested/stored identity, pointer

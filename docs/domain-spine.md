@@ -720,6 +720,7 @@ pub enum SessionReconstitutionFailure {
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
     ImportedSessionSeedUnavailable,
+    DelegatedAncestryMismatch,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
@@ -821,22 +822,38 @@ pub enum ChildRelationshipPolicy {
 }
 pub enum DelegationWaitMode { Foreground, Background }
 pub enum DescendantTerminationScope { ParentAlone, ParentAndDescendants }
+pub enum ParentTerminationKind { Stopped, Cancelled }
+pub struct ParentTerminationAuthority { /* private applied command authority */ }
+impl ParentTerminationAuthority {
+    // accessors: parent(), turn(), command(), scope(), kind()
+}
 
 pub struct DelegationContent(/* private NonEmptyUnicodeText */);
 impl DelegationContent {
     pub fn try_new(value: String) -> Result<Self, DelegationContentError>;
     pub fn as_str(&self) -> &str;
+    pub fn from_assistant_text(parts: &[AssistantText]) -> Result<Self, DelegationContentError>;
 }
 pub enum DelegationContentError {
     Invalid(NonEmptyUnicodeTextFailure),
     Oversized { utf8_byte_length: usize },
 }
 
+pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
+impl TerminalChildTurn {
+    pub fn from_scheduling(
+        value: &AcceptedInputTurnSchedulingProjection,
+        reason: DelegationOutcomeReason,
+        assistant_text: &[AssistantText],
+    ) -> Option<Self>;
+    // accessors: session(), turn()
+}
+
 pub struct DelegationProvenance { /* private typed authority */ }
 impl DelegationProvenance {
     pub fn from_tool_request(request: &ToolRequest) -> Self;
-    pub const fn from_child_turn(child: SessionId, turn: TurnId) -> Self;
-    pub const fn from_parent_command(parent: SessionId, turn: TurnId, command: DurableCommandId) -> Self;
+    pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
+    pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self;
     // accessors: tool_request(), child_turn(), parent_command()
 }
 
@@ -892,13 +909,13 @@ impl SessionDelegation {
         -> Result<DelegationWait, DelegationTransitionError>;
     pub fn deliver_message(
         self,
+        sending_request: &ToolRequest,
         id: DelegationMessageId,
         content: DelegationContent,
-        provenance: DelegationProvenance,
-    ) -> Result<Self, DelegationTransitionError>;
+    ) -> Result<(Self, DelegationEvent), DelegationTransitionError>;
     pub fn record_outcome(self, outcome: DelegationOutcome)
         -> Result<Self, DelegationTransitionError>;
-    // accessors: spawning_request(), parent(), child(), policy(), lifecycle(),
+    // accessors: spawning_request(), parent(), child(), task(), policy(), lifecycle(),
     //   events(), child_creation_provenance()
 }
 pub enum DelegationTransitionFailure {
@@ -907,14 +924,21 @@ pub enum DelegationTransitionFailure {
     MissingSpawnEvent,
     InvalidProvenance,
     InvalidToolRequestPurpose,
+    InvalidTaskContent(DelegationContentError),
     DuplicateMessageIdentity,
+    ConflictingMessageReplay,
     DuplicateOutcomeAuthority,
     OutcomeReasonMismatch,
     EventOrdinalExhausted,
 }
+pub enum RejectedDelegationTransition {
+    DeliverMessage { relation: SessionDelegation, sending_request: ToolRequest, id: DelegationMessageId, content: DelegationContent },
+    RecordOutcome { relation: SessionDelegation, outcome: DelegationOutcome },
+}
 pub struct DelegationTransitionError { /* private */ }
 impl DelegationTransitionError {
-    // accessor: failure()
+    pub fn into_rejected(self) -> Option<RejectedDelegationTransition>;
+    // accessors: spawning_request(), failure()
 }
 ```
 
@@ -8012,7 +8036,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
-| domain: session_delegation                         | 19                   |
+| domain: session_delegation                         | 23                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8040,7 +8064,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **619 (+7 free fn)** |
+| **signalbox-domain total**                         | **623 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

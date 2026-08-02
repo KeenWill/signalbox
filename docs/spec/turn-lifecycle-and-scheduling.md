@@ -818,12 +818,16 @@ Parent termination evaluates descendants only when its explicit scope is
 applying each edge's background/bound policy and records one typed disposition
 per evaluated edge. `ParentAlone`, background, and bound `KeepRunning` never
 fabricate child stop authority. Parent-driven stop/cancel outcomes carry their
-exact parent turn, spawn request, and user-command provenance; partial or
-unrecorded propagation does not commit. Equal reevaluation of the same edge by
-the same command returns the recorded disposition without appending another.
-Child-originated stop/cancel outcomes instead carry the child's exact terminal
-turn. Detached child work stays independently schedulable after the parent's
-turn or goal has terminalized.
+exact spawn request plus opaque authority from the applied parent termination;
+raw identities cannot construct it. Each edge verifies that authority's parent,
+command kind, and descendant scope against its typed outcome before applying the
+policy. Partial or unrecorded propagation does not commit. Equal reevaluation of
+the same edge by the same command returns the recorded disposition without
+appending another. Child-originated cancellation instead carries the child's
+exact proof-bearing cancelled turn. A reconciliation-required turn supplies no
+terminal child outcome, and the same cancelled-turn evidence cannot be selected
+as a stopped outcome. Detached child work stays independently schedulable after
+the parent's turn or goal has terminalized.
 
 Startup and the periodic sweep recognize child waits, pending delegation inbox
 content, and undelivered results from durable rows. They neither infer a result

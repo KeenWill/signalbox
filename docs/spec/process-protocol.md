@@ -1657,9 +1657,6 @@ below. The client accepts a global `--socket <path>` override or reads
   [conversation-import operational surface](conversation-import.md#operational-surface);
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--descendants] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
-- `session spawn <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> (--task <text> | --task-file <path>) (--background | --bound --on-parent-stopped <keep_running|stop|cancel> --on-parent-cancelled <keep_running|stop|cancel>)`;
-- `session await <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> <child-session-uuid> --mode <foreground|background>`;
-- `session message <sender-session-uuid> <sender-turn-uuid> <tool-request-uuid> <peer-session-uuid> (--content <text> | --content-file <path>)`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
 - `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
 - `runner status`;
@@ -1669,13 +1666,23 @@ below. The client accepts a global `--socket <path>` override or reads
   and
 - `chat <session-uuid>`.
 
-Delegation mutations print the exact spawning or awaiting request, child or peer
-session, closed mode/policy, and recorded message/result identity. Follow and
-chat render child results as delivered content labeled with the child session;
-they never inline the child transcript. Lifecycle lines always show outcome,
-typed reason, and provenance, including `continue_running`. Background result
-wakes are labeled separately from foreground tool-result continuation so a user
-can see whether an old turn resumed or a new parent turn became eligible.
+**Committed unimplemented functionality.** No present client provides the
+delegation commands below. Their shapes constrain the client surface implemented
+later in this stack:
+
+- `session spawn <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> (--task <text> | --task-file <path>) (--background | --bound --on-parent-stopped <keep_running|stop|cancel> --on-parent-cancelled <keep_running|stop|cancel>)`;
+- `session await <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> <child-session-uuid> --mode <foreground|background>`;
+  and
+- `session message <sender-session-uuid> <sender-turn-uuid> <tool-request-uuid> <peer-session-uuid> (--content <text> | --content-file <path>)`.
+
+When implemented, delegation mutations print the exact spawning or awaiting
+request, child or peer session, closed mode/policy, and recorded message/result
+identity. Follow and chat render child results as delivered content labeled with
+the child session; they never inline the child transcript. Lifecycle lines
+always show outcome, typed reason, and provenance, including `continue_running`.
+Background result wakes are labeled separately from foreground tool-result
+continuation so a user can see whether an old turn resumed or a new parent turn
+became eligible.
 
 `chat` is the plain line-oriented interactive surface for one live session. It
 opens one long-lived `follow_session` connection before accepting input and

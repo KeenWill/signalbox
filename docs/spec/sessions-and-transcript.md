@@ -931,13 +931,20 @@ until activation.
 A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned
 `DelegationContent` or a typed failed, stopped, or cancelled outcome together
-with exact provenance. Returned content, failure, and a child's own stop or
-cancellation carry the exact child turn. A parent-policy stop or cancellation
-instead carries the exact parent session, turn, and durable user command.
-Delivery appends a `DelegationResult` semantic entry only to the target parent
-and is idempotent by the spawning request. A detached child may return after the
-parent has stopped or cancelled; the result remains durable and independently
-inspectable even when no parent turn can consume it.
+with exact provenance. Returned content, failure, and a child's own cancellation
+carry the exact terminal child turn. Reconciliation-required work is not
+terminal delegation evidence and produces no outcome. A parent-policy stop or
+cancellation instead carries opaque authority from the exact applied parent
+termination result, exposing its parent session, turn, durable user command,
+command kind, and descendant scope. Raw identities cannot construct that
+authority, and the recorded outcome reason must match its command kind and
+scope. `ChildStopped` is produced only by a parent-policy stop; the existing
+child scheduling projection proves cancellation but does not fabricate a
+distinct stopped outcome from that evidence. Delivery appends a
+`DelegationResult` semantic entry only to the target parent and is idempotent by
+the spawning request. A detached child may return after the parent has stopped
+or cancelled; the result remains durable and independently inspectable even when
+no parent turn can consume it.
 
 **Committed unimplemented functionality.** A spawned child defaults into its
 parent's directory. No present delegation or placement surface implements or
