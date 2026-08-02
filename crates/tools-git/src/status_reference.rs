@@ -14,7 +14,7 @@ use rustix::{
 
 use crate::bounded::{bounded_bytes, tree_for_commit};
 use crate::failure::LocalGitFailure;
-use crate::layout::valid_reference_name;
+use crate::layout::{parse_full_object_id, valid_reference_name};
 use crate::limits::{MAX_BRANCH_BYTES, MAX_REFERENCE_BYTES, MAX_REVISION_BYTES};
 use crate::packed_reference::packed_reference_target;
 use crate::pinning::PinnedRepository;
@@ -133,7 +133,7 @@ pub(super) fn read_status_reference(
     }
     let direct = std::str::from_utf8(bytes)
         .ok()
-        .and_then(|value| git2::Oid::from_str(value).ok())
+        .and_then(|value| parse_full_object_id(value, authority.object_format))
         .ok_or(LocalGitFailure::Operation)?;
     Ok(StatusReferenceValue::Direct(direct))
 }

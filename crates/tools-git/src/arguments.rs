@@ -6,7 +6,7 @@ use std::{
 };
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::Error as _};
 
 use crate::limits::{
     DEFAULT_LOG_ENTRIES, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES,
@@ -71,8 +71,23 @@ pub struct GitStageArguments {
 #[serde(deny_unknown_fields)]
 pub struct GitCommitArguments {
     /// Exact commit message, interpreted only as UTF-8 data.
-    #[schemars(length(max = MAX_COMMIT_MESSAGE_BYTES))]
+    #[serde(deserialize_with = "deserialize_commit_message")]
+    #[schemars(length(min = 1, max = MAX_COMMIT_MESSAGE_BYTES))]
     pub(super) message: String,
+}
+
+fn deserialize_commit_message<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let message = String::deserialize(deserializer)?;
+    if message.is_empty()
+        || message.len() > MAX_COMMIT_MESSAGE_BYTES
+        || message.as_bytes().contains(&0)
+    {
+        return Err(D::Error::custom("invalid bounded commit message"));
+    }
+    Ok(message)
 }
 
 /// Local branch creation arguments.

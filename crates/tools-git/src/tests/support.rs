@@ -5,9 +5,12 @@ use std::{fs, io::Write, path::Path};
 use flate2::{Compression, write::ZlibEncoder};
 use git2::{
     IndexAddOption, ObjectFormat, ObjectType, Oid, Repository, RepositoryInitOptions, Signature,
+    build::CheckoutBuilder,
 };
 use signalbox_tools_workspace::{LocalWorkspaceFileSystem, WorkspaceRoot, WorkspaceRootIdentity};
 use tempfile::TempDir;
+
+use crate::{GitIdentity, executor::LocalGitExecutor};
 
 pub(super) const AUTHOR_NAME: &str = "Signalbox Fixer";
 
@@ -20,6 +23,12 @@ pub(super) const FIX_BRANCH: &str = "agent/fix";
 pub(super) const TRACKED_PATH: &str = "tracked.txt";
 
 pub(super) const INITIAL_CONTENT: &str = "before\n";
+
+pub(super) const CHANGED_CONTENT: &str = "after\n";
+
+pub(super) const MODEL_MESSAGE: &str = "subject\n\nmodel data: $(not interpreted)\n";
+
+pub(super) const CONFLICT_OURS_CONTENT: &str = "ours\n";
 
 pub(super) fn workspace_root_identity(root: &Path) -> WorkspaceRootIdentity {
     WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, root)
@@ -77,13 +86,58 @@ pub(super) fn real_git_contended_update_rejects() -> bool {
     include_bytes!("fixtures/git-conformance/contended-result").as_slice() == b"rejected\n"
 }
 
+pub(super) fn real_git_sha256_pack_index() -> Vec<u8> {
+    decode_hex_fixture(include_bytes!(
+        "fixtures/git-conformance/sha256-pack-index.hex"
+    ))
+}
+
+pub(super) fn real_git_sha256_pack_checksum() -> Oid {
+    real_git_fixture_oid_for_format(
+        include_bytes!("fixtures/git-conformance/sha256-pack-checksum"),
+        ObjectFormat::Sha256,
+    )
+}
+
+pub(super) fn real_git_sha256_pack_object_ids() -> Vec<Oid> {
+    include_bytes!("fixtures/git-conformance/sha256-pack-object-ids")
+        .split(|byte| *byte == b'\n')
+        .filter(|record| !record.is_empty())
+        .map(|record| real_git_fixture_oid_for_format(record, ObjectFormat::Sha256))
+        .collect()
+}
+
 fn real_git_fixture_oid(bytes: &[u8]) -> Oid {
-    let record = bytes
-        .strip_suffix(b"\n")
-        .expect("real Git OID fixture ends in a newline");
+    real_git_fixture_oid_for_format(bytes, ObjectFormat::Sha1)
+}
+
+fn real_git_fixture_oid_for_format(bytes: &[u8], object_format: ObjectFormat) -> Oid {
+    let record = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     let text = std::str::from_utf8(record).expect("real Git OID fixture is UTF-8");
-    crate::layout::parse_full_object_id(text, ObjectFormat::Sha1)
-        .expect("real Git OID fixture is a full SHA-1 ID")
+    crate::layout::parse_full_object_id(text, object_format)
+        .expect("real Git OID fixture is full-width")
+}
+
+fn decode_hex_fixture(bytes: &[u8]) -> Vec<u8> {
+    let digits = bytes
+        .iter()
+        .copied()
+        .filter(u8::is_ascii_hexdigit)
+        .collect::<Vec<_>>();
+    digits
+        .chunks_exact(2)
+        .map(|pair| Some((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
+        .collect::<Option<Vec<_>>>()
+        .expect("real Git hex fixture contains complete byte pairs")
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(super) struct Fixture {
@@ -112,6 +166,10 @@ impl Fixture {
     pub(super) fn root(&self) -> &Path {
         self.directory.path()
     }
+
+    pub(super) fn executor(&self) -> LocalGitExecutor<LocalWorkspaceFileSystem> {
+        LocalGitExecutor::for_test(self.root(), identity())
+    }
 }
 
 impl Sha256Fixture {
@@ -133,6 +191,65 @@ impl Sha256Fixture {
     pub(super) fn root(&self) -> &Path {
         self.directory.path()
     }
+
+    pub(super) fn executor(&self) -> LocalGitExecutor<LocalWorkspaceFileSystem> {
+        LocalGitExecutor::for_test(self.root(), identity())
+    }
+}
+
+pub(super) fn identity() -> GitIdentity {
+    GitIdentity::try_new(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture identity is admitted")
+}
+
+pub(super) fn execute(
+    executor: &LocalGitExecutor<LocalWorkspaceFileSystem>,
+    operation: crate::arguments::LocalOperation,
+) -> serde_json::Value {
+    let encoded = executor
+        .execute_operation(operation)
+        .expect("fixture operation succeeds");
+    serde_json::from_str(&encoded).expect("fixture result is JSON")
+}
+
+pub(super) fn install_deleted_conflict(fixture: &Fixture) {
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let original_reference = repository
+        .head()
+        .expect("fixture HEAD exists")
+        .name()
+        .expect("fixture HEAD name is UTF-8")
+        .to_owned();
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch("conflicting", &initial, false)
+        .expect("conflicting branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CONFLICT_OURS_CONTENT)
+        .expect("ours fixture content writes");
+    commit_all(&repository, "ours");
+    repository
+        .set_head("refs/heads/conflicting")
+        .expect("conflicting fixture branch selects");
+    repository
+        .checkout_head(Some(CheckoutBuilder::new().force()))
+        .expect("conflicting fixture branch checks out");
+    fs::write(fixture.root().join(TRACKED_PATH), "theirs\n")
+        .expect("theirs fixture content writes");
+    let theirs = commit_all(&repository, "theirs");
+    repository
+        .set_head(&original_reference)
+        .expect("original fixture branch selects");
+    repository
+        .checkout_head(Some(CheckoutBuilder::new().force()))
+        .expect("original fixture branch checks out");
+    let annotated = repository
+        .find_annotated_commit(theirs)
+        .expect("theirs annotated commit opens");
+    repository
+        .merge(&[&annotated], None, None)
+        .expect("fixture merge produces conflict");
+    fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("conflicted fixture path deletes");
 }
 
 pub(super) fn commit_all(repository: &Repository, message: &str) -> Oid {

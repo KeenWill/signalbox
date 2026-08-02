@@ -238,7 +238,7 @@ pub(super) fn resolve_exact_revision_oid(
     authority: &PinnedRepository,
     revision: &str,
 ) -> Result<git2::Oid, LocalGitFailure> {
-    if let Ok(oid) = git2::Oid::from_str(revision) {
+    if let Some(oid) = crate::layout::parse_full_object_id(revision, authority.object_format) {
         return Ok(oid);
     }
     let (_, target) = resolve_pinned_reference_chain_from(authority, revision, None)?;

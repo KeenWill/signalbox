@@ -63,8 +63,14 @@ pub(super) fn persist_objects(
         .write_buf(&mut buffer)
         .map_err(|_| LocalGitFailure::Operation)?;
     let indexed = tempfile::tempdir().map_err(|_| LocalGitFailure::Operation)?;
-    let mut indexer = Indexer::new(Some(object_database), indexed.path(), 0o600, true)
-        .map_err(|_| LocalGitFailure::Operation)?;
+    let mut indexer = Indexer::new_ext(
+        Some(object_database),
+        indexed.path(),
+        0o600,
+        true,
+        authority.object_format,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
     indexer
         .write_all(&buffer)
         .map_err(|_| LocalGitFailure::Operation)?;

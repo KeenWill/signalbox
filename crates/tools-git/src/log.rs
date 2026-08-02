@@ -8,6 +8,7 @@ use crate::bounded::{
     bounded_bytes, find_bounded_commit, resolve_bounded_commit, validate_object_header,
 };
 use crate::failure::LocalGitFailure;
+use crate::layout::parse_full_object_id;
 use crate::limits::{
     MAX_LOG_IDENTITY_BYTES, MAX_LOG_MESSAGE_BYTES, MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES,
     MAX_WORKTREE_INSPECTIONS,
@@ -79,7 +80,10 @@ pub(super) fn read_shallow_boundaries(
             return Err(LocalGitFailure::Repository);
         }
         let value = std::str::from_utf8(line).map_err(|_| LocalGitFailure::Repository)?;
-        boundaries.insert(git2::Oid::from_str(value).map_err(|_| LocalGitFailure::Repository)?);
+        boundaries.insert(
+            parse_full_object_id(value, authority.object_format)
+                .ok_or(LocalGitFailure::Repository)?,
+        );
     }
     Ok(boundaries)
 }

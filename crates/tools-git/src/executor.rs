@@ -10,10 +10,12 @@ use std::{
 
 use git2::{
     CheckoutNotificationType, Index, IndexEntry, IndexTime, Mempack, Odb, Repository,
-    RepositoryState, build::CheckoutBuilder,
+    build::CheckoutBuilder,
 };
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::ToolExecutionErrorDetail;
+#[cfg(test)]
+use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 use signalbox_tools_workspace::{
     WorkspaceEntryKind, WorkspaceFileSystem, WorkspaceResolveError, WorkspaceRoot,
 };
@@ -27,16 +29,16 @@ use crate::bounded::{
     validate_index_entry_count, validate_index_objects,
 };
 use crate::branch::branch_create;
-use crate::commit::{commit, publish_symbolic_head};
-use crate::descriptor::RepositoryIdentity;
+use crate::commit::{RepositoryOperationState, commit, publish_symbolic_head};
+use crate::descriptor::{RepositoryIdentity, descriptor_path};
 use crate::diff::diff;
 use crate::failure::LocalGitFailure;
 use crate::identity::GitIdentity;
 use crate::index_lock::{IndexLock, IndexSnapshot};
-use crate::layout::validate_repository_layout;
+use crate::layout::{valid_reference_name, validate_repository_layout};
 use crate::limits::{
-    GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_REVISION_BYTES, MAX_STAGE_FILE_BYTES,
-    MAX_STAGE_TOTAL_BYTES, MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES,
+    GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_REFERENCE_BYTES, MAX_REVISION_BYTES,
+    MAX_STAGE_FILE_BYTES, MAX_STAGE_TOTAL_BYTES, MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES,
 };
 use crate::log::log;
 use crate::objects::{PackRoot, persist_objects};
@@ -90,9 +92,11 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         self.validate_current_repository()?;
         let mut repository = self.repository_authority.repository()?;
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
-        let persistent_object_database = Odb::new().map_err(|_| LocalGitFailure::Operation)?;
+        let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&persistent_object_database)?;
-        let object_database = Odb::new().map_err(|_| LocalGitFailure::Operation)?;
+        let object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         let mempack = object_database
             .add_new_mempack_backend(1000)
@@ -138,9 +142,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             LocalOperation::Stage(arguments) => {
                 let result = LocalGitResult::Stage(self.stage_with_pinned_objects(
                     &repository,
-                    &persistent_object_database,
-                    &object_database,
-                    &mempack,
+                    (
+                        &persistent_object_database,
+                        &object_database,
+                        &mempack,
+                        &pinned_objects,
+                    ),
                     arguments,
                     || {},
                 )?);
@@ -154,7 +161,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &self.repository_authority,
                     &persistent_object_database,
                     &object_database,
-                    || self.validate_current_repository_identity(),
+                    || {
+                        pinned_objects.validate_live(&self.repository_authority)?;
+                        self.validate_current_repository_identity()
+                    },
                 )?);
                 return encode_result(&result);
             }
@@ -164,13 +174,19 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &self.repository_authority,
                     &object_database,
                     arguments,
-                    || self.validate_current_repository(),
+                    || {
+                        pinned_objects.validate_live(&self.repository_authority)?;
+                        self.validate_current_repository()
+                    },
                 )?);
                 return encode_result(&result);
             }
             LocalOperation::BranchSwitch(arguments) => {
-                let result =
-                    LocalGitResult::BranchSwitch(self.branch_switch(&repository, arguments)?);
+                let result = LocalGitResult::BranchSwitch(self.branch_switch_with_pinned_objects(
+                    &repository,
+                    &pinned_objects,
+                    arguments,
+                )?);
                 return encode_result(&result);
             }
         };
@@ -198,7 +214,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         BeforePublish: FnOnce(),
     {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
-        let persistent_object_database = Odb::new().map_err(|_| LocalGitFailure::Operation)?;
+        let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&persistent_object_database)?;
         let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
         let mempack = object_database
@@ -206,9 +223,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .map_err(|_| LocalGitFailure::Operation)?;
         self.stage_with_pinned_objects(
             repository,
-            &persistent_object_database,
-            &object_database,
-            &mempack,
+            (
+                &persistent_object_database,
+                &object_database,
+                &mempack,
+                &pinned_objects,
+            ),
             arguments,
             before_publish,
         )
@@ -217,15 +237,15 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     fn stage_with_pinned_objects<BeforePublish>(
         &self,
         repository: &Repository,
-        persistent_object_database: &Odb<'_>,
-        object_database: &Odb<'_>,
-        _mempack: &Mempack<'_>,
+        object_databases: (&Odb<'_>, &Odb<'_>, &Mempack<'_>, &PinnedObjectDatabase),
         arguments: GitStageArguments,
         before_publish: BeforePublish,
     ) -> Result<StageResult, LocalGitFailure>
     where
         BeforePublish: FnOnce(),
     {
+        let (persistent_object_database, object_database, _mempack, pinned_objects) =
+            object_databases;
         let (mut index_lock, mut index) =
             IndexLock::acquire_for_repository(&self.repository_authority)?;
         validate_index_entry_count(&index)?;
@@ -249,13 +269,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     } else {
                         0o100755
                     };
-                    let mode = if filemode {
-                        observed_mode
-                    } else {
-                        index
-                            .get_path(&path, 0)
-                            .map_or(observed_mode, |entry| entry.mode)
-                    };
+                    let indexed_mode = index.get_path(&path, 0).map(|entry| entry.mode);
+                    let mode = regular_file_mode(observed_mode, indexed_mode, filemode);
                     planned.push(PlannedStage::Add {
                         path,
                         bytes: read.bytes,
@@ -352,8 +367,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &written_objects,
         )?;
         index_lock.write(&mut index)?;
-        drop(index);
         before_publish();
+        pinned_objects.validate_live(&self.repository_authority)?;
+        self.validate_live_index_objects(&index)?;
+        drop(index);
         self.validate_current_repository_identity()?;
         index_lock.commit()?;
         self.validate_current_repository()?;
@@ -375,6 +392,19 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     pub(super) fn validate_current_repository_identity(&self) -> Result<(), LocalGitFailure> {
         self.validate_current_repository()
+    }
+
+    fn validate_live_index_objects(&self, index: &Index) -> Result<(), LocalGitFailure> {
+        let repository = self.repository_authority.open_repository_shell()?;
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        let object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&object_database)?;
+        repository
+            .set_odb(&object_database)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        validate_index_objects(&repository, index)?;
+        pinned_objects.validate_live(&self.repository_authority)
     }
 
     pub(super) fn bind_locked_index(
@@ -534,7 +564,27 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository: &Repository,
         arguments: GitBranchSwitchArguments,
     ) -> Result<BranchResult, LocalGitFailure> {
-        self.branch_switch_with_hooks(repository, arguments, || {}, || {}, || {}, || {})
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        self.branch_switch_with_hooks(
+            repository,
+            &pinned_objects,
+            arguments,
+            (|| {}, || {}, || {}, || {}),
+        )
+    }
+
+    fn branch_switch_with_pinned_objects(
+        &self,
+        repository: &Repository,
+        pinned_objects: &PinnedObjectDatabase,
+        arguments: GitBranchSwitchArguments,
+    ) -> Result<BranchResult, LocalGitFailure> {
+        self.branch_switch_with_hooks(
+            repository,
+            pinned_objects,
+            arguments,
+            (|| {}, || {}, || {}, || {}),
+        )
     }
 
     #[cfg(test)]
@@ -544,7 +594,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         post_checkout: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
-        self.branch_switch_with_hooks(repository, arguments, || {}, post_checkout, || {}, || {})
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        self.branch_switch_with_hooks(
+            repository,
+            &pinned_objects,
+            arguments,
+            (|| {}, post_checkout, || {}, || {}),
+        )
     }
 
     #[cfg(test)]
@@ -554,13 +610,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         before_reference_locks: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
         self.branch_switch_with_hooks(
             repository,
+            &pinned_objects,
             arguments,
-            before_reference_locks,
-            || {},
-            || {},
-            || {},
+            (before_reference_locks, || {}, || {}, || {}),
         )
     }
 
@@ -571,13 +626,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         post_index_publish: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
         self.branch_switch_with_hooks(
             repository,
+            &pinned_objects,
             arguments,
-            || {},
-            || {},
-            post_index_publish,
-            || {},
+            (|| {}, || {}, post_index_publish, || {}),
         )
     }
 
@@ -588,13 +642,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         before_head_publish: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
         self.branch_switch_with_hooks(
             repository,
+            &pinned_objects,
             arguments,
-            || {},
-            || {},
-            || {},
-            before_head_publish,
+            (|| {}, || {}, || {}, before_head_publish),
         )
     }
 
@@ -606,18 +659,24 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     >(
         &self,
         repository: &Repository,
+        pinned_objects: &PinnedObjectDatabase,
         arguments: GitBranchSwitchArguments,
-        before_reference_locks: BeforeLocks,
-        post_checkout: PostCheckout,
-        post_index_publish: PostIndexPublish,
-        before_head_publish: BeforeHeadPublish,
+        hooks: (
+            BeforeLocks,
+            PostCheckout,
+            PostIndexPublish,
+            BeforeHeadPublish,
+        ),
     ) -> Result<BranchResult, LocalGitFailure> {
+        let (before_reference_locks, post_checkout, post_index_publish, before_head_publish) =
+            hooks;
         let mut index_lock = self.bind_locked_index(repository)?;
-        if repository.state() != RepositoryState::Clean {
-            return Err(LocalGitFailure::Operation);
-        }
+        let operation_state = RepositoryOperationState::capture(&self.repository_authority)?;
+        operation_state.require_clean()?;
         let reference_name = format!("refs/heads/{}", arguments.name);
-        if !git2::Reference::is_valid_name(&reference_name) {
+        if reference_name.len() > MAX_REFERENCE_BYTES
+            || !valid_reference_name(reference_name.as_bytes())
+        {
             return Err(LocalGitFailure::Operation);
         }
         let (current_chain, initial_current) =
@@ -718,7 +777,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &target_tree,
             )?;
         }
-        let mut next_index = Index::new().map_err(|_| LocalGitFailure::Operation)?;
+        let mut next_index = Index::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
         next_index
             .read_tree(&target_tree)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -765,6 +825,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let mut checkout = CheckoutBuilder::new();
         checkout
             .safe()
+            .target_dir(&descriptor_path(&self.repository_authority.root))
             .update_index(false)
             .refresh(false)
             .disable_filters(true);
@@ -790,6 +851,15 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 authority: &self.repository_authority,
             },
             || {
+                operation_state.validate(&self.repository_authority)?;
+                match current_target {
+                    Some(current) => repository
+                        .set_head_detached(current)
+                        .map_err(|_| LocalGitFailure::Operation)?,
+                    None => repository
+                        .set_head("refs/heads/signalbox-pinned")
+                        .map_err(|_| LocalGitFailure::Operation)?,
+                }
                 repository
                     .checkout_tree(target_commit.as_object(), Some(&mut checkout))
                     .map_err(|_| LocalGitFailure::Operation)
@@ -838,11 +908,16 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 .map(|position| reference_locks.swap_remove(position))
                 .ok_or(LocalGitFailure::Operation)?;
             self.validate_current_repository()?;
+            pinned_objects.validate_live(&self.repository_authority)?;
+            operation_state.validate(&self.repository_authority)?;
             publish_symbolic_head(
                 &self.repository_authority,
                 head_lock,
                 &reference_name,
-                current_target.unwrap_or(git2::Oid::ZERO_SHA1),
+                current_target.unwrap_or(match self.repository_authority.object_format {
+                    git2::ObjectFormat::Sha1 => git2::Oid::ZERO_SHA1,
+                    git2::ObjectFormat::Sha256 => git2::Oid::ZERO_SHA256,
+                }),
                 target,
                 &signature,
                 || {
@@ -877,6 +952,35 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     }
 }
 
+#[cfg(test)]
+impl LocalGitExecutor<LocalWorkspaceFileSystem> {
+    pub(super) fn for_test(root_path: &Path, identity: GitIdentity) -> Self {
+        let filesystem = LocalWorkspaceFileSystem;
+        let root =
+            WorkspaceRoot::try_new(&filesystem, root_path).expect("fixture workspace root pins");
+        let root_path = std::fs::canonicalize(root_path).expect("fixture root canonicalizes");
+        let repository_identity = validate_repository_layout(&root_path, root.identity())
+            .expect("fixture repository layout validates");
+        let repository_authority = PinnedRepository::open(&root_path, repository_identity)
+            .expect("fixture repository authority pins");
+        let detail = || {
+            ToolExecutionErrorDetail::try_new("fixture Git operation failed".to_owned())
+                .expect("fixture detail constructs")
+        };
+        Self {
+            filesystem,
+            root,
+            root_path,
+            repository_identity,
+            repository_authority,
+            identity,
+            repository_detail: detail(),
+            path_detail: detail(),
+            operation_detail: detail(),
+        }
+    }
+}
+
 pub(super) enum PlannedStage {
     Add {
         path: PathBuf,
@@ -889,6 +993,17 @@ pub(super) enum PlannedStage {
     RemoveConflict {
         path: PathBuf,
     },
+}
+
+pub(super) fn regular_file_mode(observed: u32, indexed: Option<u32>, filemode: bool) -> u32 {
+    if filemode {
+        return observed;
+    }
+    match indexed {
+        Some(0o100644) => 0o100644,
+        Some(0o100755) => 0o100755,
+        Some(_) | None => observed,
+    }
 }
 
 pub(super) fn clone_index_entry(entry: &IndexEntry) -> IndexEntry {

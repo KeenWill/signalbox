@@ -18,12 +18,16 @@ typed Git library are trusted computing-base components.
 
 `git2` is trusted for typed Git semantics after authority capture: parsing the
 bounded configuration snapshot, decoding and writing private index snapshots,
-reading the captured object database, and hashing or decoding Git objects. It is
-given an isolated temporary bare repository, a pinned configuration snapshot,
-and descriptor-captured object data. It is never allowed to discover a
-repository or open the live workspace administration tree by an ambient or
-caller-selected path. `gix-validate` owns complete reference-name grammar, and
-`gix-hash` owns complete and prefix object-ID grammar; Signalbox adds the
+reading individual objects from the captured object database, and hashing or
+decoding Git objects. It is given an isolated temporary bare repository, a
+pinned configuration snapshot, and descriptor-captured object data. It is never
+allowed to discover a repository or open the live workspace administration tree
+by an ambient or caller-selected path. The bounded pack-index reader enumerates
+exact-width object IDs from the descriptor-captured index snapshot before `git2`
+verifies and decodes each object; this keeps object-format selection and
+enumeration inside the pinned-read boundary instead of relying on a path-based
+or default-format iterator. `gix-validate` owns complete reference-name grammar,
+and `gix-hash` owns complete and prefix object-ID grammar; Signalbox adds the
 declared-object-format, `refs/` namespace, and UTF-8 representability checks
 required by the typed surface.
 

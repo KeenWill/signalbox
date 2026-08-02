@@ -18,6 +18,7 @@ use crate::arguments::GitDiffArguments;
 use crate::bounded::{
     bounded_text, resolve_bounded_tree, tree_files, validate_index_objects, validate_tree_discovery,
 };
+use crate::executor::regular_file_mode;
 use crate::failure::LocalGitFailure;
 use crate::limits::{GITLINK_MODE, MAX_DIFF_BYTES, MAX_OBJECT_BYTES};
 use crate::pinning::{PinnedRepository, repository_filemode};
@@ -141,13 +142,8 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
                             } else {
                                 0o100755
                             };
-                            let mode = if filemode {
-                                observed_mode
-                            } else {
-                                index_files
-                                    .get(&path)
-                                    .map_or(observed_mode, |(_, mode)| *mode)
-                            };
+                            let indexed_mode = index_files.get(&path).map(|(_, mode)| *mode);
+                            let mode = regular_file_mode(observed_mode, indexed_mode, filemode);
                             Some((read.bytes, mode))
                         }
                         Err(WorkspaceResolveError::Rejected(_)) => {
