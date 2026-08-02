@@ -7,7 +7,7 @@ use rustix::fs::{CWD, Mode, OFlags, openat};
 use crate::descriptor::QuarantineDirectory;
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_repository_layout;
-use crate::limits::MAX_REVISION_BYTES;
+use crate::limits::{MAX_BRANCH_BYTES, MAX_REVISION_BYTES};
 use crate::pinning::PinnedRepository;
 use crate::reference_lock::{
     ReferenceLock, ReferenceParentMode, open_or_create_ref_directory_with_mode_tracked_and_hook,
@@ -57,6 +57,23 @@ fn created_reference_directory_replacement_is_never_treated_as_owned() {
         fs::read(parent.path().join(created_name).join("marker")).expect("actor marker reads"),
         actor_marker
     );
+}
+
+#[test]
+fn oversized_reference_name_rejects_before_creating_parent_directories() {
+    let fixture = Fixture::new();
+    let first_new_parent = fixture.root().join(".git/refs/heads/too-deep");
+    let name = format!("refs/heads/too-deep/{}leaf", "a/".repeat(MAX_BRANCH_BYTES));
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = ReferenceLock::acquire(&authority, &name)
+        .err()
+        .expect("oversized reference name rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(!first_new_parent.exists());
 }
 
 #[test]
@@ -525,7 +542,7 @@ fn reference_publication_preserves_a_file_replacing_the_cleanup_path() {
 }
 
 #[test]
-fn reference_publication_restores_the_old_reference_when_new_bytes_race_cleanup() {
+fn reference_publication_preserves_new_bytes_that_race_cleanup() {
     let fixture = Fixture::new();
     let name = "refs/heads/topic";
     let reference_path = fixture.root().join(".git").join(name);
@@ -554,10 +571,13 @@ fn reference_publication_restores_the_old_reference_when_new_bytes_race_cleanup(
 
     assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
-        fs::read_to_string(reference_path).expect("restored original reference reads"),
+        fs::read_to_string(reference_path).expect("racing reference reads"),
+        actor_target
+    );
+    assert_eq!(
+        fs::read_to_string(lock_path).expect("displaced original reference reads"),
         original
     );
-    assert!(!lock_path.exists());
 }
 
 #[test]
@@ -654,6 +674,33 @@ fn loose_reference_rejects_a_parent_path_replacement_after_open() {
     assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
         fs::read_to_string(parent_path.join("topic")).expect("replacement reference reads"),
+        actor_target
+    );
+}
+
+#[test]
+fn packed_reference_fallback_rejects_a_new_loose_leaf_after_snapshot() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/packed-topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let packed_path = fixture.root().join(".git/packed-refs");
+    let actor_target = format!("{}\n", git2::Oid::ZERO_SHA1);
+    fs::write(&packed_path, format!("{} {name}\n", fixture.initial))
+        .expect("packed reference writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = read_pinned_reference_with_test_hook(&authority, name, || {
+        fs::write(&reference_path, &actor_target).expect("racing loose reference writes");
+        fs::write(&packed_path, format!("{} {name}\n", git2::Oid::ZERO_SHA1))
+            .expect("replacement packed reference writes");
+    })
+    .expect_err("loose reference shadowing packed snapshot rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("racing loose reference reads"),
         actor_target
     );
 }

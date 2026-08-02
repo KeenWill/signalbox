@@ -123,18 +123,28 @@ fn read_packed_references_with_hook<AfterRead: FnOnce()>(
         return Ok(Vec::new());
     }
     let records = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-    let mut references = Vec::new();
+    let mut references: Vec<(git2::Oid, Vec<u8>)> = Vec::new();
     let mut names = HashSet::new();
     let mut previous_was_reference = false;
     let mut header_seen = false;
+    let mut sorted = false;
     for line in records.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             return Err(LocalGitFailure::Operation);
         }
-        if line == b"# pack-refs with:" || line.starts_with(b"# pack-refs with: ") {
+        if let Some(traits) = line.strip_prefix(b"# pack-refs with:") {
             if header_seen || !references.is_empty() || previous_was_reference {
                 return Err(LocalGitFailure::Operation);
             }
+            let traits = match traits {
+                b"" => b"".as_slice(),
+                traits => traits
+                    .strip_prefix(b" ")
+                    .ok_or(LocalGitFailure::Operation)?,
+            };
+            sorted = traits
+                .split(|byte| *byte == b' ')
+                .any(|trait_name| trait_name == b"sorted");
             header_seen = true;
             previous_was_reference = false;
             continue;
@@ -170,6 +180,10 @@ fn read_packed_references_with_hook<AfterRead: FnOnce()>(
                 .ok()
                 .is_none_or(|name| !git2::Reference::is_valid_name(name))
             || !names.insert(existing.to_vec())
+            || (sorted
+                && references
+                    .last()
+                    .is_some_and(|(_, previous)| previous.as_slice() >= existing))
         {
             return Err(LocalGitFailure::Operation);
         }

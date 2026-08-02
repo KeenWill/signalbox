@@ -629,29 +629,64 @@ fn repository_open_rejects_live_object_format_changed_after_snapshot() {
 }
 
 #[test]
-fn sha256_repository_preserves_references_shallow_ids_and_index_checksum() {
+fn sha256_repository_admits_the_declared_object_format() {
+    let fixture = Sha256Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
+
+    assert_eq!(authority.object_format, ObjectFormat::Sha256);
+}
+
+#[test]
+fn sha256_repository_accepts_a_sha256_shallow_boundary() {
     let fixture = Sha256Fixture::new();
     fs::write(
         fixture.root().join(".git/shallow"),
         format!("{}\n", fixture.initial),
     )
     .expect("SHA-256 shallow boundary writes");
+
+    validate_repository_layout(fixture.root()).expect("SHA-256 shallow boundary validates");
+}
+
+#[test]
+fn sha256_repository_resolves_its_symbolic_head() {
+    let fixture = Sha256Fixture::new();
     let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
     let (_, head) =
         resolve_pinned_reference_chain(&authority, None).expect("SHA-256 reference chain resolves");
-    let (index_lock, index) =
+
+    assert_eq!(head, Some(fixture.initial));
+}
+
+#[test]
+fn sha256_index_entries_retain_sha256_object_ids() {
+    let fixture = Sha256Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
+    let (_, index) =
         IndexLock::acquire_for_repository(&authority).expect("SHA-256 index lock acquires");
     let first_entry = index.get(0).expect("SHA-256 fixture index has one entry");
-    let first_entry_format = first_entry.id.object_format();
+
+    assert_eq!(first_entry.id.object_format(), ObjectFormat::Sha256);
+}
+
+#[test]
+fn sha256_index_publication_writes_a_sha256_checksum() {
+    let fixture = Sha256Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
+    let (index_lock, index) =
+        IndexLock::acquire_for_repository(&authority).expect("SHA-256 index lock acquires");
     index_lock.commit().expect("SHA-256 index publishes");
     let published_index =
         git2::Index::open_ext(&fixture.root().join(".git/index"), ObjectFormat::Sha256)
             .expect("published SHA-256 index checksum validates");
 
-    assert_eq!(authority.object_format, ObjectFormat::Sha256);
-    assert_eq!(head, Some(fixture.initial));
-    assert_eq!(first_entry_format, ObjectFormat::Sha256);
     assert_eq!(published_index.len(), index.len());
 }

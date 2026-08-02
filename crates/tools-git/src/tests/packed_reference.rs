@@ -35,6 +35,27 @@ fn duplicate_packed_reference_names_are_rejected() {
 }
 
 #[test]
+fn sorted_packed_reference_header_rejects_unsorted_records() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        format!(
+            "# pack-refs with: sorted\n{} refs/heads/z-last\n{} refs/heads/a-first\n",
+            fixture.initial, fixture.initial
+        ),
+    )
+    .expect("unsorted packed references write");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = packed_reference_target(&authority, "refs/heads/a-first")
+        .expect_err("advertised sorted order rejects unsorted records");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
 fn orphaned_packed_reference_peel_is_rejected() {
     let fixture = Fixture::new();
     fs::write(

@@ -23,7 +23,7 @@ use crate::descriptor::{
     remove_entry_if_identity,
 };
 use crate::failure::LocalGitFailure;
-use crate::limits::MAX_REVISION_BYTES;
+use crate::limits::{MAX_BRANCH_BYTES, MAX_REVISION_BYTES};
 use crate::packed_reference::{packed_reference_namespace_conflicts, packed_reference_target};
 use crate::pinning::PinnedRepository;
 use crate::reference_read::{open_git_directory_path, read_reference_leaf};
@@ -616,7 +616,7 @@ fn finalize_reference_exchange_if_current(
     if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_publication)
         != Ok(Some(publication))
     {
-        restore_quarantined_exchange(
+        restore_quarantined_publication(
             parent,
             leaf,
             lock_name,
@@ -645,32 +645,13 @@ fn finalize_reference_exchange_if_current(
         return Err(LocalGitFailure::Operation);
     }
     if reference_snapshot_identity_at(parent, leaf) != Ok(Some(publication)) {
-        if renameat_with(
-            parent,
-            leaf,
+        let _ = renameat_with(
             quarantine.descriptor(),
-            quarantined_publication,
+            quarantined_displaced,
+            parent,
+            lock_name,
             RenameFlags::NOREPLACE,
-        )
-        .is_ok()
-        {
-            restore_quarantined_exchange(
-                parent,
-                leaf,
-                lock_name,
-                &quarantine,
-                quarantined_displaced,
-                quarantined_publication,
-            );
-        } else {
-            let _ = renameat_with(
-                quarantine.descriptor(),
-                quarantined_displaced,
-                parent,
-                lock_name,
-                RenameFlags::NOREPLACE,
-            );
-        }
+        );
         return Err(LocalGitFailure::Operation);
     }
     unlinkat(
@@ -717,7 +698,7 @@ fn remove_published_reference_if_current(
     Ok(())
 }
 
-fn restore_quarantined_exchange(
+fn restore_quarantined_publication(
     parent: &OwnedFd,
     leaf: &OsStr,
     lock_name: &OsStr,
@@ -727,14 +708,14 @@ fn restore_quarantined_exchange(
 ) {
     let _ = renameat_with(
         quarantine.descriptor(),
-        quarantined_displaced,
+        quarantined_publication,
         parent,
         leaf,
         RenameFlags::NOREPLACE,
     );
     let _ = renameat_with(
         quarantine.descriptor(),
-        quarantined_publication,
+        quarantined_displaced,
         parent,
         lock_name,
         RenameFlags::NOREPLACE,
@@ -912,7 +893,9 @@ pub(super) fn open_reference_parent(
     name: &str,
     mode: ReferenceParentMode,
 ) -> Result<ReferenceParent, LocalGitFailure> {
-    if name != "HEAD" && (!name.starts_with("refs/") || !git2::Reference::is_valid_name(name)) {
+    if name.len() > MAX_BRANCH_BYTES
+        || (name != "HEAD" && (!name.starts_with("refs/") || !git2::Reference::is_valid_name(name)))
+    {
         return Err(LocalGitFailure::Operation);
     }
     let path = Path::new(name);

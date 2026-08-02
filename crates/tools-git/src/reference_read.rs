@@ -56,9 +56,14 @@ fn read_pinned_reference_with_hook<Hook: FnOnce()>(
         Ok(bound) => bound,
         Err(error) if name.starts_with("refs/") => {
             if loose_reference_parent_is_missing(authority, name)? {
-                return packed_reference_target(authority, name).map(|target| {
+                let target = packed_reference_target(authority, name)?;
+                after_metadata();
+                if !loose_reference_parent_is_missing(authority, name)? {
+                    return Err(LocalGitFailure::Operation);
+                }
+                return Ok(
                     target.map_or(PinnedReferenceValue::Missing, PinnedReferenceValue::Direct)
-                });
+                );
             }
             return Err(error);
         }
@@ -129,9 +134,19 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
     ) {
         Ok(descriptor) => descriptor,
         Err(error) if error == rustix::io::Errno::NOENT && name.starts_with("refs/") => {
-            return packed_reference_target(authority, name).map(|target| {
-                target.map_or(PinnedReferenceValue::Missing, PinnedReferenceValue::Direct)
-            });
+            let target = packed_reference_target(authority, name)?;
+            after_metadata();
+            match openat(
+                parent,
+                leaf,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Err(error) if error == rustix::io::Errno::NOENT => {}
+                Ok(_) | Err(_) => return Err(LocalGitFailure::Operation),
+            }
+            authority.validate_supported_layout()?;
+            return Ok(target.map_or(PinnedReferenceValue::Missing, PinnedReferenceValue::Direct));
         }
         Err(error) if error == rustix::io::Errno::NOENT => {
             authority.validate_supported_layout()?;
