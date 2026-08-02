@@ -749,6 +749,13 @@ The daemon catalog adds three automatic, daemon-local tools. Their invoking
 session, turn, and request always come from trusted dispatch correlation and
 never from model arguments.
 
+Their normalized JSON argument objects are exact: `spawn_session` carries
+`{"relationship":{"kind":"background"},"task":text}` or the `bound` relationship
+with `on_parent_cancelled` and `on_parent_stopped` action fields;
+`await_session` carries `{"child_session_id":uuid,"mode":mode}`; and
+`send_session_message` carries `{"content":text,"peer_session_id":uuid}`. No
+additional fields are admitted.
+
 - `spawn_session` takes `task` plus a `relationship` object. The relationship is
   either `background`, or `bound` with separately labeled `on_parent_stopped`
   and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`). It

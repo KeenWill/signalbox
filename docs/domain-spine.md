@@ -720,6 +720,7 @@ pub enum SessionReconstitutionFailure {
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
     ImportedSessionSeedUnavailable,
+    DelegatedAncestryMismatch,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
@@ -832,10 +833,19 @@ pub enum DelegationContentError {
     Oversized { utf8_byte_length: usize },
 }
 
+pub struct TerminalChildTurn { /* private checked terminal scheduling evidence */ }
+impl TerminalChildTurn {
+    pub fn from_scheduling(
+        value: &AcceptedInputTurnSchedulingProjection,
+        reason: DelegationOutcomeReason,
+    ) -> Option<Self>;
+    // accessors: session(), turn()
+}
+
 pub struct DelegationProvenance { /* private typed authority */ }
 impl DelegationProvenance {
     pub fn from_tool_request(request: &ToolRequest) -> Self;
-    pub const fn from_child_turn(child: SessionId, turn: TurnId) -> Self;
+    pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
     pub const fn from_parent_command(parent: SessionId, turn: TurnId, command: DurableCommandId) -> Self;
     // accessors: tool_request(), child_turn(), parent_command()
 }
@@ -893,13 +903,13 @@ impl SessionDelegation {
         -> Result<DelegationWait, DelegationTransitionError>;
     pub fn deliver_message(
         self,
+        sending_request: &ToolRequest,
         id: DelegationMessageId,
         content: DelegationContent,
-        provenance: DelegationProvenance,
-    ) -> Result<Self, DelegationTransitionError>;
+    ) -> Result<(Self, DelegationEvent), DelegationTransitionError>;
     pub fn record_outcome(self, outcome: DelegationOutcome)
         -> Result<Self, DelegationTransitionError>;
-    // accessors: spawning_request(), parent(), child(), policy(), lifecycle(),
+    // accessors: spawning_request(), parent(), child(), task(), policy(), lifecycle(),
     //   events(), child_creation_provenance()
 }
 pub enum DelegationTransitionFailure {
@@ -909,13 +919,14 @@ pub enum DelegationTransitionFailure {
     InvalidProvenance,
     InvalidToolRequestPurpose,
     DuplicateMessageIdentity,
+    ConflictingMessageReplay,
     DuplicateOutcomeAuthority,
     OutcomeReasonMismatch,
     EventOrdinalExhausted,
 }
 pub struct DelegationTransitionError { /* private */ }
 impl DelegationTransitionError {
-    // accessor: failure()
+    // accessors: spawning_request(), failure()
 }
 ```
 
@@ -8013,7 +8024,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
-| domain: session_delegation                         | 19                   |
+| domain: session_delegation                         | 20                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8041,7 +8052,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **619 (+7 free fn)** |
+| **signalbox-domain total**                         | **620 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

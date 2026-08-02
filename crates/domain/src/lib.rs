@@ -217,7 +217,7 @@ pub use session_delegation::{
     DelegationContentError, DelegationEvent, DelegationEventOrdinal, DelegationLifecycle,
     DelegationMessage, DelegationMessageDirection, DelegationOutcome, DelegationOutcomeReason,
     DelegationProvenance, DelegationTransitionError, DelegationTransitionFailure, DelegationWait,
-    DelegationWaitMode, DescendantTerminationScope, SessionDelegation,
+    DelegationWaitMode, DescendantTerminationScope, SessionDelegation, TerminalChildTurn,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
