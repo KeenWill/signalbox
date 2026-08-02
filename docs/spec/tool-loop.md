@@ -795,7 +795,9 @@ never from model arguments.
   atomically creates one delegated, no-ancestry child and its initial task work,
   then returns the child session identity. Equal physical replay of the same
   logical request returns that child; a second child cannot attach to the
-  request. The thirty-third active direct child is refused.
+  request. Version one imposes no fixed active-child-count limit; admission
+  checks the complete locked relationship inventory for request and child
+  uniqueness.
 - `await_session` takes the related child identity and `foreground` or
   `background`. Foreground converts the exact logical request into a durable
   child wait and produces its tool result only when the child's delivered

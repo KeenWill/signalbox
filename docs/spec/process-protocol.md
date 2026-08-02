@@ -1429,12 +1429,13 @@ object, and returns
 background or the already-delivered child outcome for foreground.
 `send_session_message` carries the related peer and bounded content, and returns
 `session_message_sent { tool_request_id, message_id, direction, ordinal }`. For
-a result that predates the wait, background records delivery and returns
-`session_await_registered`, while foreground returns the child outcome. Equal
-replay returns that same mode-specific receipt or outcome. Task and message
-strings must fit both the delegation-content ceiling and their complete
-normalized JSON argument envelope; the 1 MiB ceiling is exact only for
-standalone returned-result content.
+a sent-message receipt or update, `direction` is the closed string
+`parent_to_child` or `child_to_parent`. For a result that predates the wait,
+background records delivery and returns `session_await_registered`, while
+foreground returns the child outcome. Equal replay returns that same
+mode-specific receipt or outcome. Task and message strings must fit both the
+delegation-content ceiling and their complete normalized JSON argument envelope;
+the 1 MiB ceiling is exact only for standalone returned-result content.
 
 Session-follow updates add these closed event shapes:
 
@@ -1465,10 +1466,12 @@ correlations are exhaustive:
 `child_result` admits the first five rows and never `continue_running`;
 `child_lifecycle_disposition` admits only the last three rows. A
 `parent_command` outcome requires `parent_and_descendants` for `stopped` or
-parent-caused `cancelled`, and requires `parent_alone` for `continue_running`.
-Any other outcome/reason/provenance/content combination is a contradictory frame
-and is rejected. Thus every lifecycle result names both why it happened and the
-exact child turn or parent command that caused it.
+parent-caused `cancelled`, and also requires `parent_and_descendants` for
+`continue_running`: the latter is the explicit evaluated no-change disposition
+for an edge included by the caller-selected cascade. Any other
+outcome/reason/provenance/content combination is a contradictory frame and is
+rejected. Thus every lifecycle result names both why it happened and the exact
+child turn or parent command that caused it.
 
 The internal `delegation_wake` outbox event is a scheduler nudge, not a
 session-follow update. Clients observe the durable result or message update that

@@ -466,12 +466,23 @@ fn delegation_content_from_live_completed(
 ) -> Option<DelegationContent> {
     let mut assistant_text = Vec::with_capacity(value.assistant_entries().len());
     for entry in value.assistant_entries() {
-        let crate::SemanticTranscriptEntryPayload::AssistantText {
-            producing_call,
-            value: text,
-        } = entry.payload()
-        else {
-            return None;
+        let (producing_call, text) = match entry.payload() {
+            crate::SemanticTranscriptEntryPayload::AssistantText {
+                producing_call,
+                value,
+            } => (producing_call, value),
+            crate::SemanticTranscriptEntryPayload::Imported { .. }
+            | crate::SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | crate::SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | crate::SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | crate::SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | crate::SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | crate::SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | crate::SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | crate::SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | crate::SemanticTranscriptEntryPayload::ToolClosed { .. }
+            | crate::SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | crate::SemanticTranscriptEntryPayload::TurnCancelled { .. } => return None,
         };
         if entry.source_session() != value.session() || *producing_call != value.call().id() {
             return None;

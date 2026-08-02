@@ -906,13 +906,13 @@ unchanged.
 `tool_request_id`. It correlates that request's parent session and turn, one
 unique child session, the closed relationship-policy kind, and the two bound
 actions where required. Composite foreign keys prevent cross-session request
-use. Admission locks the parent relationship inventory, counts only active
-direct children, rejects the thirty-third, and inserts the child session,
-scheduler/default rows, initial task work, relationship, and spawn event in one
-transaction. The same transaction resolves the immutable defaults row named by
-the parent turn's frozen defaults version and copies its complete value into the
-child's defaults version one; the mutable current-defaults pointer is not a
-source for delegated creation.
+use. Admission locks the parent relationship inventory, checks request and child
+uniqueness without a fixed active-child-count limit, and inserts the child
+session, scheduler/default rows, initial task work, relationship, and spawn
+event in one transaction. The same transaction resolves the immutable defaults
+row named by the parent turn's frozen defaults version and copies its complete
+value into the child's defaults version one; the mutable current-defaults
+pointer is not a source for delegated creation.
 
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
