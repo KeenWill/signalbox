@@ -615,7 +615,10 @@ impl SessionDelegation {
     ) -> Result<DelegationWait, DelegationTransitionError> {
         if awaiting_request.session() != self.parent
             || awaiting_request.id() == self.spawning_request
-            || awaiting_request.name().as_str() != AWAIT_SESSION_TOOL_NAME
+        {
+            return Err(self.fail(DelegationTransitionFailure::InvalidProvenance));
+        }
+        if awaiting_request.name().as_str() != AWAIT_SESSION_TOOL_NAME
             || !request_arguments_match(
                 awaiting_request,
                 serde_json::json!({
@@ -624,7 +627,7 @@ impl SessionDelegation {
                 }),
             )
         {
-            return Err(self.fail(DelegationTransitionFailure::InvalidProvenance));
+            return Err(self.fail(DelegationTransitionFailure::InvalidToolRequestPurpose));
         }
         Ok(DelegationWait {
             awaiting_request: awaiting_request.id(),
@@ -1326,7 +1329,7 @@ mod tests {
             .expect_err("request mode cannot authorize a different wait mode");
         assert_eq!(
             error.failure(),
-            DelegationTransitionFailure::InvalidProvenance
+            DelegationTransitionFailure::InvalidToolRequestPurpose
         );
     }
 
