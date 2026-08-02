@@ -21500,6 +21500,68 @@ async fn corrupt_dependency_event_authority(
     Ok(corrupted.rows_affected())
 }
 
+async fn corrupt_dependency_projection_predecessor(
+    pool: &PgPool,
+    session: SessionId,
+    first_event_ordinal: u64,
+    malformed_prior_first_event_ordinal: u64,
+) -> Result<u64, sqlx::Error> {
+    let predecessor_order_constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT quote_ident(conname)
+           FROM pg_constraint
+          WHERE conrelid = 'session_plan_current_dependency'::regclass
+            AND contype = 'c'
+            AND pg_get_constraintdef(oid) LIKE
+                '%prior_first_event_ordinal < first_event_ordinal%'
+          ORDER BY conname",
+    )
+    .fetch_all(pool)
+    .await?;
+    for constraint in predecessor_order_constraints {
+        let statement =
+            format!("ALTER TABLE session_plan_current_dependency DROP CONSTRAINT {constraint}");
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_predecessor_guard",
+    )
+    .execute(pool)
+    .await?;
+    let corrupted = sqlx::query(
+        "UPDATE session_plan_current_dependency
+            SET prior_first_event_ordinal = $1
+          WHERE session_id = $2
+            AND first_event_ordinal = $3",
+    )
+    .bind(Decimal::from(malformed_prior_first_event_ordinal))
+    .bind(session.into_uuid())
+    .bind(Decimal::from(first_event_ordinal))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_predecessor_guard",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    Ok(corrupted.rows_affected())
+}
+
 async fn insert_synthetic_dependency_projection(
     pool: &PgPool,
     session: SessionId,
@@ -24499,6 +24561,148 @@ async fn session_plan_append_rejects_malformed_non_tip_dependency_edge()
         .expect_err("a later append cannot hide a malformed non-tip dependency edge");
 
     assert_eq!(corrupted.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(append_error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Complete dependency-prefix certification terminates and rejects a repeated
+/// predecessor after storage defenses are deliberately bypassed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_cyclic_dependency_predecessor_chain()
+-> Result<(), Box<dyn Error>> {
+    const SECOND_DEPENDENT_TEXT: &str = "create a cyclic dependency tip";
+    const LATER_ENTRY_TEXT: &str = "must not extend a cyclic dependency chain";
+    const SECOND_DEPENDENT_ORDINAL: u64 = 4;
+    const LATER_DEPENDENCY_EVENT_ORDINAL: u64 = 5;
+    let second_dependent = PlanEntryId::try_from_u64(SECOND_DEPENDENT_ORDINAL)
+        .expect("the second dependent fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(SECOND_DEPENDENT_TEXT),
+            depends_plan_arguments(second_dependent, prerequisite),
+            create_plan_arguments(LATER_ENTRY_TEXT),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(SECOND_DEPENDENT_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: second_dependent,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    let corrupted = corrupt_dependency_projection_predecessor(
+        &pool,
+        fixture.session,
+        LATER_DEPENDENCY_EVENT_ORDINAL,
+        LATER_DEPENDENCY_EVENT_ORDINAL,
+    )
+    .await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let append_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fixture.repository.append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::Create {
+                text: plan_text(LATER_ENTRY_TEXT),
+            },
+        )),
+    )
+    .await
+    .expect("cyclic predecessor certification terminates");
+    let append_error = append_result
+        .expect_err("a later append cannot extend a cyclic dependency predecessor chain");
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(append_error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Complete dependency-prefix certification authenticates the endpoint
+/// creations on every edge, including roots beneath a valid later tip.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_malformed_non_tip_dependency_root()
+-> Result<(), Box<dyn Error>> {
+    const SECOND_DEPENDENT_TEXT: &str = "create a later dependency root";
+    const LATER_ENTRY_TEXT: &str = "must not extend a malformed older root";
+    const SECOND_DEPENDENT_ORDINAL: u64 = 4;
+    const OLDER_ENTRY_ROOT_ORDINAL: u64 = 2;
+    let second_dependent = PlanEntryId::try_from_u64(SECOND_DEPENDENT_ORDINAL)
+        .expect("the second dependent fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(SECOND_DEPENDENT_TEXT),
+            depends_plan_arguments(second_dependent, prerequisite),
+            create_plan_arguments(LATER_ENTRY_TEXT),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(SECOND_DEPENDENT_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: second_dependent,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    let corrupted =
+        corrupt_plan_event_predecessor(&pool, &fixture, OLDER_ENTRY_ROOT_ORDINAL, None).await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let append_error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::Create {
+                text: plan_text(LATER_ENTRY_TEXT),
+            },
+        ))
+        .await
+        .expect_err("a later append cannot hide a malformed non-tip dependency root");
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
     assert_eq!(
         plan_repository_error_kind(append_error),
         PlanRepositoryErrorKind::EventSequence

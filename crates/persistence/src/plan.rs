@@ -222,7 +222,10 @@ const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
 
 const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain AS (
     SELECT edge.session_id, edge.entry_ordinal, edge.dependency_ordinal,
-           edge.first_event_ordinal, edge.prior_first_event_ordinal
+           edge.first_event_ordinal, edge.prior_first_event_ordinal,
+           ARRAY[edge.first_event_ordinal]::numeric[] AS
+               visited_first_event_ordinals,
+           FALSE AS repeated_predecessor
       FROM session_plan_head AS chain_head
       JOIN session_plan_current_dependency AS edge
         ON edge.session_id = chain_head.session_id
@@ -231,12 +234,17 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
     UNION ALL
     SELECT predecessor.session_id, predecessor.entry_ordinal,
            predecessor.dependency_ordinal, predecessor.first_event_ordinal,
-           predecessor.prior_first_event_ordinal
+           predecessor.prior_first_event_ordinal,
+           successor.visited_first_event_ordinals ||
+               ARRAY[predecessor.first_event_ordinal],
+           predecessor.first_event_ordinal =
+               ANY(successor.visited_first_event_ordinals)
       FROM dependency_chain AS successor
       JOIN session_plan_current_dependency AS predecessor
         ON predecessor.session_id = successor.session_id
        AND predecessor.first_event_ordinal =
             successor.prior_first_event_ordinal
+     WHERE NOT successor.repeated_predecessor
 ), dependency_certification AS (
     SELECT (
         (
@@ -253,13 +261,30 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
               LEFT JOIN session_plan_event AS first_event
                 ON first_event.session_id = edge.session_id
                AND first_event.event_ordinal = edge.first_event_ordinal
-             WHERE first_event.event_ordinal IS NULL
+              LEFT JOIN session_plan_event AS entry
+                ON entry.session_id = edge.session_id
+               AND entry.event_ordinal = edge.entry_ordinal
+               AND entry.event_kind = 'created'
+              LEFT JOIN session_plan_event AS dependency
+                ON dependency.session_id = edge.session_id
+               AND dependency.event_ordinal = edge.dependency_ordinal
+               AND dependency.event_kind = 'created'
+             WHERE edge.repeated_predecessor
+                OR first_event.event_ordinal IS NULL
                 OR first_event.event_kind IS DISTINCT FROM 'depends_on'
                 OR first_event.entry_ordinal IS DISTINCT FROM edge.entry_ordinal
                 OR first_event.dependency_ordinal IS DISTINCT FROM
                     edge.dependency_ordinal
                 OR NOT session_plan_event_has_valid_shape(first_event)
                 OR NOT session_plan_event_has_authority(first_event)
+                OR entry.event_ordinal IS NULL
+                OR NOT session_plan_event_has_valid_shape(entry)
+                OR NOT session_plan_creation_has_valid_shape(entry)
+                OR NOT session_plan_event_has_authority(entry)
+                OR dependency.event_ordinal IS NULL
+                OR NOT session_plan_event_has_valid_shape(dependency)
+                OR NOT session_plan_creation_has_valid_shape(dependency)
+                OR NOT session_plan_event_has_authority(dependency)
         )
     ) AS valid
 )
@@ -1629,6 +1654,14 @@ mod tests {
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("FROM dependency_chain AS edge"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("dependency_certification.valid"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("repeated_predecessor"));
+        assert!(
+            INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority(entry)")
+        );
+        assert!(
+            INVALID_APPEND_EVENT_SEQUENCE_SQL
+                .contains("session_plan_event_has_authority(dependency)")
+        );
     }
 
     #[test]
