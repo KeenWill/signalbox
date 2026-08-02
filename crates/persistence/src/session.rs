@@ -169,6 +169,7 @@ pub(crate) async fn load_session_from_connection(
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
+            s.spawning_tool_request_id,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             creation.storage_version AS create_storage_version,
@@ -253,7 +254,11 @@ fn decode_complete(
         );
     }
     let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);
-    let provenance = decode_provenance(required(&row, "stored_cause")?, ancestry)?;
+    let provenance = decode_provenance(
+        required(&row, "stored_cause")?,
+        ancestry,
+        row.try_get("spawning_tool_request_id")?,
+    )?;
     let template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
         row.try_get("stored_template_digest")?,
@@ -367,29 +372,25 @@ fn decode_ordinal(
 fn decode_provenance(
     cause: String,
     ancestry: String,
+    spawning_request: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, SessionRepositoryError> {
-    // The current migration admits only the baseline storage spellings. This
-    // adapter-level representation check does not narrow the domain seam:
-    // `SessionReconstitutionInput` continues to accept any future provenance
-    // variant once its owning migration supplies a checked mapping.
-    if cause != USER_INITIATED {
-        return Err(SessionCorruption::Unsupported {
-            field: "creation cause",
-            value: cause,
+    match (cause.as_str(), ancestry.as_str(), spawning_request) {
+        (USER_INITIATED, NO_ANCESTRY, None) => Ok(SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        )),
+        ("delegated", NO_ANCESTRY, Some(request)) => Ok(SessionCreationProvenance::delegated(
+            signalbox_domain::ToolRequestId::from_uuid(request),
+        )),
+        (USER_INITIATED | "delegated", NO_ANCESTRY, _) => {
+            Err(SessionCorruption::Inconsistent("delegated creation provenance").into())
         }
-        .into());
-    }
-    if ancestry != NO_ANCESTRY {
-        return Err(SessionCorruption::Unsupported {
-            field: "ancestry kind",
-            value: ancestry,
+        (_, _, _) => Err(SessionCorruption::Unsupported {
+            field: "creation provenance",
+            value: format!("{cause}/{ancestry}"),
         }
-        .into());
+        .into()),
     }
-    Ok(SessionCreationProvenance::new(
-        SessionCreationCause::UserInitiated,
-        TranscriptAncestry::None,
-    ))
 }
 
 fn decode_selection(

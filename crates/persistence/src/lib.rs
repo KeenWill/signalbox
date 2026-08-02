@@ -28,6 +28,7 @@ pub mod runner_protocol;
 pub mod scheduler;
 pub mod session;
 pub mod session_credentials;
+pub mod session_delegation;
 pub mod session_metadata;
 pub mod start_eligible_turn;
 pub mod startup;
