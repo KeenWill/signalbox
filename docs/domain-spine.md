@@ -1187,6 +1187,7 @@ pub enum ImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    DelegatedAncestryMismatch,
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
