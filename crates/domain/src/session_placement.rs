@@ -1,6 +1,11 @@
 //! Validated session placement and path-scoped conversation-read decisions.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::{
+    error::Error,
+    fmt,
+    hash::{Hash, Hasher},
+    num::NonZeroU64,
+};
 
 use crate::{DurableCommandId, SessionId};
 
@@ -308,6 +313,62 @@ impl VersionedSessionPlacement {
     }
 }
 
+/// Durable command payload for appending one explicit placement update event.
+#[derive(Clone, Debug)]
+pub struct UpdateSessionPlacement {
+    command_id: DurableCommandId,
+    session: SessionId,
+    expected_version: SessionPlacementVersion,
+    replacement: SessionPlacement,
+}
+
+/// Comparison equality covers every caller field except the command identifier.
+impl PartialEq for UpdateSessionPlacement {
+    fn eq(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.expected_version == other.expected_version
+            && self.replacement == other.replacement
+    }
+}
+
+impl Eq for UpdateSessionPlacement {}
+
+impl Hash for UpdateSessionPlacement {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.session.hash(state);
+        self.expected_version.hash(state);
+        self.replacement.hash(state);
+    }
+}
+
+impl UpdateSessionPlacement {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_version: SessionPlacementVersion,
+        replacement: SessionPlacement,
+    ) -> Self {
+        Self {
+            command_id,
+            session,
+            expected_version,
+            replacement,
+        }
+    }
+    pub const fn command_id(&self) -> DurableCommandId {
+        self.command_id
+    }
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+    pub const fn expected_version(&self) -> SessionPlacementVersion {
+        self.expected_version
+    }
+    pub const fn replacement(&self) -> &SessionPlacement {
+        &self.replacement
+    }
+}
+
 /// Kind of one immutable placement-history event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionPlacementEventKind {
@@ -369,6 +430,106 @@ impl SessionPlacementEvent {
     }
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
+    }
+}
+
+/// Typed terminal result recorded for an explicit placement update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UpdateSessionPlacementResult {
+    Applied(UpdateSessionPlacementApplied),
+    Rejected(UpdateSessionPlacementRejection),
+}
+
+/// Sealed evidence that an update command produced its matching update event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateSessionPlacementApplied {
+    event: SessionPlacementEvent,
+}
+
+impl UpdateSessionPlacementApplied {
+    pub fn try_new(command: &UpdateSessionPlacement, event: SessionPlacementEvent) -> Option<Self> {
+        let matches_command = event.kind() == SessionPlacementEventKind::Updated
+            && event.session() == command.session()
+            && event.command_id() == command.command_id()
+            && event.prior_version() == Some(command.expected_version())
+            && event.placement().placement() == command.replacement()
+            && event.placement().version() == command.expected_version().next()?;
+        matches_command.then_some(Self { event })
+    }
+
+    pub const fn event(&self) -> &SessionPlacementEvent {
+        &self.event
+    }
+}
+
+/// Closed authoritative rejection reason for a placement update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpdateSessionPlacementRejectionKind {
+    SessionNotFound,
+    CurrentVersionMismatch,
+    VersionExhausted,
+}
+
+/// Sealed evidence for one rejected placement update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UpdateSessionPlacementRejection {
+    session: SessionId,
+    expected: SessionPlacementVersion,
+    current: Option<SessionPlacementVersion>,
+    kind: UpdateSessionPlacementRejectionKind,
+}
+
+impl UpdateSessionPlacementRejection {
+    pub const fn session_not_found(command: &UpdateSessionPlacement) -> Self {
+        Self {
+            session: command.session(),
+            expected: command.expected_version(),
+            current: None,
+            kind: UpdateSessionPlacementRejectionKind::SessionNotFound,
+        }
+    }
+
+    pub const fn current_version_mismatch(
+        command: &UpdateSessionPlacement,
+        current: SessionPlacementVersion,
+    ) -> Option<Self> {
+        if current.as_u64() == command.expected_version().as_u64() {
+            return None;
+        }
+        Some(Self {
+            session: command.session(),
+            expected: command.expected_version(),
+            current: Some(current),
+            kind: UpdateSessionPlacementRejectionKind::CurrentVersionMismatch,
+        })
+    }
+
+    pub const fn version_exhausted(
+        command: &UpdateSessionPlacement,
+        current: SessionPlacementVersion,
+    ) -> Option<Self> {
+        if current.as_u64() != command.expected_version().as_u64() || current.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            session: command.session(),
+            expected: command.expected_version(),
+            current: Some(current),
+            kind: UpdateSessionPlacementRejectionKind::VersionExhausted,
+        })
+    }
+
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+    pub const fn expected_version(self) -> SessionPlacementVersion {
+        self.expected
+    }
+    pub const fn current_version(self) -> Option<SessionPlacementVersion> {
+        self.current
+    }
+    pub const fn kind(self) -> UpdateSessionPlacementRejectionKind {
+        self.kind
     }
 }
 
@@ -520,5 +681,107 @@ mod tests {
         );
         assert_eq!(event.placement().placement(), &replacement);
         assert_eq!(event.command_id(), command);
+    }
+
+    struct PlacementUpdateFixture {
+        session: SessionId,
+        command_id: DurableCommandId,
+        replacement: SessionPlacement,
+        command: UpdateSessionPlacement,
+    }
+
+    fn placement_update_fixture() -> PlacementUpdateFixture {
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(3));
+        let command_id = DurableCommandId::from_uuid(uuid::Uuid::from_u128(4));
+        let replacement = scoped("projects.foo.session");
+        let command = UpdateSessionPlacement::new(
+            command_id,
+            session,
+            SessionPlacementVersion::INITIAL,
+            replacement.clone(),
+        );
+        PlacementUpdateFixture {
+            session,
+            command_id,
+            replacement,
+            command,
+        }
+    }
+
+    #[test]
+    fn placement_update_applied_evidence_rejects_a_created_event() {
+        let fixture = placement_update_fixture();
+        let created = SessionPlacementEvent::created(
+            fixture.session,
+            fixture.replacement,
+            fixture.command_id,
+        );
+
+        assert_eq!(
+            UpdateSessionPlacementApplied::try_new(&fixture.command, created),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_update_applied_evidence_rejects_foreign_command_provenance() {
+        let fixture = placement_update_fixture();
+        let foreign = SessionPlacementEvent::updated(
+            fixture.session,
+            SessionPlacementVersion::INITIAL,
+            fixture.replacement,
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(5)),
+        )
+        .expect("fixture prior version has a successor");
+
+        assert_eq!(
+            UpdateSessionPlacementApplied::try_new(&fixture.command, foreign),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_update_applied_evidence_accepts_the_matching_update() {
+        let fixture = placement_update_fixture();
+        let applied = SessionPlacementEvent::updated(
+            fixture.session,
+            SessionPlacementVersion::INITIAL,
+            fixture.replacement,
+            fixture.command_id,
+        )
+        .expect("fixture prior version has a successor");
+
+        assert_eq!(
+            UpdateSessionPlacementApplied::try_new(&fixture.command, applied.clone())
+                .expect("matching event produces sealed evidence")
+                .event(),
+            &applied
+        );
+    }
+
+    #[test]
+    fn placement_update_mismatch_evidence_rejects_the_expected_version() {
+        let fixture = placement_update_fixture();
+
+        assert_eq!(
+            UpdateSessionPlacementRejection::current_version_mismatch(
+                &fixture.command,
+                SessionPlacementVersion::INITIAL,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_update_exhaustion_evidence_rejects_a_nonmaximum_version() {
+        let fixture = placement_update_fixture();
+
+        assert_eq!(
+            UpdateSessionPlacementRejection::version_exhausted(
+                &fixture.command,
+                SessionPlacementVersion::INITIAL,
+            ),
+            None
+        );
     }
 }

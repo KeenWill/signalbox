@@ -8,6 +8,7 @@ use signalbox_domain::{
     GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
     SessionPlacementEventKind, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
+    UpdateSessionPlacementRejectionKind,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -78,6 +79,21 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
     }
 }
 
+/// Closed stored result kinds for placement-update commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionPlacementResultStorageKind {
+    Applied,
+    Rejected,
+}
+
+/// Closed stored rejection kinds for placement-update commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionPlacementRejectionStorageKind {
+    SessionNotFound,
+    CurrentVersionMismatch,
+    VersionExhausted,
+}
+
 pub(crate) const fn session_placement_event_kind_to_str(
     value: SessionPlacementEventKind,
 ) -> &'static str {
@@ -93,6 +109,48 @@ pub(crate) fn session_placement_event_kind_from_str(
     match value {
         "created" => Some(SessionPlacementEventKind::Created),
         "updated" => Some(SessionPlacementEventKind::Updated),
+        _ => None,
+    }
+}
+
+pub(crate) const fn session_placement_result_kind_to_str(
+    value: SessionPlacementResultStorageKind,
+) -> &'static str {
+    match value {
+        SessionPlacementResultStorageKind::Applied => "applied",
+        SessionPlacementResultStorageKind::Rejected => "rejected",
+    }
+}
+
+pub(crate) fn session_placement_result_kind_from_str(
+    value: &str,
+) -> Option<SessionPlacementResultStorageKind> {
+    match value {
+        "applied" => Some(SessionPlacementResultStorageKind::Applied),
+        "rejected" => Some(SessionPlacementResultStorageKind::Rejected),
+        _ => None,
+    }
+}
+
+pub(crate) const fn session_placement_rejection_to_str(
+    value: UpdateSessionPlacementRejectionKind,
+) -> &'static str {
+    match value {
+        UpdateSessionPlacementRejectionKind::SessionNotFound => "session_not_found",
+        UpdateSessionPlacementRejectionKind::CurrentVersionMismatch => "current_version_mismatch",
+        UpdateSessionPlacementRejectionKind::VersionExhausted => "version_exhausted",
+    }
+}
+
+pub(crate) fn session_placement_rejection_from_str(
+    value: &str,
+) -> Option<SessionPlacementRejectionStorageKind> {
+    match value {
+        "session_not_found" => Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+        "current_version_mismatch" => {
+            Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch)
+        }
+        "version_exhausted" => Some(SessionPlacementRejectionStorageKind::VersionExhausted),
         _ => None,
     }
 }
@@ -469,14 +527,16 @@ mod tests {
 
     use super::{
         DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
-        PositiveOrdinalMappingError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        PositiveOrdinalMappingError, SessionPlacementRejectionStorageKind,
+        SessionPlacementResultStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
         input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
         plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
-        tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
-        turn_id_to_uuid,
+        session_placement_rejection_from_str, session_placement_result_kind_from_str,
+        session_placement_result_kind_to_str, tool_permission_default_from_str,
+        tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
@@ -526,6 +586,40 @@ mod tests {
             Some(SessionPlacementEventKind::Updated)
         );
         assert_eq!(session_placement_event_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn session_placement_result_kind_mapping_is_closed() {
+        assert_eq!(
+            session_placement_result_kind_from_str(session_placement_result_kind_to_str(
+                SessionPlacementResultStorageKind::Applied,
+            )),
+            Some(SessionPlacementResultStorageKind::Applied)
+        );
+        assert_eq!(
+            session_placement_result_kind_from_str(session_placement_result_kind_to_str(
+                SessionPlacementResultStorageKind::Rejected,
+            )),
+            Some(SessionPlacementResultStorageKind::Rejected)
+        );
+        assert_eq!(session_placement_result_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn session_placement_rejection_kind_mapping_is_closed() {
+        assert_eq!(
+            session_placement_rejection_from_str("session_not_found"),
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound)
+        );
+        assert_eq!(
+            session_placement_rejection_from_str("current_version_mismatch"),
+            Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch)
+        );
+        assert_eq!(
+            session_placement_rejection_from_str("version_exhausted"),
+            Some(SessionPlacementRejectionStorageKind::VersionExhausted)
+        );
+        assert_eq!(session_placement_rejection_from_str("unknown"), None);
     }
 
     #[test]
