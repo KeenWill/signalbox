@@ -280,9 +280,9 @@ pub use tool_attempt::{
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation, ToolAttemptReconstitutionError,
     ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,
-    ToolAttemptTransitionFailure, ToolDispatchGeneration, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorDetailError, ToolExecutionErrorDetailFailure,
-    ToolExecutionErrorKind,
+    ToolAttemptTransitionFailure, ToolDispatchAuthority, ToolDispatchGeneration,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorDetailError,
+    ToolExecutionErrorDetailFailure, ToolExecutionErrorKind,
 };
 pub use tool_execution::{
     AwaitingToolApproval, AwaitingToolRecovery, DelegateToolApprovalTransitionError,

@@ -6,8 +6,8 @@ use signalbox_application::{
     UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, AuthorizedToolAttempt, ContextFrontierId, CorrelatedToolAttemptObservation,
-    CurrentToolAttempt, EndedToolAttempt, ModelCallId, NormalizedToolArguments,
+    AcceptedInputId, ContextFrontierId, CorrelatedToolAttemptObservation, CurrentToolAttempt,
+    EndedToolAttempt, ModelCallId, NormalizedToolArguments,
     ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId, SessionId,
     ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
@@ -422,9 +422,9 @@ impl ToolExecutionTransaction for ExecutorFixtureTransaction {
         _session: SessionId,
         _turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<AuthorizedToolAttempt, Self::Error> {
+    ) -> Result<signalbox_domain::ToolDispatchAuthority, Self::Error> {
         self.batch
-            .authorize_attempt(attempt)
+            .authorize_dispatch(attempt)
             .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)
     }
 

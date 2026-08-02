@@ -18,19 +18,19 @@ use signalbox_application::{
     ToolExecutionTransaction,
 };
 use signalbox_domain::{
-    ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
-    CurrentToolAttemptState, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestRejectedResult, DecideToolRequestResult, DurableCommandId, EndedToolAttempt,
-    NormalizedToolArguments, PreparedDecideToolRequest, PreparedToolBatchDecision,
-    PreparedToolResultProjection, ReconstitutedToolAttempt,
-    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
-    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptEnd, ToolAttemptId,
-    ToolAttemptObservation, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolBatch, ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
-    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchGeneration, ToolEffectClass,
-    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId,
-    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
+    ActiveTurnPhase, CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
+    DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
+    DecideToolRequestResult, DurableCommandId, EndedToolAttempt, NormalizedToolArguments,
+    PreparedDecideToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
+    ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
+    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
+    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -459,14 +459,14 @@ impl PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<AuthorizedToolAttempt, ToolLoopRepositoryError> {
+    ) -> Result<ToolDispatchAuthority, ToolLoopRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
             let batch = load_active_batch_from_connection(&mut transaction, session, turn)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
-            let authorized = batch.authorize_attempt(attempt).map_err(|_| {
+            let authorized = batch.authorize_dispatch(attempt).map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition("tool attempt is not prepared")
             })?;
             mark_issuing_turn_attempt_running(&mut transaction, authorized.attempt()).await?;
@@ -527,7 +527,7 @@ impl PostgresToolLoopRepository {
         let status = match current.state() {
             CurrentToolAttemptState::Prepared => ToolAttemptAuthorizationStatus::Prepared(current),
             CurrentToolAttemptState::InFlight => ToolAttemptAuthorizationStatus::InFlight(
-                batch.resume_in_flight_attempt(attempt).map_err(|_| {
+                batch.resume_in_flight_dispatch(attempt).map_err(|_| {
                     ToolLoopRepositoryError::InvalidTransition(
                         "in-flight authorization could not restore its fence",
                     )
@@ -955,7 +955,7 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<AuthorizedToolAttempt, Self::Error> {
+    ) -> Result<ToolDispatchAuthority, Self::Error> {
         PostgresToolLoopRepository::authorize_attempt(self, session, turn, attempt).await
     }
 

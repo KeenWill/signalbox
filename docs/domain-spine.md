@@ -958,13 +958,13 @@ impl SessionDelegation {
     pub fn register_wait(
         &self,
         awaiting_request: &DelegationAwaitRequest,
-        dispatch: &AuthorizedToolAttempt,
+        dispatch: &ToolDispatchAuthority,
     ) -> Result<DelegationWait, DelegationTransitionError>;
     pub fn deliver_message(
         self,
         sending_request: DelegationMessageRequest,
         id: DelegationMessageId,
-        dispatch: &AuthorizedToolAttempt,
+        dispatch: &ToolDispatchAuthority,
     ) -> Result<(Self, DelegationEvent), DelegationTransitionError>;
     pub fn record_outcome(
         self,
@@ -3815,6 +3815,8 @@ impl CurrentToolAttempt {
 }
 pub struct AuthorizedToolAttempt { /* private */ }
 // accessors: attempt(), correlation(), executor_fence(), into_parts()
+pub struct ToolDispatchAuthority { /* private */ }
+// accessors: request(), attempt(), correlation(), executor_fence()
 pub struct EndedToolAttempt { /* private */ }
 // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
 // generation(), end()
@@ -3941,10 +3943,18 @@ impl ToolBatch {
         &self,
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn authorize_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolDispatchAuthority, ToolBatchExecutionError>;
     pub fn resume_in_flight_attempt(
         &self,
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn resume_in_flight_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolDispatchAuthority, ToolBatchExecutionError>;
     pub fn authorize_runner_attempt(
         &self,
         attempt: ToolAttemptId,
@@ -5278,9 +5288,9 @@ pub enum ToolCatalogValidationFailure {
 
 pub struct ToolExecutionInvocation { /* private */ }
 // sealed: ToolExecutionService constructs only from checked request,
-// declaration, and AuthorizedToolAttempt correlations.
+// declaration, and ToolDispatchAuthority.
 impl ToolExecutionInvocation {
-    // accessors: request(), definition(), correlation()
+    // accessors: request(), dispatch_authority(), definition(), correlation()
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
 }
 
@@ -6551,7 +6561,7 @@ pub enum RetainedToolAttemptObservationStatus {
 
 pub enum ToolAttemptAuthorizationStatus {
     Prepared(CurrentToolAttempt),
-    InFlight(AuthorizedToolAttempt),
+    InFlight(ToolDispatchAuthority),
 }
 
 pub trait ToolExecutionTransaction {
@@ -6573,7 +6583,7 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
     fn reread_ambiguous_authorization(
         &mut self,
         session: SessionId,
@@ -8180,7 +8190,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
 | domain: tool                                       | 45                   |
-| domain: tool_attempt                               | 26                   |
+| domain: tool_attempt                               | 27                   |
 | domain: tool_execution                             | 20                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
@@ -8191,7 +8201,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **641 (+7 free fn)** |
+| **signalbox-domain total**                         | **642 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
