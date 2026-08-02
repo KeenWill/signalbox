@@ -90,6 +90,16 @@ pub struct WorkspaceRootIdentity {
     pub inode: u64,
 }
 
+fn workspace_root_identity_from_stat(status: &rustix::fs::Stat) -> WorkspaceRootIdentity {
+    // rustix exposes the host's native stat field widths. Normalize them to the
+    // stable public representation used by `std::os::unix::fs::MetadataExt`.
+    #[allow(clippy::unnecessary_cast)]
+    WorkspaceRootIdentity {
+        device: status.st_dev as u64,
+        inode: status.st_ino as u64,
+    }
+}
+
 /// Descriptor authority boundary injected into one workspace tool family.
 #[derive(Clone)]
 pub struct WorkspaceRoot {
@@ -137,10 +147,7 @@ impl WorkspaceRoot {
         }
         Ok(Self {
             descriptor: Arc::new(descriptor),
-            identity: WorkspaceRootIdentity {
-                device: status.st_dev,
-                inode: status.st_ino,
-            },
+            identity: workspace_root_identity_from_stat(&status),
         })
     }
 
@@ -562,13 +569,7 @@ mod tests {
             .expect("fixture root is valid");
         let status = fstat(root.descriptor()).expect("pinned descriptor status reads");
 
-        assert_eq!(
-            root.identity(),
-            WorkspaceRootIdentity {
-                device: status.st_dev,
-                inode: status.st_ino,
-            }
-        );
+        assert_eq!(root.identity(), workspace_root_identity_from_stat(&status));
     }
 
     #[test]

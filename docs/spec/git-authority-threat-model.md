@@ -104,7 +104,7 @@ disposition commit.
 - Repository semantics outside the direct main-worktree subset are unsupported,
   not partially trusted. Linked worktrees, repository discovery, alternate
   object databases, replacement-object configuration, and other rejected
-  extension surfaces require a separate owner-approved contract before support.
+  extension surfaces require a separate user-approved contract before support.
 - Remote authentication, transport security, server-side authorization, and
   remote repository behavior are not properties of the local authority. The
   repair-write slice separately constrains egress to the configured remote and

@@ -20,7 +20,7 @@ use rustix::{
 
 use crate::descriptor::{
     FileIdentity, QuarantineDirectory, descriptor_entry_exists, file_identity,
-    remove_entry_if_identity,
+    remove_entry_if_identity, stat_file_identity,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::valid_reference_name;
@@ -1127,10 +1127,7 @@ where
             let path_identity = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
                 .ok()
                 .filter(|status| FileType::from_raw_mode(status.st_mode) == FileType::Directory)
-                .map(|status| FileIdentity {
-                    device: status.st_dev,
-                    inode: status.st_ino,
-                });
+                .map(|status| stat_file_identity(&status));
             if path_identity != Some(created_identity) {
                 return Err(LocalGitFailure::Operation);
             }

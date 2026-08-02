@@ -23,6 +23,16 @@ pub(super) struct FileIdentity {
     pub(super) inode: u64,
 }
 
+pub(super) fn stat_file_identity(status: &rustix::fs::Stat) -> FileIdentity {
+    // rustix exposes the host's native stat field widths; MetadataExt and the
+    // repository identity contract use a stable u64 representation.
+    #[allow(clippy::unnecessary_cast)]
+    FileIdentity {
+        device: status.st_dev as u64,
+        inode: status.st_ino as u64,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RepositoryIdentity {
     pub(super) root: FileIdentity,
@@ -128,10 +138,7 @@ fn remove_quarantine_directory_if_identity(
     expected: FileIdentity,
 ) -> Result<(), LocalGitFailure> {
     let current = match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(status) => Some(FileIdentity {
-            device: status.st_dev,
-            inode: status.st_ino,
-        }),
+        Ok(status) => Some(stat_file_identity(&status)),
         Err(error) if error == rustix::io::Errno::NOENT => None,
         Err(_) => return Err(LocalGitFailure::Operation),
     };
@@ -169,10 +176,7 @@ fn restore_or_remove_quarantined_entry(
         AtFlags::SYMLINK_NOFOLLOW,
     )
     .ok()
-    .map(|status| FileIdentity {
-        device: status.st_dev,
-        inode: status.st_ino,
-    });
+    .map(|status| stat_file_identity(&status));
     if current != Some(expected) {
         return Err(LocalGitFailure::Operation);
     }
@@ -452,10 +456,7 @@ pub(super) fn remove_entry_if_identity(
     removal_flags: AtFlags,
 ) -> Result<(), LocalGitFailure> {
     let current = match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(status) => Some(FileIdentity {
-            device: status.st_dev,
-            inode: status.st_ino,
-        }),
+        Ok(status) => Some(stat_file_identity(&status)),
         Err(error) if error == rustix::io::Errno::NOENT => None,
         Err(_) => return Err(LocalGitFailure::Operation),
     };
@@ -478,10 +479,7 @@ pub(super) fn remove_entry_if_identity(
         AtFlags::SYMLINK_NOFOLLOW,
     )
     .ok()
-    .map(|status| FileIdentity {
-        device: status.st_dev,
-        inode: status.st_ino,
-    });
+    .map(|status| stat_file_identity(&status));
     if current != Some(expected) {
         restore_or_remove_quarantined_entry(
             &quarantine,
