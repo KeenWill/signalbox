@@ -1625,6 +1625,17 @@ fn reconstitute_batch(
             ));
         }
     }
+    if requests.iter().any(|request| {
+        approvals.get(&request.id()).is_some_and(|approval| {
+            approval.source() == crate::ToolDecisionSource::Delegate
+                && request.approval_posture() != crate::ToolApprovalPosture::Delegated
+        })
+    }) {
+        return Err(fail(
+            input,
+            ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
+        ));
+    }
     if let Some(first_undecided) = requests
         .iter()
         .position(|request| !approvals.contains_key(&request.id()))
@@ -2011,6 +2022,70 @@ mod tests {
         let error = input
             .reconstitute()
             .expect_err("a later approval cannot bypass the earliest request");
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::ApprovalInventoryMismatch
+        );
+    }
+
+    /// INV-049: stored delegate evidence cannot be cross-wired to a request
+    /// whose frozen posture reserves the decision for a human.
+    #[test]
+    fn inv049_reconstitution_rejects_delegate_resolution_for_human_request() {
+        let delegated_request = ToolRequestReconstitutionInput::new(
+            tool_request_id(10),
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("tool_10")).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_stored(ToolArgumentsKind::Json, String::from("{}"))
+                .expect("fixture arguments are canonical"),
+        )
+        .with_approval_posture(crate::ToolApprovalPosture::Delegated)
+        .into_request();
+        let stored_request = ToolRequestReconstitutionInput::new(
+            tool_request_id(10),
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("tool_10")).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_stored(ToolArgumentsKind::Json, String::from("{}"))
+                .expect("fixture arguments are canonical"),
+        )
+        .with_approval_posture(crate::ToolApprovalPosture::Human)
+        .into_request();
+        let rationale = crate::ToolDecisionRationale::try_new(String::from("bounded request"))
+            .expect("fixture rationale is admitted");
+        let delegated = crate::DelegateToolApproval::try_new(
+            &delegated_request,
+            crate::DirectModelSelection::from_uuid(uuid::Uuid::from_u128(11)),
+            model_call_id(12),
+            crate::DelegateApprovalRecommendation::Approve,
+            rationale,
+        )
+        .expect("the delegated fixture permits approval");
+        let resolution = ToolApprovalResolutionReconstitutionInput::delegate(delegated)
+            .reconstitute()
+            .expect("the delegate evidence is internally valid");
+        let input = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![stored_request],
+            vec![resolution],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(4),
+            },
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("delegate evidence cannot widen human-only authority");
+
         assert_eq!(
             error.failure(),
             ToolBatchReconstitutionFailure::ApprovalInventoryMismatch
