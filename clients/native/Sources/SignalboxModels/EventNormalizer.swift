@@ -410,6 +410,29 @@ public enum SignalboxEventNormalizer {
             case history
             case historyTruncated = "history_truncated"
         }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            let fields: Set<String> = [
+                "entries", "next_after_entry_id", "plan_truncated", "history",
+                "history_truncated",
+            ]
+            try payload.rejectUnadmittedFields(fields, decoder: decoder)
+            try payload.requireFields(fields, decoder: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            entries = try container.decode([PlanEntry].self, forKey: .entries)
+            nextAfterEntryID = try container.decodeIfPresent(UInt64.self, forKey: .nextAfterEntryID)
+            planTruncated = try container.decode(Bool.self, forKey: .planTruncated)
+            history = try container.decodeIfPresent([PlanEvent].self, forKey: .history)
+            historyTruncated = try container.decode(Bool.self, forKey: .historyTruncated)
+            guard nextAfterEntryID.map({ $0 > 0 }) ?? true else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .nextAfterEntryID,
+                    in: container,
+                    debugDescription: "Next plan entry identity must be positive."
+                )
+            }
+        }
     }
 
     private struct PlanEntry: Decodable {
@@ -425,6 +448,35 @@ public enum SignalboxEventNormalizer {
             case status
             case dependencies
             case readiness
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            let fields: Set<String> = [
+                "entry_id", "text", "status", "dependencies", "readiness",
+            ]
+            try payload.rejectUnadmittedFields(fields, decoder: decoder)
+            try payload.requireFields(fields, decoder: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            entryID = try container.decode(UInt64.self, forKey: .entryID)
+            text = try container.decode(String.self, forKey: .text)
+            status = try container.decode(String.self, forKey: .status)
+            dependencies = try container.decode([UInt64].self, forKey: .dependencies)
+            readiness = try container.decode(String.self, forKey: .readiness)
+            guard entryID > 0,
+                SignalboxEventNormalizer.validPlanText(text),
+                SignalboxEventNormalizer.validPlanStatus(status),
+                dependencies.allSatisfy({ $0 > 0 }),
+                Set(dependencies).count == dependencies.count,
+                SignalboxEventNormalizer.validPlanReadiness(readiness)
+            else {
+                throw DecodingError.dataCorrupted(
+                    .init(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Plan entry contains invalid current values."
+                    )
+                )
+            }
         }
     }
 
@@ -751,6 +803,13 @@ public enum SignalboxEventNormalizer {
     private static func validPlanStatus(_ status: String) -> Bool {
         switch status {
         case "pending", "in_progress", "completed", "abandoned": return true
+        default: return false
+        }
+    }
+
+    private static func validPlanReadiness(_ readiness: String) -> Bool {
+        switch readiness {
+        case "ready", "waiting": return true
         default: return false
         }
     }

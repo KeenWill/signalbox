@@ -207,8 +207,105 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testInvalidCompleteUsageCostDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_model_call_usage","turn_id":"\#(Self.storedTurnID)","model_call_id":"\#(Self.storedModelCallID)","usage_provenance":"reported","input_tokens":"1","cost_amount_usd":"\#(Self.invalidUsageCostAmount)","cost_rate_version":"fixture-rate","cost_label":"\#(Self.storedUsageCostLabel)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["cost_amount_usd"],
+            .string(Self.invalidUsageCostAmount)
+        )
+    }
+
+    func testUnknownUsageProvenanceDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_model_call_usage","turn_id":"\#(Self.storedTurnID)","model_call_id":"\#(Self.storedModelCallID)","usage_provenance":"\#(Self.unknownUsageProvenance)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["usage_provenance"],
+            .string(Self.unknownUsageProvenance)
+        )
+    }
+
+    func testCostWithoutUsageDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_model_call_usage","turn_id":"\#(Self.storedTurnID)","model_call_id":"\#(Self.storedModelCallID)","usage_provenance":"reported","cost_amount_usd":"\#(Self.storedUsageCostAmount)","cost_rate_version":"fixture-rate","cost_label":"\#(Self.storedUsageCostLabel)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["cost_label"],
+            .string(Self.storedUsageCostLabel)
+        )
+    }
+
+    func testZeroStoredDefaultsVersionDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_model_identity","turn_id":"\#(Self.storedTurnID)","defaults_version":"\#(Self.zeroDefaultsVersion)","selected_model_id":"\#(Self.storedModelCallID)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["defaults_version"],
+            .string(Self.zeroDefaultsVersion)
+        )
+    }
+
+    func testInconsistentImportedAttributionDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_message","role":"assistant","text":"Fixture text","source_attribution":"\#(Self.importedUserAttribution)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["source_attribution"],
+            .string(Self.importedUserAttribution)
+        )
+    }
+
+    func testStoredImportedSpeakerLabelIsBounded() throws {
+        let speaker = String(
+            repeating: "x",
+            count: SignalboxProcessPresentation.maximumLabelUTF8Bytes + 1
+        )
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_imported_content","content_kind":"thinking","source_speaker":"\#(speaker)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let imported = try Self.importedContentEvent(in: stored)
+
+        XCTAssertEqual(
+            imported.sourceSpeaker.utf8.count,
+            SignalboxProcessPresentation.maximumLabelUTF8Bytes
+        )
+    }
+
     private static let expandedProcessEventFieldValue = "retained"
     private static let partialUsageCostAmount = "0.01"
+    private static let invalidUsageCostAmount = "01"
+    private static let unknownUsageProvenance = "fixture_future_provenance"
+    private static let storedUsageCostAmount = "0.01"
+    private static let storedUsageCostLabel = "real"
+    private static let zeroDefaultsVersion = "0"
+    private static let importedUserAttribution = "imported_user_role"
+    private static let storedTurnID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    private static let storedModelCallID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    private static let storedEventID = 9
 
     private static func unknownEvent(in stored: SignalboxStoredEvent) throws -> SignalboxUnknownEvent {
         guard case .unknown(let unknown) = stored.event else {
@@ -217,5 +314,19 @@ final class SignalboxModelsTests: XCTestCase {
             )
         }
         return unknown
+    }
+
+    private static func importedContentEvent(
+        in stored: SignalboxStoredEvent
+    ) throws -> SignalboxProcessImportedContentEvent {
+        guard case .processImportedContent(let imported) = stored.event else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: [],
+                    debugDescription: "Expected typed imported-content evidence."
+                )
+            )
+        }
+        return imported
     }
 }

@@ -546,6 +546,18 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(event.kind, ProcessProjectionFixture.futureFollowedEventKind)
   }
 
+  func testUnknownFollowedModelCallStateRetainsAttribution() throws {
+    let followed = try ProcessProjectionFixture.unknownModelCallFollowedEvent()
+    let projector = SignalboxProcessTranscriptProjector()
+
+    let event = try XCTUnwrap(projector.projectUnrecognizedFollowedEvent(followed))
+
+    XCTAssertEqual(
+      event.diagnostic,
+      ProcessProjectionFixture.futureFollowedModelCallDiagnostic
+    )
+  }
+
   func testUnknownSnapshotTurnStateProjectsAsVisibleTimelineCard() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithUnknownTurnStates()
     var projector = SignalboxProcessTranscriptProjector()
@@ -556,6 +568,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
       ProcessProjectionFixture.futureSnapshotStatePresentationKinds
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownDiagnostics(in: normalizer.timelineItems),
+      ProcessProjectionFixture.futureSnapshotStateDiagnostics
     )
   }
 
@@ -654,6 +670,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       tool.outputPreview,
       ProcessProjectionFixture.planOutputWithoutProvenance
+    )
+  }
+
+  func testMalformedPlanReadOutputKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.malformedPlanReadOutputToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.malformedPlanReadOutput
     )
   }
 
@@ -5113,8 +5140,16 @@ private enum ProcessProjectionFixture {
   static let futureCurrentModelStateKind = "fixture_future_current_model_state"
   static let futureCurrentModelStatePresentationKind =
     "current_model_call.state.\(futureCurrentModelStateKind)"
+  static let futureFollowedModelCallDiagnostic =
+    "Turn \(ProcessDriverFixture.turn), model call \(ProcessDriverFixture.modelCall): "
+    + "the daemon reported an unrecognized model-call state."
   static let futureSnapshotStatePresentationKinds = [
     futureTurnStatePresentationKind, futureCurrentModelStatePresentationKind,
+  ]
+  static let futureSnapshotStateDiagnostics = [
+    "Turn \(ProcessDriverFixture.turn): the snapshot retained an unrecognized turn state.",
+    "Turn \(crossTurn), model call \(ProcessDriverFixture.modelCall): "
+      + "the snapshot retained an unrecognized current model-call state.",
   ]
   static let planReadRequestID = "ffffffff-5555-4555-8555-555555555551"
   static let planWriteRequestID = "ffffffff-5555-4555-8555-555555555552"
@@ -5143,6 +5178,7 @@ private enum ProcessProjectionFixture {
   static let planWriteOutput = #"{"event":{"ordinal":4,"kind":"depends_on","entry_id":1,"dependency_id":2,\#(planProvenance)}}"#
   static let malformedPlanArguments = #"{"kind":"set_status","entry_id":0,"status":"completed"}"#
   static let malformedPlanReadArguments = #"{"after_entry_id":0,"unexpected":true}"#
+  static let malformedPlanReadOutput = #"{"entries":[{"entry_id":0,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":null,"history_truncated":false}"#
   static let planReadDisplayName = "Plan read"
   static let planWriteDisplayName = "Plan update"
   static let planReadArgumentPresentation = "After entry: Beginning\nInclude history: Yes"
@@ -6509,6 +6545,19 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func unknownModelCallFollowedEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"model_call_transition",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "state":{"type":"\(futureCurrentModelStateKind)","retained":"fixture"}
+      }
+      """
+    )
+  }
+
   static func snapshotWithUnknownTurnStates() throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -6668,6 +6717,16 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func malformedPlanReadOutputToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: planReadArguments,
+      output: malformedPlanReadOutput,
+      status: .completed
+    )
+  }
+
   private static func planToolRecord(
     requestID: String,
     toolName: String,
@@ -6757,6 +6816,15 @@ private enum ProcessProjectionFixture {
         return nil
       }
       return unknown.kind
+    }
+  }
+
+  static func unknownDiagnostics(in timeline: [SignalboxTimelineItem]) -> [String] {
+    timeline.compactMap {
+      guard case .unknown(let unknown) = $0 else {
+        return nil
+      }
+      return unknown.diagnostic
     }
   }
 

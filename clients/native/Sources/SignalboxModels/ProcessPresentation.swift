@@ -348,6 +348,15 @@ public enum SignalboxProcessMessageSourceAttribution: String, Codable, Equatable
       return "Assistant role"
     }
   }
+
+  public var role: SignalboxMessageRole {
+    switch self {
+    case .importedUserRole:
+      return .user
+    case .importedAssistantRole:
+      return .assistant
+    }
+  }
 }
 
 public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
@@ -372,7 +381,7 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     sourceAttribution: SignalboxProcessMessageSourceAttribution? = nil
   ) {
     self.kind = "process_message"
-    self.role = role
+    self.role = sourceAttribution?.role ?? role
     self.text = text
     self.unrecognizedKind = unrecognizedKind.map {
       SignalboxProcessPresentation.retainedLabel($0)
@@ -383,7 +392,7 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     self.kind = try container.decode(String.self, forKey: .kind)
-    self.role = try container.decode(SignalboxMessageRole.self, forKey: .role)
+    let role = try container.decode(SignalboxMessageRole.self, forKey: .role)
     self.text = try container.decode(String.self, forKey: .text)
     self.unrecognizedKind = try container.decodeIfPresent(
       String.self,
@@ -391,10 +400,19 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     ).map {
       SignalboxProcessPresentation.retainedLabel($0)
     }
-    self.sourceAttribution = try container.decodeIfPresent(
+    let sourceAttribution = try container.decodeIfPresent(
       SignalboxProcessMessageSourceAttribution.self,
       forKey: .sourceAttribution
     )
+    guard sourceAttribution?.role == role || sourceAttribution == nil else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .sourceAttribution,
+        in: container,
+        debugDescription: "Imported source attribution contradicts the message role."
+      )
+    }
+    self.role = role
+    self.sourceAttribution = sourceAttribution
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -454,6 +472,14 @@ public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
       decoder: decoder
     )
     self = try Self(from: decoder)
+    guard defaultsVersion.rawValue > 0 else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Model-identity defaults version must be positive."
+        )
+      )
+    }
   }
 }
 
@@ -513,12 +539,37 @@ public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable 
       ],
       decoder: decoder
     )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let provenance = try container.decode(
+      SignalboxUsageProvenance.self,
+      forKey: .usageProvenance
+    )
+    let amount = try container.decodeIfPresent(
+      SignalboxCanonicalDollarAmount.self,
+      forKey: .costAmountUSD
+    )
+    let rateVersion = try container.decodeIfPresent(
+      SignalboxBillingRateVersion.self,
+      forKey: .costRateVersion
+    )
+    let label = try container.decodeIfPresent(
+      SignalboxModelCallCostLabel.self,
+      forKey: .costLabel
+    )
     self = try Self(from: decoder)
-    guard hasAtomicCostFields else {
+    let hasUsage = inputTokens != nil || outputTokens != nil
+      || cacheCreationInputTokens != nil || cacheReadInputTokens != nil
+    guard hasAtomicCostFields,
+      usageProvenance == provenance.rawValue,
+      costAmountUSD == amount?.rawValue,
+      costRateVersion == rateVersion?.rawValue,
+      costLabel == label?.rawValue,
+      amount == nil || hasUsage
+    else {
       throw DecodingError.dataCorrupted(
         .init(
           codingPath: decoder.codingPath,
-          debugDescription: "Usage cost fields must be present together."
+          debugDescription: "Model-usage evidence contains invalid scalar relationships."
         )
       )
     }
@@ -548,7 +599,7 @@ public struct SignalboxProcessImportedContentEvent: Codable, Equatable, Sendable
   ) {
     kind = "process_imported_content"
     self.contentKind = contentKind
-    self.sourceSpeaker = sourceSpeaker
+    self.sourceSpeaker = SignalboxProcessPresentation.retainedLabel(sourceSpeaker)
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -563,7 +614,14 @@ public struct SignalboxProcessImportedContentEvent: Codable, Equatable, Sendable
       ["kind", "content_kind", "source_speaker"],
       decoder: decoder
     )
-    self = try Self(from: decoder)
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      contentKind: try container.decode(
+        SignalboxProcessImportedContentKind.self,
+        forKey: .contentKind
+      ),
+      sourceSpeaker: try container.decode(String.self, forKey: .sourceSpeaker)
+    )
   }
 }
 

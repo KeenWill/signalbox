@@ -105,19 +105,21 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   ) -> SignalboxProcessConservativeEvent? {
     let content: (kind: String, diagnostic: String)?
     switch followed.event {
-    case .modelCallTransition(_, _, .unknown(let kind, _)):
+    case .modelCallTransition(let turnID, let modelCallID, .unknown(let kind, _)):
       content = (
         SignalboxProcessPresentation.retainedLabel(
           "model_call_transition.state.\(kind)"
         ),
-        "The daemon reported an unrecognized model-call state."
+        "Turn \(turnID.rawValue), model call \(modelCallID.rawValue): "
+          + "the daemon reported an unrecognized model-call state."
       )
-    case .toolBatchTransition(_, _, .unknown(let kind, _)):
+    case .toolBatchTransition(let turnID, let modelCallID, .unknown(let kind, _)):
       content = (
         SignalboxProcessPresentation.retainedLabel(
           "tool_batch_transition.state.\(kind)"
         ),
-        "The daemon reported an unrecognized tool-batch state."
+        "Turn \(turnID.rawValue), model call \(modelCallID.rawValue): "
+          + "the daemon reported an unrecognized tool-batch state."
       )
     case .unknown(let kind, _, let diagnostic):
       content = (
@@ -533,7 +535,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .unknown(let kind, _, let diagnostic):
       content = (
         SignalboxProcessPresentation.retainedLabel("turn.state.\(kind)"),
-        diagnostic?.message ?? "The snapshot retained an unrecognized turn state."
+        "Turn \(turn.turnID.rawValue): "
+          + (diagnostic?.message ?? "the snapshot retained an unrecognized turn state.")
       )
     case .activeRunning(_, let currentModelCall):
       guard let currentModelCall else {
@@ -546,7 +549,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           SignalboxProcessPresentation.retainedLabel(
             "current_model_call.state.\(kind)"
           ),
-          "The snapshot retained an unrecognized current model-call state."
+          "Turn \(turn.turnID.rawValue), model call \(currentModelCall.modelCallID.rawValue): "
+            + "the snapshot retained an unrecognized current model-call state."
         )
       case .prepared, .inFlight, .cancellationRequested:
         content = nil
