@@ -1429,11 +1429,11 @@ Session-follow updates add these closed event shapes:
   `failed`, `stopped`, or `cancelled`, and provenance is either the exact child
   turn or the exact parent session, parent turn, and durable command;
 - `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, provenance }`,
-  including `continue_running` and the same closed provenance union; and
-- `delegation_wake { spawning_request_id, subject }`, where `subject` is exactly
-  `result { result_spawning_request_id }` or `message { message_id }`. A result
-  subject's identity equals the event's `spawning_request_id`; a message subject
-  names a message on that exact relationship.
+  including `continue_running` and the same closed provenance union.
+
+The internal `delegation_wake` outbox event is a scheduler nudge, not a
+session-follow update. Clients observe the durable result or message update that
+caused it, never the wake itself.
 
 The same durable fact may appear once on the parent and once on the child stream
 when both are affected; each event's own `session_id` identifies its stream.
@@ -1543,7 +1543,6 @@ closed `event` object. The protocol admits these event shapes:
 | `child_lifecycle_disposition`  | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                           |
 | `child_result`                 | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                |
 | `session_message`              | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content` |
-| `delegation_wake`              | `spawning_request_id` and closed `subject`                                                                 |
 
 A `goal_turn_retired` event clears only the exact queued turn it names; an
 unmatched or already-active identity leaves local turn controls unchanged. A
