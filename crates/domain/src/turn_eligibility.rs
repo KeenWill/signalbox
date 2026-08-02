@@ -6933,10 +6933,12 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             command_defaults,
-            prepared.session().id(),
-            SessionPlacementVersion::INITIAL,
-            prepared.session().id(),
-            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: prepared.session().id(),
+                current_pointer_version: SessionPlacementVersion::INITIAL,
+                selected_event_session: prepared.session().id(),
+                selected_event: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            },
             conversation,
             vec![crate::ImportedSessionSeedReconstitutionInput::new(
                 seed.session(),

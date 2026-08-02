@@ -54,11 +54,12 @@ impl <Identity> {
 }
 ```
 
-The twenty-one identities defined in `lib.rs`:
+The twenty-two identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
 pub struct SessionId(/* private */);
+pub struct DelegationMessageId(/* private */);
 pub struct ImportedConversationId(/* private */);
 pub struct ImportedTranscriptEntryId(/* private */);
 pub struct AcceptedInputId(/* private */);
@@ -648,6 +649,8 @@ impl UpdateSessionPlacement {
     ) -> Self;
     // accessors: command_id(), session(), expected_version(), replacement()
 }
+// Eq/Hash exclude command_id (comparison-payload rule,
+// spec/identity-and-commands.md)
 pub enum SessionPlacementEventKind { Created, Updated }
 pub struct SessionPlacementEvent { /* private */ }
 impl SessionPlacementEvent {
@@ -976,6 +979,134 @@ impl ReconstitutedSessionCreation {
 }
 ```
 
+## domain: session_delegation
+
+```rust
+pub enum BoundChildAction { KeepRunning, Stop, Cancel }
+pub enum ChildRelationshipPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: BoundChildAction,
+        on_parent_cancelled: BoundChildAction,
+    },
+}
+pub enum DelegationWaitMode { Foreground, Background }
+pub enum DescendantTerminationScope { ParentAlone, ParentAndDescendants }
+pub enum ParentTerminationKind { Stopped, Cancelled }
+pub enum ParentTerminationCommandSource {
+    Turn { turn: TurnId },
+    Goal { generation: GoalGeneration },
+}
+pub struct ParentTerminationAuthority { /* private applied command authority */ }
+// sealed: exact applied parent-termination producer deferred to scheduling
+impl ParentTerminationAuthority {
+    // accessors: parent(), source(), turn(), goal_generation(), command(), scope(), kind()
+}
+
+pub struct DelegationContent(/* private NonEmptyUnicodeText */);
+impl DelegationContent {
+    pub const MAX_UTF8_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, DelegationContentError>;
+    pub fn as_str(&self) -> &str;
+    pub fn from_assistant_text(parts: &[AssistantText]) -> Result<Self, DelegationContentError>;
+}
+pub enum DelegationContentFailure {
+    Invalid(NonEmptyUnicodeTextFailure),
+    Oversized { utf8_byte_length: usize },
+}
+pub struct DelegationContentError { /* private rejected String + failure */ }
+impl DelegationContentError {
+    pub fn into_parts(self) -> (String, DelegationContentFailure);
+    // accessors: value(), failure()
+}
+pub enum DelegationRequestFailure {
+    InvalidToolRequestPurpose,
+    InvalidContent(DelegationContentError),
+}
+pub struct DelegationRequestError { /* private unchanged ToolRequest + failure; Error::source forwards invalid content */ }
+impl DelegationRequestError {
+    pub fn into_request(self) -> ToolRequest;
+    // accessors: request(), failure()
+}
+pub struct DelegatedSpawnRequest { /* private canonical request + task + policy */ }
+impl DelegatedSpawnRequest {
+    pub fn parse(request: ToolRequest, task: String, policy: ChildRelationshipPolicy)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), task(), policy()
+}
+pub struct DelegationAwaitRequest { /* private canonical request + child + mode */ }
+impl DelegationAwaitRequest {
+    pub fn parse(request: ToolRequest, child: SessionId, mode: DelegationWaitMode)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), child(), mode()
+}
+pub struct DelegationMessageRequest { /* private canonical request + peer + content */ }
+impl DelegationMessageRequest {
+    pub fn parse(request: ToolRequest, peer: SessionId, content: String)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), peer(), content()
+}
+
+pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
+impl TerminalChildTurn {
+    pub fn from_completed(value: &CompletedModelCallTurn) -> Option<Self>;
+    pub fn from_scheduling(
+        value: &AcceptedInputTurnSchedulingProjection,
+        reason: DelegationOutcomeReason,
+    ) -> Option<Self>;
+    // accessors: session(), turn(), reason()
+}
+
+pub struct DelegationProvenance { /* private typed authority */ }
+impl DelegationProvenance {
+    pub fn from_spawn(request: &DelegatedSpawnRequest) -> Self;
+    pub fn from_await(request: &DelegationAwaitRequest) -> Self;
+    pub fn from_message(request: &DelegationMessageRequest) -> Self;
+    pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
+    pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self;
+    // accessors: tool_request(), child_turn(), parent_command() returning the sealed authority
+}
+
+pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
+pub struct DelegationMessage { /* private */ }
+// sealed: relation aggregate producer deferred to the delegation aggregate
+impl DelegationMessage {
+    // accessors: id(), direction(), content(), provenance()
+}
+pub enum DelegationOutcomeReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ChildResultUnavailable,
+    ChildCancelled,
+    ParentStopped { scope: DescendantTerminationScope },
+    ParentCancelled { scope: DescendantTerminationScope },
+}
+pub enum DelegationOutcomeKind {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    AlreadyTerminal,
+    ContinueRunning,
+}
+pub struct DelegationOutcome { /* private validated kind + content + reason + provenance */ }
+impl DelegationOutcome {
+    pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
+        -> Option<Self>;
+    // accessors: kind(), content(), reason(), provenance()
+}
+pub struct ChildWait { /* private awaiting request + spawning request + child */ }
+// sealed: DelegationWait::foreground_subject
+impl ChildWait {
+    // accessors: awaiting_request(), spawning_request(), child()
+}
+pub struct DelegationWait { /* private */ }
+// sealed: relation aggregate producer deferred to the delegation aggregate
+impl DelegationWait {
+    // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
+}
+```
+
 ## domain: imported_session
 
 ```rust
@@ -1049,10 +1180,7 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        current_placement_session: SessionId,
-        current_placement_version: SessionPlacementVersion,
-        placement_session: SessionId,
-        current_placement: VersionedSessionPlacement,
+        placement: SessionPlacementReconstitutionFacts,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
@@ -1069,10 +1197,7 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        current_placement_session: SessionId,
-        current_placement_version: SessionPlacementVersion,
-        placement_session: SessionId,
-        current_placement: VersionedSessionPlacement,
+        placement: SessionPlacementReconstitutionFacts,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
@@ -1150,10 +1275,7 @@ impl ImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        current_placement_session: SessionId,
-        current_placement_version: SessionPlacementVersion,
-        placement_session: SessionId,
-        current_placement: VersionedSessionPlacement,
+        placement: SessionPlacementReconstitutionFacts,
         imported_conversation: ImportedConversation,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -3092,6 +3214,7 @@ pub enum StoppedToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     },
 }
 impl StoppedToolResponsePartIdentity {
@@ -3100,6 +3223,7 @@ impl StoppedToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     ) -> Self;
 }
 pub struct StoppedToolRoundModelCallIdentities { /* private */ }
@@ -3495,7 +3619,7 @@ impl ToolUsingAssistantResponseError {
 pub struct ToolRequest { /* private */ }
 // sealed live producer: definitive model-call tool-round transition
 impl ToolRequest {
-    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments()
+    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments(), approval_posture()
 }
 pub struct ToolRequestReconstitutionInput { /* private */ }
 impl ToolRequestReconstitutionInput {
@@ -3508,6 +3632,7 @@ impl ToolRequestReconstitutionInput {
         name: ToolName,
         arguments: NormalizedToolArguments,
     ) -> Self;
+    pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
     pub fn into_request(self) -> ToolRequest;
 }
 
@@ -3520,6 +3645,12 @@ pub enum ToolPermissionDefault {
     Confirm,
     AlwaysConfirm,
 }
+pub enum ToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
 pub enum ToolEffectClass {
     EffectFree,
     ExternalEffect,
@@ -3529,8 +3660,41 @@ pub enum ToolDecisionSource {
     PolicyAuto,
     SessionBlanket,
     SessionOverride,
-    JudgeRecommendation,
+    Delegate,
 }
+
+pub enum ToolApprovalDecider {
+    User { command: DurableCommandId },
+    Delegate { model: DirectModelSelection, call: ModelCallId },
+}
+
+pub struct ToolDecisionRationale(/* private */);
+impl ToolDecisionRationale {
+    pub fn try_new(value: String) -> Result<Self, ToolDecisionRationaleError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+pub struct ToolDecisionRationaleError { /* private */ }
+// accessors: value(), into_value()
+
+pub enum DelegateApprovalRecommendation {
+    Approve,
+    Deny,
+    EscalateToHuman,
+}
+pub struct DelegateToolApproval { /* private */ }
+impl DelegateToolApproval {
+    pub fn try_new(
+        request: &ToolRequest,
+        model: DirectModelSelection,
+        call: ModelCallId,
+        recommendation: DelegateApprovalRecommendation,
+        rationale: ToolDecisionRationale,
+    ) -> Result<Self, DelegateToolApprovalError>;
+    // accessors: request(), model(), call(), recommendation(), rationale()
+}
+pub struct DelegateToolApprovalError { /* private */ }
+// accessors: posture(), recommendation()
 
 pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
@@ -3552,13 +3716,14 @@ pub enum ToolApprovalDecision {
     Deny { reason: Option<ToolDenialReason> },
 }
 pub struct ToolApprovalResolution { /* private */ }
-// sealed live producers: user command, registry auto, or frozen session blanket
+// sealed live producers: user command, registry auto, frozen session blanket, or checked delegate
 impl ToolApprovalResolution {
-    // accessors: request(), decision(), source(), is_approved()
+    // accessors: request(), decision(), source(), decider(), rationale(), is_approved()
 }
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
     pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
+    pub fn delegate(approval: DelegateToolApproval) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
     pub const fn session_blanket(
         request: ToolRequestId,
@@ -3573,8 +3738,13 @@ pub struct ToolApprovalResolutionReconstitutionError { /* private */ }
 pub enum InitialToolApproval {
     Confirm,
     AlwaysConfirm,
+    Human,
+    Delegated,
     PolicyAuto,
     SessionBlanket,
+}
+impl InitialToolApproval {
+    pub const fn requires_decision(self) -> bool;
 }
 
 pub struct DecideToolRequest { /* private */ }
@@ -3864,6 +4034,11 @@ impl ToolBatch {
     ) -> impl Iterator<Item = ToolAttemptId> + '_;
     pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery>;
+    pub fn prepare_delegate_decision(
+        self,
+        approval: DelegateToolApproval,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Result<PreparedDelegateToolApproval, DelegateToolApprovalTransitionError>;
     pub fn prepare_user_decision(
         self,
         command: DecideToolRequest,
@@ -3920,6 +4095,16 @@ pub struct AwaitingToolRecovery { /* private */ }
 // sealed: ToolBatch::awaiting_recovery
 // accessors: session(), turn(), producing_call(), yielded_frontier(),
 // issuing_attempt(), attempt()
+pub struct PreparedDelegateToolApproval { /* private */ }
+// accessors: batch(), approval(), resolution(), active_phase()
+pub enum DelegateToolApprovalTransitionFailure {
+    NoUndecidedRequest,
+    RequestMismatch,
+    ContinuationAttemptMismatch,
+}
+pub struct DelegateToolApprovalTransitionError { /* private */ }
+// accessors: batch(), approval(), failure()
+
 pub struct PreparedToolBatchDecision { /* private */ }
 // accessors: batch(), prepared_command(), active_phase(), into_parts()
 pub enum ToolBatchDecisionFailure {
@@ -8085,12 +8270,13 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 21                   |
+| domain: lib.rs identities                          | 22                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session_placement                          | 18                   |
 | domain: session                                    | 22                   |
+| domain: session_delegation                         | 24                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8106,9 +8292,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_execution                            | 51                   |
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
-| domain: tool                                       | 38                   |
+| domain: tool                                       | 45                   |
 | domain: tool_attempt                               | 26                   |
-| domain: tool_execution                             | 17                   |
+| domain: tool_execution                             | 20                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
@@ -8118,7 +8304,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **618 (+7 free fn)** |
+| **signalbox-domain total**                         | **653 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

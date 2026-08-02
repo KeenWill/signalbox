@@ -537,6 +537,8 @@ impl UpdateSessionPlacementRejection {
 mod tests {
     use super::*;
 
+    const PLACEMENT_UPDATE_REPLACEMENT_PATH: &str = "projects.foo.session";
+
     fn scoped(value: &str) -> SessionPlacement {
         SessionPlacement::scoped(SessionPlacementPath::try_new(value.to_owned()).unwrap()).unwrap()
     }
@@ -608,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn s36_inv049_prefix_rule_allows_siblings_and_descendants_but_not_ancestors_or_disjoint_paths()
+    fn s36_inv050_prefix_rule_allows_siblings_and_descendants_but_not_ancestors_or_disjoint_paths()
     {
         let requester = scoped("projects.foo.reviews.pr123");
         let requesting_directory = requester.path().unwrap().parent_directory();
@@ -660,7 +662,7 @@ mod tests {
     fn placement_update_event_preserves_prior_version_and_command_history() {
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
         let command = DurableCommandId::from_uuid(uuid::Uuid::from_u128(2));
-        let replacement = scoped("projects.foo.session");
+        let replacement = scoped(PLACEMENT_UPDATE_REPLACEMENT_PATH);
         let event = SessionPlacementEvent::updated(
             session,
             SessionPlacementVersion::INITIAL,
@@ -698,7 +700,7 @@ mod tests {
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(PLACEMENT_UPDATE_SESSION_SEED));
         let command_id =
             DurableCommandId::from_uuid(uuid::Uuid::from_u128(PLACEMENT_UPDATE_COMMAND_SEED));
-        let replacement = scoped("projects.foo.session");
+        let replacement = scoped(PLACEMENT_UPDATE_REPLACEMENT_PATH);
         let command = UpdateSessionPlacement::new(
             command_id,
             session,
