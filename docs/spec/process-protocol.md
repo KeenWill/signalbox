@@ -200,11 +200,14 @@ that variant.
 | `attach_goal`                           | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Attach the first immutable commissioned statement and begin pursuing it.                                                                                                                                                                                                                                                                                                        |
 | `read_goal`                             | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read the current goal projection and complete ordered lineage.                                                                                                                                                                                                                                                                                                                  |
 | `resume_goal`                           | `command_id` and `session_id` (canonical UUID strings), `guidance` (string or null)                                                                                                                                                                                      | Resume the blocked current generation, optionally using exact guidance as its next turn input.                                                                                                                                                                                                                                                                                  |
-| `stop_goal`                             | `command_id` and `session_id` (canonical UUID strings)                                                                                                                                                                                                                   | Terminalize the pursuing or blocked current generation by explicit user action.                                                                                                                                                                                                                                                                                                 |
+| `stop_goal`                             | `command_id` and `session_id` (canonical UUID strings), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                                                                                                                                  | Terminalize the pursuing or blocked current generation by explicit user action, with an explicit delegated-child scope.                                                                                                                                                                                                                                                         |
 | `supersede_goal`                        | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Atomically supersede the current generation and begin pursuing a new immutable statement in the same lineage.                                                                                                                                                                                                                                                                   |
 | `submit_input`                          | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string, or null only for steering), and optional `delivery`                                                                                   | Submit exact user text with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                                                                                                                                                           |
 | `read_transcript`                       | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                                                                                                                                                  |
 | `follow_session`                        | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; also receive ephemeral provider-text deltas.                                                                                                                                                                 |
+| `spawn_session`                         | `session_id`, `turn_id`, and `tool_request_id` (canonical UUID strings), `task` (string), and `relationship` (closed object)                                                                                                                                             | Execute one exact already-issued spawn request.                                                                                                                                                                                                                                                                                                                                 |
+| `await_session`                         | `session_id`, `turn_id`, `tool_request_id`, and `child_session_id` (canonical UUID strings), and `mode` (`foreground` or `background`)                                                                                                                                   | Register delivery for one related child.                                                                                                                                                                                                                                                                                                                                        |
+| `send_session_message`                  | `session_id`, `turn_id`, `tool_request_id`, and `peer_session_id` (canonical UUID strings), and `content` (string)                                                                                                                                                       | Send one bounded message across the exact relationship.                                                                                                                                                                                                                                                                                                                         |
 | `list_session_metadata`                 | `required_tags` (string array), `title_contains` (string or null), `include_archived` (boolean), `page_size` (canonical decimal string), `after_session_id` (canonical UUID string or null)                                                                              | Read one filtered metadata-summary page in session-identity order.                                                                                                                                                                                                                                                                                                              |
 | `read_session_metadata`                 | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read one complete current metadata snapshot.                                                                                                                                                                                                                                                                                                                                    |
 | `replace_session_metadata`              | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                                                                                                  | Durably replace one complete metadata snapshot as the user actor.                                                                                                                                                                                                                                                                                                               |
@@ -212,7 +215,7 @@ that variant.
 | `create_session_from_imported_frontier` | `command_id` and `imported_conversation_id` (canonical UUID strings), `through_position` (positive canonical decimal string), `relationship` (`resume` or `fork`), `initial_model_selection` (selection object), `runner_placement` (proposed; placement object or null) | Create an independent live session seeded through the selected inclusive imported position.                                                                                                                                                                                                                                                                                     |
 | `replace_session_defaults`              | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean), `system_prompt` (string or null)                                         | Install one complete immutable defaults epoch as the user actor, conditional on the exact current epoch.                                                                                                                                                                                                                                                                        |
 | `reconcile_turn`                        | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                           | Supply the user reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                                                                                                                                                            |
-| `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                           | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin.                                                                                                                                                                                                                                                         |
+| `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                          | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin and explicitly selecting delegated-child scope.                                                                                                                                                                                                          |
 | `decide_tool_request`                   | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                         | Supply the user decision for one pending tool request through the canonical decision command.                                                                                                                                                                                                                                                                                   |
 | `read_session_defaults`                 | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                              | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                                                                                                                                                          |
 | `list_conversations`                    | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                      | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                                                                                                                                                  |
@@ -653,14 +656,16 @@ that variant. Every accepted non-review mutation request — `create_session`,
 `create_session_from_template`, `create_session_from_imported_frontier`,
 `submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
 `replace_session_metadata`, `replace_session_defaults`, `compact_session`,
-`import_conversation`, `replace_lost_runner`, `abandon_lost_runner`, or
-`promote_pending_runner` — produces exactly one of:
+`import_conversation`, `spawn_session`, `await_session`, `send_session_message`,
+`replace_lost_runner`, `abandon_lost_runner`, or `promote_pending_runner` —
+produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`; a queued submit names the ordinary
   origin turn held behind its expected active turn, and a `stop_turn` acceptance
-  names the accepted immediate successor;
+  names the accepted immediate successor and additionally carries its exact
+  `descendant_scope` and canonical decimal `disposition_count`;
 - `steering_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `source_turn_id`; this is the normal receipt for
   accepted pending steering, which creates no turn;
@@ -681,6 +686,15 @@ that variant. Every accepted non-review mutation request — `create_session`,
   call;
 - `conversation_import_inserted` with `imported_conversation_id`;
 - `conversation_import_already_imported` with `imported_conversation_id`;
+- `session_spawned` with `tool_request_id`, `child_session_id`, and the exact
+  `relationship`;
+- `session_await_registered` with `tool_request_id`, `child_session_id`, and
+  `mode`;
+- `child_result` with `await_request_id`, `spawning_request_id`,
+  `child_session_id`, `outcome`, nullable `content`, closed `reason`, and exact
+  `provenance`;
+- `session_message_sent` with `tool_request_id`, `message_id`, `direction`, and
+  `ordinal` plus the positive recipient-wide `delivery_sequence`;
 - `runner_replaced` with `session_id`, `prior_runner_id`, `new_runner_id`,
   successor `placement_revision`, and `sandbox_profile`;
 - `runner_abandoned` with `session_id` and `placement_revision`;
@@ -691,6 +705,8 @@ that variant. Every accepted non-review mutation request — `create_session`,
 
 **Implemented behavior.** An accepted goal mutation returns
 `goal_transition_applied { session_id, event_ordinal, generation }`. A
+`stop_goal` form additionally carries its exact `descendant_scope` and canonical
+decimal `disposition_count`; equal replay returns that same complete receipt. A
 successful `read_goal` returns `goal_history_start` with the current generation
 and immutable statement; `goal_history_state` with the current state; one or
 more contiguous `goal_history_item` messages with event ordinal, generation,
@@ -1039,7 +1055,29 @@ A `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,
 `tool_request_not_earliest_undecided { tool_request_id, earliest_tool_request_id }`,
-and `tool_request_not_in_session { session_id, tool_request_id }`. A
+and `tool_request_not_in_session { session_id, tool_request_id }`. A delegation
+request admits `session_not_found`, `tool_request_not_found`, and
+`tool_request_not_in_session` with those same shapes, plus
+`delegation_request_not_in_turn { session_id, turn_id, tool_request_id }` when
+the named request belongs to another turn, and
+`delegation_tool_request_not_executable { tool_request_id, state }` when a first
+execution names a request whose state is `awaiting_approval`, `denied`,
+`closed`, or `attempt_ended`. Durable equal replay is checked first against the
+exact stored operation and returns its original receipt without requiring a
+still-live execution attempt. `spawn_session` additionally admits
+`delegation_spawn_conflict { tool_request_id }` for a non-equal replay and
+`delegated_child_identity_collision { child_session_id }` when the generated
+child identity is already occupied. It has no fixed active-child-count
+rejection: admission checks the complete locked parent relationship inventory
+only for request and child uniqueness. `await_session` additionally admits
+`delegation_relation_not_found { session_id, peer_session_id }` and
+`delegation_await_conflict { tool_request_id }`; `send_session_message` admits
+that same relation detail and `delegation_message_conflict { tool_request_id }`.
+An exhausted relation event ordinal admits
+`delegation_event_ordinal_exhausted { spawning_request_id, last }`. These
+delegation details are closed; request-purpose, carried-argument, and bounded
+content failures occur while constructing the application input and therefore
+map to `invalid_request`, not `rejected`. A
 `create_session_from_imported_frontier` rejection admits
 `imported_conversation_not_found { imported_conversation_id }` and
 `imported_frontier_position_out_of_range { imported_conversation_id, requested_position, last_position }`.
@@ -1341,6 +1379,40 @@ imported content and verbatim raw source remain authoritative only in the
 immutable imported-conversation aggregate; the wire snapshot neither fabricates
 native evidence nor replaces that authority.
 
+**Session-delegation foundation proposal.** The delegation stack adds three
+non-text `transcript_entry` arms:
+
+- `delegated_task { spawning_request_id, parent_session_id, parent_turn_id, content }`;
+- `delegation_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, delivery_sequence, content }`;
+- `delegation_result { await_request_id, spawning_request_id, child_session_id, mode, delivery_sequence, outcome, content, reason, provenance }`.
+
+The task arm resolves the immutable spawn request and relationship, requires
+`source_session_id` to equal the child, and carries the exact checked task
+argument. It is a distinct delegated-task origin, never a user accepted-input
+entry. The message arm resolves the immutable message record referenced by the
+semantic entry and requires `source_session_id` to equal its recipient. The
+result arm resolves both the immutable child-result record and the exact
+delegation wait named by `await_request_id`; that wait must name the same
+spawning request and child, and `source_session_id` must equal its parent. Thus
+separate waits for one child retain distinct model-visible tool-result
+correlation. `mode` equals that wait's `foreground` or `background`;
+`delivery_sequence` is null for foreground and is the positive canonical decimal
+recipient-wide sequence for background. Message entries likewise resolve their
+positive recipient-wide delivery sequence even though the wire retains the
+relationship-local ordinal. `content` is required for a returned result and null
+for every other closed outcome; `reason` and `provenance` use the same closed
+shapes as the corresponding `session_event`. A missing record, mismatched wait,
+relationship, endpoint, delivery sequence, or incompatible outcome fails the
+snapshot before transmission.
+
+Snapshot deduplication uses the complete `(source_session_id, entry_id)`
+semantic identity. Neither `message_id` nor `spawning_request_id` is a
+substitute for that source-qualified key, and a second occurrence of the same
+key fails the snapshot. Each delegation arm increments `entry_count` exactly
+once and consumes one contiguous `entry_index`; its inline content emits no
+`transcript_content` frames. Distinct source-qualified entries remain distinct
+even if they resolve through one relationship.
+
 `entry_index` is zero-based and contiguous in frontier-member order; the first
 entry is zero and each later entry is exactly its predecessor plus one.
 
@@ -1354,6 +1426,113 @@ semantic frontier has no entry messages.
 The wire snapshot is a presentation projection, not a domain `Session`, a
 storage record, or a provider prompt. Unknown stored variants fail closed until
 the process protocol explicitly maps them.
+
+## Session-delegation process surface
+
+This section is the foundation proposal at the bottom of the delegation stack.
+The model-facing tool names and arguments are owned by
+[tool-loop](tool-loop.md#session-delegation-tool-family). The process surface
+admits their exact already-issued work for terminal operation and recovery; it
+does not let a client fabricate model provenance. `spawn_session`,
+`await_session`, and `send_session_message` therefore each carry the invoking
+session, turn, and `tool_request_id`, which must reconstitute one matching
+logical request before any mutation occurs.
+
+Logical-request reconstitution alone is not execution authority. Before a first
+mutation, the daemon must also reconstitute the exact authorized, executable
+attempt for that request and prove it is neither awaiting approval, denied,
+closed, nor already ended. This check uses the ordinary tool-execution authority
+boundary; a process client cannot promote a merely issued request. An exact
+durable replay is the sole exception: it returns the immutable stored receipt
+before consulting current attempt state and cannot create another effect.
+
+`spawn_session` additionally carries bounded `task` and the closed relationship
+object, and returns
+`session_spawned { tool_request_id, child_session_id, relationship }`.
+`await_session` carries the related child and wait mode, and returns either
+`session_await_registered { tool_request_id, child_session_id, mode }` for
+background or the already-delivered child outcome for foreground.
+`send_session_message` carries the related peer and bounded content, and returns
+`session_message_sent { tool_request_id, message_id, direction, ordinal, delivery_sequence }`.
+For a sent-message receipt or update, `direction` is the closed string
+`parent_to_child` or `child_to_parent`. For a result that predates the wait,
+background records delivery and returns `session_await_registered`, while
+foreground returns the child outcome. Equal replay returns that same
+mode-specific receipt or outcome. Task and message strings must fit both the
+delegation-content ceiling and their complete normalized JSON argument envelope;
+the 1 MiB ceiling is exact only for standalone returned-result content.
+
+Session-follow updates add these closed event shapes:
+
+- `child_spawned { spawning_request_id, child_session_id, relationship }`;
+- `child_waiting { await_request_id, spawning_request_id, child_session_id, mode }`;
+- `session_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, delivery_sequence, content }`;
+- `child_result { spawning_request_id, child_session_id, outcome, content, reason, provenance }`;
+- `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, provenance }`.
+
+The two outcome events use one closed nested union. `outcome` is `returned`,
+`failed`, `stopped`, `cancelled`, `already_terminal`, or `continue_running`;
+`reason` is `child_completed`, `child_execution_failed`,
+`child_result_unavailable`, `child_cancelled`, `parent_stopped`, or
+`parent_cancelled`. `provenance` is
+`child_turn { child_session_id, child_turn_id }`,
+`parent_turn_command { parent_session_id, parent_turn_id, command_id, descendant_scope }`,
+or
+`parent_goal_command { parent_session_id, goal_generation, command_id, descendant_scope }`,
+where `goal_generation` is a positive canonical decimal string and
+`descendant_scope` uses the request spelling above. Goal-stop provenance never
+carries or fabricates a parent turn. The admitted correlations are exhaustive:
+
+| Outcome            | Reason                                                 | Provenance     | Content      |
+| ------------------ | ------------------------------------------------------ | -------------- | ------------ |
+| `returned`         | `child_completed`                                      | `child_turn`   | exact string |
+| `failed`           | `child_execution_failed` or `child_result_unavailable` | `child_turn`   | null         |
+| `cancelled`        | `child_cancelled`                                      | `child_turn`   | null         |
+| `stopped`          | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
+| `cancelled`        | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
+| `already_terminal` | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
+| `continue_running` | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
+
+`child_result` admits every row except `already_terminal` and
+`continue_running`; `child_lifecycle_disposition` admits only parent-command
+`stopped`, `cancelled`, `already_terminal`, and `continue_running` rows. A
+parent-command outcome admits either `parent_turn_command` or
+`parent_goal_command` provenance and requires `parent_and_descendants` for
+`stopped`, parent-caused `cancelled`, and `continue_running`. An
+`already_terminal` row additionally requires the relationship's pre-existing
+immutable child result and never creates or replaces it; traversal continues
+through the child's outgoing edges. For a nonterminal child, the outcome names
+the bound-child action while the reason independently names whether the parent
+stopped or was cancelled; both cross-action combinations are valid.
+`already_terminal` names no new child action. A `continue_running` row is the
+explicit evaluated no-change disposition for an edge included by the
+caller-selected cascade. Any other outcome/reason/provenance/content combination
+is a contradictory frame and is rejected. Thus every lifecycle result names both
+why it happened and the exact child turn or parent command that caused it.
+
+`delivery_sequence` is a positive canonical decimal string allocated under the
+recipient session lock. It is required on every `session_message` update and on
+the transcript's background `delegation_result`, null on its foreground
+`delegation_result`, and unique and gap-free per recipient across messages and
+background-result deliveries. The result-availability `child_result` update is
+not an inbox delivery and carries no sequence. Relationship-local `ordinal`
+never breaks a cross-relationship tie.
+
+The internal `delegation_wake` outbox event is a scheduler nudge, not a
+session-follow update. Clients observe the durable result or message update that
+caused it, never the wake itself.
+
+The same durable fact may appear once on the parent and once on the child stream
+when both are affected; each event's own `session_id` identifies its stream.
+Cursor ordering, snapshot-first follow, deduplication, and resync rules are
+unchanged. No event embeds or links the child transcript.
+
+`descendant_scope` is required on both `stop_goal` and `stop_turn`. The terminal
+client spells omission as `parent_alone` and `--descendants` as
+`parent_and_descendants`; it never guesses from the relationship policy. A
+successful cascade receipt includes the selected scope and the exact count of
+recorded descendant dispositions, so a zero-child choice and an unperformed
+cascade cannot be confused.
 
 ## Durable update dispatch
 
@@ -1426,18 +1605,23 @@ receives `resync_required` and reconnects for another snapshot.
 Each `session_event` message carries `cursor`, `session_id`, and exactly one
 closed `event` object. The protocol admits these event shapes:
 
-| Event                          | Additional members                                                            |
-| ------------------------------ | ----------------------------------------------------------------------------- |
-| `session_created`              | none                                                                          |
-| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`          |
-| `goal_turn_retired`            | `turn_id`                                                                     |
-| `turn_activated`               | `turn_id` and `current_attempt_id`                                            |
-| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                       |
-| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
-| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                     |
-| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
-| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                |
-| `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+| Event                          | Additional members                                                                                         |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `session_created`              | none                                                                                                       |
+| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                       |
+| `goal_turn_retired`            | `turn_id`                                                                                                  |
+| `turn_activated`               | `turn_id` and `current_attempt_id`                                                                         |
+| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                                    |
+| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                              |
+| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                  |
+| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                     |
+| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                             |
+| `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                     |
+| `child_spawned`                | `spawning_request_id`, `child_session_id`, and `relationship`                                              |
+| `child_waiting`                | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                  |
+| `child_lifecycle_disposition`  | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                           |
+| `child_result`                 | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                |
+| `session_message`              | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content` |
 
 A `goal_turn_retired` event clears only the exact queued turn it names; an
 unmatched or already-active identity leaves local turn controls unchanged. A
@@ -1596,7 +1780,7 @@ below. The client accepts a global `--socket <path>` override or reads
 - `goal attach <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
 - `goal show <session-uuid>`;
 - `goal resume <session-uuid> [--guidance <text> | --guidance-file <path>] [--command-id <uuid>]`;
-- `goal stop <session-uuid> [--command-id <uuid>]`;
+- `goal stop <session-uuid> [--descendants] [--command-id <uuid>]`;
 - `goal supersede <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `send <session-uuid> --queue [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
@@ -1607,7 +1791,7 @@ below. The client accepts a global `--socket <path>` override or reads
 - conversation import operations described by the
   [conversation-import operational surface](conversation-import.md#operational-surface);
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
-- `stop <session-uuid> [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
+- `stop <session-uuid> [--descendants] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
 - `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
 - `runner status`;
@@ -1616,6 +1800,24 @@ below. The client accepts a global `--socket <path>` override or reads
 - `runner promote --pending-enrollment <request-uuid> [--command-id <uuid>]`;
   and
 - `chat <session-uuid>`.
+
+**Committed unimplemented functionality.** No present client provides the
+delegation commands below. Their shapes constrain the client surface implemented
+later in this stack:
+
+- `session spawn <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> (--task <text> | --task-file <path>) (--background | --bound --on-parent-stopped <keep_running|stop|cancel> --on-parent-cancelled <keep_running|stop|cancel>)`;
+- `session await <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> <child-session-uuid> --mode <foreground|background>`;
+  and
+- `session message <sender-session-uuid> <sender-turn-uuid> <tool-request-uuid> <peer-session-uuid> (--content <text> | --content-file <path>)`.
+
+When implemented, delegation mutations print the exact spawning or awaiting
+request, child or peer session, closed mode/policy, and recorded message/result
+identity. Follow and chat render child results as delivered content labeled with
+the child session; they never inline the child transcript. Lifecycle lines
+always show outcome, typed reason, and provenance, including `continue_running`.
+Background result wakes are labeled separately from foreground tool-result
+continuation so a user can see whether an old turn resumed or a new parent turn
+became eligible.
 
 `chat` is the plain line-oriented interactive surface for one live session. It
 opens one long-lived `follow_session` connection before accepting input and
