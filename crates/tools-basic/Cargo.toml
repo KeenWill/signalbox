@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+html-escape = "0.2.15"
 icu_casemap = "2.2.0"
 idna = "1.1.0"
 jiff = { version = "0.2.34", default-features = false, features = [
@@ -43,6 +44,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "time",
 ] }
 unicode-normalization = "0.1.25"
+url = { version = "2.5.8", default-features = false, features = ["std"] }
 uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]

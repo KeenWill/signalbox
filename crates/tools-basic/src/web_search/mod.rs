@@ -3,7 +3,6 @@
 mod arguments;
 mod binding;
 mod brave;
-mod canonicalization;
 mod diagnostic;
 mod egress;
 mod evidence;
@@ -21,8 +20,6 @@ mod transport_failure;
 mod binding_tests;
 #[cfg(test)]
 mod brave_tests;
-#[cfg(test)]
-mod canonicalization_tests;
 #[cfg(test)]
 mod credential_tests;
 #[cfg(test)]

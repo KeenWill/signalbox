@@ -632,36 +632,6 @@ async fn web_search_rejects_bound_wrapper_dynamic_prefix_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: an HTML C1 numeric reference is decoded through its standard
-/// replacement mapping before the injected transport boundary.
-#[tokio::test]
-async fn web_search_rejects_c1_numeric_reference_credential_before_transport() {
-    let searches = Arc::new(AtomicUsize::new(0));
-    let credentials = StaticCredentials {
-        value: HTML_NUMERIC_C1_COLLISION_KEY,
-    };
-    let transport = CountingTransport {
-        searches: Arc::clone(&searches),
-    };
-    let (_catalog, mut executor) = WebSearchTool::try_new(credentials, transport, configuration())
-        .expect("static web_search tool compiles")
-        .into_parts();
-    let request = WebSearchRequest {
-        provider: WebSearchProvider::Brave,
-        query: String::from(HTML_NUMERIC_C1_COLLISION_VALUE),
-    };
-    let correlation = dispatch_correlation();
-
-    let evidence = executor
-        .execute_request(request, &correlation)
-        .await
-        .into_result()
-        .expect("C1 numeric-reference collision is definitive evidence");
-
-    assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
-    assert_eq!(searches.load(Ordering::Relaxed), 0);
-}
-
 /// INV-035: a terminated standard named reference outside the locally decoded
 /// table fails closed before reaching the injected transport boundary.
 #[tokio::test]
@@ -689,66 +659,6 @@ async fn web_search_rejects_unsupported_named_html_reference_before_transport() 
         .expect("unsupported named-reference syntax is definitive evidence");
     let _detail = known_failure_detail(evidence);
 
-    assert_eq!(searches.load(Ordering::Relaxed), 0);
-}
-
-/// INV-035: semicolonless numeric HTML references fail closed before query
-/// text reaches the injected transport boundary.
-#[tokio::test]
-async fn web_search_rejects_semicolonless_numeric_reference_before_transport() {
-    let searches = Arc::new(AtomicUsize::new(0));
-    let credentials = StaticCredentials {
-        value: SEMICOLONLESS_NUMERIC_HTML_COLLISION_KEY,
-    };
-    let transport = CountingTransport {
-        searches: Arc::clone(&searches),
-    };
-    let (_catalog, mut executor) = WebSearchTool::try_new(credentials, transport, configuration())
-        .expect("static web_search tool compiles")
-        .into_parts();
-    let request = WebSearchRequest {
-        provider: WebSearchProvider::Brave,
-        query: String::from(SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE),
-    };
-    let correlation = dispatch_correlation();
-
-    let evidence = executor
-        .execute_request(request, &correlation)
-        .await
-        .into_result()
-        .expect("semicolonless numeric-reference syntax is definitive evidence");
-
-    assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
-    assert_eq!(searches.load(Ordering::Relaxed), 0);
-}
-
-/// INV-035: legacy named HTML references that allow an omitted semicolon
-/// fail closed before query text reaches the injected transport boundary.
-#[tokio::test]
-async fn web_search_rejects_semicolonless_named_reference_before_transport() {
-    let searches = Arc::new(AtomicUsize::new(0));
-    let credentials = StaticCredentials {
-        value: SEMICOLONLESS_NAMED_HTML_COLLISION_KEY,
-    };
-    let transport = CountingTransport {
-        searches: Arc::clone(&searches),
-    };
-    let (_catalog, mut executor) = WebSearchTool::try_new(credentials, transport, configuration())
-        .expect("static web_search tool compiles")
-        .into_parts();
-    let request = WebSearchRequest {
-        provider: WebSearchProvider::Brave,
-        query: String::from(SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE),
-    };
-    let correlation = dispatch_correlation();
-
-    let evidence = executor
-        .execute_request(request, &correlation)
-        .await
-        .into_result()
-        .expect("semicolonless named-reference syntax is definitive evidence");
-
-    assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 

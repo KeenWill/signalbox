@@ -1,5 +1,5 @@
-use reqwest::Url;
 use signalbox_model_runtime::CredentialReference;
+use url::Url;
 
 /// Non-secret name of the daemon-held Brave Search credential.
 pub const BRAVE_SEARCH_CREDENTIAL_REFERENCE: &str = "brave-search-primary";
