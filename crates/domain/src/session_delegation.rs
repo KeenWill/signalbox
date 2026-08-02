@@ -5,8 +5,8 @@ use std::num::NonZeroU64;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DelegationMessageId, DurableCommandId, NonEmptyUnicodeText, SessionId, ToolRequest,
-    ToolRequestId, TurnId,
+    DelegationMessageId, DurableCommandId, GoalGeneration, NonEmptyUnicodeText, SessionId,
+    ToolRequest, ToolRequestId, TurnId,
 };
 
 const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
@@ -52,6 +52,15 @@ pub enum ParentTerminationKind {
     Cancelled,
 }
 
+/// Exact domain command source that applied a parent termination.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ParentTerminationCommandSource {
+    /// An interrupt command applied to one exact live turn.
+    Turn { turn: TurnId },
+    /// A goal-stop command applied to one exact goal generation.
+    Goal { generation: GoalGeneration },
+}
+
 /// Exact applied parent termination authority.
 ///
 /// Raw identities cannot construct this proof. The scheduling slice supplies
@@ -60,7 +69,7 @@ pub enum ParentTerminationKind {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ParentTerminationAuthority {
     parent: SessionId,
-    turn: TurnId,
+    source: ParentTerminationCommandSource,
     command: DurableCommandId,
     kind: ParentTerminationKind,
     scope: DescendantTerminationScope,
@@ -71,8 +80,22 @@ impl ParentTerminationAuthority {
         self.parent
     }
 
-    pub const fn turn(self) -> TurnId {
-        self.turn
+    pub const fn source(self) -> ParentTerminationCommandSource {
+        self.source
+    }
+
+    pub const fn turn(self) -> Option<TurnId> {
+        match self.source {
+            ParentTerminationCommandSource::Turn { turn } => Some(turn),
+            ParentTerminationCommandSource::Goal { .. } => None,
+        }
+    }
+
+    pub const fn goal_generation(self) -> Option<GoalGeneration> {
+        match self.source {
+            ParentTerminationCommandSource::Goal { generation } => Some(generation),
+            ParentTerminationCommandSource::Turn { .. } => None,
+        }
     }
 
     pub const fn command(self) -> DurableCommandId {
@@ -468,12 +491,23 @@ fn delegation_content_from_live_completed(
 ) -> Option<DelegationContent> {
     let mut assistant_text = Vec::with_capacity(value.assistant_entries().len());
     for entry in value.assistant_entries() {
-        let crate::SemanticTranscriptEntryPayload::AssistantText {
-            producing_call,
-            value: text,
-        } = entry.payload()
-        else {
-            return None;
+        let (producing_call, text) = match entry.payload() {
+            crate::SemanticTranscriptEntryPayload::AssistantText {
+                producing_call,
+                value,
+            } => (producing_call, value),
+            crate::SemanticTranscriptEntryPayload::Imported { .. }
+            | crate::SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | crate::SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | crate::SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | crate::SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | crate::SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | crate::SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | crate::SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | crate::SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | crate::SemanticTranscriptEntryPayload::ToolClosed { .. }
+            | crate::SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | crate::SemanticTranscriptEntryPayload::TurnCancelled { .. } => return None,
         };
         if entry.source_session() != value.session() || *producing_call != value.call().id() {
             return None;
@@ -607,11 +641,9 @@ impl DelegationProvenance {
         }
     }
 
-    pub const fn parent_command(&self) -> Option<(SessionId, TurnId, DurableCommandId)> {
+    pub const fn parent_command(&self) -> Option<ParentTerminationAuthority> {
         match self.kind {
-            DelegationProvenanceKind::ParentCommand { authority } => {
-                Some((authority.parent(), authority.turn(), authority.command()))
-            }
+            DelegationProvenanceKind::ParentCommand { authority } => Some(authority),
             DelegationProvenanceKind::ToolRequest { .. }
             | DelegationProvenanceKind::ChildTurn { .. } => None,
         }
@@ -717,6 +749,7 @@ pub enum DelegationOutcomeKind {
     ChildFailed,
     ChildStopped,
     ChildCancelled,
+    AlreadyTerminal,
     ContinueRunning,
 }
 
@@ -816,6 +849,38 @@ impl DelegationOutcome {
                 };
                 Some(Self {
                     kind,
+                    content: None,
+                    reason,
+                    provenance: DelegationProvenance::from_parent_termination(authority),
+                })
+            }
+        }
+    }
+
+    /// Records that an evaluated descendant edge was already terminal.
+    ///
+    /// The relationship aggregate calls this only after resolving the
+    /// relationship's unique immutable child result. That result remains the
+    /// authority for the prior terminal state; this disposition records the
+    /// exact parent command that evaluated the edge without fabricating a
+    /// second child result.
+    #[allow(dead_code, reason = "consumed by the stacked delegation aggregate")]
+    pub(crate) const fn from_parent_already_terminal(
+        authority: ParentTerminationAuthority,
+    ) -> Option<Self> {
+        match authority.scope {
+            DescendantTerminationScope::ParentAlone => None,
+            DescendantTerminationScope::ParentAndDescendants => {
+                let reason = match authority.kind {
+                    ParentTerminationKind::Stopped => DelegationOutcomeReason::ParentStopped {
+                        scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                    ParentTerminationKind::Cancelled => DelegationOutcomeReason::ParentCancelled {
+                        scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                };
+                Some(Self {
+                    kind: DelegationOutcomeKind::AlreadyTerminal,
                     content: None,
                     reason,
                     provenance: DelegationProvenance::from_parent_termination(authority),
@@ -1169,11 +1234,21 @@ impl SessionDelegation {
                 DelegationTransitionFailure::DuplicateOutcomeAuthority,
             ));
         }
-        if self.lifecycle != DelegationLifecycle::Active {
+        let records_terminal_evaluation = outcome.kind() == DelegationOutcomeKind::AlreadyTerminal;
+        if self.lifecycle != DelegationLifecycle::Active
+            && (!records_terminal_evaluation || !has_child_terminal_outcome(&self))
+        {
             return Err(Self::reject_outcome(
                 self,
                 outcome,
                 DelegationTransitionFailure::AlreadyTerminal,
+            ));
+        }
+        if self.lifecycle == DelegationLifecycle::Active && records_terminal_evaluation {
+            return Err(Self::reject_outcome(
+                self,
+                outcome,
+                DelegationTransitionFailure::OutcomeReasonMismatch,
             ));
         }
         if !outcome_matches_relation(&self, &outcome) {
@@ -1188,7 +1263,8 @@ impl SessionDelegation {
             DelegationOutcomeKind::ResultReturned
             | DelegationOutcomeKind::ChildFailed
             | DelegationOutcomeKind::ChildStopped
-            | DelegationOutcomeKind::ChildCancelled => false,
+            | DelegationOutcomeKind::ChildCancelled
+            | DelegationOutcomeKind::AlreadyTerminal => false,
         };
         let ordinal = match self.next_ordinal() {
             Ok(ordinal) => ordinal,
@@ -1253,6 +1329,21 @@ impl SessionDelegation {
     }
 }
 
+fn has_child_terminal_outcome(relation: &SessionDelegation) -> bool {
+    relation
+        .events
+        .iter()
+        .filter_map(DelegationEvent::outcome)
+        .any(|outcome| {
+            matches!(
+                outcome.kind(),
+                DelegationOutcomeKind::ResultReturned
+                    | DelegationOutcomeKind::ChildFailed
+                    | DelegationOutcomeKind::ChildCancelled
+            ) && outcome.provenance().child_turn().is_some()
+        })
+}
+
 fn outcome_matches_relation(relation: &SessionDelegation, outcome: &DelegationOutcome) -> bool {
     let reason = outcome.reason();
     let child_matches = || {
@@ -1285,6 +1376,9 @@ fn outcome_matches_relation(relation: &SessionDelegation, outcome: &DelegationOu
         DelegationOutcomeKind::ContinueRunning => {
             parent_outcome_matches(relation, outcome, reason, BoundChildAction::KeepRunning)
         }
+        DelegationOutcomeKind::AlreadyTerminal => {
+            parent_evaluation_matches(relation, outcome, reason)
+        }
     }
 }
 
@@ -1294,7 +1388,16 @@ fn parent_outcome_matches(
     reason: DelegationOutcomeReason,
     expected_action: BoundChildAction,
 ) -> bool {
-    let authority_matches = match (outcome.provenance().kind, reason) {
+    parent_evaluation_matches(relation, outcome, reason)
+        && descendant_action(relation.policy, reason) == Some(expected_action)
+}
+
+fn parent_evaluation_matches(
+    relation: &SessionDelegation,
+    outcome: &DelegationOutcome,
+    reason: DelegationOutcomeReason,
+) -> bool {
+    match (outcome.provenance().kind, reason) {
         (
             DelegationProvenanceKind::ParentCommand { authority },
             DelegationOutcomeReason::ParentStopped {
@@ -1316,8 +1419,7 @@ fn parent_outcome_matches(
                 && authority.scope() == DescendantTerminationScope::ParentAndDescendants
         }
         _ => false,
-    };
-    authority_matches && descendant_action(relation.policy, reason) == Some(expected_action)
+    }
 }
 
 fn descendant_action(
@@ -1472,7 +1574,7 @@ mod tests {
     ) -> ParentTerminationAuthority {
         ParentTerminationAuthority {
             parent: session_id(1),
-            turn: turn_id(2),
+            source: ParentTerminationCommandSource::Turn { turn: turn_id(2) },
             command: command_id(3),
             kind: ParentTerminationKind::Stopped,
             scope,
@@ -1876,9 +1978,27 @@ mod tests {
         assert_eq!(
             outcome.reason(),
             DelegationOutcomeReason::ParentStopped {
-                scope: DescendantTerminationScope::ParentAndDescendants,
+                scope: authority.scope(),
             }
         );
+    }
+
+    /// S18 / INV-010: an already-terminal edge records its evaluating command.
+    #[test]
+    fn s18_inv010_already_terminal_edge_has_typed_command_disposition() {
+        let authority =
+            parent_termination_authority(DescendantTerminationScope::ParentAndDescendants);
+        let outcome = DelegationOutcome::from_parent_already_terminal(authority)
+            .expect("descendant-scoped authority records terminal-edge evaluation");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::AlreadyTerminal);
+        assert_eq!(
+            outcome.reason(),
+            DelegationOutcomeReason::ParentStopped {
+                scope: authority.scope(),
+            }
+        );
+        assert_eq!(outcome.provenance().parent_command(), Some(authority));
     }
 
     /// S18 / INV-010: descendant-scoped cancellation selects its exact reason.
@@ -1886,7 +2006,7 @@ mod tests {
     fn s18_inv010_parent_and_descendants_cancel_constructs_policy_outcome() {
         let authority = ParentTerminationAuthority {
             parent: session_id(1),
-            turn: turn_id(2),
+            source: ParentTerminationCommandSource::Turn { turn: turn_id(2) },
             command: command_id(3),
             kind: ParentTerminationKind::Cancelled,
             scope: DescendantTerminationScope::ParentAndDescendants,
@@ -1901,6 +2021,24 @@ mod tests {
                 scope: DescendantTerminationScope::ParentAndDescendants,
             }
         );
+    }
+
+    /// S18 / INV-010: goal-stop authority names a generation without a turn.
+    #[test]
+    fn s18_inv010_goal_termination_authority_never_fabricates_a_turn() {
+        let generation = GoalGeneration::new(std::num::NonZeroU64::MIN);
+        let authority = ParentTerminationAuthority {
+            parent: session_id(1),
+            source: ParentTerminationCommandSource::Goal { generation },
+            command: command_id(3),
+            kind: ParentTerminationKind::Stopped,
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        };
+        let provenance = DelegationProvenance::from_parent_termination(authority);
+
+        assert_eq!(authority.turn(), None);
+        assert_eq!(authority.goal_generation(), Some(generation));
+        assert_eq!(provenance.parent_command(), Some(authority));
     }
 
     #[test]
@@ -2082,13 +2220,21 @@ mod aggregate_tests {
     }
 
     fn parent_authority(
-        source: TerminationAuthoritySource,
+        authority_source: TerminationAuthoritySource,
         kind: ParentTerminationKind,
         scope: DescendantTerminationScope,
     ) -> ParentTerminationAuthority {
+        let command_source = match kind {
+            ParentTerminationKind::Stopped => ParentTerminationCommandSource::Goal {
+                generation: GoalGeneration::new(NonZeroU64::MIN),
+            },
+            ParentTerminationKind::Cancelled => {
+                ParentTerminationCommandSource::Turn { turn: turn_id(5) }
+            }
+        };
         ParentTerminationAuthority {
-            parent: source.session(),
-            turn: turn_id(5),
+            parent: authority_source.session(),
+            source: command_source,
             command: command_id(6),
             kind,
             scope,
@@ -2429,6 +2575,29 @@ mod aggregate_tests {
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
         assert_eq!(replayed, relation);
         assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S18 / INV-010: later descendant evaluation is explicit on a child-terminal edge.
+    #[test]
+    fn s18_inv010_child_terminal_edge_records_parent_command_disposition() {
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background)
+            .record_outcome(returned_outcome("terminal result"))
+            .expect("returned result terminalizes relation");
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let disposition = DelegationOutcome::from_parent_already_terminal(authority)
+            .expect("descendant-scoped command produces a typed disposition");
+        let relation = relation
+            .record_outcome(disposition.clone())
+            .expect("a child result authenticates the terminal edge");
+        let recorded = relation.events().last().and_then(DelegationEvent::outcome);
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(recorded, Some(&disposition));
+        assert_eq!(relation.events().len(), 3);
     }
 
     /// S18 / INV-010: a different authority cannot append after terminalization.
