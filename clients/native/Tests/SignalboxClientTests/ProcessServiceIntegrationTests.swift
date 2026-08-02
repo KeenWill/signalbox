@@ -469,29 +469,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(message.role, .assistant)
   }
 
-  func testTurnActivationSideProjectionIncludesModelIdentityMarker() throws {
-    let snapshot = try ProcessProjectionFixture.snapshotWithModelIdentityMarker()
-    let trigger = try ProcessProjectionFixture.activatedEvent()
+  func testCompletionSideProjectionIncludesModelIdentityMarker() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
+    let trigger = try ProcessProjectionFixture.completedTrigger()
     var projector = SignalboxProcessTranscriptProjector()
 
     let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
     let record = try XCTUnwrap(projection.records.first)
     let marker = try ProcessProjectionFixture.conservativeEvent(in: record)
 
-    XCTAssertEqual(projection.records.count, ProcessProjectionFixture.singleRecordCount)
+    XCTAssertEqual(
+      projection.records.count,
+      ProcessProjectionFixture.modelIdentityCompletionRecordCount
+    )
     XCTAssertEqual(marker.kind, ProcessProjectionFixture.modelIdentityKind)
     XCTAssertEqual(marker.diagnostic, ProcessProjectionFixture.modelIdentityDiagnostic)
-  }
-
-  func testTurnActivationSideProjectionAllowsAbsentModelIdentityMarker() throws {
-    let snapshot = try ProcessProjectionFixture.snapshotWithoutModelIdentityMarker()
-    let trigger = try ProcessProjectionFixture.activatedEvent()
-    var projector = SignalboxProcessTranscriptProjector()
-
-    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-
-    XCTAssertTrue(projection.records.isEmpty)
-    XCTAssertEqual(projection.activity, ProcessProjectionFixture.runningActivity)
   }
 
   func testUnknownTranscriptEntryPresentationKindIsBounded() throws {
@@ -606,21 +598,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       SignalboxProcessPresentation.maximumLabelUTF8Bytes
     )
     XCTAssertTrue(description.hasSuffix(ProcessProjectionFixture.mutationRetryGuidance))
-  }
-
-  func testTurnActivationSideProjectionRejectsMissingActivatedTurn() throws {
-    let snapshot = try ProcessProjectionFixture.snapshotWithoutTurns()
-    let trigger = try ProcessProjectionFixture.activatedEvent()
-    var projector = SignalboxProcessTranscriptProjector()
-
-    XCTAssertThrowsError(
-      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-    ) { error in
-      XCTAssertEqual(
-        error as? SignalboxProcessTranscriptProjectionError,
-        .missingTriggerEvidence
-      )
-    }
   }
 
   func testFailedProviderCauseAppearsInNativeActivity() throws {
@@ -4843,6 +4820,7 @@ private enum ProcessProjectionFixture {
   static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
   static let completedAssistantTranscriptRowID = "timeline-message-1"
   static let singleRecordCount = 1
+  static let modelIdentityCompletionRecordCount = 2
   static let modelIdentityKind = "model_identity_changed"
   static let modelIdentityDiagnostic =
     "Turn \(ProcessDriverFixture.turn) selected model \(ProcessDriverFixture.modelCall) at defaults version 1; source session \(ProcessDriverFixture.session), entry \(proposedToolEntry)."
@@ -5466,7 +5444,9 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithModelIdentityMarker() throws -> SignalboxSynchronizationSnapshot {
+  static func snapshotWithCompletedModelIdentityMarker() throws
+    -> SignalboxSynchronizationSnapshot
+  {
     try snapshot(
       messages: [
         """
@@ -5561,47 +5541,45 @@ private enum ProcessProjectionFixture {
         """,
         """
         {
+          "type":"transcript_text_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"3",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(completedAssistantText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"4",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_completed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
           "turn_count":"2",
-          "entry_count":"3"
-        }
-        """,
-      ]
-    )
-  }
-
-  static func snapshotWithoutModelIdentityMarker() throws -> SignalboxSynchronizationSnapshot {
-    try snapshotWithActiveTurnState(
-      """
-      {
-        "type":"active_running",
-        "current_attempt_id":"\(ProcessDriverFixture.attempt)",
-        "current_model_call":null
-      }
-      """
-    )
-  }
-
-  static func snapshotWithoutTurns() throws -> SignalboxSynchronizationSnapshot {
-    try snapshot(
-      messages: [
-        """
-        {
-          "type":"transcript_snapshot_start",
-          "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
-        }
-        """,
-        emptyModelCallsBoundary,
-        """
-        {
-          "type":"transcript_snapshot_end",
-          "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1",
-          "turn_count":"0",
-          "entry_count":"0"
+          "entry_count":"5"
         }
         """,
       ]

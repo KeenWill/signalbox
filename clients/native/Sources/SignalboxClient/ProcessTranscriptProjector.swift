@@ -497,14 +497,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ message: SignalboxTranscriptEntryMessage,
     isAttributableTo trigger: SignalboxProcessSessionEvent
   ) -> Bool {
+    if modelIdentityEntry(message.entry, isAttributableTo: trigger) {
+      return true
+    }
     switch trigger {
-    case .turnActivated(let turnID, _):
-      guard
-        case .modelIdentityChanged(let entryTurnID, _, _) = message.entry
-      else {
-        return false
-      }
-      return entryTurnID == turnID
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
@@ -537,10 +533,34 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryAttemptID == toolAttemptID && context.turnID == turnID
-    case .sessionCreated, .inputAccepted, .modelCallTransition,
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }
+  }
+
+  private func modelIdentityEntry(
+    _ entry: SignalboxTranscriptEntry,
+    isAttributableTo trigger: SignalboxProcessSessionEvent
+  ) -> Bool {
+    guard case .modelIdentityChanged(let entryTurnID, _, _) = entry else {
+      return false
+    }
+    let triggerTurnID: SignalboxCanonicalUUID
+    switch trigger {
+    case .toolBatchTransition(let turnID, _, _),
+      .turnCompleted(let turnID, _, _, _),
+      .turnFailed(let turnID, _, _),
+      .turnRefused(let turnID, _, _),
+      .turnCancelled(let turnID, _, _),
+      .turnReconciliationRequired(let turnID, _, _),
+      .turnToolReconciliationRequired(let turnID, _, _):
+      triggerTurnID = turnID
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .contextCompacted, .unknown:
+      return false
+    }
+    return entryTurnID == triggerTurnID
   }
 
   private func toolEntry(
@@ -572,13 +592,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for trigger: SignalboxProcessSessionEvent
   ) -> Bool {
     switch trigger {
-    case .turnActivated(let turnID, _):
-      return snapshot.records.contains { record in
-        guard case .turn(let turn) = record else {
-          return false
-        }
-        return turn.turnID == turnID
-      }
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
@@ -682,7 +695,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryAttemptID == toolAttemptID && context.turnID == turnID
       }
-    case .sessionCreated, .inputAccepted, .modelCallTransition, .turnRefused,
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
       .turnReconciliationRequired, .unknown:
       return true
     }
