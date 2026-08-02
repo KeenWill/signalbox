@@ -3611,6 +3611,60 @@ async fn approval_judge_preparation_serializes_a_concurrent_user_decision()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_decision_insert_serializes_a_concurrent_judge_preparation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ed0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS)
+            .await?;
+    let mut decision_transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source)
+         VALUES ($1, 'approve', 'policy_auto')",
+    )
+    .bind(request.into_uuid())
+    .execute(&mut *decision_transaction)
+    .await?;
+    let judge_pool = pool.clone();
+    let judge_task = tokio::spawn(async move {
+        let mut judge_transaction = judge_pool.begin().await?;
+        let prepared =
+            insert_prepared_judge(&mut judge_transaction, &fixture, request, seed + 0xe0).await?;
+        judge_transaction.commit().await?;
+        Ok::<_, sqlx::Error>(prepared)
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "judge preparation must wait for the decision's request lock"
+    );
+
+    decision_transaction.rollback().await?;
+    let (_, judge_call) = judge_task.await??;
+    let durable_state: (bool, bool) = sqlx::query_as(
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM tool_approval_judge_model_call
+                 WHERE model_call_id = $1 AND state_kind = 'prepared'
+            ),
+            EXISTS (
+                SELECT 1 FROM tool_approval_decision WHERE request_id = $2
+            )",
+    )
+    .bind(judge_call)
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_state, (true, false));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_automatic_decision_cannot_widen_a_human_request()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;

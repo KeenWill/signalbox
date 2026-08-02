@@ -163,6 +163,10 @@ DECLARE
     request_posture text;
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        SELECT approval_posture INTO request_posture
+          FROM tool_request
+         WHERE request_id = NEW.request_id
+           FOR UPDATE;
         SELECT true INTO active_wait
           FROM turn_lifecycle AS lifecycle
          WHERE lifecycle.turn_id = NEW.turn_id
@@ -170,10 +174,6 @@ BEGIN
            AND lifecycle.state_kind = 'active'
            AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
            AND lifecycle.approval_tool_request_id = NEW.request_id
-           FOR UPDATE;
-        SELECT approval_posture INTO request_posture
-          FROM tool_request
-         WHERE request_id = NEW.request_id
            FOR UPDATE;
         IF active_wait IS DISTINCT FROM true OR EXISTS (
             SELECT 1

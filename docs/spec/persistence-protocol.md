@@ -507,8 +507,8 @@ the schema instead:
   ordinal and generation assignment even when the Rust transaction reached that
   row first with `FOR NO KEY UPDATE`;
 - the approval-judge insert guard (migration `202608020015`) first takes
-  `FOR UPDATE` on the request's active `turn_lifecycle` row and then on the
-  `tool_request` row before it admits a prepared judge call; and
+  `FOR UPDATE` on the `tool_request` row and then on the request's active
+  `turn_lifecycle` row before it admits a prepared judge call; and
 - the deferred approval-decision authority trigger in that migration takes
   `FOR UPDATE` on the `tool_request` row before it checks for a nonterminal
   judge call and validates the decision's frozen-posture authority.
@@ -583,9 +583,11 @@ Locks per transaction, in acquisition order:
   authority trigger takes the `tool_request` row `FOR UPDATE` after the
   scheduler lock and before checking that no nonterminal judge remains.
 - **Approval-judge preparation**: the schema guard first attempts to lock the
-  exact active `turn_lifecycle` row `FOR UPDATE`, then locks the `tool_request`
+  `tool_request` row `FOR UPDATE`, then locks the exact active `turn_lifecycle`
   row `FOR UPDATE`, and only then checks for an existing decision and validates
-  the prepared call.
+  the prepared call. This matches the decision insert's implicit request lock
+  before its lifecycle update, so opposing approval transactions cannot hold
+  those rows in reverse order.
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
