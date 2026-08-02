@@ -1789,9 +1789,14 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         switch followed.event {
         case .modelCallTransition(_, _, .unknown),
           .toolBatchTransition(_, _, .unknown):
-          if let record = try projector.projectUnrecognizedFollowedEvent(followed) {
-            normalizer.upsert(record)
-            refreshTimeline()
+          if let record = try projector.projectUnrecognizedFollowedEvent(followed),
+            case .processConservative(let event) = record.event
+          {
+            retainUnrecognizedLiveEvent(
+              kind: event.kind,
+              diagnostic: event.diagnostic,
+              cursor: followed.cursor
+            )
           }
         default:
           break
@@ -2083,7 +2088,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .unknown(let kind, _, let decodingDiagnostic):
       retainUnrecognizedLiveEvent(
         kind: kind,
-        decodingDiagnostic: decodingDiagnostic,
+        diagnostic: decodingDiagnostic?.message,
         cursor: followed.cursor
       )
     case .sessionCreated, .contextCompacted:
@@ -2093,7 +2098,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private func retainUnrecognizedLiveEvent(
     kind: String,
-    decodingDiagnostic: SignalboxDecodingDiagnostic?,
+    diagnostic: String?,
     cursor: SignalboxCanonicalUInt64
   ) {
     guard unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] == nil else {
@@ -2101,7 +2106,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
     let retainedKind = SignalboxProcessPresentation.retainedLabel(kind)
     let retainedDiagnostic = SignalboxProcessPresentation.retainedLabel(
-      decodingDiagnostic?.message
+      diagnostic
         ?? "The session event kind is not rendered by this client."
     )
     let retainedBytes = UInt(retainedKind.utf8.count + retainedDiagnostic.utf8.count)

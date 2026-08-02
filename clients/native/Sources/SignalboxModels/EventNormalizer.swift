@@ -285,6 +285,7 @@ public enum SignalboxEventNormalizer {
                     title: "Model changed",
                     systemImage: "arrow.triangle.2.circlepath",
                     details: [
+                        .init(label: "Turn", value: event.turnID.rawValue),
                         .init(label: "Selected model", value: event.selectedModelID.rawValue),
                         .init(label: "Defaults version", value: event.defaultsVersion.rawValue.description),
                     ]
@@ -415,11 +416,15 @@ public enum SignalboxEventNormalizer {
         let entryID: UInt64
         let text: String
         let status: String
+        let dependencies: [UInt64]
+        let readiness: String
 
         private enum CodingKeys: String, CodingKey {
             case entryID = "entry_id"
             case text
             case status
+            case dependencies
+            case readiness
         }
     }
 
@@ -429,6 +434,7 @@ public enum SignalboxEventNormalizer {
         let entryID: UInt64
         let text: String?
         let status: String?
+        let dependencyID: UInt64?
 
         private enum CodingKeys: String, CodingKey {
             case ordinal
@@ -436,6 +442,7 @@ public enum SignalboxEventNormalizer {
             case entryID = "entry_id"
             case text
             case status
+            case dependencyID = "dependency_id"
         }
     }
 
@@ -444,12 +451,14 @@ public enum SignalboxEventNormalizer {
         let entryID: UInt64?
         let text: String?
         let status: String?
+        let dependencyID: UInt64?
 
         private enum CodingKeys: String, CodingKey {
             case kind
             case entryID = "entry_id"
             case text
             case status
+            case dependencyID = "dependency_id"
         }
     }
 
@@ -498,28 +507,42 @@ public enum SignalboxEventNormalizer {
         guard let value = decode(PlanReadOutput.self, from: json) else {
             return nil
         }
-        let entries = value.entries.map {
-            "#\($0.entryID) [\(planStatusLabel($0.status))] \($0.text)"
+        let entries = value.entries.map { entry in
+            let dependencies = entry.dependencies.isEmpty
+                ? "None"
+                : entry.dependencies.map { "#\($0)" }.joined(separator: ", ")
+            return "#\(entry.entryID) [\(planStatusLabel(entry.status)), "
+                + "\(planReadinessLabel(entry.readiness))] \(entry.text)\n"
+                + "Dependencies: \(dependencies)"
         }
-        let history = value.history?.map(formattedPlanEvent) ?? []
+        let history: [String]
+        switch value.history {
+        case nil:
+            history = ["Not included"]
+        case .some(let events) where events.isEmpty:
+            history = ["None"]
+        case .some(let events):
+            history = events.map(formattedPlanEvent)
+        }
         return (["Entries"] + (entries.isEmpty ? ["None"] : entries) + [
             "Next entry: \(value.nextAfterEntryID?.description ?? "None")",
             "Plan truncated: \(yesNo(value.planTruncated))",
             "History",
-        ] + (history.isEmpty ? ["Not included"] : history) + [
+        ] + history + [
             "History truncated: \(yesNo(value.historyTruncated))"
         ]).joined(separator: "\n")
     }
 
     private static func formattedPlanWriteArguments(_ json: String) -> String? {
-        guard let value = decode(PlanWriteArguments.self, from: json) else {
+        guard let value = decodePlanWriteArguments(json) else {
             return nil
         }
         return formattedPlanOperation(
             kind: value.kind,
             entryID: value.entryID,
             text: value.text,
-            status: value.status
+            status: value.status,
+            dependencyID: value.dependencyID
         )
     }
 
@@ -530,12 +553,53 @@ public enum SignalboxEventNormalizer {
         return formattedPlanEvent(value.event)
     }
 
+    private static func decodePlanWriteArguments(_ json: String) -> PlanWriteArguments? {
+        guard
+            let payload = decode(SignalboxJSONValue.self, from: json),
+            case .object(let fields) = payload,
+            case .string(let kind)? = fields["kind"]
+        else {
+            return nil
+        }
+        let admittedFields: Set<String>
+        switch kind {
+        case "create":
+            admittedFields = ["kind", "text"]
+        case "revise":
+            admittedFields = ["kind", "entry_id", "text"]
+        case "set_status":
+            admittedFields = ["kind", "entry_id", "status"]
+        case "depends_on":
+            admittedFields = ["kind", "entry_id", "dependency_id"]
+        default:
+            return nil
+        }
+        guard Set(fields.keys) == admittedFields,
+            let value = decode(PlanWriteArguments.self, from: json)
+        else {
+            return nil
+        }
+        switch kind {
+        case "create":
+            return value.text == nil ? nil : value
+        case "revise":
+            return value.entryID == nil || value.text == nil ? nil : value
+        case "set_status":
+            return value.entryID == nil || value.status == nil ? nil : value
+        case "depends_on":
+            return value.entryID == nil || value.dependencyID == nil ? nil : value
+        default:
+            return nil
+        }
+    }
+
     private static func formattedPlanEvent(_ event: PlanEvent) -> String {
         "Event #\(event.ordinal): " + formattedPlanOperation(
             kind: event.kind,
             entryID: event.entryID,
             text: event.text,
-            status: event.status
+            status: event.status,
+            dependencyID: event.dependencyID
         )
     }
 
@@ -543,7 +607,8 @@ public enum SignalboxEventNormalizer {
         kind: String,
         entryID: UInt64?,
         text: String?,
-        status: String?
+        status: String?,
+        dependencyID: UInt64?
     ) -> String {
         switch kind {
         case "create", "created":
@@ -553,6 +618,9 @@ public enum SignalboxEventNormalizer {
         case "set_status", "status_changed":
             let statusLabel = status.map(planStatusLabel) ?? "Status not reported"
             return "Set entry #\(entryID?.description ?? "not reported") to \(statusLabel)"
+        case "depends_on":
+            return "Make entry #\(entryID?.description ?? "not reported") depend on entry "
+                + "#\(dependencyID?.description ?? "not reported")"
         default:
             return "Unrecognized plan operation (\(kind))"
         }
@@ -565,6 +633,14 @@ public enum SignalboxEventNormalizer {
         case "completed": return "Completed"
         case "abandoned": return "Abandoned"
         default: return "Unrecognized status (\(status))"
+        }
+    }
+
+    private static func planReadinessLabel(_ readiness: String) -> String {
+        switch readiness {
+        case "ready": return "Ready"
+        case "waiting": return "Waiting"
+        default: return "Unrecognized readiness (\(readiness))"
         }
     }
 
@@ -590,7 +666,7 @@ public enum SignalboxEventNormalizer {
         case .sourceMessageBlock:
             presentation = ("Imported message block", "text.bubble")
         case .text:
-            presentation = ("Imported unattested text", "text.quote")
+            presentation = ("Imported text unavailable", "text.quote")
         case .toolCall:
             presentation = ("Imported tool call", "wrench.and.screwdriver")
         case .toolResult:

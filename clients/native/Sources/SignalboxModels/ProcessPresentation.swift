@@ -396,20 +396,24 @@ public struct SignalboxProcessContextSummaryEvent: Codable, Equatable, Sendable 
 
 public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
   public let kind: String
+  public let turnID: SignalboxCanonicalUUID
   public let defaultsVersion: SignalboxCanonicalUInt64
   public let selectedModelID: SignalboxCanonicalUUID
 
   public init(
+    turnID: SignalboxCanonicalUUID,
     defaultsVersion: SignalboxCanonicalUInt64,
     selectedModelID: SignalboxCanonicalUUID
   ) {
     self.kind = "process_model_identity"
+    self.turnID = turnID
     self.defaultsVersion = defaultsVersion
     self.selectedModelID = selectedModelID
   }
 
   private enum CodingKeys: String, CodingKey {
     case kind
+    case turnID = "turn_id"
     case defaultsVersion = "defaults_version"
     case selectedModelID = "selected_model_id"
   }

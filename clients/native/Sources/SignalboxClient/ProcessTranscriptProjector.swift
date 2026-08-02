@@ -70,6 +70,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private var toolsByRequestID: [String: SignalboxProcessToolEvent] = [:]
   private var toolContextsByRequestID: [String: ToolContext] = [:]
   private var nextSyntheticEventID = Int.min / 2
+  private var nextModelCallUsageEventID = Int.max / 4
 
   public init() {}
 
@@ -107,17 +108,21 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch followed.event {
     case .modelCallTransition(_, _, .unknown(let kind, _)):
       content = (
-        "model_call_transition.state.\(kind)",
+        SignalboxProcessPresentation.retainedLabel(
+          "model_call_transition.state.\(kind)"
+        ),
         "The daemon reported an unrecognized model-call state."
       )
     case .toolBatchTransition(_, _, .unknown(let kind, _)):
       content = (
-        "tool_batch_transition.state.\(kind)",
+        SignalboxProcessPresentation.retainedLabel(
+          "tool_batch_transition.state.\(kind)"
+        ),
         "The daemon reported an unrecognized tool-batch state."
       )
     case .unknown(let kind, _, let diagnostic):
       content = (
-        kind,
+        SignalboxProcessPresentation.retainedLabel(kind),
         diagnostic?.message ?? "The daemon reported an unrecognized session event."
       )
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
@@ -302,11 +307,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     switch message.entry {
-    case .modelIdentityChanged(_, let defaultsVersion, let selectedModelID):
+    case .modelIdentityChanged(let turnID, let defaultsVersion, let selectedModelID):
       return try semanticRecord(
         message,
         event: .processModelIdentity(
           SignalboxProcessModelIdentityEvent(
+            turnID: turnID,
             defaultsVersion: defaultsVersion,
             selectedModelID: selectedModelID
           )
@@ -524,12 +530,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     if let existing = presentationIDs[identity] {
       return existing
     }
-    let base = Int.max / 4
-    let index = evidence.modelCallIndex.rawValue
-    guard index < UInt64(Int.max / 4) else {
+    guard nextModelCallUsageEventID < Int.max / 2 else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
     }
-    let claimed = SignalboxEventID(rawValue: base + Int(index))
+    let claimed = SignalboxEventID(rawValue: nextModelCallUsageEventID)
+    nextModelCallUsageEventID += 1
     presentationIDs[identity] = claimed
     return claimed
   }
@@ -541,13 +546,15 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch turn.state {
     case .unknown(let kind, _, let diagnostic):
       content = (
-        "turn.state.\(kind)",
+        SignalboxProcessPresentation.retainedLabel("turn.state.\(kind)"),
         diagnostic?.message ?? "The snapshot retained an unrecognized turn state."
       )
     case .activeRunning(_, let currentModelCall):
       if let currentModelCall, case .unknown(let kind, _) = currentModelCall.state {
         content = (
-          "current_model_call.state.\(kind)",
+          SignalboxProcessPresentation.retainedLabel(
+            "current_model_call.state.\(kind)"
+          ),
           "The snapshot retained an unrecognized current model-call state."
         )
       } else {
@@ -846,24 +853,32 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func importedPresentation(
     _ speaker: SignalboxImportedSourceSpeaker
-  ) -> (role: SignalboxMessageRole, unrecognizedKind: String?) {
+  ) -> (role: SignalboxMessageRole, unrecognizedKind: String?, sourceLabel: String) {
     switch speaker {
     case .attested(.user):
-      return (.user, nil)
+      return (.user, nil, "User role")
     case .attested(.assistant):
-      return (.assistant, nil)
+      return (.assistant, nil, "Assistant role")
     case .attested(.unknown(let value)):
+      let label = SignalboxProcessPresentation.retainedLabel(
+        "Unrecognized speaker (\(value))"
+      )
       return (
         .unknown,
-        SignalboxProcessPresentation.retainedLabel("Unrecognized speaker (\(value))")
+        label,
+        label
       )
     case .unknown(let kind, _):
+      let label = SignalboxProcessPresentation.retainedLabel("Unknown speaker (\(kind))")
       return (
         .unknown,
-        SignalboxProcessPresentation.retainedLabel("Unknown speaker (\(kind))")
+        label,
+        label
       )
-    case .notAttested, .attestedAbsent:
-      return (.unknown, nil)
+    case .notAttested:
+      return (.unknown, nil, "Speaker not attested")
+    case .attestedAbsent:
+      return (.unknown, nil, "Speaker absent")
     }
   }
 
@@ -897,20 +912,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private func importedSpeakerLabel(
     _ speaker: SignalboxImportedSourceSpeaker
   ) -> String {
-    switch speaker {
-    case .notAttested:
-      return "Speaker not attested"
-    case .attestedAbsent:
-      return "Speaker absent"
-    case .attested(.user):
-      return "User"
-    case .attested(.assistant):
-      return "Assistant"
-    case .attested(.unknown(let value)):
-      return "Unrecognized speaker (\(value))"
-    case .unknown(let kind, _):
-      return "Unrecognized source speaker (\(kind))"
-    }
+    importedPresentation(speaker).sourceLabel
   }
 
   private func activity(

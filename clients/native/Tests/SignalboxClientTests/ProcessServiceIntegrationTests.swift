@@ -487,6 +487,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       ProcessProjectionFixture.importedNoticeTitles
     )
     XCTAssertEqual(
+      ProcessProjectionFixture.noticeDetailValues(in: normalizer.timelineItems),
+      ProcessProjectionFixture.importedSpeakerLabels
+    )
+    XCTAssertEqual(
       ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
       ProcessProjectionFixture.futureImportedPresentationKinds
     )
@@ -506,6 +510,30 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       ProcessProjectionFixture.noticeDetailValues(in: normalizer.timelineItems),
       ProcessProjectionFixture.modelNoticeDetailValues
+    )
+  }
+
+  func testModelUsagePresentationIDsSurviveEarlierInsertion() throws {
+    let initialSnapshot = try ProcessProjectionFixture.snapshotWithLaterModelUsageOnly()
+    let updatedSnapshot = try ProcessProjectionFixture.snapshotWithEarlierModelUsageInserted()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let initial = try projector.projectAuthoritativeSnapshot(initialSnapshot)
+    let updated = try projector.projectAuthoritativeSnapshot(updatedSnapshot)
+
+    XCTAssertEqual(
+      try ProcessProjectionFixture.modelCallUsageEventID(
+        ProcessDriverFixture.modelCall,
+        in: initial
+      ),
+      try ProcessProjectionFixture.modelCallUsageEventID(
+        ProcessDriverFixture.modelCall,
+        in: updated
+      )
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.modelCallUsageIDs(in: updated),
+      ProcessProjectionFixture.orderedModelCallUsageIDs
     )
   }
 
@@ -4952,6 +4980,9 @@ private enum ProcessProjectionFixture {
     "Imported source event", "Imported thinking", "Imported tool call",
     "Imported tool result",
   ]
+  static let importedSpeakerLabels = [
+    "Speaker not attested", "Assistant role", "Assistant role", "User role",
+  ]
   static let modelNoticeTitles = ["Model changed", "Model usage"]
   static let modelIdentityDefaultsVersion = UInt64(7)
   static let modelInputTokens = UInt64(12)
@@ -4961,7 +4992,10 @@ private enum ProcessProjectionFixture {
   static let modelCostAmountUSD = "0.0012"
   static let modelCostRateVersion = "fixture-rate-v1"
   static let modelCostLabel = "real"
+  static let earlierModelCall = "11111111-2222-4222-8222-222222222222"
+  static let orderedModelCallUsageIDs = [earlierModelCall, ProcessDriverFixture.modelCall]
   static let modelNoticeDetailValues = [
+    ProcessDriverFixture.turn,
     ProcessDriverFixture.modelCall,
     modelIdentityDefaultsVersion.description,
     ProcessDriverFixture.turn,
@@ -4996,18 +5030,39 @@ private enum ProcessProjectionFixture {
   ]
   static let planReadRequestID = "ffffffff-5555-4555-8555-555555555551"
   static let planWriteRequestID = "ffffffff-5555-4555-8555-555555555552"
+  static let planCreateRequestID = "ffffffff-5555-4555-8555-555555555553"
+  static let planReviseRequestID = "ffffffff-5555-4555-8555-555555555554"
+  static let planStatusRequestID = "ffffffff-5555-4555-8555-555555555555"
+  static let malformedPlanRequestID = "ffffffff-5555-4555-8555-555555555556"
   static let planReadArguments = #"{"include_history":true}"#
-  static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress"}],"next_after_entry_id":null,"plan_truncated":false,"history":null,"history_truncated":false}"#
-  static let planWriteArguments = #"{"kind":"set_status","entry_id":1,"status":"completed"}"#
-  static let planWriteOutput = #"{"event":{"ordinal":2,"kind":"status_changed","entry_id":1,"status":"completed","provenance":{}}}"#
-  static let planDisplayNames = ["Plan read", "Plan update"]
+  static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress","dependencies":[2],"readiness":"waiting"}],"next_after_entry_id":null,"plan_truncated":false,"history":[],"history_truncated":false}"#
+  static let planCreateArguments = #"{"kind":"create","text":"Draft protocol"}"#
+  static let planCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol","provenance":{}}}"#
+  static let planReviseArguments = #"{"kind":"revise","entry_id":1,"text":"Audit protocol"}"#
+  static let planReviseOutput = #"{"event":{"ordinal":2,"kind":"text_revised","entry_id":1,"text":"Audit protocol","provenance":{}}}"#
+  static let planStatusArguments = #"{"kind":"set_status","entry_id":1,"status":"completed"}"#
+  static let planStatusOutput = #"{"event":{"ordinal":3,"kind":"status_changed","entry_id":1,"status":"completed","provenance":{}}}"#
+  static let planWriteArguments = #"{"kind":"depends_on","entry_id":1,"dependency_id":2}"#
+  static let planWriteOutput = #"{"event":{"ordinal":4,"kind":"depends_on","entry_id":1,"dependency_id":2,"provenance":{}}}"#
+  static let malformedPlanArguments = #"{"kind":"create","text":"Draft protocol","unexpected":true}"#
+  static let planDisplayNames = [
+    "Plan read", "Plan update", "Plan update", "Plan update", "Plan update", "Plan update",
+  ]
   static let planArgumentPresentations = [
     "After entry: Beginning\nInclude history: Yes",
+    "Create entry: Draft protocol",
+    "Revise entry #1: Audit protocol",
     "Set entry #1 to Completed",
+    "Make entry #1 depend on entry #2",
+    malformedPlanArguments,
   ]
   static let planOutputPresentations = [
-    "Entries\n#1 [In progress] Audit protocol\nNext entry: None\nPlan truncated: No\nHistory\nNot included\nHistory truncated: No",
-    "Event #2: Set entry #1 to Completed",
+    "Entries\n#1 [In progress, Waiting] Audit protocol\nDependencies: #2\nNext entry: None\nPlan truncated: No\nHistory\nNone\nHistory truncated: No",
+    "Event #1: Create entry #1: Draft protocol",
+    "Event #2: Revise entry #1: Audit protocol",
+    "Event #3: Set entry #1 to Completed",
+    "Event #4: Make entry #1 depend on entry #2",
+    "No output yet",
   ]
   static let firstPendingID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
   static let secondPendingID = "00000000-0000-4000-8000-000000000001"
@@ -6238,6 +6293,92 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithLaterModelUsageOnly() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try modelUsageSnapshot(
+      evidence: [modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall)]
+    )
+  }
+
+  static func snapshotWithEarlierModelUsageInserted() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try modelUsageSnapshot(
+      evidence: [
+        modelUsageMessage(index: 0, modelCallID: earlierModelCall),
+        modelUsageMessage(index: 1, modelCallID: ProcessDriverFixture.modelCall),
+      ]
+    )
+  }
+
+  private static func modelUsageSnapshot(
+    evidence: [String]
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+      ] + evidence + [
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"\(evidence.count)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
+  private static func modelUsageMessage(
+    index: UInt64,
+    modelCallID: String
+  ) -> String {
+    """
+    {
+      "type":"transcript_model_call_usage",
+      "model_call_index":"\(index)",
+      "turn_id":"\(ProcessDriverFixture.turn)",
+      "model_call_id":"\(modelCallID)",
+      "usage_provenance":"\(modelUsageProvenance)",
+      "usage":{
+        "input_tokens":"\(modelInputTokens)",
+        "output_tokens":"\(modelOutputTokens)",
+        "cache_creation_input_tokens":"\(modelCacheCreationTokens)",
+        "cache_read_input_tokens":null
+      },
+      "cost":null
+    }
+    """
+  }
+
   static func unknownFollowedEvent() throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
@@ -6346,11 +6487,59 @@ private enum ProcessProjectionFixture {
         eventID: SignalboxEventID(rawValue: 2),
         event: .processTool(
           SignalboxProcessToolEvent(
+            toolRequestID: SignalboxToolInvocationID(rawValue: planCreateRequestID),
+            toolName: "plan_write",
+            arguments: planCreateArguments,
+            output: planCreateOutput,
+            status: .completed
+          )
+        )
+      ),
+      SignalboxStoredEvent(
+        eventID: SignalboxEventID(rawValue: 3),
+        event: .processTool(
+          SignalboxProcessToolEvent(
+            toolRequestID: SignalboxToolInvocationID(rawValue: planReviseRequestID),
+            toolName: "plan_write",
+            arguments: planReviseArguments,
+            output: planReviseOutput,
+            status: .completed
+          )
+        )
+      ),
+      SignalboxStoredEvent(
+        eventID: SignalboxEventID(rawValue: 4),
+        event: .processTool(
+          SignalboxProcessToolEvent(
+            toolRequestID: SignalboxToolInvocationID(rawValue: planStatusRequestID),
+            toolName: "plan_write",
+            arguments: planStatusArguments,
+            output: planStatusOutput,
+            status: .completed
+          )
+        )
+      ),
+      SignalboxStoredEvent(
+        eventID: SignalboxEventID(rawValue: 5),
+        event: .processTool(
+          SignalboxProcessToolEvent(
             toolRequestID: SignalboxToolInvocationID(rawValue: planWriteRequestID),
             toolName: "plan_write",
             arguments: planWriteArguments,
             output: planWriteOutput,
             status: .completed
+          )
+        )
+      ),
+      SignalboxStoredEvent(
+        eventID: SignalboxEventID(rawValue: 6),
+        event: .processTool(
+          SignalboxProcessToolEvent(
+            toolRequestID: SignalboxToolInvocationID(rawValue: malformedPlanRequestID),
+            toolName: "plan_write",
+            arguments: malformedPlanArguments,
+            output: nil,
+            status: .proposed
           )
         )
       ),
@@ -6391,6 +6580,32 @@ private enum ProcessProjectionFixture {
       return notice
     }
     return notices.flatMap { $0.details }.map { $0.value }
+  }
+
+  static func modelCallUsageIDs(
+    in projection: SignalboxProcessTranscriptProjection
+  ) -> [String] {
+    projection.records.compactMap { record in
+      guard case .processModelCallUsage(let event) = record.event else {
+        return nil
+      }
+      return event.modelCallID.rawValue
+    }.sorted()
+  }
+
+  static func modelCallUsageEventID(
+    _ modelCallID: String,
+    in projection: SignalboxProcessTranscriptProjection
+  ) throws -> SignalboxEventID {
+    guard let record = projection.records.first(where: { record in
+      guard case .processModelCallUsage(let event) = record.event else {
+        return false
+      }
+      return event.modelCallID.rawValue == modelCallID
+    }) else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureEvent
+    }
+    return record.eventID
   }
 
   static func unknownKinds(in timeline: [SignalboxTimelineItem]) -> [String] {
@@ -7339,6 +7554,26 @@ extension ProcessServiceIntegrationTests {
     )
     XCTAssertEqual(boundaryCards.newest.kind, ProcessProjectionFixture.futureSessionEventKind)
   }
+
+  @MainActor
+  func testUnknownNestedStateHistoryIsBoundedAndVisible() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    try ProcessProjectionFixture.fillUnknownNestedStateHistory(in: viewModel)
+    let boundaryCards = try ProcessProjectionFixture.boundaryAndNewestUnknownCards(
+      in: viewModel.timeline
+    )
+
+    XCTAssertEqual(viewModel.timeline.count, ProcessProjectionFixture.unknownHistoryCapacity)
+    XCTAssertEqual(boundaryCards.boundary.kind, ProcessProjectionFixture.unknownHistoryKind)
+    XCTAssertEqual(
+      boundaryCards.boundary.diagnostic,
+      ProcessProjectionFixture.unknownHistoryDiagnostic
+    )
+    XCTAssertEqual(boundaryCards.newest.kind, ProcessProjectionFixture.unknownNestedStateKind)
+  }
 }
 
 extension ProcessProjectionFixture {
@@ -7352,6 +7587,8 @@ extension ProcessProjectionFixture {
   )
   static let unknownSessionEventDiagnostic =
     "The session event kind is not rendered by this client."
+  static let unknownNestedStateKind =
+    "model_call_transition.state.\(unknownModelCallState)"
   static let unknownEventSideSnapshotTimelineKinds: [ProcessTimelineFixtureKind] = [
     .message, .unknown, .tool,
   ]
@@ -7380,6 +7617,19 @@ extension ProcessProjectionFixture {
     for cursor in 1...(capacity + 1) {
       viewModel.apply(
         .event(try unknownSessionEvent(kind: futureSessionEventKind, cursor: UInt64(cursor)))
+      )
+    }
+  }
+
+  @MainActor
+  static func fillUnknownNestedStateHistory(
+    in viewModel: ProcessSessionDetailViewModel
+  ) throws {
+    let capacity = SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+      .eventBufferCapacity.maximumEvents
+    for cursor in 1...(capacity + 1) {
+      viewModel.apply(
+        .event(try unknownStateModelCallEvent(cursor: UInt64(cursor)))
       )
     }
   }
