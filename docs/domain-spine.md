@@ -895,7 +895,7 @@ impl DelegationProvenance {
 
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
-// sealed: relation aggregate producer deferred to the delegation aggregate
+// sealed: SessionDelegation::deliver_message
 impl DelegationMessage {
     // accessors: id(), direction(), content(), provenance()
 }
@@ -930,7 +930,7 @@ impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
-// sealed: relation aggregate producer deferred to the delegation aggregate
+// sealed: SessionDelegation::register_wait
 impl DelegationWait {
     // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }

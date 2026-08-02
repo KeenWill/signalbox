@@ -1125,7 +1125,13 @@ impl SessionDelegation {
                 DelegationTransitionFailure::OutcomeReasonMismatch,
             ));
         }
-        let remains_active = outcome.kind() == DelegationOutcomeKind::ContinueRunning;
+        let remains_active = match outcome.kind() {
+            DelegationOutcomeKind::ContinueRunning => true,
+            DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled => false,
+        };
         let ordinal = match self.next_ordinal() {
             Ok(ordinal) => ordinal,
             Err(failure) => return Err(Self::reject_outcome(self, outcome, failure)),
