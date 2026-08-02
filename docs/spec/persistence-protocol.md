@@ -28,7 +28,9 @@ was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
 extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`). This page covers the Postgres
+PR #384 (`agent/goal-mode-runtime`); and the session-placement event, current
+head, and creation transaction were verified through this PR
+(`agent/scoped-visibility-creation`). This page covers the Postgres
 representation in `crates/persistence` (source and migrations), migration
 discipline, durable command storage and replay equality, the fail-closed
 reconstitution boundary, the lock protocol, pending-steering durable state, the
@@ -42,7 +44,9 @@ identity kinds and command construction in
 INV-tagged tests; this page cites tags resolved through the generated
 [invariant index](../invariants.md). The runner-orchestration transaction and
 lock paragraphs are the foundation proposal at the bottom of their implementing
-stack and become verified only with those child pull requests.
+stack and become verified only with those child pull requests. The
+session-placement update transaction is the foundation proposal at the bottom of
+its implementing stack and becomes verified only with its child pull request.
 
 ## Stack and boundaries
 
@@ -71,6 +75,21 @@ Concrete mapping rules:
   signed and silently narrows valid ordinals above `i64::MAX`; `numeric(20, 0)`
   preserves the full range and its ordering.
 
+Migration `202608020016_session_placement_path.sql` adds the append-only
+`session_placement_event` history, its one-row mutable current pointer, and the
+typed `update_session_placement_command` record. Every existing session is
+backfilled with a pathless version-one creation event. Post-migration legacy
+native creation records below storage version 6 and imported creation records
+materialize that same pathless event and head when their typed creation receipt
+is inserted, so a daemon spanning the migration cannot create an unreadable
+session. A deferred reverse check requires every newly inserted session to end
+its transaction with a complete selected placement event. New native creation
+records use storage version 6, store the optional path and explicit
+root-global-read-intent bit, and append the same event atomically with the
+session. Checks make the intent bit true exactly for a one-segment root path and
+false for pathless and non-root scoped values. The current pointer may advance
+only to the next event; event rows and typed command records are immutable.
+
 Connection options are explicit: production parsing forces
 `PgSslMode::VerifyFull`; the ephemeral-test helper forces `Disable`. Pool sizing
 remains at SQLx defaults until an operational slice selects limits.
@@ -78,8 +97,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirty-eight files, `202607180001` through
-`202607300101` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — fifty-seven files, `202607180001` through
+`202608020016` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -414,27 +433,26 @@ identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
-`review_workflow`, `compact_session`, `replace_lost_runner`,
-`abandon_lost_runner`, `promote_pending_runner`) and a kind-scoped
-`storage_version`. The gates above fix the current numbers: create-session
-records write version 5, defaults-bearing imported-create records write version
-4, and replace-defaults records write version 3. Create-session records
-reconstitute version 1 with the disabled dangerous-tool posture, and versions 1
-and 2 with no system prompt — a pre-version-three row carrying one fails closed
-in both the schema and every Rust reader. A pre-version-four create row carrying
-template provenance and a pre-version-five create row carrying a runner
-placement likewise fail closed; therefore a rollback reader that supports only
-versions 1 through 4 rejects every new create record instead of projecting a
-runner-backed creation as daemon-only, exactly as a reader supporting only
-versions 1 through 3 rejects every template-provenance record instead of
-projecting template creation as explicit creation. Metadata, submit, decision,
-review-workflow, compaction, and runner-recovery records use version 1. Each
-kind has one typed subordinate request record keyed by `command_id` that stores
-every caller-supplied semantic field in typed, `CHECK`-constrained columns.
-Every kind except runner replacement also stores the terminal
-`applied`/`rejected` result and typed result fields there.
-`replace_lost_runner_command` is the immutable request and
-provisioning-authorization root; at most one append-only
+`review_workflow`, `review_orchestration`, `compact_session`, `goal`,
+`update_session_placement`) and a kind-scoped `storage_version`. The gates above
+fix the current numbers: create-session records write version 6;
+defaults-bearing imported-create and replace-defaults records write version 3;
+every other closed kind writes version 1. Create-session records reconstitute
+version 1 with the disabled dangerous-tool posture, and versions 1 and 2 with no
+system prompt — a pre-version-three row carrying one fails closed in both the
+schema and every Rust reader. A pre-version-four create row carrying template
+provenance and a pre-version-five create row carrying a runner placement
+likewise fail closed; therefore a rollback reader that supports only versions 1
+through 4 rejects every new create record instead of projecting a runner-backed
+creation as daemon-only, exactly as a reader supporting only versions 1 through
+3 rejects every template-provenance record instead of projecting template
+creation as explicit creation. Metadata, submit, decision, review-workflow,
+compaction, and runner-recovery records use version 1. Each kind has one typed
+subordinate request record keyed by `command_id` that stores every
+caller-supplied semantic field in typed, `CHECK`-constrained columns. Every kind
+except runner replacement also stores the terminal `applied`/`rejected` result
+and typed result fields there. `replace_lost_runner_command` is the immutable
+request and provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
 its fields. Deferred reverse constraints require exactly one typed request per
@@ -513,6 +531,7 @@ Locks per transaction, in acquisition order:
   append-only, so complete loading and boundary resolution need no mutable-state
   lock. Semantic-entry candidates are requested only after the resulting checked
   prefix fixes their cardinality.
+
 - **ContextCompaction**: after claiming an unseen user-global command,
   preparation locks the target `session_scheduler` row `FOR UPDATE` and then the
   current-defaults pointer `FOR UPDATE` before reading defaults, turn, frontier,
@@ -529,6 +548,7 @@ Locks per transaction, in acquisition order:
   before allocating a second call. An equal replay resolves from the command
   registry and receipt without taking a session lifecycle lock or resolving
   current configuration.
+
 - **SubmitInput** (`prepare_against_locked_state`): session row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the
@@ -536,6 +556,7 @@ Locks per transaction, in acquisition order:
   pending-steering acceptance additionally locks the named active
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
+
 - **Goal commands and transitions**: an unseen user command first claims the
   user-global registry, then every user, model, scheduler, and continuation
   transaction locks the session row `FOR NO KEY UPDATE` before reading the event
@@ -549,6 +570,7 @@ Locks per transaction, in acquisition order:
   then read current defaults and insert their queued goal turn; rejected
   commands commit without firing the trigger, and exact user-command replay
   takes no row lock.
+
 - **StartEligibleTurn**, **startup recovery**, and the **model-call execution
   transactions** (prepare, authorize, observation commit, restart recovery — all
   in `model_execution.rs`, reusing the same inventory statement): the
@@ -556,6 +578,7 @@ Locks per transaction, in acquisition order:
   existence is checked with a bare `EXISTS`). The session row is locked only
   `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
   `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
@@ -567,10 +590,12 @@ Locks per transaction, in acquisition order:
   `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call updates then
   serialize under the scheduler lock; their foreign keys may take implicit
   `KEY SHARE` locks on parent rows.
+
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key.
+
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
   serializes metadata writers without conflicting with the `KEY SHARE` lock
@@ -583,6 +608,13 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
+
+- **UpdateSessionPlacement**: an unseen command locks the target's
+  `session_current_placement` head `FOR UPDATE` before checking the expected
+  version, appending the next immutable placement event, and advancing the head.
+  Exact replay and conflicting reuse resolve from the command registry without
+  taking that lock.
+
 - **SessionPlan append**: ordinal allocation locks the session row
   `FOR NO KEY UPDATE` before reading the trigger-maintained head. The adapter
   uses the inventory's `PLAN_APPEND_ATTEMPT` statement to lock the exact active
@@ -591,6 +623,7 @@ Locks per transaction, in acquisition order:
   with node-deduplicated reachability. It projects first occurrences while
   advancing both heads. Reads fetch at most 32 direct dependencies per returned
   entry after verifying both heads; they never load transitive closure.
+
 - **Runner total order**: every transaction that takes more than one runner
   authority lock uses the same applicable subsequence, omitting absent rows but
   never reordering them: `session_scheduler` when present; current enrollment or
@@ -599,6 +632,7 @@ Locks per transaction, in acquisition order:
   placement; current credential grant; lease; operation-failure evidence after
   its correlated operation; and only then semantic-frontier and turn rows. A
   durable user-command claim precedes this subsequence.
+
 - **Runner enrollment and registration**: the current enrollment or pending
   replacement-request head is locked first, followed by the relevant runner
   heads in runner-identity order and then the current registration head.
@@ -608,6 +642,7 @@ Locks per transaction, in acquisition order:
   (`promote_pending_runner`) uses that same subsequence, takes no
   `session_scheduler`, placement, grant, or lease lock because it changes none
   of them, and commits its claim, activation, and terminal result together.
+
 - **Runner dispatch and result**: `session_scheduler` is the first lock,
   followed by enrollment, current runner connection/loss, registration,
   placement, current credential grant when present, and lease heads in the total
@@ -618,6 +653,7 @@ Locks per transaction, in acquisition order:
   then the applicable runner and lease rows without acquiring an earlier omitted
   lock, and commits the checked terminal attempt observation and claimed-lease
   completion together.
+
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger
   reject new offers or claims from that connection. It never holds that global
@@ -631,6 +667,7 @@ Locks per transaction, in acquisition order:
   it. A crash resumes at the first uncommitted session, while every
   not-yet-projected placement is already effectively lost through the epoch
   fence.
+
 - **Runner replace, abandon, and release**: an unseen abandonment command owns
   its durable-command claim and terminalizes in one transaction. An unseen
   replacement command first claims its immutable request and provisioning
@@ -674,6 +711,7 @@ Locks per transaction, in acquisition order:
   leaves its workspace under that same recorded-leak response. Until one of the
   three commits, an unacknowledged release is redelivered after restart exactly
   as an unacknowledged result is.
+
 - **Runner operation failure**: durable admission takes `session_scheduler` for
   the correlated session, then the applicable enrollment, connection/loss,
   registration, placement, grant, and lease rows in the runner total order.
@@ -685,10 +723,12 @@ Locks per transaction, in acquisition order:
   claim, workspace receipt, release acknowledgement, loss transition, or
   duplicate failure therefore wins the shared authority row and makes the loser
   reread the one committed terminal proof instead of committing both outcomes.
+
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
   transaction.
+
 - **Daemon-generation advance**: `hub_fence_state` is locked `FOR UPDATE`, then
   the transaction takes the exclusive transaction-level advisory lock for the
   prior generation, updates the singleton to its successor, and also obtains the
