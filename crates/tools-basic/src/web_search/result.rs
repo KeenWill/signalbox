@@ -47,6 +47,15 @@ pub(super) struct ParsedResultUrlRemovalFacts {
 pub(super) struct EscapedSnippet(String);
 
 /// One checked provider result.
+///
+/// INV-035: provider-controlled components remain opaque outside this crate;
+/// only request-scoped evidence construction may render them.
+///
+/// ```compile_fail
+/// fn render_provider_components(result: &signalbox_tools_basic::WebSearchResult) {
+///     let _ = (result.title(), result.url(), result.snippet());
+/// }
+/// ```
 #[derive(Clone, Eq, PartialEq)]
 pub struct WebSearchResult {
     pub(super) title: ResultTitle,
@@ -103,17 +112,17 @@ impl WebSearchResult {
     }
 
     /// Entity-escaped provider result title.
-    pub fn title(&self) -> &str {
+    pub(super) fn title(&self) -> &str {
         self.title.as_str()
     }
 
     /// Parsed HTTP(S) result URL with unsafe components discarded.
-    pub fn url(&self) -> &str {
+    pub(super) fn url(&self) -> &str {
         self.url.as_str()
     }
 
     /// Entity-escaped provider result snippet.
-    pub fn snippet(&self) -> &str {
+    pub(super) fn snippet(&self) -> &str {
         self.snippet.as_str()
     }
 }

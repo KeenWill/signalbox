@@ -1616,6 +1616,31 @@ fn web_search_rejects_inserted_special_scheme_authority_slash_credential() {
     );
 }
 
+/// INV-035: WHATWG insertion of both missing special-scheme authority slashes
+/// cannot conceal a credential spanning the scheme and authority boundary.
+#[test]
+fn web_search_rejects_two_inserted_special_scheme_authority_slashes() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_INSERTED_TWO_AUTHORITY_SLASHES_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("two inserted authority-slashes fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_INSERTED_TWO_AUTHORITY_SLASHES_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a zero hextet adjacent to a credential boundary can compress to
 /// the separator run retained by a canonical IPv6 result URL.
 #[test]

@@ -392,7 +392,7 @@ pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
         })
 }
 
-fn fixed_evidence_diagnostic_outputs() -> Option<[String; 7]> {
+fn fixed_evidence_diagnostic_outputs() -> Option<[String; 8]> {
     const DETAIL_SHAPE_PROBE: &str = "diagnostic probe";
     let populated_detail =
         ToolExecutionErrorDetail::try_new(String::from(DETAIL_SHAPE_PROBE)).ok()?;
@@ -417,6 +417,12 @@ fn fixed_evidence_diagnostic_outputs() -> Option<[String; 7]> {
         format!(
             "{:?}",
             Ok::<ToolExecutorEvidence, ()>(ToolExecutorEvidence::CompletedText(String::new()))
+        ),
+        format!(
+            "{:?}",
+            Ok::<ToolExecutorEvidence, WebSearchExecutorError>(ToolExecutorEvidence::KnownFailed {
+                detail: None
+            })
         ),
         format!(
             "{:?}",

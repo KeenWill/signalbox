@@ -98,6 +98,8 @@ pub(super) const FIXTURE_C0_PREPROCESSED_RESULT_URL: &str = "https://example.com
 
 pub(super) const FIXTURE_INSERTED_AUTHORITY_SLASH_RESULT_URL: &str = "https:/example.com";
 
+pub(super) const FIXTURE_INSERTED_TWO_AUTHORITY_SLASHES_RESULT_URL: &str = "https:example.com";
+
 pub(super) const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
 
 pub(super) const FIXTURE_UNKNOWN_NAMED_REFERENCE_TITLE: &str = "Synthetic R&D; result";
@@ -298,6 +300,8 @@ pub(super) const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
 
 pub(super) const URL_INSERTED_AUTHORITY_SLASH_COLLISION_KEY: &str = "s:/e";
 
+pub(super) const URL_INSERTED_TWO_AUTHORITY_SLASHES_COLLISION_KEY: &str = "s:e";
+
 pub(super) const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
 
 pub(super) const URL_DECODED_CASE_BACKSLASH_COLLISION_KEY: &str = "ABC%5CDEF";
@@ -405,6 +409,8 @@ pub(super) const SUCCESS_RESULT_DEBUG_COLLISION_KEY: &str = "Ok";
 pub(super) const SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(C";
 
 pub(super) const ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Err(E";
+
+pub(super) const KNOWN_FAILURE_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(K";
 
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 

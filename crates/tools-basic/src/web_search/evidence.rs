@@ -73,10 +73,25 @@ pub(super) fn redact_entity_escaped_component(
     maximum_bytes: usize,
     scrubber: &CredentialScrubber,
 ) -> Result<String, WebSearchExecutorError> {
-    let raw = decode_html_character_references(component)
+    let raw = decode_html_character_references_to_closure(component)
         .ok_or(WebSearchExecutorError::EvidenceEncoding)?;
-    let redacted = scrubber.redact_text(&raw.text);
+    let redacted = scrubber.redact_text(&raw);
     entity_escape(&redacted, maximum_bytes).ok_or(WebSearchExecutorError::EvidenceEncoding)
+}
+
+pub(super) fn decode_html_character_references_to_closure(component: &str) -> Option<String> {
+    let initial = decode_html_character_references(component)?;
+    let raw_provider_text = initial.text;
+    let mut decoded = raw_provider_text.clone();
+    for _ in 0..MAX_REVERSIBLE_DECODE_PASSES {
+        let next = decode_html_character_references(&decoded)?;
+        match next.change {
+            ReversibleTextChange::Unchanged => return Some(raw_provider_text),
+            ReversibleTextChange::Changed => decoded = next.text,
+        }
+    }
+    let final_pass = decode_html_character_references(&decoded)?;
+    (final_pass.change == ReversibleTextChange::Unchanged).then_some(raw_provider_text)
 }
 
 pub(super) fn completed_text_evidence(

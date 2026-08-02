@@ -114,8 +114,8 @@ pub(super) fn removed_default_port_fragment(value: &str, default_port: u16) -> O
 }
 
 pub(super) fn inserted_special_scheme_authority_slash_fragment(value: &str) -> Option<String> {
-    let (scheme, suffix) = value.split_once(":/")?;
-    if suffix.starts_with('/')
+    let (scheme, suffix) = value.split_once(':')?;
+    if suffix.starts_with("//")
         || !scheme
             .bytes()
             .next()
@@ -124,6 +124,10 @@ pub(super) fn inserted_special_scheme_authority_slash_fragment(value: &str) -> O
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
     {
+        return None;
+    }
+    let suffix = suffix.strip_prefix('/').unwrap_or(suffix);
+    if suffix.is_empty() {
         return None;
     }
     Some(format!("{scheme}://{suffix}"))
