@@ -1,17 +1,17 @@
 # Repository watch and event dispatch
 
-**Implemented behavior and foundation contract.** Repository watch is a
-credentialed external-ingress boundary from its first operation: the daemon
-holds a distinct credential-file reference for each configured repository, reads
-secret bytes only for that repository's request, and never gives a dispatched
-session the watch credential. Per-repository tokens carry the least GitHub scope
-needed to read the configured signals. This is the C0 confused-deputy boundary:
-a credential for one repository cannot authorize a request to another
-repository. A repository without a credential file is invalid configuration and
-is not watched; a repository absent from the list is not watched; an absent
-repository-watch section means that the subsystem does not start. Dispatched
-sessions retain the approval posture of their named session templates, without
-authority inherited from the watcher.
+**Foundation contract.** Repository watch is a credentialed external-ingress
+boundary from its first operation: the daemon holds a distinct credential-file
+reference for each configured repository, reads secret bytes only for that
+repository's request, and never gives a dispatched session the watch credential.
+Per-repository tokens carry the least GitHub scope needed to read the configured
+signals. This is the C0 confused-deputy boundary: a credential for one
+repository cannot authorize a request to another repository. A repository
+without a credential file is invalid configuration and is not watched; a
+repository absent from the list is not watched; an absent repository-watch
+section means that the subsystem does not start. Dispatched sessions retain the
+approval posture of their named session templates, without authority inherited
+from the watcher.
 
 This bottom specification diff owns the four-pull-request repository-watch
 stack. The version-one domain vocabulary and validation shapes were verified
@@ -65,14 +65,15 @@ and a later authenticated webhook receiver to feed the same durable facts.
 **Implemented behavior and foundation contract.** Each event is an immutable,
 version-one fact with its own UUID identity, repository, tagged pull-request or
 branch target, and closed payload. Pull-request targets carry the positive PR
-number, current 40-hex head SHA, base and head branches, title, body, complete
-label set, draft state, and author needed by the structured matcher. This is
-normalized event context, not a raw API object. The only branch-target event in
-version one is `BranchWorkflowRunCompleted`; its payload supplies the branch,
-workflow, and conclusion. Events append in accepted observation order and are
-never updated or deleted. Construction rejects a pull-request event when the
-payload's current head, base branch, or label transition contradicts that
-event's complete current pull-request context. Label names admit up to 50
+number, current 40-hex head SHA, head repository, base and head branches, title,
+body, complete label set, draft state, and the author when GitHub supplies one.
+This is normalized event context, not a raw API object. The only branch-target
+event in version one is `BranchWorkflowRunCompleted`; its payload supplies the
+branch, workflow, and conclusion. Events append in accepted observation order
+and are never updated or deleted. Construction rejects a pull-request event when
+the payload's current head, base branch, or label transition contradicts that
+event's complete current pull-request context. A `HeadChanged` payload whose
+previous and current SHAs are equal is invalid. Label names admit up to 50
 Unicode scalar values, including their full UTF-8 representation.
 
 **Implemented behavior and foundation contract.** The closed version-one event
@@ -140,20 +141,31 @@ used by the qualifier. A supplied payload qualifier is false for an event kind
 to which it does not apply. Expressiveness grows only by adding versioned
 fields.
 
+**Implemented behavior and foundation contract.** A branch event cannot satisfy
+pull-request-only base, head, title, body, label, draft, author, or
+mergeable-state fields. Repository, event-kind, and conclusion fields can apply
+to either context shape where their payload exists. An exact-author field is
+false when GitHub supplies no current pull-request author. Rule validation
+derives accepted context shapes from the event kinds that can satisfy all
+supplied fields, rather than from the event-kind list alone.
+
 **Implemented behavior.** Regex patterns are nonempty, explicitly anchored by
 `^` and `$`, and at most 1,024 UTF-8 bytes. Anchoring applies to the complete
 expression, so an alternative cannot escape the whole-candidate boundary.
 Construction uses Rust's linear-time `regex` crate; backreferences and
 look-around are therefore not admitted and no backtracking engine is present.
-Exact branch fields admit Git's complete `refs/heads/<name>` grammar while
-storing the name without that prefix.
+The crate's ordinary Unicode properties and case folding remain available, and
+an invalid pattern reports the regex compiler's safe diagnostic. Exact branch
+fields admit Git's complete `refs/heads/<name>` grammar while storing the name
+without that prefix.
 
 ## Actions and dispatch context
 
 **Implemented behavior and foundation contract.** Each rule carries a nonempty
-ordered list of tagged action variants. Version one ships exactly one variant,
-`dispatch_session { template, params }`. The configured action fixes the
-session-template name; when a fact matches, `params` is the exact injected
+ordered list of tagged action variants. Version one ships exactly one configured
+variant, `dispatch_session { template }`. When a fact matches, that
+configuration produces the emitted action
+`dispatch_session { template, params }`, where `params` is the exact injected
 tagged context for that event. No unused action variant is reserved.
 
 **Implemented behavior and foundation contract.** Dispatch context is the
@@ -167,12 +179,13 @@ API state. A pull-request event always produces the first shape and
 `BranchWorkflowRunCompleted` always produces the second.
 
 **Implemented behavior and foundation contract.** Each session-template entry
-declares whether it accepts pull-request context, branch context, or both. Rule
-configuration is invalid when any event kind the rule can match produces a shape
-rejected by any action's template. An empty event-kind list can match both
-shapes and therefore requires both. An unknown template or missing context
-declaration is also a validation failure. Validation completes before polling
-starts; dispatch never discovers a shape mismatch at runtime.
+declares a nonempty set containing pull-request context, branch context, or
+both. Rule configuration is invalid when any event kind the rule can match
+produces a shape rejected by any action's template. An empty event-kind list
+without narrowing fields can match both shapes and therefore requires both. An
+unknown template or missing context declaration is also a validation failure.
+Validation completes before polling starts; dispatch never discovers a shape
+mismatch at runtime.
 
 ## Deduplication, concurrency, and audit
 

@@ -153,14 +153,15 @@ pub use replace_session_defaults::{
 pub use repo_watch::{
     BranchContext, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
     DispatchSessionAction, DispatchSessionParameters, GitHubObjectId, LabelName, MergeableState,
-    PullRequestBody, PullRequestContext, PullRequestEventContext, PullRequestNumber,
-    PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject, RepoWatchActionV1,
-    RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchContextShape,
-    RepoWatchEvent, RepoWatchEventConstructionError, RepoWatchEventKindNameV1,
-    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher, RepoWatchMatcherV1,
-    RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchRuleValidationError, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepoWatchTextError, RepositorySlug, ReviewState,
+    PullRequestBody, PullRequestContext, PullRequestEventContext, PullRequestEventContextInput,
+    PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError,
+    RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
+    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleValidationError,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug, ReviewState,
     ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{

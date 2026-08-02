@@ -16,7 +16,9 @@ use crate::{RepoWatchEventId, SessionTemplateName};
 
 const MAX_REPOSITORY_BYTES: usize = 201;
 const MAX_BRANCH_BYTES: usize = 255;
-const MAX_LOGIN_BYTES: usize = 39;
+const MAX_LOGIN_BASE_BYTES: usize = 39;
+const BOT_LOGIN_SUFFIX: &str = "[bot]";
+const MAX_LOGIN_BYTES: usize = MAX_LOGIN_BASE_BYTES + BOT_LOGIN_SUFFIX.len();
 const MAX_LABEL_BYTES: usize = 200;
 const MAX_LABEL_CHARACTERS: usize = 50;
 const MAX_NAME_BYTES: usize = 256;
@@ -27,7 +29,7 @@ const MAX_TITLE_BYTES: usize = 1_024;
 const MAX_BODY_BYTES: usize = 262_144;
 
 /// Why one repository-watch text value was refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchTextError {
     Empty,
     ContainsNull,
@@ -35,7 +37,7 @@ pub enum RepoWatchTextError {
     TooManyCharacters { characters: usize, maximum: usize },
     Malformed,
     UnanchoredPattern,
-    InvalidPattern,
+    InvalidPattern { reason: String },
 }
 
 impl fmt::Display for RepoWatchTextError {
@@ -58,7 +60,9 @@ impl fmt::Display for RepoWatchTextError {
             Self::UnanchoredPattern => {
                 formatter.write_str("repository-watch regex must be anchored with ^ and $")
             }
-            Self::InvalidPattern => formatter.write_str("repository-watch regex is invalid"),
+            Self::InvalidPattern { reason } => {
+                write!(formatter, "repository-watch regex is invalid: {reason}")
+            }
         }
     }
 }
@@ -200,8 +204,36 @@ impl LabelName {
         self.0
     }
 }
-bounded_text!(/// One GitHub actor login.
-    RepoWatchAuthorLogin, MAX_LOGIN_BYTES);
+/// One checked GitHub human, managed-user, or App-bot actor login.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RepoWatchAuthorLogin(String);
+
+impl RepoWatchAuthorLogin {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError> {
+        validate_text(&value, MAX_LOGIN_BYTES)?;
+        let base = value.strip_suffix(BOT_LOGIN_SUFFIX).unwrap_or(&value);
+        let valid = !base.is_empty()
+            && base.len() <= MAX_LOGIN_BASE_BYTES
+            && !base.starts_with('-')
+            && !base.ends_with('-')
+            && !base.contains("--")
+            && base
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        if !valid {
+            return Err(RepoWatchTextError::Malformed);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
 bounded_text!(/// One check-run name.
     CheckRunName, MAX_NAME_BYTES);
 bounded_text!(/// One workflow name.
@@ -329,8 +361,11 @@ impl RepoWatchPattern {
         if !value.starts_with('^') || !value.ends_with('$') {
             return Err(RepoWatchTextError::UnanchoredPattern);
         }
-        let compiled = Regex::new(&format!(r"\A(?:{value})\z"))
-            .map_err(|_| RepoWatchTextError::InvalidPattern)?;
+        let compiled = Regex::new(&format!(r"\A(?:{value})\z")).map_err(|error| {
+            RepoWatchTextError::InvalidPattern {
+                reason: error.to_string(),
+            }
+        })?;
         Ok(Self {
             source: value,
             compiled,
@@ -381,6 +416,23 @@ pub enum RepoWatchEventKindNameV1 {
     BaseAdvanced,
     ReactionChanged,
 }
+
+const PULL_REQUEST_EVENT_KINDS_V1: [RepoWatchEventKindNameV1; 14] = [
+    RepoWatchEventKindNameV1::PullRequestOpened,
+    RepoWatchEventKindNameV1::PullRequestClosed,
+    RepoWatchEventKindNameV1::PullRequestMerged,
+    RepoWatchEventKindNameV1::HeadChanged,
+    RepoWatchEventKindNameV1::MergeableStateChanged,
+    RepoWatchEventKindNameV1::ChecksCompleted,
+    RepoWatchEventKindNameV1::CheckRunCompleted,
+    RepoWatchEventKindNameV1::ReviewSubmitted,
+    RepoWatchEventKindNameV1::ThreadOpened,
+    RepoWatchEventKindNameV1::ThreadResolved,
+    RepoWatchEventKindNameV1::Labeled,
+    RepoWatchEventKindNameV1::Unlabeled,
+    RepoWatchEventKindNameV1::BaseAdvanced,
+    RepoWatchEventKindNameV1::ReactionChanged,
+];
 
 /// Aggregate check-suite result used by the closed version-one vocabulary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -526,38 +578,44 @@ impl RepoWatchEventKindV1 {
 pub struct PullRequestEventContext {
     number: PullRequestNumber,
     head_sha: CommitSha,
+    head_repository: RepositorySlug,
     base_branch: BranchName,
     head_branch: BranchName,
     title: PullRequestTitle,
     body: PullRequestBody,
     labels: Box<[LabelName]>,
     draft: bool,
-    author: RepoWatchAuthorLogin,
+    author: Option<RepoWatchAuthorLogin>,
+}
+
+/// Field-labeled construction input for normalized pull-request event context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PullRequestEventContextInput {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: RepositorySlug,
+    pub base_branch: BranchName,
+    pub head_branch: BranchName,
+    pub title: PullRequestTitle,
+    pub body: PullRequestBody,
+    pub labels: Vec<LabelName>,
+    pub draft: bool,
+    pub author: Option<RepoWatchAuthorLogin>,
 }
 
 impl PullRequestEventContext {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        number: PullRequestNumber,
-        head_sha: CommitSha,
-        base_branch: BranchName,
-        head_branch: BranchName,
-        title: PullRequestTitle,
-        body: PullRequestBody,
-        labels: Vec<LabelName>,
-        draft: bool,
-        author: RepoWatchAuthorLogin,
-    ) -> Self {
+    pub fn new(input: PullRequestEventContextInput) -> Self {
         Self {
-            number,
-            head_sha,
-            base_branch,
-            head_branch,
-            title,
-            body,
-            labels: labels.into_boxed_slice(),
-            draft,
-            author,
+            number: input.number,
+            head_sha: input.head_sha,
+            head_repository: input.head_repository,
+            base_branch: input.base_branch,
+            head_branch: input.head_branch,
+            title: input.title,
+            body: input.body,
+            labels: input.labels.into_boxed_slice(),
+            draft: input.draft,
+            author: input.author,
         }
     }
 
@@ -566,6 +624,9 @@ impl PullRequestEventContext {
     }
     pub const fn head_sha(&self) -> &CommitSha {
         &self.head_sha
+    }
+    pub const fn head_repository(&self) -> &RepositorySlug {
+        &self.head_repository
     }
     pub const fn base_branch(&self) -> &BranchName {
         &self.base_branch
@@ -585,8 +646,8 @@ impl PullRequestEventContext {
     pub const fn draft(&self) -> bool {
         self.draft
     }
-    pub const fn author(&self) -> &RepoWatchAuthorLogin {
-        &self.author
+    pub const fn author(&self) -> Option<&RepoWatchAuthorLogin> {
+        self.author.as_ref()
     }
 }
 
@@ -616,6 +677,9 @@ impl RepoWatchEvent {
         match &kind {
             RepoWatchEventKindV1::BranchWorkflowRunCompleted { .. } => {
                 return Err(RepoWatchEventConstructionError::BranchKindOnPullRequest);
+            }
+            RepoWatchEventKindV1::HeadChanged { previous, current } if previous == current => {
+                return Err(RepoWatchEventConstructionError::HeadChangedWithoutChange);
             }
             RepoWatchEventKindV1::HeadChanged { current, .. } if current != context.head_sha() => {
                 return Err(RepoWatchEventConstructionError::HeadChangedCurrentMismatch);
@@ -690,6 +754,7 @@ impl RepoWatchEvent {
 pub enum RepoWatchEventConstructionError {
     BranchKindOnPullRequest,
     HeadChangedCurrentMismatch,
+    HeadChangedWithoutChange,
     BaseAdvancedBranchMismatch,
     LabeledContextMissingLabel,
     UnlabeledContextContainsLabel,
@@ -704,6 +769,7 @@ impl fmt::Display for RepoWatchEventConstructionError {
             Self::HeadChangedCurrentMismatch => {
                 "head-change current SHA differs from pull-request context"
             }
+            Self::HeadChangedWithoutChange => "head-change previous and current SHAs are identical",
             Self::BaseAdvancedBranchMismatch => {
                 "base-advance branch differs from pull-request context"
             }
@@ -727,12 +793,20 @@ pub struct RepoWatchLabelMatcher {
     none_of: Box<[LabelName]>,
 }
 
+/// Field-labeled construction input for version-one label predicates.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RepoWatchLabelMatcherInput {
+    pub any_of: Vec<LabelName>,
+    pub all_of: Vec<LabelName>,
+    pub none_of: Vec<LabelName>,
+}
+
 impl RepoWatchLabelMatcher {
-    pub fn new(any_of: Vec<LabelName>, all_of: Vec<LabelName>, none_of: Vec<LabelName>) -> Self {
+    pub fn new(input: RepoWatchLabelMatcherInput) -> Self {
         Self {
-            any_of: any_of.into_boxed_slice(),
-            all_of: all_of.into_boxed_slice(),
-            none_of: none_of.into_boxed_slice(),
+            any_of: input.any_of.into_boxed_slice(),
+            all_of: input.all_of.into_boxed_slice(),
+            none_of: input.none_of.into_boxed_slice(),
         }
     }
 
@@ -797,18 +871,49 @@ impl RepoWatchMatcherV1 {
     }
 
     fn produces_branch_context(&self) -> bool {
-        self.event_kinds.is_empty()
-            || self
-                .event_kinds
-                .contains(&RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        self.base_branch.is_none()
+            && self.head_branch.is_none()
+            && self.title.is_none()
+            && self.body.is_none()
+            && self.labels.any_of.is_empty()
+            && self.labels.all_of.is_empty()
+            && self.labels.none_of.is_empty()
+            && self.draft.is_none()
+            && self.author.is_none()
+            && self.kind_can_match(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
     }
 
     fn produces_pull_request_context(&self) -> bool {
-        self.event_kinds.is_empty()
-            || self
-                .event_kinds
-                .iter()
-                .any(|kind| *kind != RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        PULL_REQUEST_EVENT_KINDS_V1
+            .into_iter()
+            .any(|kind| self.kind_can_match(kind))
+    }
+
+    fn kind_can_match(&self, kind: RepoWatchEventKindNameV1) -> bool {
+        let selected = self.event_kinds.is_empty() || self.event_kinds.contains(&kind);
+        let mergeable_applies = self.mergeable_state.is_empty()
+            || kind == RepoWatchEventKindNameV1::MergeableStateChanged;
+        let conclusion_applies = self.conclusion.is_empty()
+            || match kind {
+                RepoWatchEventKindNameV1::ChecksCompleted => self.conclusion.iter().any(|value| {
+                    matches!(value, CheckConclusion::Success | CheckConclusion::Failure)
+                }),
+                RepoWatchEventKindNameV1::CheckRunCompleted
+                | RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => true,
+                RepoWatchEventKindNameV1::PullRequestOpened
+                | RepoWatchEventKindNameV1::PullRequestClosed
+                | RepoWatchEventKindNameV1::PullRequestMerged
+                | RepoWatchEventKindNameV1::HeadChanged
+                | RepoWatchEventKindNameV1::MergeableStateChanged
+                | RepoWatchEventKindNameV1::ReviewSubmitted
+                | RepoWatchEventKindNameV1::ThreadOpened
+                | RepoWatchEventKindNameV1::ThreadResolved
+                | RepoWatchEventKindNameV1::Labeled
+                | RepoWatchEventKindNameV1::Unlabeled
+                | RepoWatchEventKindNameV1::BaseAdvanced
+                | RepoWatchEventKindNameV1::ReactionChanged => false,
+            };
+        selected && mergeable_applies && conclusion_applies
     }
 
     pub fn event_kinds(&self) -> &[RepoWatchEventKindNameV1] {
@@ -890,15 +995,32 @@ pub struct RepoWatchTemplateContextDeclaration {
     accepted: Box<[RepoWatchDispatchContextShape]>,
 }
 
+/// Why a template's repository-watch context declaration was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchTemplateContextDeclarationError {
+    NoAcceptedContextShape,
+}
+
+impl fmt::Display for RepoWatchTemplateContextDeclarationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("repository-watch template accepts no dispatch context shape")
+    }
+}
+
+impl Error for RepoWatchTemplateContextDeclarationError {}
+
 impl RepoWatchTemplateContextDeclaration {
-    pub fn new(
+    pub fn try_new(
         template: SessionTemplateName,
         accepted: Vec<RepoWatchDispatchContextShape>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, RepoWatchTemplateContextDeclarationError> {
+        if accepted.is_empty() {
+            return Err(RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape);
+        }
+        Ok(Self {
             template,
             accepted: accepted.into_boxed_slice(),
-        }
+        })
     }
 
     pub const fn template(&self) -> &SessionTemplateName {
@@ -1226,12 +1348,14 @@ mod tests {
 
     use super::{
         BranchName, CheckConclusion, CommitSha, LabelName, MergeableState, PullRequestBody,
-        PullRequestEventContext, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
-        RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
-        RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchMatcherV1,
+        PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+        RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
+        RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+        RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
         RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
         RepoWatchRuleId, RepoWatchRuleValidationError, RepoWatchSingletonScope,
-        RepoWatchTemplateContextDeclaration, RepoWatchTextError, RepositorySlug,
+        RepoWatchTemplateContextDeclaration, RepoWatchTemplateContextDeclarationError,
+        RepoWatchTextError, RepositorySlug,
     };
 
     const CONTEXT_HEAD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -1246,17 +1370,18 @@ mod tests {
         base_branch: BranchName,
         labels: Vec<LabelName>,
     ) -> Result<PullRequestEventContext, RepoWatchTextError> {
-        Ok(PullRequestEventContext::new(
-            PullRequestNumber::new(NonZeroU64::MIN),
+        Ok(PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(NonZeroU64::MIN),
             head_sha,
+            head_repository: RepositorySlug::try_new(String::from("namespace/repo"))?,
             base_branch,
-            BranchName::try_new(String::from("topic/watch"))?,
-            PullRequestTitle::try_new(String::from("Watch repositories"))?,
-            PullRequestBody::try_new(String::new())?,
+            head_branch: BranchName::try_new(String::from("topic/watch"))?,
+            title: PullRequestTitle::try_new(String::from("Watch repositories"))?,
+            body: PullRequestBody::try_new(String::new())?,
             labels,
-            false,
-            RepoWatchAuthorLogin::try_new(String::from("maintainer"))?,
-        ))
+            draft: false,
+            author: Some(RepoWatchAuthorLogin::try_new(String::from("maintainer"))?),
+        }))
     }
 
     #[test]
@@ -1276,6 +1401,33 @@ mod tests {
         );
         assert_eq!(
             RepositorySlug::try_new(String::from("../repo")),
+            Err(RepoWatchTextError::Malformed)
+        );
+    }
+
+    #[test]
+    fn actor_login_accepts_human_managed_and_app_bot_forms() {
+        assert!(RepoWatchAuthorLogin::try_new(String::from("maintainer-name")).is_ok());
+        assert!(RepoWatchAuthorLogin::try_new(String::from("maintainer_SHORT")).is_ok());
+        assert!(RepoWatchAuthorLogin::try_new(String::from("github-actions[bot]")).is_ok());
+    }
+
+    #[test]
+    fn actor_login_rejects_malformed_provider_values() {
+        assert_eq!(
+            RepoWatchAuthorLogin::try_new(String::from("bad login")),
+            Err(RepoWatchTextError::Malformed)
+        );
+        assert_eq!(
+            RepoWatchAuthorLogin::try_new(String::from("bad\nlogin")),
+            Err(RepoWatchTextError::Malformed)
+        );
+        assert_eq!(
+            RepoWatchAuthorLogin::try_new(String::from("-bad")),
+            Err(RepoWatchTextError::Malformed)
+        );
+        assert_eq!(
+            RepoWatchAuthorLogin::try_new(String::from("bad--login")),
             Err(RepoWatchTextError::Malformed)
         );
     }
@@ -1318,6 +1470,25 @@ mod tests {
     }
 
     #[test]
+    fn matcher_regex_supports_unicode_properties_and_case_folding() -> Result<(), RepoWatchTextError>
+    {
+        let property = RepoWatchPattern::try_new(String::from(r"^\p{Greek}+$"))?;
+        let case_fold = RepoWatchPattern::try_new(String::from("^(?i:café)$"))?;
+
+        assert!(property.is_match("Δοκιμή"));
+        assert!(case_fold.is_match("CAFÉ"));
+        Ok(())
+    }
+
+    #[test]
+    fn matcher_regex_preserves_compiler_diagnostics() {
+        let error = RepoWatchPattern::try_new(String::from("^(?=value)value$"))
+            .expect_err("look-around must remain unsupported");
+
+        assert!(error.to_string().contains("look-around"));
+    }
+
+    #[test]
     fn branch_name_rejects_invalid_git_ref_shapes() {
         assert_eq!(
             BranchName::try_new(String::from("bad..branch")),
@@ -1349,6 +1520,23 @@ mod tests {
     }
 
     #[test]
+    fn label_matcher_construction_keeps_predicates_named() -> Result<(), RepoWatchTextError> {
+        let any_of = LabelName::try_new(String::from("any"))?;
+        let all_of = LabelName::try_new(String::from("all"))?;
+        let none_of = LabelName::try_new(String::from("none"))?;
+        let matcher = RepoWatchLabelMatcher::new(RepoWatchLabelMatcherInput {
+            any_of: vec![any_of.clone()],
+            all_of: vec![all_of.clone()],
+            none_of: vec![none_of.clone()],
+        });
+
+        assert_eq!(matcher.any_of(), [any_of]);
+        assert_eq!(matcher.all_of(), [all_of]);
+        assert_eq!(matcher.none_of(), [none_of]);
+        Ok(())
+    }
+
+    #[test]
     fn branch_event_produces_tagged_branch_context() -> Result<(), Box<dyn Error>> {
         let repository = RepositorySlug::try_new(String::from("namespace/repo"))?;
         let branch = BranchName::try_new(String::from("main"))?;
@@ -1374,17 +1562,18 @@ mod tests {
         let number = PullRequestNumber::new(NonZeroU64::MIN);
         let head_sha =
             super::CommitSha::try_new(String::from("0123456789abcdef0123456789abcdef01234567"))?;
-        let context = PullRequestEventContext::new(
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
             number,
             head_sha,
-            BranchName::try_new(String::from("main"))?,
-            BranchName::try_new(String::from("topic/watch"))?,
-            PullRequestTitle::try_new(String::from("Watch repositories"))?,
-            PullRequestBody::try_new(String::new())?,
-            Vec::new(),
-            false,
-            RepoWatchAuthorLogin::try_new(String::from("maintainer"))?,
-        );
+            head_repository: RepositorySlug::try_new(String::from("namespace/repo"))?,
+            base_branch: BranchName::try_new(String::from("main"))?,
+            head_branch: BranchName::try_new(String::from("topic/watch"))?,
+            title: PullRequestTitle::try_new(String::from("Watch repositories"))?,
+            body: PullRequestBody::try_new(String::new())?,
+            labels: Vec::new(),
+            draft: false,
+            author: Some(RepoWatchAuthorLogin::try_new(String::from("maintainer"))?),
+        });
         let event = RepoWatchEvent::try_pull_request(
             RepoWatchEventId::from_uuid(Uuid::from_u128(2)),
             repository,
@@ -1399,6 +1588,28 @@ mod tests {
             RepoWatchDispatchContextShape::PullRequest
         );
         assert_eq!(parameters.event(), &event);
+        Ok(())
+    }
+
+    #[test]
+    fn pull_request_context_retains_head_repository_and_missing_author()
+    -> Result<(), Box<dyn Error>> {
+        let head_repository = RepositorySlug::try_new(String::from("fork-source/repo"))?;
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(NonZeroU64::MIN),
+            head_sha: CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+            head_repository: head_repository.clone(),
+            base_branch: BranchName::try_new(String::from("main"))?,
+            head_branch: BranchName::try_new(String::from("topic/watch"))?,
+            title: PullRequestTitle::try_new(String::from("Watch repositories"))?,
+            body: PullRequestBody::try_new(String::new())?,
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+
+        assert_eq!(context.head_repository(), &head_repository);
+        assert_eq!(context.author(), None);
         Ok(())
     }
 
@@ -1422,6 +1633,31 @@ mod tests {
         assert_eq!(
             result,
             Err(RepoWatchEventConstructionError::HeadChangedCurrentMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn head_changed_previous_must_differ_from_current() -> Result<(), Box<dyn Error>> {
+        let head = CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?;
+        let context = pull_request_context(
+            head.clone(),
+            BranchName::try_new(String::from("main"))?,
+            Vec::new(),
+        )?;
+        let result = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::nil()),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            context,
+            RepoWatchEventKindV1::HeadChanged {
+                previous: head.clone(),
+                current: head,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(RepoWatchEventConstructionError::HeadChangedWithoutChange)
         );
         Ok(())
     }
@@ -1555,6 +1791,93 @@ mod tests {
     }
 
     #[test]
+    fn mergeable_qualifier_with_all_kinds_produces_only_pull_request_context()
+    -> Result<(), Box<dyn Error>> {
+        let template = SessionTemplateName::try_new(String::from("conflict-handler"))?;
+        let rule = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("mergeable-only"))?,
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                mergeable_state: vec![MergeableState::Conflicting],
+                ..RepoWatchMatcherV1Input::default()
+            }),
+            vec![RepoWatchRuleActionV1::DispatchSession { template }],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+
+        assert_eq!(
+            rule.required_context_shapes(),
+            [RepoWatchDispatchContextShape::PullRequest]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pull_request_matcher_fields_exclude_branch_context() -> Result<(), Box<dyn Error>> {
+        let template = SessionTemplateName::try_new(String::from("author-handler"))?;
+        let rule = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("author-only"))?,
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                author: Some(RepoWatchAuthorLogin::try_new(String::from("maintainer"))?),
+                ..RepoWatchMatcherV1Input::default()
+            }),
+            vec![RepoWatchRuleActionV1::DispatchSession { template }],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+
+        assert_eq!(
+            rule.required_context_shapes(),
+            [RepoWatchDispatchContextShape::PullRequest]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn conclusion_qualifier_with_all_kinds_produces_both_context_shapes()
+    -> Result<(), Box<dyn Error>> {
+        let template = SessionTemplateName::try_new(String::from("failure-handler"))?;
+        let rule = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("conclusion-only"))?,
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                conclusion: vec![CheckConclusion::Failure],
+                ..RepoWatchMatcherV1Input::default()
+            }),
+            vec![RepoWatchRuleActionV1::DispatchSession { template }],
+            RepoWatchSingletonScope::Repository,
+            Duration::ZERO,
+        )?;
+
+        assert_eq!(
+            rule.required_context_shapes(),
+            [
+                RepoWatchDispatchContextShape::PullRequest,
+                RepoWatchDispatchContextShape::Branch,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_checks_exclude_unavailable_conclusion_values() -> Result<(), Box<dyn Error>> {
+        let template = SessionTemplateName::try_new(String::from("neutral-handler"))?;
+        let rule = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("neutral-aggregate"))?,
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                event_kinds: vec![RepoWatchEventKindNameV1::ChecksCompleted],
+                conclusion: vec![CheckConclusion::Neutral],
+                ..RepoWatchMatcherV1Input::default()
+            }),
+            vec![RepoWatchRuleActionV1::DispatchSession { template }],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+
+        assert!(rule.required_context_shapes().is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn rule_validation_rejects_a_template_context_mismatch() -> Result<(), Box<dyn Error>> {
         let template = SessionTemplateName::try_new(String::from("branch-handler"))?;
         let rule = RepoWatchRule::try_new(
@@ -1570,10 +1893,10 @@ mod tests {
             RepoWatchSingletonScope::Repository,
             Duration::ZERO,
         )?;
-        let declarations = [RepoWatchTemplateContextDeclaration::new(
+        let declarations = [RepoWatchTemplateContextDeclaration::try_new(
             template.clone(),
             vec![RepoWatchDispatchContextShape::PullRequest],
-        )];
+        )?];
 
         assert_eq!(
             rule.validate_template_contexts(&declarations),
@@ -1581,6 +1904,17 @@ mod tests {
                 template,
                 shape: RepoWatchDispatchContextShape::Branch,
             })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn template_context_declaration_rejects_an_empty_shape_list() -> Result<(), Box<dyn Error>> {
+        let template = SessionTemplateName::try_new(String::from("empty-context"))?;
+
+        assert_eq!(
+            RepoWatchTemplateContextDeclaration::try_new(template, Vec::new()),
+            Err(RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape)
         );
         Ok(())
     }

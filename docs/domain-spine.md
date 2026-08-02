@@ -7532,7 +7532,7 @@ pub enum RepoWatchTextError {
     TooManyCharacters { characters: usize, maximum: usize },
     Malformed,
     UnanchoredPattern,
-    InvalidPattern,
+    InvalidPattern { reason: String },
 }
 // implements Error.
 
@@ -7685,20 +7685,22 @@ impl RepoWatchEventKindV1 {
 }
 
 pub struct PullRequestEventContext { /* private */ }
+pub struct PullRequestEventContextInput {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: RepositorySlug,
+    pub base_branch: BranchName,
+    pub head_branch: BranchName,
+    pub title: PullRequestTitle,
+    pub body: PullRequestBody,
+    pub labels: Vec<LabelName>,
+    pub draft: bool,
+    pub author: Option<RepoWatchAuthorLogin>,
+}
 impl PullRequestEventContext {
-    pub fn new(
-        number: PullRequestNumber,
-        head_sha: CommitSha,
-        base_branch: BranchName,
-        head_branch: BranchName,
-        title: PullRequestTitle,
-        body: PullRequestBody,
-        labels: Vec<LabelName>,
-        draft: bool,
-        author: RepoWatchAuthorLogin,
-    ) -> Self;
-    // accessors: number(), head_sha(), base_branch(), head_branch(), title(),
-    //   body(), labels(), draft(), author()
+    pub fn new(input: PullRequestEventContextInput) -> Self;
+    // accessors: number(), head_sha(), head_repository(), base_branch(),
+    //   head_branch(), title(), body(), labels(), draft(), author()
 }
 
 pub enum RepoWatchEventTarget {
@@ -7727,6 +7729,7 @@ impl RepoWatchEvent {
 pub enum RepoWatchEventConstructionError {
     BranchKindOnPullRequest,
     HeadChangedCurrentMismatch,
+    HeadChangedWithoutChange,
     BaseAdvancedBranchMismatch,
     LabeledContextMissingLabel,
     UnlabeledContextContainsLabel,
@@ -7734,12 +7737,13 @@ pub enum RepoWatchEventConstructionError {
 // implements Error.
 
 pub struct RepoWatchLabelMatcher { /* private */ }
+pub struct RepoWatchLabelMatcherInput {
+    pub any_of: Vec<LabelName>,
+    pub all_of: Vec<LabelName>,
+    pub none_of: Vec<LabelName>,
+}
 impl RepoWatchLabelMatcher {
-    pub fn new(
-        any_of: Vec<LabelName>,
-        all_of: Vec<LabelName>,
-        none_of: Vec<LabelName>,
-    ) -> Self;
+    pub fn new(input: RepoWatchLabelMatcherInput) -> Self;
     // accessors: any_of(), all_of(), none_of()
 }
 
@@ -7778,12 +7782,17 @@ pub enum RepoWatchDispatchContextShape {
 
 pub struct RepoWatchTemplateContextDeclaration { /* private */ }
 impl RepoWatchTemplateContextDeclaration {
-    pub fn new(
+    pub fn try_new(
         template: SessionTemplateName,
         accepted: Vec<RepoWatchDispatchContextShape>,
-    ) -> Self;
+    ) -> Result<Self, RepoWatchTemplateContextDeclarationError>;
     // accessors: template(), accepted(), accepts()
 }
+
+pub enum RepoWatchTemplateContextDeclarationError {
+    NoAcceptedContextShape,
+}
+// implements Error.
 
 pub struct PullRequestContext { /* private */ }
 // sealed: DispatchSessionParameters::try_from_event().
@@ -8677,7 +8686,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: user_content                               | 4                    |
 | domain: submit_input                               | 32                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
-| domain: repo_watch                                 | 44                   |
+| domain: repo_watch                                 | 47                   |
 | domain: turn_lifecycle                             | 10                   |
 | domain: turn_eligibility                           | 29                   |
 | domain: turn_attempt                               | 13                   |
@@ -8698,7 +8707,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **702 (+7 free fn)** |
+| **signalbox-domain total**                         | **705 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
