@@ -216,11 +216,13 @@ pub use session::{
 pub use session_delegation::{
     BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,
     DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationContentFailure,
-    DelegationMessage, DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
-    DelegationRequestFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
-    ParentTerminationAuthority, ParentTerminationCommandSource, ParentTerminationKind,
-    TerminalChildTurn,
+    DelegationEvent, DelegationEventOrdinal, DelegationLifecycle, DelegationMessage,
+    DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind,
+    DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
+    DelegationRequestFailure, DelegationTransitionError, DelegationTransitionFailure,
+    DelegationWait, DelegationWaitMode, DescendantTerminationScope, ParentTerminationAuthority,
+    ParentTerminationCommandSource, ParentTerminationKind, RejectedDelegationTransition,
+    SessionDelegation, TerminalChildTurn,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
@@ -287,9 +289,9 @@ pub use tool_attempt::{
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation, ToolAttemptReconstitutionError,
     ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,
-    ToolAttemptTransitionFailure, ToolDispatchGeneration, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorDetailError, ToolExecutionErrorDetailFailure,
-    ToolExecutionErrorKind,
+    ToolAttemptTransitionFailure, ToolDispatchAuthority, ToolDispatchGeneration,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorDetailError,
+    ToolExecutionErrorDetailFailure, ToolExecutionErrorKind,
 };
 pub use tool_execution::{
     AwaitingToolApproval, AwaitingToolRecovery, DelegateToolApprovalTransitionError,
@@ -506,6 +508,7 @@ pub(crate) mod test_support {
         context_frontier_id -> crate::ContextFrontierId,
         semantic_transcript_entry_id -> crate::SemanticTranscriptEntryId,
         tool_request_id -> crate::ToolRequestId,
+        delegation_message_id -> crate::DelegationMessageId,
         tool_attempt_id -> crate::ToolAttemptId,
         runner_enrollment_id -> crate::RunnerEnrollmentId,
         runner_id -> crate::RunnerId,
