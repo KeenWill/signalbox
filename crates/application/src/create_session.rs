@@ -184,9 +184,6 @@ where
                     CreateSessionPreparationFailure::DelegatedCreationRequiresSpawn => {
                         "delegated creation requires the session-spawn transaction"
                     }
-                    CreateSessionPreparationFailure::DelegatedCreationRequiresSpawn => {
-                        "delegated creation requires the session-spawn transaction"
-                    }
                 };
                 write!(formatter, "CreateSession preparation failed: {reason}")
             }
