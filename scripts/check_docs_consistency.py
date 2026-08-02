@@ -23,6 +23,11 @@ The check is deterministic and offline. It verifies:
    or the pull-request number and head branch in the GitHub Actions event. An
    event build also accepts unmerged verification identities inherited from the
    event's exact base commit.
+   A PR that landed inside another PR's merge (a stack merged from the top has
+   no first-parent merge commits for its inner PRs) cites its carrier in the
+   scope tail — ``PR #N (`branch-ref`; via PR #M `carrier-branch`)`` — and the
+   token is accepted when the carrier's number and branch match a first-parent
+   merge commit.
 
 External links and semantic freshness beyond reachability are outside this
 check. Run from any directory; exits nonzero with one stable line per
@@ -182,6 +187,9 @@ PR_TOKEN = re.compile(
     r"`([^\s`]+)`"
     rf"(?:{SCOPED_DETAIL_TAIL})?"
     r"\)"
+)
+VIA_CARRIER = re.compile(
+    r"\bvia[ \t\r\n]+PR[ \t]*#([1-9][0-9]*)[ \t\r\n]+`([^\s`]+)`"
 )
 INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
 CLAUSE_BOUNDARY = (
@@ -3507,11 +3515,18 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     not github_event_present and branch == checkout_branch
                 )
                 inherited_match = (number, branch) in inherited_identities
+                carrier = VIA_CARRIER.search(token.group(0))
+                carrier_match = (
+                    carrier is not None
+                    and int(carrier.group(1)) in integration_branches
+                    and carrier.group(2)
+                    in integration_branches[int(carrier.group(1))]
+                )
                 in_flight_match = (
                     number not in integration_branches
                     and (event_match or local_match)
                 )
-                if historical_match or inherited_match:
+                if historical_match or inherited_match or carrier_match:
                     continue
                 if in_flight_match:
                     candidate_identity = (number, branch)
@@ -3528,6 +3543,13 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     message = f"cannot inspect GitHub pull-request event: {event_error}"
                 elif in_flight_match:
                     message = "only one unmerged verification PR identity is permitted"
+                elif carrier is not None:
+                    message = (
+                        f"PR #{number} cites carrier PR #{carrier.group(1)} "
+                        f"(`{carrier.group(2)}`), which has no matching "
+                        f"merge commit in the `{INTEGRATION_BRANCH}` "
+                        "integration history"
+                    )
                 elif number not in integration_branches:
                     message = (
                         f"PR #{number} has no merge commit in the "

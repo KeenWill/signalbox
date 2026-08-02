@@ -2852,6 +2852,65 @@ class DocsConsistencyTests(unittest.TestCase):
             f"names `{self.merged_pr_branch}`", failures[0].message
         )
 
+    def test_verification_ref_accepts_carrier_merged_on_first_parent(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`; via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), [])
+
+    def test_verification_ref_rejects_unmerged_carrier(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`; via PR #88 "
+            "`agent/also-missing`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "cites carrier PR #88 (`agent/also-missing`)",
+            failures[0].message,
+        )
+
+    def test_verification_ref_rejects_carrier_with_wrong_branch(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`; via PR #12 "
+            "`agent/not-the-merged-branch`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "cites carrier PR #12 (`agent/not-the-merged-branch`)",
+            failures[0].message,
+        )
+
     def test_verification_ref_rejects_one_parent_merge_subject_spoof(self) -> None:
         run_git(
             self.root,
