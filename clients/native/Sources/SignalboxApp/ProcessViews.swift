@@ -1940,7 +1940,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
       }
-      applyModelCallState(state)
+      applyModelCallState(state, for: turnID)
     case .toolBatchTransition(let turnID, _, let state):
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
         return
@@ -1950,22 +1950,28 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
-        activity = .init(state: .running, label: "Running")
+        applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
       case .resultsProjected:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
-        activity = .init(state: .running, label: "Running")
+        applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
       case .recoveryRequired:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
-        activity = .init(state: .recoveryRequired, label: "Recovery required")
+        applyNestedActivity(
+          .init(state: .recoveryRequired, label: "Recovery required"),
+          for: turnID
+        )
       case .unknown(let kind, _):
         if mutationBlocksByTurnID[turnID] != .unknownTurnState {
           mutationBlocksByTurnID[turnID] = .unknownNestedState
         }
-        activity = .init(state: .recoveryRequired, label: "Recovery required")
+        applyNestedActivity(
+          .init(state: .recoveryRequired, label: "Recovery required"),
+          for: turnID
+        )
         presentDiagnostic("Preserved an unrecognized tool-batch state: \(kind).")
       }
     case .turnCompleted(let turnID, _, _, _):
@@ -2121,24 +2127,49 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
-  private func applyModelCallState(_ state: SignalboxModelCallState) {
+  private func applyModelCallState(
+    _ state: SignalboxModelCallState,
+    for turnID: SignalboxCanonicalUUID
+  ) {
     switch state {
     case .prepared, .inFlight, .cancellationRequested:
-      activity = .init(state: .running, label: "Running")
+      applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
     case .terminal(let disposition):
       switch disposition {
       case .ambiguous:
-        activity = .init(state: .recoveryRequired, label: "Recovery required")
+        applyNestedActivity(
+          .init(state: .recoveryRequired, label: "Recovery required"),
+          for: turnID
+        )
       case .completed, .knownFailed, .refused, .cancelled:
-        activity = .init(state: .running, label: "Running")
+        applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
       case .unknown(let value):
-        activity = .init(state: .recoveryRequired, label: "Recovery required")
+        applyNestedActivity(
+          .init(state: .recoveryRequired, label: "Recovery required"),
+          for: turnID
+        )
         presentDiagnostic("Preserved an unrecognized model-call disposition: \(value).")
       }
     case .unknown(let kind, _):
-      activity = .init(state: .recoveryRequired, label: "Recovery required")
+      applyNestedActivity(
+        .init(state: .recoveryRequired, label: "Recovery required"),
+        for: turnID
+      )
       presentDiagnostic("Preserved an unrecognized model-call state: \(kind).")
     }
+  }
+
+  private func applyNestedActivity(
+    _ nestedActivity: SignalboxProcessActivity,
+    for turnID: SignalboxCanonicalUUID
+  ) {
+    let preservesBlockedActivity = mutationBlocksByTurnID.contains { blockedTurnID, reason in
+      blockedTurnID != turnID || reason == .unknownTurnState
+    }
+    guard !preservesBlockedActivity else {
+      return
+    }
+    activity = nestedActivity
   }
 
   private func presentDiagnostic(_ message: String) {

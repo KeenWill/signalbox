@@ -981,6 +981,60 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testUnknownTurnActivitySurvivesNewerModelCallTransition() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownTurnState(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.completedModelCallEvent(
+          cursor: ProcessProjectionFixture.newerTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertFalse(viewModel.canSend)
+  }
+
+  @MainActor
+  func testUnknownTurnActivitySurvivesNewerToolBatchTransition() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownTurnState(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.proposedToolTrigger(
+          cursor: ProcessProjectionFixture.newerTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertFalse(viewModel.canSend)
+  }
+
+  @MainActor
   func testProposedToolWaitsOnlyWhenSideSnapshotShowsApproval() async throws {
     let service = makeService(scenario: .pendingApproval)
     let sessions = try await service.listSessions(includeArchived: false)
@@ -1973,6 +2027,29 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let requester = SequencedProcessRequester(
       pages: [
         [try ProcessDriverFixture.unknownMutationReceipt()],
+        [try ProcessDriverFixture.inputSubmitted()],
+      ]
+    )
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.oneImmediateMutationRetryPolicy
+    )
+
+    let receipt = try await service.submit(submission)
+    let openedRequests = await requester.openedRequests
+
+    XCTAssertEqual(receipt, try ProcessSubmissionFixture.submittedReceipt())
+    XCTAssertEqual(
+      openedRequests,
+      ProcessSubmissionFixture.retriedRequests(for: submission)
+    )
+  }
+
+  func testFutureMutationErrorRetriesTheSameDurableCommand() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requester = SequencedProcessRequester(
+      pages: [
+        [try ProcessDriverFixture.futureMutationError()],
         [try ProcessDriverFixture.inputSubmitted()],
       ]
     )
@@ -4312,6 +4389,18 @@ private enum ProcessDriverFixture {
     try frame(#"{"type":"future_mutation_receipt","opaque":"fixture"}"#)
   }
 
+  static func futureMutationError() throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"error",
+        "code":"fixture_future_mutation_error",
+        "message":"Fixture future mutation outcome."
+      }
+      """
+    )
+  }
+
   static func malformedMetadataSummary() throws -> SignalboxProcessServerFrame {
     try frame(
       """
@@ -5461,7 +5550,9 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func proposedToolTrigger() throws -> SignalboxFollowedSessionEvent {
+  static func proposedToolTrigger(
+    cursor: UInt64 = 1
+  ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
       {
@@ -5473,7 +5564,8 @@ private enum ProcessProjectionFixture {
           "frontier_id":"\(ProcessDriverFixture.frontier)"
         }
       }
-      """
+      """,
+      cursor: cursor
     )
   }
 
