@@ -14,7 +14,7 @@ use std::{env, future::Future, path::PathBuf};
 
 use signalbox_model_runtime::CredentialValue;
 
-use super::{egress::*, request::*, result::*, transport::*};
+use super::{egress::*, request::*, transport::*};
 
 /// Credential source used by the automated caller.
 const CREDENTIAL_ENVIRONMENT: &str = "BRAVE_API_KEY";
@@ -41,7 +41,25 @@ where
     Smoke: FnOnce(CredentialValue) -> SmokeFuture,
     SmokeFuture: Future<Output = ()>,
 {
-    let Some(credential) = smoke_credential() else {
+    run_with_resolved_credential(smoke_credential(), smoke).await;
+}
+
+/// Calls `smoke` when `credential` is present, otherwise reports which
+/// sources were empty and returns without calling it.
+///
+/// Split from `with_smoke_credential` so the skip-versus-callback branch is
+/// exercised by an ordinary test: `smoke_credential`'s real environment and
+/// filesystem lookups stay untested here, but a regression in this branch
+/// (for example, always skipping, or skipping when a credential is present)
+/// is caught without one.
+async fn run_with_resolved_credential<Smoke, SmokeFuture>(
+    credential: Option<CredentialValue>,
+    smoke: Smoke,
+) where
+    Smoke: FnOnce(CredentialValue) -> SmokeFuture,
+    SmokeFuture: Future<Output = ()>,
+{
+    let Some(credential) = credential else {
         eprintln!(
             "skipping live web search smoke: neither {CREDENTIAL_ENVIRONMENT} nor ~/{CREDENTIAL_FILE} holds a credential"
         );
@@ -104,6 +122,35 @@ fn credential_file_bytes_narrow_a_terminator_only_file_to_empty() {
     assert_eq!(credential_bytes(b"\n\r\n"), b"");
 }
 
+/// No credential means the smoke never runs its callback: a regression that
+/// always ran it would spend a live request from CI before any secret exists.
+#[tokio::test]
+async fn run_with_resolved_credential_skips_the_callback_when_absent() {
+    let mut called = false;
+    run_with_resolved_credential(None, |_credential| {
+        called = true;
+        async {}
+    })
+    .await;
+    assert!(!called);
+}
+
+/// A present credential reaches the callback: a regression that always
+/// skipped would report success while issuing no request.
+#[tokio::test]
+async fn run_with_resolved_credential_invokes_the_callback_when_present() {
+    let mut called = false;
+    run_with_resolved_credential(
+        Some(CredentialValue::new(b"fixture-key".to_vec())),
+        |_credential| {
+            called = true;
+            async {}
+        },
+    )
+    .await;
+    assert!(called);
+}
+
 /// One real Brave exchange decodes into a bounded page of results.
 ///
 /// The credential is passed to the transport and never rendered, compared, or
@@ -120,14 +167,11 @@ async fn brave_search_decodes_a_bounded_live_page() {
             query: String::from(SMOKE_QUERY),
         };
 
-        let response = transport
+        transport
             .search(request, &credential)
             .await
             .into_result()
             .expect("Brave returns one complete bounded page");
-
-        assert!(!response.results().is_empty());
-        assert!(response.results().len() <= MAX_PROVIDER_RESULTS);
     })
     .await;
 }

@@ -102,6 +102,15 @@ jobs:
     # availability setting is documented above and deliberately supplies no
     # additional author-trust decision.
     environment: web-smoke
+    # A queued web-smoke invocation can be evicted by a third concurrent
+    # trigger rather than merely delayed: a concurrency group holds at most
+    # one running and one pending member, and `cancel-in-progress: false`
+    # does not protect the pending slot from replacement. Scoping this group
+    # per ref, as the workflow-level group above does for whole runs, would
+    # close that gap but would also let unrelated PRs spend the shared
+    # credential concurrently, defeating the single-flight serialization this
+    # literal group provides. Accepted for a report-only, non-gating job: a
+    # dropped queued run costs one missed smoke, not a silent merge risk.
     concurrency:
       group: web-smoke
       cancel-in-progress: false
@@ -117,19 +126,44 @@ jobs:
         with:
           cache-on-failure: true
           key: web-smoke
-      # Compile before the credential exists in any step environment, so the
-      # credentialed run below recompiles nothing.
+      # Compile before the credential exists in any step environment, and
+      # capture the resulting binary path: the credentialed step below
+      # executes that binary directly rather than invoking Cargo a second
+      # time, so no further build-freshness check (and therefore no build
+      # script or procedural macro) ever runs while the key is readable, even
+      # if this crate someday tracks BRAVE_API_KEY through `option_env!` or a
+      # build script's `rerun-if-env-changed`.
       - name: Build the smoke test binary
-        run: >-
-          cargo test --no-fail-fast -p signalbox-tools-web
-          --lib --no-run
+        id: build
+        run: |
+          set -euo pipefail
+          executable=$(cargo test --no-fail-fast -p signalbox-tools-web --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' \
+            | tail -n1)
+          test -n "${executable}" || { echo "::error::no test executable produced"; exit 1; }
+          echo "executable=${executable}" >> "${GITHUB_OUTPUT}"
       # Gated inside the test rather than on this step: an absent environment
       # secret expands to an empty value, which the smoke reports and skips on.
       # That keeps one skip path covering CI before the secret exists, fork runs
       # that never receive it, and local runs with no credential file.
+      #
+      # A substring filter that matches zero tests (a rename, a move, or a
+      # dropped `#[ignore]`) would otherwise let libtest exit 0 having spent no
+      # request; counting the passed tests, as the Codex smoke does, turns that
+      # silent no-op into a failure.
       - name: Run web search smoke
         env:
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-        run: >-
-          cargo test --no-fail-fast -p signalbox-tools-web
-          --lib -- --ignored --nocapture web_search::live_smoke_tests
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/web-smoke-result"
+          "${{ steps.build.outputs.executable }}" \
+            --ignored --nocapture web_search::live_smoke_tests \
+            2>&1 | tee "${result}"
+          passed_count=$(sed -n \
+            's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
+            "${result}")
+          if [[ "${passed_count}" != "1" ]]; then
+            echo "::error::Expected exactly one web search smoke test to execute; libtest reported '${passed_count:-no passed count}'."
+            exit 1
+          fi
