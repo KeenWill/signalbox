@@ -942,17 +942,21 @@ functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or
 semantic entries. A parent-policy stop or cancellation instead carries opaque
-authority from the exact applied parent termination result, exposing its parent
-session, turn, durable user command, command kind, and descendant scope. Raw
-identities cannot construct that authority, `parent_alone` authority cannot
-produce a child disposition, and the recorded outcome reason must match its
-command kind and scope. `ChildStopped` is produced only by a parent-policy stop;
-the existing child scheduling projection proves cancellation but does not
-fabricate a distinct stopped outcome from that evidence. Delivery appends a
-`DelegationResult` semantic entry only to the target parent and is idempotent by
-the spawning request. A detached child may return after the parent has stopped
-or cancelled; the result remains durable and independently inspectable even when
-no parent turn can consume it.
+authority from the exact applied parent termination result. Every authority
+exposes its parent session, durable user command, command kind, and descendant
+scope; a turn interrupt additionally names its exact turn, while a goal stop
+names the exact goal generation and carries no turn. Raw identities cannot
+construct that authority, `parent_alone` authority cannot produce a child
+disposition, and the recorded outcome reason must match its command kind and
+scope. `ChildStopped` is produced only by a parent-policy stop; the existing
+child scheduling projection proves cancellation but does not fabricate a
+distinct stopped outcome from that evidence. Delivery appends a
+`DelegationResult` semantic entry only to the target parent, names the exact
+awaiting request that receives the result, and is idempotent by that awaiting
+request. The immutable child result remains keyed by the spawning request. A
+detached child may return after the parent has stopped or cancelled; the result
+remains durable and independently inspectable even when no parent turn can
+consume it.
 
 **Committed unimplemented functionality.** A spawned child defaults into its
 parent's directory. No present delegation or placement surface implements or

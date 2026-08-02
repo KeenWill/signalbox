@@ -3,8 +3,8 @@
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DelegationMessageId, DurableCommandId, NonEmptyUnicodeText, SessionId, ToolRequest,
-    ToolRequestId, TurnId,
+    DelegationMessageId, DurableCommandId, GoalGeneration, NonEmptyUnicodeText, SessionId,
+    ToolRequest, ToolRequestId, TurnId,
 };
 
 const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
@@ -50,6 +50,15 @@ pub enum ParentTerminationKind {
     Cancelled,
 }
 
+/// Exact domain command source that applied a parent termination.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ParentTerminationCommandSource {
+    /// An interrupt command applied to one exact live turn.
+    Turn { turn: TurnId },
+    /// A goal-stop command applied to one exact goal generation.
+    Goal { generation: GoalGeneration },
+}
+
 /// Exact applied parent termination authority.
 ///
 /// Raw identities cannot construct this proof. The scheduling slice supplies
@@ -58,7 +67,7 @@ pub enum ParentTerminationKind {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ParentTerminationAuthority {
     parent: SessionId,
-    turn: TurnId,
+    source: ParentTerminationCommandSource,
     command: DurableCommandId,
     kind: ParentTerminationKind,
     scope: DescendantTerminationScope,
@@ -69,8 +78,22 @@ impl ParentTerminationAuthority {
         self.parent
     }
 
-    pub const fn turn(self) -> TurnId {
-        self.turn
+    pub const fn source(self) -> ParentTerminationCommandSource {
+        self.source
+    }
+
+    pub const fn turn(self) -> Option<TurnId> {
+        match self.source {
+            ParentTerminationCommandSource::Turn { turn } => Some(turn),
+            ParentTerminationCommandSource::Goal { .. } => None,
+        }
+    }
+
+    pub const fn goal_generation(self) -> Option<GoalGeneration> {
+        match self.source {
+            ParentTerminationCommandSource::Goal { generation } => Some(generation),
+            ParentTerminationCommandSource::Turn { .. } => None,
+        }
     }
 
     pub const fn command(self) -> DurableCommandId {
@@ -616,11 +639,9 @@ impl DelegationProvenance {
         }
     }
 
-    pub const fn parent_command(&self) -> Option<(SessionId, TurnId, DurableCommandId)> {
+    pub const fn parent_command(&self) -> Option<ParentTerminationAuthority> {
         match self.kind {
-            DelegationProvenanceKind::ParentCommand { authority } => {
-                Some((authority.parent(), authority.turn(), authority.command()))
-            }
+            DelegationProvenanceKind::ParentCommand { authority } => Some(authority),
             DelegationProvenanceKind::ToolRequest { .. }
             | DelegationProvenanceKind::ChildTurn { .. } => None,
         }
@@ -947,7 +968,7 @@ mod tests {
     ) -> ParentTerminationAuthority {
         ParentTerminationAuthority {
             parent: session_id(1),
-            turn: turn_id(2),
+            source: ParentTerminationCommandSource::Turn { turn: turn_id(2) },
             command: command_id(3),
             kind: ParentTerminationKind::Stopped,
             scope,
@@ -1361,7 +1382,7 @@ mod tests {
     fn s18_inv010_parent_and_descendants_cancel_constructs_policy_outcome() {
         let authority = ParentTerminationAuthority {
             parent: session_id(1),
-            turn: turn_id(2),
+            source: ParentTerminationCommandSource::Turn { turn: turn_id(2) },
             command: command_id(3),
             kind: ParentTerminationKind::Cancelled,
             scope: DescendantTerminationScope::ParentAndDescendants,
@@ -1376,6 +1397,24 @@ mod tests {
                 scope: DescendantTerminationScope::ParentAndDescendants,
             }
         );
+    }
+
+    /// S18 / INV-010: goal-stop authority names a generation without a turn.
+    #[test]
+    fn s18_inv010_goal_termination_authority_never_fabricates_a_turn() {
+        let generation = GoalGeneration::new(std::num::NonZeroU64::MIN);
+        let authority = ParentTerminationAuthority {
+            parent: session_id(1),
+            source: ParentTerminationCommandSource::Goal { generation },
+            command: command_id(3),
+            kind: ParentTerminationKind::Stopped,
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        };
+        let provenance = DelegationProvenance::from_parent_termination(authority);
+
+        assert_eq!(authority.turn(), None);
+        assert_eq!(authority.goal_generation(), Some(generation));
+        assert_eq!(provenance.parent_command(), Some(authority));
     }
 
     #[test]

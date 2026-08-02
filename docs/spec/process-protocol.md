@@ -690,8 +690,9 @@ produces exactly one of:
   `relationship`;
 - `session_await_registered` with `tool_request_id`, `child_session_id`, and
   `mode`;
-- `child_result` with `spawning_request_id`, `child_session_id`, `outcome`,
-  nullable `content`, closed `reason`, and exact `provenance`;
+- `child_result` with `await_request_id`, `spawning_request_id`,
+  `child_session_id`, `outcome`, nullable `content`, closed `reason`, and exact
+  `provenance`;
 - `session_message_sent` with `tool_request_id`, `message_id`, `direction`, and
   `ordinal`;
 - `runner_replaced` with `session_id`, `prior_runner_id`, `new_runner_id`,
@@ -1058,7 +1059,12 @@ and `tool_request_not_in_session { session_id, tool_request_id }`. A delegation
 request admits `session_not_found`, `tool_request_not_found`, and
 `tool_request_not_in_session` with those same shapes, plus
 `delegation_request_not_in_turn { session_id, turn_id, tool_request_id }` when
-the named request belongs to another turn. `spawn_session` additionally admits
+the named request belongs to another turn, and
+`delegation_tool_request_not_executable { tool_request_id, state }` when a first
+execution names a request whose state is `awaiting_approval`, `denied`,
+`closed`, or `attempt_ended`. Durable equal replay is checked first against the
+exact stored operation and returns its original receipt without requiring a
+still-live execution attempt. `spawn_session` additionally admits
 `delegation_spawn_conflict { tool_request_id }` for a non-equal replay and
 `delegated_child_identity_collision { child_session_id }` when the generated
 child identity is already occupied. It has no fixed active-child-count
@@ -1377,16 +1383,18 @@ native evidence nor replaces that authority.
 non-text `transcript_entry` arms:
 
 - `delegation_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, content }`;
-- `delegation_result { spawning_request_id, child_session_id, outcome, content, reason, provenance }`.
+- `delegation_result { await_request_id, spawning_request_id, child_session_id, outcome, content, reason, provenance }`.
 
 The message arm resolves the immutable message record referenced by the semantic
 entry and requires `source_session_id` to equal its recipient. The result arm
-resolves the immutable child-result record referenced by the semantic entry and
-requires `source_session_id` to equal its parent. `content` is required for a
-returned result and null for every other closed outcome; `reason` and
-`provenance` use the same closed shapes as the corresponding `session_event`. A
-missing record, mismatched relationship or endpoint, or incompatible outcome
-fails the snapshot before transmission.
+resolves both the immutable child-result record and the exact delegation wait
+named by `await_request_id`; that wait must name the same spawning request and
+child, and `source_session_id` must equal its parent. Thus separate waits for
+one child retain distinct model-visible tool-result correlation. `content` is
+required for a returned result and null for every other closed outcome; `reason`
+and `provenance` use the same closed shapes as the corresponding
+`session_event`. A missing record, mismatched wait, relationship, or endpoint,
+or incompatible outcome fails the snapshot before transmission.
 
 Snapshot deduplication uses the complete `(source_session_id, entry_id)`
 semantic identity. Neither `message_id` nor `spawning_request_id` is a
@@ -1421,6 +1429,14 @@ does not let a client fabricate model provenance. `spawn_session`,
 session, turn, and `tool_request_id`, which must reconstitute one matching
 logical request before any mutation occurs.
 
+Logical-request reconstitution alone is not execution authority. Before a first
+mutation, the daemon must also reconstitute the exact authorized, executable
+attempt for that request and prove it is neither awaiting approval, denied,
+closed, nor already ended. This check uses the ordinary tool-execution authority
+boundary; a process client cannot promote a merely issued request. An exact
+durable replay is the sole exception: it returns the immutable stored receipt
+before consulting current attempt state and cannot create another effect.
+
 `spawn_session` additionally carries bounded `task` and the closed relationship
 object, and returns
 `session_spawned { tool_request_id, child_session_id, relationship }`.
@@ -1449,29 +1465,35 @@ The two outcome events use one closed nested union. `outcome` is `returned`,
 `failed`, `stopped`, `cancelled`, or `continue_running`; `reason` is
 `child_completed`, `child_execution_failed`, `child_result_unavailable`,
 `child_cancelled`, `parent_stopped`, or `parent_cancelled`. `provenance` is
-either `child_turn { child_session_id, child_turn_id }` or
-`parent_command { parent_session_id, parent_turn_id, command_id, descendant_scope }`,
-where `descendant_scope` uses the request spelling above. The admitted
-correlations are exhaustive:
+`child_turn { child_session_id, child_turn_id }`,
+`parent_turn_command { parent_session_id, parent_turn_id, command_id, descendant_scope }`,
+or
+`parent_goal_command { parent_session_id, goal_generation, command_id, descendant_scope }`,
+where `goal_generation` is a positive canonical decimal string and
+`descendant_scope` uses the request spelling above. Goal-stop provenance never
+carries or fabricates a parent turn. The admitted correlations are exhaustive:
 
-| Outcome            | Reason                                                 | Provenance       | Content      |
-| ------------------ | ------------------------------------------------------ | ---------------- | ------------ |
-| `returned`         | `child_completed`                                      | `child_turn`     | exact string |
-| `failed`           | `child_execution_failed` or `child_result_unavailable` | `child_turn`     | null         |
-| `cancelled`        | `child_cancelled`                                      | `child_turn`     | null         |
-| `stopped`          | `parent_stopped`                                       | `parent_command` | null         |
-| `cancelled`        | `parent_cancelled`                                     | `parent_command` | null         |
-| `continue_running` | `parent_stopped` or `parent_cancelled`                 | `parent_command` | null         |
+| Outcome            | Reason                                                 | Provenance     | Content      |
+| ------------------ | ------------------------------------------------------ | -------------- | ------------ |
+| `returned`         | `child_completed`                                      | `child_turn`   | exact string |
+| `failed`           | `child_execution_failed` or `child_result_unavailable` | `child_turn`   | null         |
+| `cancelled`        | `child_cancelled`                                      | `child_turn`   | null         |
+| `stopped`          | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
+| `cancelled`        | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
+| `continue_running` | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
 
-`child_result` admits the first five rows and never `continue_running`;
-`child_lifecycle_disposition` admits only the last three rows. A
-`parent_command` outcome requires `parent_and_descendants` for `stopped` or
-parent-caused `cancelled`, and also requires `parent_and_descendants` for
-`continue_running`: the latter is the explicit evaluated no-change disposition
-for an edge included by the caller-selected cascade. Any other
-outcome/reason/provenance/content combination is a contradictory frame and is
-rejected. Thus every lifecycle result names both why it happened and the exact
-child turn or parent command that caused it.
+`child_result` admits every row except `continue_running`;
+`child_lifecycle_disposition` admits only parent-command `stopped`, `cancelled`,
+and `continue_running` rows. A A parent-command outcome admits either
+`parent_turn_command` or `parent_goal_command` provenance and requires
+`parent_and_descendants` for `stopped`, parent-caused `cancelled`, and
+`continue_running`. The outcome names the bound-child action, while the reason
+independently names whether the parent stopped or was cancelled; both
+cross-action combinations are valid. A `continue_running` row is the explicit
+evaluated no-change disposition for an edge included by the caller-selected
+cascade. Any other outcome/reason/provenance/content combination is a
+contradictory frame and is rejected. Thus every lifecycle result names both why
+it happened and the exact child turn or parent command that caused it.
 
 The internal `delegation_wake` outbox event is a scheduler nudge, not a
 session-follow update. Clients observe the durable result or message update that
