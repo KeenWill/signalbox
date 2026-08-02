@@ -710,6 +710,101 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testTruncatedAbsentPlanHistoryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord(
+      output: ProcessProjectionFixture.truncatedAbsentPlanHistoryOutput
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.truncatedAbsentPlanHistoryOutput
+    )
+  }
+
+  func testTruncatedEmptyPlanHistoryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord(
+      output: ProcessProjectionFixture.truncatedEmptyPlanHistoryOutput
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.truncatedEmptyPlanHistoryOutput
+    )
+  }
+
+  func testExcessivePlanDependenciesKeepRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord(
+      output: ProcessProjectionFixture.excessivePlanDependenciesOutput
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.excessivePlanDependenciesOutput
+    )
+  }
+
+  func testUnorderedPlanEntriesKeepRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord(
+      output: ProcessProjectionFixture.unorderedPlanEntriesOutput
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.unorderedPlanEntriesOutput)
+  }
+
+  func testSelfDependentPlanEntryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord(
+      output: ProcessProjectionFixture.selfDependentPlanEntryOutput
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.selfDependentPlanEntryOutput)
+  }
+
+  func testCyclicPlanEntriesKeepRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord(
+      output: ProcessProjectionFixture.cyclicPlanEntriesOutput
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.cyclicPlanEntriesOutput)
+  }
+
+  func testReadyPlanEntryWithIncompleteDependencyKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord(
+      output: ProcessProjectionFixture.inconsistentReadyPlanEntryOutput
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.inconsistentReadyPlanEntryOutput
+    )
+  }
+
+  func testWaitingPlanEntryWithCompletedDependencyKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadToolRecord(
+      output: ProcessProjectionFixture.inconsistentWaitingPlanEntryOutput
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.inconsistentWaitingPlanEntryOutput
+    )
+  }
+
   func testFuturePlanEntryReferenceKeepsRawEvidenceVisible() throws {
     let record = ProcessProjectionFixture.futurePlanEntryReferenceToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
@@ -821,6 +916,52 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       timelineMessage.label,
       ProcessProjectionFixture.importedUserRoleLabel
+    )
+  }
+
+  func testImportedUnattestedTextRetainsWireSpeakerLabel() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedTextSpeaker(
+      #"{"type":"not_attested"}"#
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+    let timelineMessage = try ProcessProjectionFixture.onlyTimelineMessage(
+      in: normalizer.timelineItems
+    )
+
+    XCTAssertEqual(
+      message.sourceAttribution,
+      ProcessProjectionFixture.importedUnattestedAttribution
+    )
+    XCTAssertEqual(
+      timelineMessage.label,
+      ProcessProjectionFixture.importedUnattestedLabel
+    )
+  }
+
+  func testImportedAttestedAbsentTextRetainsWireSpeakerLabel() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedTextSpeaker(
+      #"{"type":"attested_absent"}"#
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+    let timelineMessage = try ProcessProjectionFixture.onlyTimelineMessage(
+      in: normalizer.timelineItems
+    )
+
+    XCTAssertEqual(
+      message.sourceAttribution,
+      ProcessProjectionFixture.importedAttestedAbsentAttribution
+    )
+    XCTAssertEqual(
+      timelineMessage.label,
+      ProcessProjectionFixture.importedAttestedAbsentLabel
     )
   }
 
@@ -5145,6 +5286,12 @@ private enum ProcessProjectionFixture {
   ]
   static let importedUserRoleLabel = "User role"
   static let importedUserRoleAttribution = SignalboxProcessMessageSourceAttribution.importedUserRole
+  static let importedUnattestedLabel = "Speaker not attested"
+  static let importedUnattestedAttribution =
+    SignalboxProcessMessageSourceAttribution.importedSpeakerNotAttested
+  static let importedAttestedAbsentLabel = "Speaker absent"
+  static let importedAttestedAbsentAttribution =
+    SignalboxProcessMessageSourceAttribution.importedSpeakerAbsent
   static let modelNoticeTitles = ["Model changed", "Model usage"]
   static let modelPresentationEventKinds = [
     "process_model_identity", "process_message", "process_message",
@@ -5222,6 +5369,34 @@ private enum ProcessProjectionFixture {
   static let malformedPlanReadOutput = #"{"entries":[{"entry_id":0,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":null,"history_truncated":false}"#
   static let expandedPlanWriteOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planProvenance)},"future_field":"retained"}"#
   static let contradictoryPlanReadCursorOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress","dependencies":[],"readiness":"ready"}],"next_after_entry_id":1,"plan_truncated":false,"history":null,"history_truncated":false}"#
+  static let truncatedAbsentPlanHistoryOutput = rawPlanReadOutput(
+    entries: "[]",
+    history: "null",
+    historyTruncated: true
+  )
+  static let truncatedEmptyPlanHistoryOutput = rawPlanReadOutput(
+    entries: "[]",
+    history: "[]",
+    historyTruncated: true
+  )
+  static let excessivePlanDependenciesOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":1,"text":"Audit protocol","status":"pending","dependencies":[\#(excessivePlanDependencies)],"readiness":"ready"}]"#
+  )
+  static let unorderedPlanEntriesOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":2,"text":"Second","status":"pending","dependencies":[],"readiness":"ready"},{"entry_id":1,"text":"First","status":"pending","dependencies":[],"readiness":"ready"}]"#
+  )
+  static let selfDependentPlanEntryOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":1,"text":"Audit protocol","status":"pending","dependencies":[1],"readiness":"waiting"}]"#
+  )
+  static let cyclicPlanEntriesOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":1,"text":"First","status":"pending","dependencies":[2],"readiness":"waiting"},{"entry_id":2,"text":"Second","status":"pending","dependencies":[1],"readiness":"waiting"}]"#
+  )
+  static let inconsistentReadyPlanEntryOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":1,"text":"First","status":"pending","dependencies":[2],"readiness":"ready"},{"entry_id":2,"text":"Second","status":"pending","dependencies":[],"readiness":"ready"}]"#
+  )
+  static let inconsistentWaitingPlanEntryOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":1,"text":"First","status":"pending","dependencies":[2],"readiness":"waiting"},{"entry_id":2,"text":"Second","status":"completed","dependencies":[],"readiness":"ready"}]"#
+  )
   static let futurePlanEntryReferenceOutput = #"{"event":{"ordinal":2,"kind":"status_changed","entry_id":3,"status":"completed",\#(planProvenance)}}"#
   static let planReadDisplayName = "Plan read"
   static let planWriteDisplayName = "Plan update"
@@ -6713,6 +6888,16 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func planReadToolRecord(output: String) -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: planReadArguments,
+      output: output,
+      status: .completed
+    )
+  }
+
   static func planCreateToolRecord() -> SignalboxStoredEvent {
     planToolRecord(
       requestID: planCreateRequestID,
@@ -6842,6 +7027,17 @@ private enum ProcessProjectionFixture {
         )
       )
     )
+  }
+
+  private static let excessivePlanDependencies =
+    (2...34).map(String.init).joined(separator: ",")
+
+  private static func rawPlanReadOutput(
+    entries: String,
+    history: String = "null",
+    historyTruncated: Bool = false
+  ) -> String {
+    #"{"entries":\#(entries),"next_after_entry_id":null,"plan_truncated":false,"history":\#(history),"history_truncated":\#(historyTruncated)}"#
   }
 
   static func importedContentKinds(

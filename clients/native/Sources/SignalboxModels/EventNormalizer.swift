@@ -429,12 +429,18 @@ public enum SignalboxEventNormalizer {
                 ? entries.last.map { nextAfterEntryID == $0.entryID } ?? false
                 : nextAfterEntryID == nil
             guard nextAfterEntryID.map({ $0 > 0 }) ?? true,
-                cursorMatchesTruncation
+                cursorMatchesTruncation,
+                SignalboxEventNormalizer.validPlanEntries(entries),
+                SignalboxEventNormalizer.validPlanHistory(
+                    history,
+                    truncated: historyTruncated
+                )
             else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .nextAfterEntryID,
                     in: container,
-                    debugDescription: "Plan truncation and its continuation cursor disagree."
+                    debugDescription:
+                        "Plan read output contains contradictory pagination or relationships."
                 )
             }
         }
@@ -473,6 +479,8 @@ public enum SignalboxEventNormalizer {
                 SignalboxEventNormalizer.validPlanStatus(status),
                 dependencies.allSatisfy({ $0 > 0 }),
                 Set(dependencies).count == dependencies.count,
+                dependencies.count
+                    <= SignalboxProcessProtocol.maximumPlanDependenciesPerEntry,
                 SignalboxEventNormalizer.validPlanReadiness(readiness)
             else {
                 throw DecodingError.dataCorrupted(
@@ -837,6 +845,97 @@ public enum SignalboxEventNormalizer {
         case "ready", "waiting": return true
         default: return false
         }
+    }
+
+    private static func validPlanEntries(_ entries: [PlanEntry]) -> Bool {
+        guard entries.count <= SignalboxProcessProtocol.maximumPlanReadEntries else {
+            return false
+        }
+        var statuses: [UInt64: String] = [:]
+        var priorEntryID: UInt64?
+        for entry in entries {
+            guard priorEntryID.map({ entry.entryID > $0 }) ?? true,
+                statuses.updateValue(entry.status, forKey: entry.entryID) == nil
+            else {
+                return false
+            }
+            priorEntryID = entry.entryID
+        }
+        for entry in entries {
+            let visibleIncomplete = entry.dependencies.contains { dependencyID in
+                statuses[dependencyID].map { $0 != "completed" } ?? false
+            }
+            let allVisibleCompleted = entry.dependencies.allSatisfy { dependencyID in
+                statuses[dependencyID] == "completed"
+            }
+            guard !((entry.readiness == "ready" && visibleIncomplete)
+                || (entry.readiness == "waiting" && allVisibleCompleted))
+            else {
+                return false
+            }
+        }
+        let dependencies = Dictionary(uniqueKeysWithValues: entries.map { entry in
+            (entry.entryID, entry.dependencies.filter { statuses[$0] != nil })
+        })
+        return !entries.contains { entry in
+            planDependencyPathExists(
+                from: entry.entryID,
+                to: entry.entryID,
+                dependencies: dependencies,
+                requireEdge: true,
+                visited: []
+            )
+        }
+    }
+
+    private static func planDependencyPathExists(
+        from entryID: UInt64,
+        to targetID: UInt64,
+        dependencies: [UInt64: [UInt64]],
+        requireEdge: Bool,
+        visited: Set<UInt64>
+    ) -> Bool {
+        if !requireEdge, entryID == targetID {
+            return true
+        }
+        guard !visited.contains(entryID) else {
+            return false
+        }
+        let nextVisited = visited.union([entryID])
+        return dependencies[entryID, default: []].contains { dependencyID in
+            planDependencyPathExists(
+                from: dependencyID,
+                to: targetID,
+                dependencies: dependencies,
+                requireEdge: false,
+                visited: nextVisited
+            )
+        }
+    }
+
+    private static func validPlanHistory(
+        _ history: [PlanEvent]?,
+        truncated: Bool
+    ) -> Bool {
+        guard let history else {
+            return !truncated
+        }
+        guard history.count <= SignalboxProcessProtocol.maximumPlanHistoryEvents,
+            !truncated || !history.isEmpty
+        else {
+            return false
+        }
+        var priorOrdinal: UInt64?
+        var attemptIDs: Set<SignalboxCanonicalUUID> = []
+        for event in history {
+            guard priorOrdinal.map({ event.ordinal > $0 }) ?? true,
+                attemptIDs.insert(event.provenance.attemptID).inserted
+            else {
+                return false
+            }
+            priorOrdinal = event.ordinal
+        }
+        return true
     }
 
     private static func formattedPlanEvent(_ event: PlanEvent) -> String {

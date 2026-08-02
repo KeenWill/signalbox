@@ -942,9 +942,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         nil
       )
     case .notAttested:
-      return (.unknown, nil, "Speaker not attested", nil)
+      return (
+        .unknown, nil, "Speaker not attested", .importedSpeakerNotAttested
+      )
     case .attestedAbsent:
-      return (.unknown, nil, "Speaker absent", nil)
+      return (.unknown, nil, "Speaker absent", .importedSpeakerAbsent)
     }
   }
 

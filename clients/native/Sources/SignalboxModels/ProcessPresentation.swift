@@ -339,6 +339,8 @@ public struct SignalboxProcessActivity: Equatable, Sendable {
 public enum SignalboxProcessMessageSourceAttribution: String, Codable, Equatable, Sendable {
   case importedUserRole = "imported_user_role"
   case importedAssistantRole = "imported_assistant_role"
+  case importedSpeakerNotAttested = "imported_speaker_not_attested"
+  case importedSpeakerAbsent = "imported_speaker_absent"
 
   public var presentationLabel: String {
     switch self {
@@ -346,6 +348,10 @@ public enum SignalboxProcessMessageSourceAttribution: String, Codable, Equatable
       return "User role"
     case .importedAssistantRole:
       return "Assistant role"
+    case .importedSpeakerNotAttested:
+      return "Speaker not attested"
+    case .importedSpeakerAbsent:
+      return "Speaker absent"
     }
   }
 
@@ -355,6 +361,8 @@ public enum SignalboxProcessMessageSourceAttribution: String, Codable, Equatable
       return .user
     case .importedAssistantRole:
       return .assistant
+    case .importedSpeakerNotAttested, .importedSpeakerAbsent:
+      return .unknown
     }
   }
 }
