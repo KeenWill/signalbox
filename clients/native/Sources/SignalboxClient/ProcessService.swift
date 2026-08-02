@@ -36,9 +36,11 @@ public enum SignalboxProcessServiceError: LocalizedError, Equatable {
       .deadlineExceeded(let message):
       return message
     case .remote(let code, let message, _):
-      return "\(code.rawValue): \(message)"
+      return SignalboxProcessPresentation.retainedLabel("\(code.rawValue): \(message)")
     case .mutationRetryExhausted(let code, let message):
-      return "\(code.rawValue): \(message) The exact command can be retried."
+      return SignalboxProcessPresentation.retainedLabel(
+        "\(code.rawValue): \(message) The exact command can be retried."
+      )
     }
   }
 }

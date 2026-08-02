@@ -525,6 +525,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testFutureRemoteErrorPresentationIsBounded() throws {
+    let error = SignalboxProcessServiceError.remote(
+      code: .unknown(ProcessProjectionFixture.oversizedUnknownState),
+      message: ProcessProjectionFixture.remoteErrorMessage,
+      detail: nil
+    )
+
+    let description = try XCTUnwrap(error.errorDescription)
+
+    XCTAssertEqual(
+      description.utf8.count,
+      SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+  }
+
   func testTurnActivationSideProjectionRejectsMissingActivatedTurn() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithoutTurns()
     let trigger = try ProcessProjectionFixture.activatedEvent()
@@ -4334,6 +4349,7 @@ private enum ProcessProjectionFixture {
   static let unknownToolBatchState = "fixture_future_tool_batch_state"
   static let unknownToolBatchDiagnostic =
     "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
+  static let remoteErrorMessage = "Fixture remote error."
   static let oversizedUnknownState = String(
     repeating: "x",
     count: SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes + 1
