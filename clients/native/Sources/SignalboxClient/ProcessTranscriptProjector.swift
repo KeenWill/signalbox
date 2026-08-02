@@ -74,7 +74,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private var toolsByRequestID: [String: SignalboxProcessToolEvent] = [:]
   private var toolContextsByRequestID: [String: ToolContext] = [:]
   private var nextSyntheticEventID = Int.min / 2
-  private var nextModelCallUsageEventID = Int.max / 4
+  private var nextModelCallUsageEventID = Int.min / 4
 
   public init() {}
 
@@ -154,7 +154,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
     return SignalboxProcessConservativeEvent(
       kind: content.kind,
-      diagnostic: content.diagnostic
+      diagnostic: SignalboxProcessPresentation.retainedLabel(content.diagnostic)
     )
   }
 
@@ -596,7 +596,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     if let existing = presentationIDs[identity] {
       return existing
     }
-    guard nextSyntheticEventID < 0 else {
+    guard nextSyntheticEventID < Int.min / 4 else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
     }
     let claimed = SignalboxEventID(rawValue: nextSyntheticEventID)
@@ -621,7 +621,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       presentationIDs[identity] = claimed
       return claimed
     }
-    guard nextModelCallUsageEventID < Int.max / 2 else {
+    guard nextModelCallUsageEventID < 0 else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
     }
     let claimed = SignalboxEventID(rawValue: nextModelCallUsageEventID)
@@ -671,7 +671,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       event: .processConservative(
         SignalboxProcessConservativeEvent(
           kind: content.kind,
-          diagnostic: content.diagnostic
+          diagnostic: SignalboxProcessPresentation.retainedLabel(content.diagnostic)
         )
       )
     )
@@ -959,9 +959,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   ) {
     switch speaker {
     case .attested(.user):
-      return (.user, nil, "User role", .importedUserRole)
+      return (
+        .user,
+        nil,
+        SignalboxProcessMessageSourceAttribution.importedUserRole.presentationLabel,
+        .importedUserRole
+      )
     case .attested(.assistant):
-      return (.assistant, nil, "Assistant role", .importedAssistantRole)
+      return (
+        .assistant,
+        nil,
+        SignalboxProcessMessageSourceAttribution.importedAssistantRole.presentationLabel,
+        .importedAssistantRole
+      )
     case .attested(.unknown(let value)):
       let label = SignalboxProcessPresentation.retainedLabel(
         "Unrecognized speaker (\(value))"
@@ -982,10 +992,18 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       )
     case .notAttested:
       return (
-        .unknown, nil, "Speaker not attested", .importedSpeakerNotAttested
+        .unknown,
+        nil,
+        SignalboxProcessMessageSourceAttribution.importedSpeakerNotAttested.presentationLabel,
+        .importedSpeakerNotAttested
       )
     case .attestedAbsent:
-      return (.unknown, nil, "Speaker absent", .importedSpeakerAbsent)
+      return (
+        .unknown,
+        nil,
+        SignalboxProcessMessageSourceAttribution.importedSpeakerAbsent.presentationLabel,
+        .importedSpeakerAbsent
+      )
     }
   }
 

@@ -5282,16 +5282,19 @@ private enum ProcessProjectionFixture {
     "Imported tool result",
   ]
   static let importedSpeakerLabels = [
-    "Speaker not attested", "Assistant role", "Assistant role", "User role",
+    SignalboxProcessMessageSourceAttribution.importedSpeakerNotAttested.presentationLabel,
+    SignalboxProcessMessageSourceAttribution.importedAssistantRole.presentationLabel,
+    SignalboxProcessMessageSourceAttribution.importedAssistantRole.presentationLabel,
+    SignalboxProcessMessageSourceAttribution.importedUserRole.presentationLabel,
   ]
-  static let importedUserRoleLabel = "User role"
   static let importedUserRoleAttribution = SignalboxProcessMessageSourceAttribution.importedUserRole
-  static let importedUnattestedLabel = "Speaker not attested"
+  static let importedUserRoleLabel = importedUserRoleAttribution.presentationLabel
   static let importedUnattestedAttribution =
     SignalboxProcessMessageSourceAttribution.importedSpeakerNotAttested
-  static let importedAttestedAbsentLabel = "Speaker absent"
+  static let importedUnattestedLabel = importedUnattestedAttribution.presentationLabel
   static let importedAttestedAbsentAttribution =
     SignalboxProcessMessageSourceAttribution.importedSpeakerAbsent
+  static let importedAttestedAbsentLabel = importedAttestedAbsentAttribution.presentationLabel
   static let modelNoticeTitles = ["Model changed", "Model usage"]
   static let modelPresentationEventKinds = [
     "process_model_identity", "process_message", "process_message",
@@ -8406,6 +8409,48 @@ extension ProcessServiceIntegrationTests {
     )
   }
 
+  func testUnanchoredUsageIdentityCannotCollideWithSemanticEntryIdentity() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithFormerUsageIdentityCollision()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(
+      projection.records.map(\.eventID.rawValue),
+      ProcessProjectionFixture.disjointUsageAndSemanticPresentationIDs
+    )
+    XCTAssertEqual(
+      projection.records.map(\.event.kind),
+      ProcessProjectionFixture.disjointUsageAndSemanticEventKinds
+    )
+  }
+
+  func testMalformedFollowedEventDiagnosticIsBounded() throws {
+    let followed = try ProcessProjectionFixture.malformedKnownFollowedEvent()
+    let projector = SignalboxProcessTranscriptProjector()
+
+    let event = try XCTUnwrap(projector.projectUnrecognizedFollowedEvent(followed))
+
+    XCTAssertEqual(
+      event.diagnostic,
+      ProcessProjectionFixture.boundedMalformedFollowedEventDiagnostic
+    )
+  }
+
+  func testMalformedSnapshotTurnDiagnosticIsBounded() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithMalformedKnownTurnState()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let record = try XCTUnwrap(projection.records.first)
+    let event = try ProcessProjectionFixture.conservativeEvent(in: record)
+
+    XCTAssertEqual(
+      event.diagnostic,
+      ProcessProjectionFixture.boundedMalformedTurnStateDiagnostic
+    )
+  }
+
   func testUnknownTerminalDispositionRetainsAttribution() throws {
     let followed = try ProcessProjectionFixture.unknownDispositionModelCallEvent()
     let projector = SignalboxProcessTranscriptProjector()
@@ -8554,6 +8599,24 @@ extension ProcessServiceIntegrationTests {
 
 extension ProcessProjectionFixture {
   static let futureSessionEventKind = "fixture_future_session_event"
+  static let formerUsageCollisionEntryIndex = UInt64((Int.max / 4 - 1) / 2)
+  static let disjointUsageAndSemanticPresentationIDs = [Int.max / 4, Int.min / 4]
+  static let disjointUsageAndSemanticEventKinds = [
+    "process_conservative", "process_model_call_usage",
+  ]
+  static let oversizedDiagnosticMemberName = String(
+    repeating: "d",
+    count: SignalboxProcessPresentation.maximumLabelUTF8Bytes + 1
+  )
+  static let boundedMalformedFollowedEventDiagnostic =
+    SignalboxProcessPresentation.retainedLabel(
+      "Invalid field value at event.\(oversizedDiagnosticMemberName)."
+    )
+  static let boundedMalformedTurnStateDiagnostic =
+    SignalboxProcessPresentation.retainedLabel(
+      "Turn \(ProcessDriverFixture.turn): Invalid field value at state."
+        + "\(oversizedDiagnosticMemberName)."
+    )
   static let unknownHistoryKind = "unrecognized_session_event_history_truncated"
   static let unknownHistoryDiagnostic =
     "Earlier unrecognized session events were removed to keep retained history bounded."
@@ -8568,6 +8631,76 @@ extension ProcessProjectionFixture {
   static let unknownEventSideSnapshotTimelineKinds: [ProcessTimelineFixtureKind] = [
     .message, .unknown, .tool,
   ]
+
+  static func snapshotWithFormerUsageIdentityCollision() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    let usageMessage = try message(
+      modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall)
+    )
+    guard case .transcriptModelCallUsage(let usage) = usageMessage else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureEvent
+    }
+    let entryMessage = try message(
+      """
+      {
+        "type":"transcript_entry",
+        "entry_index":"\(formerUsageCollisionEntryIndex)",
+        "source_session_id":"\(ProcessDriverFixture.session)",
+        "entry_id":"\(importedFutureEntry)",
+        "entry":{"type":"fixture_collision_entry"}
+      }
+      """
+    )
+    guard case .transcriptEntry(let entry) = entryMessage else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureEvent
+    }
+    return SignalboxSynchronizationSnapshot(
+      sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
+      cursor: SignalboxCanonicalUInt64(rawValue: 1),
+      records: [.modelCallUsage(usage), .entry(entry)]
+    )
+  }
+
+  static func malformedKnownFollowedEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"session_created",
+        "\(oversizedDiagnosticMemberName)":true
+      }
+      """
+    )
+  }
+
+  static func snapshotWithMalformedKnownTurnState() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    let message = try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"completed",
+          "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+          "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+          "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "\(oversizedDiagnosticMemberName)":true
+        }
+      }
+      """
+    )
+    guard case .transcriptTurn(let turn) = message else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureEvent
+    }
+    return SignalboxSynchronizationSnapshot(
+      sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
+      cursor: SignalboxCanonicalUInt64(rawValue: 1),
+      records: [.turn(turn)]
+    )
+  }
 
   static func unknownSessionEvent(
     kind: String = oversizedUnknownState,
