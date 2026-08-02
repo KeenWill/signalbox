@@ -1677,21 +1677,32 @@ mod tests {
 
     #[test]
     fn delegate_resolution_preserves_model_call_and_rationale() {
+        const SUBJECT_REQUEST_SEED: u128 = 50;
+        const SUBJECT_SESSION_SEED: u128 = 1;
+        const SUBJECT_TURN_SEED: u128 = 2;
+        const ISSUING_CALL_SEED: u128 = 3;
+        const SUBJECT_ORDINAL: u32 = 0;
+        const SUBJECT_TOOL_NAME: &str = "current_time";
+        const SUBJECT_ARGUMENTS: &str = "{}";
+        const JUDGE_MODEL_SEED: u128 = 51;
+        const JUDGE_CALL_SEED: u128 = 52;
+        const JUDGE_RATIONALE: &str = "bounded request";
+
         let request = ToolRequestReconstitutionInput::new(
-            tool_request_id(50),
-            session_id(1),
-            turn_id(2),
-            model_call_id(3),
-            ToolRequestOrdinal::from_u32(0),
-            ToolName::try_new(String::from("current_time")).expect("fixture name is valid"),
-            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+            tool_request_id(SUBJECT_REQUEST_SEED),
+            session_id(SUBJECT_SESSION_SEED),
+            turn_id(SUBJECT_TURN_SEED),
+            model_call_id(ISSUING_CALL_SEED),
+            ToolRequestOrdinal::from_u32(SUBJECT_ORDINAL),
+            ToolName::try_new(String::from(SUBJECT_TOOL_NAME)).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from(SUBJECT_ARGUMENTS))
                 .expect("fixture arguments are valid"),
         )
         .with_approval_posture(ToolApprovalPosture::Delegated)
         .into_request();
-        let model = DirectModelSelection::from_uuid(uuid::Uuid::from_u128(51));
-        let call = model_call_id(52);
-        let rationale = ToolDecisionRationale::try_new(String::from("bounded request"))
+        let model = DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED));
+        let call = model_call_id(JUDGE_CALL_SEED);
+        let rationale = ToolDecisionRationale::try_new(String::from(JUDGE_RATIONALE))
             .expect("fixture rationale is admitted");
         let approval = DelegateToolApproval::try_new(
             &request,
