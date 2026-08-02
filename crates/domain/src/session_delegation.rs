@@ -870,6 +870,7 @@ impl DelegationEventOrdinal {
         self.0.get()
     }
 
+    #[cfg(test)]
     const fn first() -> Self {
         Self(NonZeroU64::MIN)
     }
@@ -928,6 +929,11 @@ pub enum DelegationLifecycle {
 }
 
 /// One exact parent/child relationship keyed by its spawning request.
+///
+/// Construction is intentionally sealed inside this module until the
+/// persistence stack can admit a spawn from the complete, locked parent
+/// relationship inventory. Callers cannot substitute a count or partial slice
+/// for that admission proof.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionDelegation {
     spawning_request: ToolRequestId,
@@ -940,16 +946,21 @@ pub struct SessionDelegation {
 }
 
 impl SessionDelegation {
-    pub fn spawn(
+    #[cfg(test)]
+    fn spawn_fixture(
         spawning_request: DelegatedSpawnRequest,
         child: SessionId,
     ) -> Result<Self, DelegationTransitionError> {
         let parent = spawning_request.request().session();
         if parent == child {
+            let request_id = spawning_request.request().id();
             return Err(DelegationTransitionError {
-                spawning_request: spawning_request.request().id(),
+                spawning_request: request_id,
                 failure: DelegationTransitionFailure::SameSession,
-                rejected: None,
+                rejected: Some(Box::new(RejectedDelegationTransition::Spawn {
+                    request: spawning_request,
+                    child,
+                })),
             });
         }
         let provenance = DelegationProvenance::from_spawn(&spawning_request);
@@ -1335,6 +1346,10 @@ pub enum DelegationTransitionFailure {
 /// Unchanged aggregate and exact attempted input from a rejected consuming transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RejectedDelegationTransition {
+    Spawn {
+        request: DelegatedSpawnRequest,
+        child: SessionId,
+    },
     DeliverMessage {
         relation: SessionDelegation,
         request: DelegationMessageRequest,
@@ -1932,7 +1947,7 @@ mod aggregate_tests {
     }
 
     fn relation(parent: u128, child: u128, policy: ChildRelationshipPolicy) -> SessionDelegation {
-        SessionDelegation::spawn(spawn_request(parent, 1, policy), session_id(child))
+        SessionDelegation::spawn_fixture(spawn_request(parent, 1, policy), session_id(child))
             .expect("fixture parent and child are distinct")
     }
 
@@ -1971,6 +1986,16 @@ mod aggregate_tests {
             .expect("cancelled terminal evidence seals its outcome")
     }
 
+    #[track_caller]
+    fn rejected_spawn(error: DelegationTransitionError) -> (DelegatedSpawnRequest, SessionId) {
+        let Some(RejectedDelegationTransition::Spawn { request, child }) = error.into_rejected()
+        else {
+            panic!("spawn rejection retains typed request and child");
+        };
+        (request, child)
+    }
+
+    #[track_caller]
     fn rejected_message(
         error: DelegationTransitionError,
     ) -> (
@@ -1989,6 +2014,7 @@ mod aggregate_tests {
         (relation, request, id)
     }
 
+    #[track_caller]
     fn rejected_outcome(
         error: DelegationTransitionError,
     ) -> (SessionDelegation, DelegationOutcome) {
@@ -2018,7 +2044,8 @@ mod aggregate_tests {
         };
         let request = spawn_request(2, 1, policy);
         let spawning_request = request.request().id();
-        let relation = SessionDelegation::spawn(request, session_id(3)).expect("distinct child");
+        let relation =
+            SessionDelegation::spawn_fixture(request, session_id(3)).expect("distinct child");
 
         assert_eq!(relation.spawning_request(), spawning_request);
         assert_eq!(relation.task(), &content(TEST_TASK));
@@ -2032,6 +2059,20 @@ mod aggregate_tests {
             relation.child_creation_provenance().ancestry(),
             crate::TranscriptAncestry::None
         );
+    }
+
+    /// S18 / INV-010: a session cannot delegate to itself, and rejection is lossless.
+    #[test]
+    fn s18_inv010_same_session_spawn_rejection_returns_exact_inputs() {
+        let request = spawn_request(2, 1, ChildRelationshipPolicy::Background);
+        let child = session_id(2);
+        let error = SessionDelegation::spawn_fixture(request.clone(), child)
+            .expect_err("a child must be distinct from its parent");
+
+        assert_eq!(error.failure(), DelegationTransitionFailure::SameSession);
+        let (returned_request, returned_child) = rejected_spawn(error);
+        assert_eq!(returned_request, request);
+        assert_eq!(returned_child, child);
     }
 
     /// S18 / INV-010: foreground wait retains the exact child subject.
@@ -2175,6 +2216,30 @@ mod aggregate_tests {
         assert_eq!(returned_id, id);
     }
 
+    /// S18 / INV-012: a replay cannot change content under one request authority.
+    #[test]
+    fn s18_inv012_conflicting_message_replay_reports_code_and_returns_inputs() {
+        let relation = relation(2, 3, ChildRelationshipPolicy::Background);
+        let first = message_request(2, 3, relation.child(), "first");
+        let conflicting = message_request(2, 3, relation.child(), "changed");
+        let (relation, _) = relation
+            .deliver_message(first, delegation_message_id(5))
+            .expect("first request authority appends");
+        let error = relation
+            .clone()
+            .deliver_message(conflicting.clone(), delegation_message_id(6))
+            .expect_err("one request authority cannot carry changed content");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::ConflictingMessageReplay
+        );
+        let (returned_relation, returned_request, returned_id) = rejected_message(error);
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_request, conflicting);
+        assert_eq!(returned_id, delegation_message_id(6));
+    }
+
     /// S18 / INV-010: returned child result terminalizes exactly once.
     #[test]
     fn s18_inv010_returned_result_terminalizes_and_replays() {
@@ -2191,6 +2256,62 @@ mod aggregate_tests {
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
         assert_eq!(replayed, relation);
         assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S18 / INV-010: a different authority cannot append after terminalization.
+    #[test]
+    fn s18_inv010_already_terminal_rejection_reports_code_and_returns_inputs() {
+        let relation = relation(2, 1, ChildRelationshipPolicy::Background)
+            .record_outcome(returned_outcome("terminal result"))
+            .expect("returned result terminalizes relation");
+        let outcome = cancelled_outcome(relation.child());
+        let error = relation
+            .clone()
+            .record_outcome(outcome.clone())
+            .expect_err("another terminal authority cannot append");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::AlreadyTerminal
+        );
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, outcome);
+    }
+
+    /// S18 / INV-012: one authority cannot replay with a different outcome.
+    #[test]
+    fn s18_inv012_duplicate_outcome_authority_reports_code_and_returns_inputs() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let relation = relation(2, 3, policy);
+        let authority = parent_authority(
+            2,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let first = DelegationOutcome::from_parent_policy(authority, BoundChildAction::Stop)
+            .expect("descendant authority admits the chosen stop policy");
+        let conflicting =
+            DelegationOutcome::from_parent_policy(authority, BoundChildAction::Cancel)
+                .expect("the same authority can express the conflicting attempted action");
+        let relation = relation
+            .record_outcome(first)
+            .expect("chosen stop policy terminalizes relation");
+        let error = relation
+            .clone()
+            .record_outcome(conflicting.clone())
+            .expect_err("one authority cannot select two outcomes");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::DuplicateOutcomeAuthority
+        );
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, conflicting);
     }
 
     /// S18 / INV-010: another child's sealed result returns unchanged.

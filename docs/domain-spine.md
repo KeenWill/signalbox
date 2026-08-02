@@ -955,10 +955,6 @@ impl DelegationEvent {
 pub enum DelegationLifecycle { Active, Terminal }
 pub struct SessionDelegation { /* private */ }
 impl SessionDelegation {
-    pub fn spawn(
-        spawning_request: DelegatedSpawnRequest,
-        child: SessionId,
-    ) -> Result<Self, DelegationTransitionError>;
     pub fn register_wait(
         &self,
         awaiting_request: &DelegationAwaitRequest,
@@ -987,6 +983,10 @@ pub enum DelegationTransitionFailure {
     EventOrdinalExhausted,
 }
 pub enum RejectedDelegationTransition {
+    Spawn {
+        request: DelegatedSpawnRequest,
+        child: SessionId,
+    },
     DeliverMessage {
         relation: SessionDelegation,
         request: DelegationMessageRequest,
