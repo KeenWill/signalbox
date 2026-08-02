@@ -672,16 +672,18 @@ impl HubModelConfiguration {
         let rates = self.billing_rates.get(&target)?;
         let billing_kind = *self.billing_kinds.get(credential_profile)?;
         let input_tokens = match input.semantics? {
-            ProcessModelCallInputTokenSemantics::CacheInclusive => match input.tokens {
-                Some(total) => Some(
-                    total.checked_sub(
-                        cache_creation_input_tokens
-                            .unwrap_or_default()
-                            .checked_add(cache_read_input_tokens.unwrap_or_default())?,
-                    )?,
-                ),
-                None => None,
-            },
+            ProcessModelCallInputTokenSemantics::CacheInclusive => {
+                match (
+                    input.tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                ) {
+                    (Some(total), Some(cache_creation), Some(cache_read)) => {
+                        Some(total.checked_sub(cache_creation.checked_add(cache_read)?)?)
+                    }
+                    _ => None,
+                }
+            }
             ProcessModelCallInputTokenSemantics::CacheExclusive => input.tokens,
         };
         let amount_usd = fold_reported_cost([
@@ -1752,8 +1754,8 @@ context_window_tokens = 200000
                     ProcessModelCallInputTokenSemantics::CacheInclusive,
                 ),
                 None,
-                None,
-                None,
+                Some(0),
+                Some(0),
             )
             .expect("the API-metered Codex fixture has rates");
 
@@ -1791,6 +1793,47 @@ context_window_tokens = 200000
             .expect("the consistent Codex breakdown derives a cost");
 
         assert_eq!(cost.amount_usd().to_string(), "1.8");
+    }
+
+    #[test]
+    fn codex_unreported_cache_axis_suppresses_only_ordinary_input_cost() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = HubModelConfiguration::parse(
+            &configuration_with_api_metered_codex_model(&executable, temporary.path()),
+        )
+        .expect("the API-metered Codex fixture is valid");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000002").expect("fixture UUID is valid"),
+        );
+        let route = configuration
+            .resolve_direct_model(selection)
+            .expect("the Codex fixture has a route");
+        let partial_breakdown = configuration
+            .derive_model_call_cost(
+                route.target(),
+                route.credential_profile(),
+                ModelCallInputUsage::new(
+                    Some(1_000_000),
+                    ProcessModelCallInputTokenSemantics::CacheInclusive,
+                ),
+                None,
+                Some(100_000),
+                None,
+            )
+            .expect("the independently reported cache axis derives a cost");
+        let cache_axis_only = configuration
+            .derive_model_call_cost(
+                route.target(),
+                route.credential_profile(),
+                ModelCallInputUsage::new(None, ProcessModelCallInputTokenSemantics::CacheInclusive),
+                None,
+                Some(100_000),
+                None,
+            )
+            .expect("the independently reported cache axis derives the reference cost");
+
+        assert_eq!(partial_breakdown, cache_axis_only);
     }
 
     #[test]

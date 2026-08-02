@@ -1310,7 +1310,7 @@ impl<'a> Output<'a> {
                 let (turn, mut total) = current_turn.take().ok_or(ClientError::Protocol(
                     "token usage turn grouping was invalid",
                 ))?;
-                Self::usage_lines(&mut rendered_usage, Some(turn), &mut total)?;
+                self.usage_lines(&mut rendered_usage, Some(turn), &mut total)?;
             }
             if current_turn.is_none() {
                 current_turn = Some((evidence.turn_id, UsageAggregate::new()?));
@@ -1322,15 +1322,16 @@ impl<'a> Output<'a> {
             session_total.add(&evidence)?;
         }
         if let Some((turn, mut total)) = current_turn {
-            Self::usage_lines(&mut rendered_usage, Some(turn), &mut total)?;
+            self.usage_lines(&mut rendered_usage, Some(turn), &mut total)?;
         }
-        Self::usage_lines(&mut rendered_usage, None, &mut session_total)?;
+        self.usage_lines(&mut rendered_usage, None, &mut session_total)?;
         rendered_usage.seek(SeekFrom::Start(0))?;
         io::copy(&mut rendered_usage, &mut self.stdout)?;
         Ok(())
     }
 
     fn usage_lines<OutputWriter: Write>(
+        &self,
         stdout: &mut OutputWriter,
         turn: Option<CanonicalUuid>,
         total: &mut UsageAggregate,
@@ -1345,7 +1346,7 @@ impl<'a> Output<'a> {
                 || String::from("cost_total scope=session"),
                 |turn| format!("cost turn={turn}"),
             );
-            let rate_version = control_safe(&key.rate_version, TextField::DelimitedOnLine);
+            let rate_version = self.render_field(&key.rate_version, TextField::DelimitedOnLine);
             writeln!(
                 stdout,
                 "{prefix} usage_provenance={} label={} rate_version={} usd={} costed_calls={}",
@@ -3493,6 +3494,43 @@ mod tests {
             cost_total scope=session usage_provenance=estimated label=metered_equivalent rate_version=rates-v1 usd=0.4 costed_calls=1
         "#]]
         .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn raw_transcript_cost_rate_version_is_unchanged() {
+        let rate_version = String::from("rates v1");
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [ServerMessage::TranscriptModelCallUsage {
+                model_call_index: CanonicalU64::new(0),
+                turn_id: wire_uuid(1),
+                model_call_id: wire_uuid(11),
+                usage_provenance: UsageProvenance::Reported,
+                usage: ModelCallTokenUsage {
+                    input_tokens: Some(CanonicalU64::new(0)),
+                    output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                },
+                cost: Some(ModelCallDollarCost {
+                    amount_usd: CanonicalDollarAmount::try_new(String::from("0.1"))
+                        .expect("fixture dollar amount is canonical"),
+                    rate_version: BillingRateVersion::try_new(rate_version.clone())
+                        .expect("fixture rate version is valid"),
+                    label: ModelCallCostLabel::Real,
+                }),
+            }],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, true)
+            .snapshot(&mut snapshot)
+            .expect("raw cost snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains(&format!("rate_version={rate_version} ")));
         assert!(stderr.is_empty());
     }
 
