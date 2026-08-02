@@ -89,14 +89,20 @@ pub(super) fn removed_default_port_fragment(value: &str, default_port: u16) -> O
     }
     let default_port_text = default_port.to_string();
     let complete_port = port_fragment.parse::<u16>().ok()? == default_port;
+    let leading_port_digits = !authority_context.is_empty()
+        && port_fragment.len() < default_port_text.len()
+        && default_port_text.starts_with(port_fragment);
     let trailing_port_digits = authority_context.is_empty()
         && port_fragment.len() < default_port_text.len()
         && default_port_text.ends_with(port_fragment);
-    if !complete_port && !trailing_port_digits {
+    if !complete_port && !leading_port_digits && !trailing_port_digits {
         return None;
     }
     path_suffix.map_or_else(
-        || (complete_port && !authority_context.is_empty()).then(|| authority_context.to_owned()),
+        || {
+            ((complete_port || leading_port_digits) && !authority_context.is_empty())
+                .then(|| authority_context.to_owned())
+        },
         |path| {
             Some(if complete_port {
                 format!("{authority_context}/{path}")
@@ -105,6 +111,22 @@ pub(super) fn removed_default_port_fragment(value: &str, default_port: u16) -> O
             })
         },
     )
+}
+
+pub(super) fn inserted_special_scheme_authority_slash_fragment(value: &str) -> Option<String> {
+    let (scheme, suffix) = value.split_once(":/")?;
+    if suffix.starts_with('/')
+        || !scheme
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        || !scheme
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    {
+        return None;
+    }
+    Some(format!("{scheme}://{suffix}"))
 }
 
 pub(super) fn removed_empty_port_delimiter_fragment(value: &str) -> Option<String> {
@@ -158,8 +180,15 @@ fn has_explicit_authority_port(value: &str) -> bool {
 }
 
 pub(super) fn canonicalized_complete_url(value: &str) -> Option<String> {
-    let url = Url::parse(value).ok()?;
-    matches!(url.scheme(), "http" | "https").then(|| String::from(url.as_str()))
+    let mut url = Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    url.set_username("").ok()?;
+    url.set_password(None).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
 }
 
 pub(super) fn parse_ip_literal(value: &str) -> Option<std::net::IpAddr> {
@@ -209,6 +238,30 @@ pub(super) fn canonicalized_ipv4_component_fragments(value: &str) -> impl Iterat
             .into_iter()
             .flatten(),
         );
+    }
+    let components = value.split('.').collect::<Vec<_>>();
+    if (2..=4).contains(&components.len())
+        && components.iter().all(|component| !component.is_empty())
+    {
+        let retained_components = components.len();
+        let trailing_components = 4 - retained_components;
+        let suffix = ".0".repeat(trailing_components);
+        fragments.extend(canonicalized_ipv4_fragment(
+            &format!("{value}{suffix}"),
+            0..retained_components,
+        ));
+        let first = components[0];
+        if first.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            let radix_context = format!("0x{first}");
+            let candidate = std::iter::once(radix_context.as_str())
+                .chain(components[1..].iter().copied())
+                .collect::<Vec<_>>()
+                .join(".");
+            fragments.extend(canonicalized_ipv4_fragment(
+                &format!("{candidate}{suffix}"),
+                0..retained_components,
+            ));
+        }
     }
     fragments.into_iter()
 }
@@ -474,7 +527,7 @@ pub(super) fn canonicalized_ipv6_separator_bound_hextet_text_fragments(value: &s
         while run_end < hextets.len() && hextets[run_end] == "0" {
             run_end += 1;
         }
-        if (run_start > 0 || leading_separator) && (run_end < hextets.len() || trailing_separator) {
+        if run_start > 0 || leading_separator || run_end < hextets.len() || trailing_separator {
             let prefix = hextets[..run_start].join(":");
             let suffix = hextets[run_end..].join(":");
             let compressed = format!(

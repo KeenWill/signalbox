@@ -11,6 +11,8 @@ pub(super) const FIXTURE_RESULT_URL: &str = "https://example.com/result";
 
 pub(super) const FIXTURE_IPV6_RESULT_URL: &str = "https://[2001:db8::1]/result";
 
+pub(super) const FIXTURE_COMPRESSED_LOOPBACK_IPV6_RESULT_URL: &str = "https://[::1]/";
+
 pub(super) const FIXTURE_MULTI_HEXTET_IPV6_RESULT_URL: &str = "https://[2001:db8:0:1::]/";
 
 pub(super) const FIXTURE_IPV4_TAIL_IPV6_RESULT_URL: &str = "http://[::ffff:c0a8:1]/";
@@ -25,6 +27,8 @@ pub(super) const FIXTURE_SEPARATOR_SPANNING_HEX_IPV4_RESULT_URL: &str = "http://
 
 pub(super) const FIXTURE_PADDED_SEPARATOR_SPANNING_HEX_IPV4_RESULT_URL: &str =
     "http://1.0x007f.0.1/";
+
+pub(super) const FIXTURE_PADDED_MULTI_COMPONENT_HEX_IPV4_RESULT_URL: &str = "http://0x007f.00.0.1/";
 
 pub(super) const FIXTURE_TRAILING_DOT_IPV4_RESULT_URL: &str = "http://127.0.0.1./";
 
@@ -91,6 +95,8 @@ pub(super) const FIXTURE_IDNA_REMOVED_CODE_POINT_RESULT_URL: &str =
 pub(super) const FIXTURE_IDNA_COMPATIBILITY_RESULT_URL: &str = "https://x-a¼b-y.example/result";
 
 pub(super) const FIXTURE_C0_PREPROCESSED_RESULT_URL: &str = "https://example.com/abc";
+
+pub(super) const FIXTURE_INSERTED_AUTHORITY_SLASH_RESULT_URL: &str = "https:/example.com";
 
 pub(super) const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
 
@@ -196,6 +202,8 @@ pub(super) const URL_IPV4_SEPARATOR_SPANNING_COLLISION_KEY: &str = ".0x7";
 
 pub(super) const URL_IPV4_PADDED_SEPARATOR_SPANNING_COLLISION_KEY: &str = ".0x007";
 
+pub(super) const URL_IPV4_PADDED_MULTI_COMPONENT_COLLISION_KEY: &str = "007f.00";
+
 pub(super) const URL_IPV4_TRAILING_DOT_COLLISION_KEY: &str = ".1.";
 
 pub(super) const URL_DISCARDED_PORT_ZERO_COLLISION_KEY: &str = ":0";
@@ -214,9 +222,15 @@ pub(super) const URL_BARE_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "80/p"
 
 pub(super) const URL_REMOVED_DEFAULT_PORT_COLLISION_KEY: &str = "m:80";
 
+pub(super) const URL_AUTHORITY_DEFAULT_PORT_PREFIX_COLLISION_KEY: &str = "m:8";
+
+pub(super) const URL_AUTHORITY_DEFAULT_PORT_COLLISION_KEY: &str = "example.com:443";
+
 pub(super) const URL_DEFAULT_PORT_DIGIT_SUFFIX_COLLISION_KEY: &str = "0/p";
 
 pub(super) const URL_COMPOSED_PORT_PATH_COLLISION_KEY: &str = "0400/a/../p";
+
+pub(super) const URL_COMPLETE_EMPTY_QUERY_COLLISION_KEY: &str = "https://example.com/?";
 
 pub(super) fn maximum_zero_prefixed_port_path_collision_key() -> String {
     let leading_zeroes = "0".repeat(MAX_CREDENTIAL_BYTES - "1/p".len());
@@ -254,6 +268,8 @@ pub(super) const URL_IPV6_COMPRESSED_ZERO_RUN_COLLISION_KEY: &str = ":0000:0000:
 
 pub(super) const URL_IPV6_COMPRESSED_ZERO_RUN_SUFFIX_COLLISION_KEY: &str = ":0000:0000:2:";
 
+pub(super) const URL_IPV6_ZERO_RUN_BOUNDARY_COLLISION_KEY: &str = "0:";
+
 pub(super) const URL_EMBEDDED_IPV6_HEXTET_COLLISION_KEY: &str = "0db";
 
 pub(super) const URL_IPV6_MULTI_HEXTET_COLLISION_KEY: &str = "0db8:0000";
@@ -279,6 +295,8 @@ pub(super) const URL_INTERNAL_TAB_COLLISION_KEY: &str = "ab\tcd";
 pub(super) const URL_C0_PREPROCESSED_COLLISION_KEY: &str = "%00abc";
 
 pub(super) const URL_BACKSLASH_COLLISION_KEY: &str = "abc\\def";
+
+pub(super) const URL_INSERTED_AUTHORITY_SLASH_COLLISION_KEY: &str = "s:/e";
 
 pub(super) const URL_DECODED_BACKSLASH_COLLISION_KEY: &str = "abc%5Cdef";
 
@@ -385,6 +403,8 @@ pub(super) const KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY: &str = "KnownFailed
 pub(super) const SUCCESS_RESULT_DEBUG_COLLISION_KEY: &str = "Ok";
 
 pub(super) const SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(C";
+
+pub(super) const ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Err(E";
 
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 
