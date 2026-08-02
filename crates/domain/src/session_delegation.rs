@@ -251,11 +251,11 @@ impl DelegatedSpawnRequest {
         task: String,
         policy: ChildRelationshipPolicy,
     ) -> Result<Self, DelegationRequestError> {
+        let value = parse_arguments(&request, SPAWN_SESSION_TOOL_NAME)?;
         let task = DelegationContent::try_new(task).map_err(|failure| DelegationRequestError {
             request: Box::new(request.clone()),
             failure: DelegationRequestFailure::InvalidContent(failure),
         })?;
-        let value = parse_arguments(&request, SPAWN_SESSION_TOOL_NAME)?;
         if value
             != serde_json::json!({
                 "relationship": relationship_argument(policy),
@@ -341,12 +341,12 @@ impl DelegationMessageRequest {
         peer: SessionId,
         content: String,
     ) -> Result<Self, DelegationRequestError> {
+        let value = parse_arguments(&request, SEND_SESSION_MESSAGE_TOOL_NAME)?;
         let content =
             DelegationContent::try_new(content).map_err(|failure| DelegationRequestError {
                 request: Box::new(request.clone()),
                 failure: DelegationRequestFailure::InvalidContent(failure),
             })?;
-        let value = parse_arguments(&request, SEND_SESSION_MESSAGE_TOOL_NAME)?;
         if value
             != serde_json::json!({
                 "content": content.as_str(),
@@ -1071,6 +1071,50 @@ mod tests {
             source.failure(),
             DelegationContentFailure::Invalid(crate::NonEmptyUnicodeTextFailure::Empty)
         );
+    }
+
+    #[test]
+    fn spawn_request_checks_tool_purpose_before_task_content() {
+        let raw = named_request(
+            1,
+            AWAIT_SESSION_TOOL_NAME,
+            serde_json::json!({
+                "child_session_id": session_id(2).as_uuid().to_string(),
+                "mode": "foreground",
+            }),
+        );
+        let error = DelegatedSpawnRequest::parse(
+            raw.clone(),
+            String::new(),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect_err("the wrong operation is rejected before invalid task content");
+
+        assert_eq!(
+            error.failure(),
+            &DelegationRequestFailure::InvalidToolRequestPurpose
+        );
+        assert_eq!(error.into_request(), raw);
+    }
+
+    #[test]
+    fn message_request_checks_tool_purpose_before_message_content() {
+        let raw = named_request(
+            1,
+            AWAIT_SESSION_TOOL_NAME,
+            serde_json::json!({
+                "child_session_id": session_id(2).as_uuid().to_string(),
+                "mode": "foreground",
+            }),
+        );
+        let error = DelegationMessageRequest::parse(raw.clone(), session_id(2), String::new())
+            .expect_err("the wrong operation is rejected before invalid message content");
+
+        assert_eq!(
+            error.failure(),
+            &DelegationRequestFailure::InvalidToolRequestPurpose
+        );
+        assert_eq!(error.into_request(), raw);
     }
 
     #[test]
