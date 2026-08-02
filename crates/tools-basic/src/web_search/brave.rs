@@ -1,11 +1,31 @@
 use super::{egress::*, result::*, transport_failure::*};
+use serde::Deserialize;
 
 #[derive(serde::Deserialize)]
 pub(super) struct BraveResponse {
     #[serde(rename = "type")]
     pub(super) response_type: String,
     pub(super) query: BraveQueryFacts,
-    pub(super) web: Option<BraveWebResults>,
+    #[serde(default, deserialize_with = "deserialize_brave_web_member")]
+    pub(super) web: BraveWebMember,
+}
+
+#[derive(Default)]
+pub(super) enum BraveWebMember {
+    #[default]
+    Missing,
+    Null,
+    Results(BraveWebResults),
+}
+
+fn deserialize_brave_web_member<'de, D>(deserializer: D) -> Result<BraveWebMember, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<BraveWebResults>::deserialize(deserializer).map(|web| match web {
+        Some(results) => BraveWebMember::Results(results),
+        None => BraveWebMember::Null,
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -48,7 +68,11 @@ pub(super) fn decode_brave_response(
     } else {
         WebSearchPageCompleteness::Complete
     };
-    let raw_results = response.web.map_or_else(Vec::new, |web| web.results);
+    let raw_results = match response.web {
+        BraveWebMember::Missing => return Err(WebSearchTransportFailure::InvalidResponse),
+        BraveWebMember::Null => Vec::new(),
+        BraveWebMember::Results(web) => web.results,
+    };
     if raw_results.len() > MAX_PROVIDER_RESULTS {
         return Err(WebSearchTransportFailure::InvalidResponse);
     }
