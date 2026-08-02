@@ -1647,15 +1647,54 @@ mod tests {
         failure
     }
 
-    /// S18 / INV-003: delegated current sessions reject independently stored ancestry.
+    /// S18 / INV-003: delegated construction fixes exact cause and no ancestry.
     #[test]
-    fn s18_inv003_current_session_rejects_delegated_ancestry() {
+    fn s18_inv003_delegated_helper_constructs_no_ancestry() {
+        let spawning_request = crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(2));
+        let provenance = SessionCreationProvenance::delegated(spawning_request);
+
+        assert_eq!(
+            provenance.cause(),
+            SessionCreationCause::Delegated { spawning_request }
+        );
+        assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
+    }
+
+    /// S18 / INV-003: delegated current sessions reject native ancestry.
+    #[test]
+    fn s18_inv003_current_session_rejects_delegated_native_ancestry() {
         let spawning_request = crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(2));
         let provenance = SessionCreationProvenance::new(
             SessionCreationCause::Delegated { spawning_request },
             TranscriptAncestry::SingleSource {
                 source_session: session_id(3),
                 source_frontier: test_frontier(4),
+            },
+        );
+        let failure = current_session_reconstitution_failure(CurrentSessionFacts {
+            provenance,
+            ..CurrentSessionFacts::matching(session_id(1))
+        });
+
+        assert_eq!(
+            failure,
+            SessionReconstitutionFailure::DelegatedAncestryMismatch
+        );
+    }
+
+    /// S18 / INV-003: delegated current sessions reject imported ancestry.
+    #[test]
+    fn s18_inv003_current_session_rejects_delegated_imported_ancestry() {
+        let spawning_request = crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(2));
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated { spawning_request },
+            TranscriptAncestry::ImportedConversation {
+                source_frontier: test_imported_frontier(
+                    imported_conversation_id(3),
+                    imported_transcript_entry_id(4),
+                    ImportedTranscriptPosition::first(),
+                ),
+                relationship: ImportedSessionRelationship::Fork,
             },
         );
         let failure = current_session_reconstitution_failure(CurrentSessionFacts {

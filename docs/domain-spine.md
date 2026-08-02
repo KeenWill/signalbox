@@ -835,22 +835,27 @@ impl DelegationContent {
     pub fn as_str(&self) -> &str;
     pub fn from_assistant_text(parts: &[AssistantText]) -> Result<Self, DelegationContentError>;
 }
-pub enum DelegationContentError {
+pub enum DelegationContentFailure {
     Invalid(NonEmptyUnicodeTextFailure),
     Oversized { utf8_byte_length: usize },
+}
+pub struct DelegationContentError { /* private rejected String + failure */ }
+impl DelegationContentError {
+    pub fn into_parts(self) -> (String, DelegationContentFailure);
+    // accessors: value(), failure()
 }
 pub enum DelegationRequestFailure {
     InvalidToolRequestPurpose,
     InvalidContent(DelegationContentError),
 }
-pub struct DelegationRequestError { /* private unchanged ToolRequest + failure */ }
+pub struct DelegationRequestError { /* private unchanged ToolRequest + failure; Error::source forwards invalid content */ }
 impl DelegationRequestError {
     pub fn into_request(self) -> ToolRequest;
     // accessors: request(), failure()
 }
 pub struct DelegatedSpawnRequest { /* private canonical request + task + policy */ }
 impl DelegatedSpawnRequest {
-    pub fn parse(request: ToolRequest, policy: ChildRelationshipPolicy)
+    pub fn parse(request: ToolRequest, task: String, policy: ChildRelationshipPolicy)
         -> Result<Self, DelegationRequestError>;
     // accessors: request(), task(), policy()
 }
@@ -862,19 +867,31 @@ impl DelegationAwaitRequest {
 }
 pub struct DelegationMessageRequest { /* private canonical request + peer + content */ }
 impl DelegationMessageRequest {
-    pub fn parse(request: ToolRequest, peer: SessionId, content: DelegationContent)
+    pub fn parse(request: ToolRequest, peer: SessionId, content: String)
         -> Result<Self, DelegationRequestError>;
     // accessors: request(), peer(), content()
 }
 
 pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
+pub enum TerminalChildTurnDisposition { Completed, Failed, Refused, Cancelled, ReconciliationRequired }
+pub struct TerminalChildTurnReconstitutionInput { /* private delegation-origin terminal disposition and exact semantic projection */ }
+impl TerminalChildTurnReconstitutionInput {
+    pub fn new(
+        session: SessionId,
+        turn: TurnId,
+        disposition: TerminalChildTurnDisposition,
+        terminal_call: Option<ModelCallId>,
+        terminal_projection: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+}
 impl TerminalChildTurn {
+    pub fn from_completed(value: &CompletedModelCallTurn) -> Option<Self>;
+    pub fn reconstitute(input: TerminalChildTurnReconstitutionInput) -> Option<Self>;
     pub fn from_scheduling(
         value: &AcceptedInputTurnSchedulingProjection,
         reason: DelegationOutcomeReason,
-        assistant_text: &[AssistantText],
     ) -> Option<Self>;
-    // accessors: session(), turn()
+    // accessors: session(), turn(), reason()
 }
 
 pub struct DelegationProvenance { /* private typed authority */ }
@@ -895,16 +912,27 @@ impl DelegationMessage {
 pub enum DelegationOutcomeReason {
     ChildCompleted,
     ChildExecutionFailed,
+    ChildResultUnavailable,
     ChildCancelled,
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
 }
-pub enum DelegationOutcome {
-    ResultReturned { content: DelegationContent, reason: DelegationOutcomeReason, provenance: DelegationProvenance },
-    ChildFailed { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
-    ChildStopped { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
-    ChildCancelled { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
-    ContinueRunning { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+pub enum DelegationOutcomeKind {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    ContinueRunning,
+}
+pub struct DelegationOutcome { /* private validated kind + content + reason + provenance */ }
+impl DelegationOutcome {
+    pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
+        -> Option<Self>;
+    pub const fn from_parent_policy(
+        authority: ParentTerminationAuthority,
+        action: BoundChildAction,
+    ) -> Self;
+    // accessors: kind(), content(), reason(), provenance()
 }
 pub struct ChildWait { /* private awaiting request + spawning request + child */ }
 impl ChildWait {
@@ -8010,7 +8038,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
-| domain: session_delegation                         | 21                   |
+| domain: session_delegation                         | 25                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8038,7 +8066,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **621 (+7 free fn)** |
+| **signalbox-domain total**                         | **625 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

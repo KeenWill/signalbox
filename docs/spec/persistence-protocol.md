@@ -930,10 +930,10 @@ append-only, uniquely orders messages per relationship, and requires exact
 parent/child sender and recipient plus the sending tool request.
 `session_child_result` has at most one row per spawning request and carries
 exactly one returned-text, failed, stopped, or cancelled shape with child turn
-provenance for returned, failed, and child-originated terminal outcomes, or
-exact parent session/turn/command provenance for a policy-driven stop or
-cancellation. Delivery satellites bind messages/results to their exact semantic
-entries; no transcript query supplies result content.
+provenance for returned, failed, result-unavailable, and child-originated
+terminal outcomes, or exact parent session/turn/command provenance for a
+policy-driven stop or cancellation. Delivery satellites bind messages/results to
+their exact semantic entries; no transcript query supplies result content.
 
 Parent-and-descendants termination locks relationship rows in stable spawning
 request order before it writes any disposition. The command and every evaluated

@@ -932,7 +932,11 @@ A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned
 `DelegationContent` or a typed failed, stopped, or cancelled outcome together
 with exact provenance. Returned content, failure, and a child's own cancellation
-carry the exact terminal child turn. Reconciliation-required work is not
+carry the exact terminal child turn. Returned content is derived only from the
+proof-bearing completed call or its exact stored terminal semantic projection;
+independently supplied text, accepted input, and user content cannot authorize a
+result. A completed turn with empty or oversized returned text records the
+distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
 terminal delegation evidence and produces no outcome. A parent-policy stop or
 cancellation instead carries opaque authority from the exact applied parent
 termination result, exposing its parent session, turn, durable user command,

@@ -214,11 +214,12 @@ pub use session::{
 };
 pub use session_delegation::{
     BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,
-    DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationMessage,
-    DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome,
-    DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
+    DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationContentFailure,
+    DelegationMessage, DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome,
+    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
     DelegationRequestFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
     ParentTerminationAuthority, ParentTerminationKind, TerminalChildTurn,
+    TerminalChildTurnDisposition, TerminalChildTurnReconstitutionInput,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
