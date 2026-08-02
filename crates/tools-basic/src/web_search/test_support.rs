@@ -44,6 +44,12 @@ pub(super) const FIXTURE_PORT_PATH_ZERO_RESULT_URL: &str = "https://example.com:
 
 pub(super) const FIXTURE_DEFAULT_PORT_PATH_RESULT_URL: &str = "http://example.com:80/path";
 
+pub(super) const FIXTURE_EMPTY_QUERY_RESULT_URL: &str = "https://example.com/xyzabc?";
+
+pub(super) const FIXTURE_EMPTY_FRAGMENT_RESULT_URL: &str = "https://example.com/xyzabc#";
+
+pub(super) const FIXTURE_USER_INFORMATION_BOUNDARY_RESULT_URL: &str = "http://usernam@example.com/";
+
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
 
 pub(super) const FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL: &str = "https://[0db8::1]/";
@@ -52,6 +58,8 @@ pub(super) const FIXTURE_SEPARATOR_SPANNING_IPV6_HEXTET_RESULT_URL: &str = "http
 
 pub(super) const FIXTURE_COMPRESSED_ZERO_HEXTET_RESULT_URL: &str =
     "https://[1:0000:0000:2:3:4:5:6]/";
+
+pub(super) const FIXTURE_DOTTED_IPV4_TAIL_IPV6_RESULT_URL: &str = "http://[::ffff:192.168.0.1]/";
 
 pub(super) const FIXTURE_TAB_NORMALIZED_RESULT_URL: &str = "http://example.com/abcd";
 
@@ -182,6 +190,14 @@ pub(super) const URL_PORT_PATH_ZERO_COLLISION_KEY: &str = "00/p";
 
 pub(super) const URL_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "m:80/p";
 
+pub(super) const URL_BARE_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "80/p";
+
+pub(super) const URL_EMPTY_QUERY_DELIMITER_COLLISION_KEY: &str = "xyzabc?";
+
+pub(super) const URL_EMPTY_FRAGMENT_DELIMITER_COLLISION_KEY: &str = "xyzabc#";
+
+pub(super) const URL_USER_INFORMATION_BOUNDARY_COLLISION_KEY: &str = "m@example";
+
 pub(super) const URL_AUTHORITY_WITH_PORT_NON_COLLISION_KEY: &str = "com:1";
 
 pub(super) const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
@@ -191,6 +207,8 @@ pub(super) const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
 pub(super) const URL_IPV6_SEPARATOR_SPANNING_COLLISION_KEY: &str = ":0db";
 
 pub(super) const URL_IPV6_COMPRESSED_ZERO_SEPARATOR_COLLISION_KEY: &str = ":0000:";
+
+pub(super) const URL_IPV6_COMPRESSED_ZERO_RUN_COLLISION_KEY: &str = ":0000:0000:";
 
 pub(super) const URL_EMBEDDED_IPV6_HEXTET_COLLISION_KEY: &str = "0db";
 
@@ -205,6 +223,8 @@ pub(super) const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
 pub(super) const URL_IPV4_TAIL_DIGIT_SUBSTRING_COLLISION_KEY: &str = "68";
 
 pub(super) const URL_IPV4_TAIL_SEPARATOR_SUBSTRING_COLLISION_KEY: &str = ".168";
+
+pub(super) const URL_IPV4_TAIL_CROSS_COMPONENT_COLLISION_KEY: &str = "8.0";
 
 pub(super) const URL_MIXED_COMPRESSED_IPV6_TAIL_COLLISION_KEY: &str = "::ffff:192.168";
 
@@ -305,6 +325,12 @@ pub(super) const UNICODE_COMBINING_MARK_COLLISION_VALUE: &str = "éx";
 pub(super) const PROVIDER_REJECTION_STATUS: u16 = 429;
 
 pub(super) const PROVIDER_ERROR_DEBUG_COLLISION_KEY: &str = "WebSearchProviderError";
+
+pub(super) const PROVIDER_VARIANT_DEBUG_COLLISION_KEY: &str = "Brave";
+
+pub(super) const EGRESS_POLICY_DEBUG_COLLISION_KEY: &str = "WebSearchEgressPolicy";
+
+pub(super) const CONFIGURATION_DEBUG_COLLISION_KEY: &str = "WebSearchConfiguration";
 
 pub(super) const PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY: &str = "[provider-controlled]";
 

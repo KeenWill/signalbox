@@ -30,7 +30,17 @@ pub(super) const RESULT_QUERY_PARAMETER_ALLOWLIST: &[&str] = &[];
 pub(super) struct ResultTitle(String);
 
 #[derive(Clone, Eq, PartialEq)]
-pub(super) struct ParsedResultUrl(String);
+pub(super) struct ParsedResultUrl {
+    rendered: String,
+    removal_facts: ParsedResultUrlRemovalFacts,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) struct ParsedResultUrlRemovalFacts {
+    pub(super) user_information: bool,
+    pub(super) query: bool,
+    pub(super) fragment: bool,
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct EscapedSnippet(String);
@@ -130,6 +140,11 @@ impl ParsedResultUrl {
             return None;
         }
 
+        let removal_facts = ParsedResultUrlRemovalFacts {
+            user_information: !parsed.username().is_empty() || parsed.password().is_some(),
+            query: parsed.query().is_some(),
+            fragment: parsed.fragment().is_some(),
+        };
         parsed.set_username("").ok()?;
         parsed.set_password(None).ok()?;
         parsed.set_fragment(None);
@@ -144,11 +159,18 @@ impl ParsedResultUrl {
         }
 
         let rendered = parsed.to_string();
-        (rendered.len() <= MAX_RESULT_URL_BYTES).then_some(Self(rendered))
+        (rendered.len() <= MAX_RESULT_URL_BYTES).then_some(Self {
+            rendered,
+            removal_facts,
+        })
     }
 
     pub(super) fn as_str(&self) -> &str {
-        &self.0
+        &self.rendered
+    }
+
+    pub(super) const fn removal_facts(&self) -> ParsedResultUrlRemovalFacts {
+        self.removal_facts
     }
 }
 
@@ -282,7 +304,14 @@ pub(super) fn fixed_result_diagnostic_outputs() -> [String; 6] {
     };
     let result = WebSearchResult {
         title: ResultTitle(String::new()),
-        url: ParsedResultUrl(String::new()),
+        url: ParsedResultUrl {
+            rendered: String::new(),
+            removal_facts: ParsedResultUrlRemovalFacts {
+                user_information: false,
+                query: false,
+                fragment: false,
+            },
+        },
         snippet: EscapedSnippet(String::new()),
     };
     let complete_response = WebSearchResponse {
