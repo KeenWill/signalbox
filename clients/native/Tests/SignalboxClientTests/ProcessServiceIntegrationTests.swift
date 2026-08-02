@@ -5375,6 +5375,7 @@ private enum ProcessProjectionFixture {
   static let planWriteOutput = #"{"event":{"ordinal":4,"kind":"depends_on","entry_id":1,"dependency_id":2,\#(planProvenance)}}"#
   static let malformedPlanArguments = #"{"kind":"set_status","entry_id":0,"status":"completed"}"#
   static let malformedPlanReadArguments = #"{"after_entry_id":0,"unexpected":true}"#
+  static let nullPlanReadHistoryArguments = #"{"include_history":null}"#
   static let duplicatePlanReadArguments =
     #"{"include_history":false,"include_history":true}"#
   static let duplicatePlanWriteArguments =
@@ -7182,6 +7183,16 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func nullPlanReadHistoryArgumentToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: malformedPlanReadRequestID,
+      toolName: "plan_read",
+      arguments: nullPlanReadHistoryArguments,
+      output: nil,
+      status: .proposed
+    )
+  }
+
   static func duplicatePlanWriteArgumentToolRecord() -> SignalboxStoredEvent {
     planToolRecord(
       requestID: malformedPlanRequestID,
@@ -8484,6 +8495,17 @@ extension ProcessServiceIntegrationTests {
     XCTAssertEqual(
       tool.compactArgumentSummary,
       ProcessProjectionFixture.duplicatePlanReadArguments
+    )
+  }
+
+  func testNullPlanReadHistoryFlagKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.nullPlanReadHistoryArgumentToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.nullPlanReadHistoryArguments
     )
   }
 

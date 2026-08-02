@@ -403,7 +403,11 @@ public enum SignalboxEventNormalizer {
             )
             let container = try decoder.container(keyedBy: CodingKeys.self)
             afterEntryID = try container.decodeIfPresent(UInt64.self, forKey: .afterEntryID)
-            includeHistory = try container.decodeIfPresent(Bool.self, forKey: .includeHistory)
+            if container.contains(.includeHistory) {
+                includeHistory = try container.decode(Bool.self, forKey: .includeHistory)
+            } else {
+                includeHistory = nil
+            }
             guard afterEntryID.map({ $0 > 0 }) ?? true else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .afterEntryID,
