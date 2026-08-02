@@ -7,7 +7,7 @@ use std::{
 };
 
 use git2::{ObjectFormat, ObjectType};
-use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat, symlinkat};
+use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, mkdirat, openat, statat, symlinkat};
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::failure::LocalGitFailure;
@@ -24,6 +24,7 @@ use crate::tests::support::{
     Fixture, Sha256Fixture, plant_loose_blob, plant_loose_blob_with_claimed_id, plant_packed_blob,
 };
 
+#[track_caller]
 fn assert_repository_construction_failure(failure: LocalGitToolsConstructionError) {
     assert!(matches!(
         failure,
@@ -253,6 +254,75 @@ fn object_capture_rejects_a_loose_directory_replaced_after_scan() {
 }
 
 #[test]
+fn object_capture_rejects_a_loose_object_replaced_after_scan() {
+    let fixture = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let object_id = fixture.initial.to_string();
+    let object_path = fixture
+        .root()
+        .join(".git/objects")
+        .join(&object_id[..2])
+        .join(&object_id[2..]);
+    let original = fs::read(&object_path).expect("fixture loose object reads");
+    let replacement = vec![b'x'; original.len()];
+
+    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
+        fs::remove_file(&object_path).expect("loose object removes after scan");
+        fs::write(&object_path, &replacement).expect("loose object replaces after scan")
+    })
+    .err()
+    .expect("replaced loose object rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_capture_rejects_a_loose_object_added_after_scan() {
+    let fixture = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let object_id = fixture.initial.to_string();
+    let added_path = fixture
+        .root()
+        .join(".git/objects")
+        .join(&object_id[..2])
+        .join("0".repeat(object_id.len() - 2));
+
+    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
+        fs::write(&added_path, b"actor object").expect("loose object adds after scan")
+    })
+    .err()
+    .expect("added loose object rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_capture_rejects_a_pack_file_rewritten_after_scan() {
+    let fixture = Fixture::new();
+    let pack_path = plant_packed_blob(fixture.root(), b"packed fixture content");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let pack_length = fs::metadata(&pack_path)
+        .expect("fixture pack metadata reads")
+        .len();
+    let replacement =
+        vec![0_u8; usize::try_from(pack_length).expect("fixture pack length fits memory")];
+
+    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
+        fs::write(&pack_path, &replacement).expect("pack file rewrites after scan")
+    })
+    .err()
+    .expect("rewritten pack file rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
 fn administrative_scan_rejects_a_symlink_without_retaining_a_deep_path() {
     let fixture = Fixture::new();
     let git_directory = openat(
@@ -262,7 +332,8 @@ fn administrative_scan_rejects_a_symlink_without_retaining_a_deep_path() {
         Mode::empty(),
     )
     .expect("fixture administrative directory pins");
-    plant_deep_administrative_symlink(git_directory, 256);
+    plant_deep_administrative_symlink(&git_directory, 256);
+    assert_deep_administrative_symlink(git_directory, 256);
 
     let failure = validate_repository_layout(fixture.root())
         .expect_err("deep administrative symlink rejects");
@@ -270,22 +341,39 @@ fn administrative_scan_rejects_a_symlink_without_retaining_a_deep_path() {
     assert_repository_construction_failure(failure);
 }
 
-fn plant_deep_administrative_symlink(parent: OwnedFd, remaining: usize) {
+fn plant_deep_administrative_symlink(parent: &OwnedFd, remaining: usize) {
     if remaining == 0 {
-        symlinkat("/outside", &parent, "escape").expect("deep administrative symlink constructs");
+        symlinkat("/outside", parent, "escape").expect("deep administrative symlink constructs");
         return;
     }
     let component = format!("d{remaining:03}-{}", "x".repeat(200));
-    mkdirat(&parent, &component, Mode::RUSR | Mode::WUSR | Mode::XUSR)
+    mkdirat(parent, &component, Mode::RUSR | Mode::WUSR | Mode::XUSR)
         .expect("deep administrative directory constructs");
     let child = openat(
-        &parent,
+        parent,
         &component,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .expect("deep administrative directory pins");
-    plant_deep_administrative_symlink(child, remaining - 1);
+    plant_deep_administrative_symlink(&child, remaining - 1);
+}
+
+#[track_caller]
+fn assert_deep_administrative_symlink(mut parent: OwnedFd, depth: usize) {
+    for remaining in (1..=depth).rev() {
+        let component = format!("d{remaining:03}-{}", "x".repeat(200));
+        parent = openat(
+            &parent,
+            &component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("expected deep administrative directory opens");
+    }
+    let status = statat(&parent, "escape", AtFlags::SYMLINK_NOFOLLOW)
+        .expect("deep administrative escape metadata reads");
+    assert_eq!(FileType::from_raw_mode(status.st_mode), FileType::Symlink);
 }
 
 #[test]
@@ -699,7 +787,7 @@ fn repository_open_parses_the_validated_config_snapshot() {
 }
 
 #[test]
-fn repository_shell_and_object_capture_reject_descendant_replacement() {
+fn repository_shell_rejects_an_object_database_symlink_replacement() {
     let fixture = Fixture::new();
     let outside = Fixture::new();
     let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
@@ -711,16 +799,32 @@ fn repository_shell_and_object_capture_reject_descendant_replacement() {
     symlink(outside.root().join(".git/objects"), &objects)
         .expect("outside object database symlink constructs");
 
-    let shell_failure = authority
+    let failure = authority
         .repository()
         .err()
         .expect("replacement object database rejects repository shell");
-    let capture_failure = PinnedObjectDatabase::capture(&authority)
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_capture_rejects_an_object_database_symlink_replacement() {
+    let fixture = Fixture::new();
+    let outside = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let objects = fixture.root().join(".git/objects");
+    let retired_objects = fixture.root().join(".git/objects.retired");
+    fs::rename(&objects, &retired_objects).expect("fixture objects retire");
+    symlink(outside.root().join(".git/objects"), &objects)
+        .expect("outside object database symlink constructs");
+
+    let failure = PinnedObjectDatabase::capture(&authority)
         .err()
         .expect("replacement object database rejects capture");
 
-    assert_eq!(shell_failure, LocalGitFailure::Repository);
-    assert_eq!(capture_failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Repository);
 }
 
 #[test]

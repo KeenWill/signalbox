@@ -24,7 +24,7 @@ use crate::descriptor::{
 };
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_BRANCH_BYTES, MAX_REVISION_BYTES};
-use crate::packed_reference::{packed_reference_namespace_conflicts, packed_reference_target};
+use crate::packed_reference::packed_reference_state;
 use crate::pinning::PinnedRepository;
 use crate::reference_read::{open_git_directory_path, read_reference_leaf};
 
@@ -279,8 +279,9 @@ impl ReferenceLock {
         {
             return Err(LocalGitFailure::Operation);
         }
-        let expected_packed = packed_reference_target(authority, &self.name)?;
-        if packed_reference_namespace_conflicts(authority, &self.name)? {
+        let (expected_packed, packed_namespace_conflicts) =
+            packed_reference_state(authority, &self.name)?;
+        if packed_namespace_conflicts {
             return Err(LocalGitFailure::Operation);
         }
         if !descriptor_entry_exists(&self.parent, &self.leaf)? {
@@ -300,17 +301,13 @@ impl ReferenceLock {
             )
             .map_err(|_| LocalGitFailure::Operation)?;
             after_publish();
-            let packed_is_current = packed_reference_target(authority, &self.name)
-                .is_ok_and(|current| current == expected_packed);
-            let packed_namespace_is_clear =
-                packed_reference_namespace_conflicts(authority, &self.name)
-                    .is_ok_and(|conflicts| !conflicts);
+            let packed_state_is_current = packed_reference_state(authority, &self.name)
+                .is_ok_and(|current| current == (expected_packed, false));
             let layout_is_current = authority.validate_supported_layout().is_ok();
             let hierarchy_is_current = self.hierarchy_is_current(authority);
             before_cleanup();
             let publication_is_current = self.prepared_publication_is_current();
-            if !packed_is_current
-                || !packed_namespace_is_clear
+            if !packed_state_is_current
                 || !layout_is_current
                 || !hierarchy_is_current
                 || !publication_is_current
@@ -342,10 +339,8 @@ impl ReferenceLock {
                 .ok_or(LocalGitFailure::Operation)?;
         after_publish();
         let displaced = read_reference_leaf(&self.parent, &self.lock_name, authority, &self.name);
-        let packed_is_current = packed_reference_target(authority, &self.name)
-            .is_ok_and(|current| current == expected_packed);
-        let packed_namespace_is_clear = packed_reference_namespace_conflicts(authority, &self.name)
-            .is_ok_and(|conflicts| !conflicts);
+        let packed_state_is_current = packed_reference_state(authority, &self.name)
+            .is_ok_and(|current| current == (expected_packed, false));
         let displaced_value_is_expected = displaced.as_ref() == Ok(expected);
         let displaced_snapshot_is_current =
             reference_snapshot_identity_at(&self.parent, &self.lock_name)
@@ -355,8 +350,7 @@ impl ReferenceLock {
         if !displaced_value_is_expected
             || !displaced_snapshot_is_current
             || !publication_is_current
-            || !packed_is_current
-            || !packed_namespace_is_clear
+            || !packed_state_is_current
             || !layout_is_current
             || !self.hierarchy_is_current(authority)
         {
@@ -373,10 +367,8 @@ impl ReferenceLock {
             return Err(LocalGitFailure::Operation);
         }
         before_cleanup();
-        let final_postconditions_hold = packed_reference_target(authority, &self.name)
-            .is_ok_and(|current| current == expected_packed)
-            && packed_reference_namespace_conflicts(authority, &self.name)
-                .is_ok_and(|conflicts| !conflicts)
+        let final_postconditions_hold = packed_reference_state(authority, &self.name)
+            .is_ok_and(|current| current == (expected_packed, false))
             && authority.validate_supported_layout().is_ok()
             && self.hierarchy_is_current(authority);
         if !final_postconditions_hold {

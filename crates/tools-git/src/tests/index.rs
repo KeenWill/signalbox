@@ -452,6 +452,35 @@ fn index_lock_preserves_a_displaced_replacement_after_exchange() {
 }
 
 #[test]
+fn index_lock_accepts_a_new_writer_after_displaced_index_removal() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let prepared_index = b"prepared index bytes".to_vec();
+    let next_writer = b"next writer lock".to_vec();
+    let (mut index_lock, _index) =
+        IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
+    index_lock
+        .write_raw(&prepared_index)
+        .expect("prepared index writes");
+
+    index_lock
+        .commit_with_post_cleanup_test_hook(|| {
+            fs::write(&lock_path, &next_writer).expect("next writer lock acquires")
+        })
+        .expect("completed publication accepts the next writer");
+
+    assert_eq!(
+        fs::read(index_path).expect("prepared live index reads"),
+        prepared_index
+    );
+    assert_eq!(
+        fs::read(lock_path).expect("next writer lock reads"),
+        next_writer
+    );
+}
+
+#[test]
 fn index_lock_preserves_a_directory_replacing_the_displaced_cleanup_path() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");

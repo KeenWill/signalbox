@@ -42,6 +42,12 @@ pub(super) struct IndexSnapshot {
     _file: fs::File,
 }
 
+#[derive(Clone, Copy)]
+enum IndexSnapshotPermissions {
+    PreserveSource,
+    RetainDestination,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct IndexSnapshotIdentity {
     file: FileIdentity,
@@ -61,7 +67,12 @@ impl IndexSnapshot {
         object_format: ObjectFormat,
     ) -> Result<(Self, Index), LocalGitFailure> {
         let mut file = tempfile::tempfile().map_err(|_| LocalGitFailure::Operation)?;
-        copy_index_snapshot(index_path, &mut file, false, object_format)?;
+        copy_index_snapshot(
+            index_path,
+            &mut file,
+            IndexSnapshotPermissions::RetainDestination,
+            object_format,
+        )?;
         let index = Index::open_ext(&descriptor_path(&file), object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
         Ok((Self { _file: file }, index))
@@ -232,7 +243,7 @@ impl IndexLock {
             &guard.parent,
             &guard.index_name,
             &mut guard.lock,
-            true,
+            IndexSnapshotPermissions::PreserveSource,
             guard.object_format,
         )?;
         guard.expected_index = expected_index;
@@ -382,7 +393,7 @@ impl IndexLock {
     }
 
     pub(super) fn commit(self) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(|| {}, || {}, || {}, || {})
+        self.commit_with_hooks(|| {}, || {}, || {}, || {}, || {})
     }
 
     #[cfg(test)]
@@ -390,7 +401,7 @@ impl IndexLock {
         self,
         before_publish: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(before_publish, || {}, || {}, || {})
+        self.commit_with_hooks(before_publish, || {}, || {}, || {}, || {})
     }
 
     #[cfg(test)]
@@ -398,7 +409,7 @@ impl IndexLock {
         self,
         before_exchange: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(|| {}, before_exchange, || {}, || {})
+        self.commit_with_hooks(|| {}, before_exchange, || {}, || {}, || {})
     }
 
     #[cfg(test)]
@@ -406,7 +417,7 @@ impl IndexLock {
         self,
         after_exchange: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(|| {}, || {}, after_exchange, || {})
+        self.commit_with_hooks(|| {}, || {}, after_exchange, || {}, || {})
     }
 
     #[cfg(test)]
@@ -414,7 +425,15 @@ impl IndexLock {
         self,
         before_cleanup: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(|| {}, || {}, || {}, before_cleanup)
+        self.commit_with_hooks(|| {}, || {}, || {}, before_cleanup, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn commit_with_post_cleanup_test_hook<Hook: FnOnce()>(
+        self,
+        after_displaced_remove: Hook,
+    ) -> Result<FileIdentity, LocalGitFailure> {
+        self.commit_with_hooks(|| {}, || {}, || {}, || {}, after_displaced_remove)
     }
 
     fn commit_with_hooks<
@@ -422,12 +441,14 @@ impl IndexLock {
         BeforeExchange: FnOnce(),
         AfterExchange: FnOnce(),
         BeforeCleanup: FnOnce(),
+        AfterDisplacedRemove: FnOnce(),
     >(
         mut self,
         before_publish: BeforePublish,
         before_exchange: BeforeExchange,
         after_exchange: AfterExchange,
         before_cleanup: BeforeCleanup,
+        after_displaced_remove: AfterDisplacedRemove,
     ) -> Result<FileIdentity, LocalGitFailure> {
         self.validate_supported_layout()?;
         let prepared_index = self.prepared_index.ok_or(LocalGitFailure::Operation)?;
@@ -498,8 +519,13 @@ impl IndexLock {
                     }
                     return Err(LocalGitFailure::Operation);
                 }
-                if remove_displaced_index_if_current(&self.parent, &self.lock_name, original_index)
-                    .is_err()
+                if remove_displaced_index_if_current(
+                    &self.parent,
+                    &self.lock_name,
+                    original_index,
+                    after_displaced_remove,
+                )
+                .is_err()
                 {
                     return Err(LocalGitFailure::Operation);
                 }
@@ -532,6 +558,7 @@ impl IndexLock {
                             &self.parent,
                             &self.index_name,
                             prepared_index,
+                            || {},
                         );
                     }
                     return Err(LocalGitFailure::Operation);
@@ -574,6 +601,7 @@ fn remove_displaced_index_if_current(
     parent: &OwnedFd,
     name: &OsStr,
     expected: IndexSnapshotIdentity,
+    after_remove: impl FnOnce(),
 ) -> Result<(), LocalGitFailure> {
     let quarantine = QuarantineDirectory::create(parent)?;
     let quarantined_name = OsStr::new("displaced");
@@ -599,9 +627,7 @@ fn remove_displaced_index_if_current(
     }
     unlinkat(quarantine.descriptor(), quarantined_name, AtFlags::empty())
         .map_err(|_| LocalGitFailure::Operation)?;
-    if entry_identity(parent, name)?.is_some() {
-        return Err(LocalGitFailure::Operation);
-    }
+    after_remove();
     Ok(())
 }
 
@@ -840,10 +866,10 @@ pub(super) fn write_index_entries(
     index_content_identity(&bytes)
 }
 
-pub(super) fn copy_index_snapshot(
+fn copy_index_snapshot(
     index_path: &Path,
     destination: &mut fs::File,
-    preserve_permissions: bool,
+    permissions: IndexSnapshotPermissions,
     object_format: ObjectFormat,
 ) -> Result<(), LocalGitFailure> {
     match openat(
@@ -853,7 +879,7 @@ pub(super) fn copy_index_snapshot(
         Mode::empty(),
     ) {
         Ok(descriptor) => {
-            copy_open_index_snapshot(descriptor, destination, preserve_permissions, object_format)
+            copy_open_index_snapshot(descriptor, destination, permissions, object_format)
                 .map(drop)?
         }
         Err(rustix::io::Errno::NOENT) => {
@@ -867,22 +893,16 @@ pub(super) fn copy_index_snapshot(
 fn copy_open_index_snapshot(
     descriptor: OwnedFd,
     destination: &mut fs::File,
-    preserve_permissions: bool,
+    permissions: IndexSnapshotPermissions,
     object_format: ObjectFormat,
 ) -> Result<IndexSnapshotIdentity, LocalGitFailure> {
-    copy_open_index_snapshot_with_hook(
-        descriptor,
-        destination,
-        preserve_permissions,
-        object_format,
-        || {},
-    )
+    copy_open_index_snapshot_with_hook(descriptor, destination, permissions, object_format, || {})
 }
 
 fn copy_open_index_snapshot_with_hook<AfterMetadata: FnOnce()>(
     descriptor: OwnedFd,
     destination: &mut fs::File,
-    preserve_permissions: bool,
+    permissions: IndexSnapshotPermissions,
     object_format: ObjectFormat,
     after_metadata: AfterMetadata,
 ) -> Result<IndexSnapshotIdentity, LocalGitFailure> {
@@ -891,7 +911,7 @@ fn copy_open_index_snapshot_with_hook<AfterMetadata: FnOnce()>(
     if !metadata.is_file() || metadata.len() > MAX_INDEX_BYTES as u64 {
         return Err(LocalGitFailure::Repository);
     }
-    if preserve_permissions {
+    if matches!(permissions, IndexSnapshotPermissions::PreserveSource) {
         destination
             .set_permissions(metadata.permissions())
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -937,7 +957,7 @@ pub(super) fn copy_index_snapshot_with_test_hook<AfterMetadata: FnOnce()>(
     copy_open_index_snapshot_with_hook(
         descriptor,
         destination,
-        false,
+        IndexSnapshotPermissions::RetainDestination,
         object_format,
         after_metadata,
     )
@@ -987,7 +1007,7 @@ fn copy_index_snapshot_at(
     parent: &OwnedFd,
     index_name: &OsStr,
     destination: &mut fs::File,
-    preserve_permissions: bool,
+    permissions: IndexSnapshotPermissions,
     object_format: ObjectFormat,
 ) -> Result<(Option<IndexSnapshotIdentity>, IndexContentIdentity), LocalGitFailure> {
     match openat(
@@ -997,12 +1017,8 @@ fn copy_index_snapshot_at(
         Mode::empty(),
     ) {
         Ok(descriptor) => {
-            let snapshot = copy_open_index_snapshot(
-                descriptor,
-                destination,
-                preserve_permissions,
-                object_format,
-            )?;
+            let snapshot =
+                copy_open_index_snapshot(descriptor, destination, permissions, object_format)?;
             Ok((Some(snapshot), snapshot.content()))
         }
         Err(rustix::io::Errno::NOENT) => {

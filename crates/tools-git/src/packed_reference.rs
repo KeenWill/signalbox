@@ -40,6 +40,25 @@ pub(super) fn packed_reference_namespace_conflicts(
     Ok(false)
 }
 
+pub(super) fn packed_reference_state(
+    authority: &PinnedRepository,
+    reference_name: &str,
+) -> Result<(Option<git2::Oid>, bool), LocalGitFailure> {
+    let requested = reference_name.as_bytes();
+    let mut target = None;
+    let mut namespace_conflicts = false;
+    for (oid, existing) in read_packed_references(authority)? {
+        if existing == requested {
+            target = Some(oid);
+        } else if is_namespaced_under(&existing, requested)
+            || is_namespaced_under(requested, &existing)
+        {
+            namespace_conflicts = true;
+        }
+    }
+    Ok((target, namespace_conflicts))
+}
+
 fn is_namespaced_under(candidate: &[u8], namespace: &[u8]) -> bool {
     candidate.len() > namespace.len()
         && candidate.starts_with(namespace)

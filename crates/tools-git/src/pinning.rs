@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fmt, fs,
     io::{Read, Seek},
     ops::{Deref, DerefMut},
@@ -18,6 +18,7 @@ use rustix::{
     fs::{CWD, Mode, OFlags, openat},
     io::dup,
 };
+use sha2::{Digest, Sha256};
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
@@ -71,6 +72,18 @@ pub(super) struct RepositoryShell {
 
 pub(super) struct PinnedObjectDatabase {
     pub(super) directory: tempfile::TempDir,
+}
+
+struct ObjectChildBinding {
+    name: OsString,
+    identity: FileIdentity,
+    leaves: Vec<ObjectLeafBinding>,
+}
+
+struct ObjectLeafBinding {
+    name: OsString,
+    snapshot: FileSnapshotIdentity,
+    digest: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -513,14 +526,19 @@ impl PinnedObjectDatabase {
                     Mode::empty(),
                 )
                 .map_err(|_| LocalGitFailure::Repository)?;
-                pinned_children.push((name.clone(), owned_directory_identity(&pack)?));
-                pin_object_directory(
+                let identity = owned_directory_identity(&pack)?;
+                let leaves = pin_object_directory(
                     &pack,
                     &directory.path().join("pack"),
                     &mut inspected,
                     &mut captured_bytes,
                     ObjectDirectoryKind::Pack,
                 )?;
+                pinned_children.push(ObjectChildBinding {
+                    name,
+                    identity,
+                    leaves,
+                });
                 continue;
             }
             if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_hexdigit) {
@@ -539,16 +557,21 @@ impl PinnedObjectDatabase {
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Repository)?;
-            pinned_children.push((name.clone(), owned_directory_identity(&loose)?));
+            let identity = owned_directory_identity(&loose)?;
             let destination = directory.path().join(&name);
             fs::create_dir(&destination).map_err(|_| LocalGitFailure::Operation)?;
-            pin_object_directory(
+            let leaves = pin_object_directory(
                 &loose,
                 &destination,
                 &mut inspected,
                 &mut captured_bytes,
                 loose_kind,
             )?;
+            pinned_children.push(ObjectChildBinding {
+                name,
+                identity,
+                leaves,
+            });
         }
         after_scan();
         let snapshot = Self { directory };
@@ -625,13 +648,14 @@ impl PinnedObjectDatabase {
     }
 }
 
-pub(super) fn pin_object_directory(
+fn pin_object_directory(
     source: &OwnedFd,
     destination: &Path,
     inspected: &mut usize,
     captured_bytes: &mut u64,
     kind: ObjectDirectoryKind,
-) -> Result<(), LocalGitFailure> {
+) -> Result<Vec<ObjectLeafBinding>, LocalGitFailure> {
+    let mut bindings = Vec::new();
     for entry in
         fs::read_dir(descriptor_path_from_fd(source)).map_err(|_| LocalGitFailure::Repository)?
     {
@@ -679,9 +703,46 @@ pub(super) fn pin_object_directory(
         }
         snapshot.rewind().map_err(|_| LocalGitFailure::Operation)?;
         kind.validate_content(&mut snapshot, &name)?;
+        let digest = object_leaf_digest(&mut snapshot, copied)?;
+        bindings.push(ObjectLeafBinding {
+            name,
+            snapshot: file_snapshot_identity(&after_copy),
+            digest,
+        });
         *captured_bytes = captured_bytes.saturating_add(copied);
     }
-    Ok(())
+    Ok(bindings)
+}
+
+fn object_leaf_digest(
+    file: &mut fs::File,
+    expected_length: u64,
+) -> Result<[u8; 32], LocalGitFailure> {
+    file.rewind().map_err(|_| LocalGitFailure::Repository)?;
+    let mut remaining = expected_length;
+    let mut buffer = [0_u8; 8192];
+    let mut digest = Sha256::new();
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| LocalGitFailure::Repository)?;
+        let read = file
+            .read(&mut buffer[..requested])
+            .map_err(|_| LocalGitFailure::Repository)?;
+        if read == 0 {
+            return Err(LocalGitFailure::Repository);
+        }
+        digest.update(&buffer[..read]);
+        remaining = remaining.saturating_sub(read as u64);
+    }
+    let mut extra = [0_u8; 1];
+    if file
+        .read(&mut extra)
+        .map_err(|_| LocalGitFailure::Repository)?
+        != 0
+    {
+        return Err(LocalGitFailure::Repository);
+    }
+    Ok(digest.finalize().into())
 }
 
 pub(super) fn live_object_database_bytes(
@@ -791,18 +852,80 @@ fn owned_directory_identity(directory: &OwnedFd) -> Result<FileIdentity, LocalGi
 
 fn validate_object_child_bindings(
     objects: &OwnedFd,
-    expected: &[(std::ffi::OsString, FileIdentity)],
+    expected: &[ObjectChildBinding],
 ) -> Result<(), LocalGitFailure> {
-    for (name, identity) in expected {
+    let mut expected_children = expected
+        .iter()
+        .map(|binding| binding.name.clone())
+        .collect::<Vec<_>>();
+    expected_children.sort();
+    let mut inspected = 0_usize;
+    let mut current_children = Vec::new();
+    for entry in
+        fs::read_dir(descriptor_path_from_fd(objects)).map_err(|_| LocalGitFailure::Repository)?
+    {
+        inspected = inspected.saturating_add(1);
+        if inspected > MAX_REPOSITORY_INSPECTIONS {
+            return Err(LocalGitFailure::Repository);
+        }
+        let name = entry.map_err(|_| LocalGitFailure::Repository)?.file_name();
+        if name != OsStr::new("info") {
+            current_children.push(name);
+        }
+    }
+    current_children.sort();
+    if current_children != expected_children {
+        return Err(LocalGitFailure::Repository);
+    }
+    for binding in expected {
         let current = openat(
             objects,
-            name,
+            &binding.name,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(|_| LocalGitFailure::Repository)?;
-        if owned_directory_identity(&current)? != *identity {
+        if owned_directory_identity(&current)? != binding.identity {
             return Err(LocalGitFailure::Repository);
+        }
+        let mut current_leaves = Vec::new();
+        for entry in fs::read_dir(descriptor_path_from_fd(&current))
+            .map_err(|_| LocalGitFailure::Repository)?
+        {
+            inspected = inspected.saturating_add(1);
+            if inspected > MAX_REPOSITORY_INSPECTIONS {
+                return Err(LocalGitFailure::Repository);
+            }
+            current_leaves.push(entry.map_err(|_| LocalGitFailure::Repository)?.file_name());
+        }
+        current_leaves.sort();
+        let mut expected_leaves = binding
+            .leaves
+            .iter()
+            .map(|leaf| leaf.name.clone())
+            .collect::<Vec<_>>();
+        expected_leaves.sort();
+        if current_leaves != expected_leaves {
+            return Err(LocalGitFailure::Repository);
+        }
+        for leaf in &binding.leaves {
+            let descriptor = openat(
+                &current,
+                &leaf.name,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| LocalGitFailure::Repository)?;
+            let mut file = fs::File::from(descriptor);
+            let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
+            if !metadata.is_file() || file_snapshot_identity(&metadata) != leaf.snapshot {
+                return Err(LocalGitFailure::Repository);
+            }
+            let digest = object_leaf_digest(&mut file, leaf.snapshot.length)?;
+            let after_read = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
+            if file_snapshot_identity(&after_read) != leaf.snapshot || digest != leaf.digest {
+                return Err(LocalGitFailure::Repository);
+            }
         }
     }
     Ok(())
