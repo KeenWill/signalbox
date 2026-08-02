@@ -1426,6 +1426,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     }
     switch message {
     case .transcriptTurn(let turn):
+      if let malformed = turn.state.malformedStoredProjection {
+        return .diagnostic(kind: malformed.kind, decodingDiagnostic: malformed.diagnostic)
+      }
       let ownership = turn.state.snapshotModelCallOwnership
       let exposedModelCallID = ownership.exposedModelCallID
       guard
@@ -1519,6 +1522,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       return .accepted
     case .transcriptEntry(let entry):
       entriesStarted = true
+      if let malformed = entry.entry.malformedStoredProjection {
+        return .diagnostic(kind: malformed.kind, decodingDiagnostic: malformed.diagnostic)
+      }
       guard
         modelCallsEnded && pendingModelIdentityTurnID == nil,
         !entry.entry.hasMalformedStoredProjection && entry.entry.modelIdentityTurnIsKnown(in: turnAcceptancePositions),
@@ -1543,6 +1549,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       return .accepted
     case .transcriptTextEntry(let entry):
       entriesStarted = true
+      if let malformed = entry.entry.malformedStoredProjection {
+        return .diagnostic(kind: malformed.kind, decodingDiagnostic: malformed.diagnostic)
+      }
       guard
         modelCallsEnded,
         pendingModelIdentityTurnID == nil || entry.sourceSessionID == boundary.sessionID,
@@ -1657,6 +1666,17 @@ extension SignalboxSynchronizationSnapshot.Record {
 }
 
 extension SignalboxTranscriptTurnState {
+  fileprivate var malformedStoredProjection:
+    (kind: String, diagnostic: SignalboxDecodingDiagnostic)?
+  {
+    guard case .unknown(let kind, _, let decodingDiagnostic) = self,
+      let decodingDiagnostic
+    else {
+      return nil
+    }
+    return ("transcript_turn.state.\(kind)", decodingDiagnostic)
+  }
+
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
     case .queued: return .impossible
@@ -1761,6 +1781,17 @@ extension SignalboxCurrentModelCallState {
 }
 
 extension SignalboxTranscriptEntry {
+  fileprivate var malformedStoredProjection:
+    (kind: String, diagnostic: SignalboxDecodingDiagnostic)?
+  {
+    guard case .unknown(let kind, _, let decodingDiagnostic) = self,
+      let decodingDiagnostic
+    else {
+      return nil
+    }
+    return (kind, decodingDiagnostic)
+  }
+
   fileprivate var modelIdentityTurnID: SignalboxCanonicalUUID? {
     if case .modelIdentityChanged(let turnID, _, _) = self {
       return turnID
@@ -1818,6 +1849,17 @@ extension SignalboxTranscriptEntry {
 }
 
 extension SignalboxTranscriptTextEntry {
+  fileprivate var malformedStoredProjection:
+    (kind: String, diagnostic: SignalboxDecodingDiagnostic)?
+  {
+    guard case .unknown(let kind, _, let decodingDiagnostic) = self,
+      let decodingDiagnostic
+    else {
+      return nil
+    }
+    return (kind, decodingDiagnostic)
+  }
+
   fileprivate func consumesTurnOrigin(
     _ pendingTurnID: inout SignalboxCanonicalUUID?,
     seenTurnIDs: inout Set<SignalboxCanonicalUUID>

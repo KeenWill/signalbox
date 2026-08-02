@@ -530,6 +530,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testUnknownImportedSpeakerWrapperPreservesItsPresentationKind() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedTextSpeaker(
+      #"{"type":"fixture_future_speaker_wrapper"}"#
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
+
+    XCTAssertEqual(message.role, .unknown)
+    XCTAssertEqual(
+      message.unrecognizedKind,
+      ProcessProjectionFixture.unknownSpeakerWrapperLabel
+    )
+  }
+
+  func testUnknownAttestedImportedSpeakerPreservesItsPresentationKind() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedTextSpeaker(
+      #"{"type":"attested","speaker":"fixture_future_speaker"}"#
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
+
+    XCTAssertEqual(message.role, .unknown)
+    XCTAssertEqual(
+      message.unrecognizedKind,
+      ProcessProjectionFixture.unknownAttestedSpeakerLabel
+    )
+  }
+
   func testUnknownImportedContentPresentationKindIsBounded() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithImportedContentKind(
       ProcessProjectionFixture.oversizedUnknownState
@@ -4778,6 +4810,8 @@ private enum ProcessProjectionFixture {
     "Turn \(ProcessDriverFixture.turn) selected model \(ProcessDriverFixture.modelCall) at defaults version 1; source session \(ProcessDriverFixture.session), entry \(proposedToolEntry)."
   static let unknownTextEntryKind = "fixture_future_text_entry"
   static let unknownTextEntryContent = "Fixture future text."
+  static let unknownSpeakerWrapperLabel = "Unknown speaker (fixture_future_speaker_wrapper)"
+  static let unknownAttestedSpeakerLabel = "Unrecognized speaker (fixture_future_speaker)"
   static let unknownToolBatchState = "fixture_future_tool_batch_state"
   static let unknownToolBatchDiagnostic =
     "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
@@ -5271,6 +5305,55 @@ private enum ProcessProjectionFixture {
           "source_session_id":"\(ProcessDriverFixture.session)",
           "entry_id":"\(proposedToolEntry)",
           "entry":{"type":"\(unknownTextEntryKind)"}
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(unknownTextEntryContent)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"1"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithImportedTextSpeaker(
+    _ sourceSpeaker: String
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{
+            "type":"imported",
+            "imported_conversation_id":"\(ProcessDriverFixture.session)",
+            "imported_entry_id":"\(completedUserEntry)",
+            "source_speaker":\(sourceSpeaker)
+          }
         }
         """,
         """

@@ -207,8 +207,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       role = .assistant
       unrecognizedKind = nil
     case .imported(_, _, let speaker):
-      role = importedRole(speaker)
-      unrecognizedKind = nil
+      (role, unrecognizedKind) = importedPresentation(speaker)
     case .unknown(let kind, _, _):
       role = .unknown
       unrecognizedKind = SignalboxProcessPresentation.retainedLabel(kind)
@@ -689,19 +688,26 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
   }
 
-  private func importedRole(
+  private func importedPresentation(
     _ speaker: SignalboxImportedSourceSpeaker
-  ) -> SignalboxMessageRole {
-    guard case .attested(let importedSpeaker) = speaker else {
-      return .unknown
-    }
-    switch importedSpeaker {
-    case .user:
-      return .user
-    case .assistant:
-      return .assistant
-    case .unknown:
-      return .unknown
+  ) -> (role: SignalboxMessageRole, unrecognizedKind: String?) {
+    switch speaker {
+    case .attested(.user):
+      return (.user, nil)
+    case .attested(.assistant):
+      return (.assistant, nil)
+    case .attested(.unknown(let value)):
+      return (
+        .unknown,
+        SignalboxProcessPresentation.retainedLabel("Unrecognized speaker (\(value))")
+      )
+    case .unknown(let kind, _):
+      return (
+        .unknown,
+        SignalboxProcessPresentation.retainedLabel("Unknown speaker (\(kind))")
+      )
+    case .notAttested, .attestedAbsent:
+      return (.unknown, nil)
     }
   }
 

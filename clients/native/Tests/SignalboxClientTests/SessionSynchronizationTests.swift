@@ -305,6 +305,12 @@ final class SessionSynchronizationTests: XCTestCase {
       transport.machine.phase,
       .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
     )
+    XCTAssertEqual(
+      transport.machine.diagnostics.last?.message,
+      SynchronizationFixture.malformedKnownSnapshotDiagnostic(
+        in: try SynchronizationFixture.malformedQueuedTurn()
+      )
+    )
   }
 
   func testINV033UnadmittedNestedTurnFieldFailsSnapshotClosed() throws {
@@ -343,6 +349,12 @@ final class SessionSynchronizationTests: XCTestCase {
       transport.machine.phase,
       .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
     )
+    XCTAssertEqual(
+      transport.machine.diagnostics.last?.message,
+      SynchronizationFixture.malformedKnownSnapshotDiagnostic(
+        in: try SynchronizationFixture.malformedTranscriptEntry()
+      )
+    )
   }
 
   func testINV033MalformedNestedTextEntryFailsSnapshotClosed() throws {
@@ -361,6 +373,12 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(
       transport.machine.phase,
       .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(
+      transport.machine.diagnostics.last?.message,
+      SynchronizationFixture.malformedKnownSnapshotDiagnostic(
+        in: try SynchronizationFixture.malformedTextEntry()
+      )
     )
   }
 
@@ -3009,6 +3027,39 @@ private enum SynchronizationFixture {
       }
       """
     )
+  }
+
+  static func malformedKnownSnapshotDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) -> String? {
+    let kind: String
+    let diagnostic: SignalboxDecodingDiagnostic?
+    switch message {
+    case .transcriptTurn(let turn):
+      guard case .unknown(let nestedKind, _, let nestedDiagnostic) = turn.state else {
+        return nil
+      }
+      kind = "transcript_turn.state.\(nestedKind)"
+      diagnostic = nestedDiagnostic
+    case .transcriptEntry(let entry):
+      guard case .unknown(let nestedKind, _, let nestedDiagnostic) = entry.entry else {
+        return nil
+      }
+      kind = nestedKind
+      diagnostic = nestedDiagnostic
+    case .transcriptTextEntry(let entry):
+      guard case .unknown(let nestedKind, _, let nestedDiagnostic) = entry.entry else {
+        return nil
+      }
+      kind = nestedKind
+      diagnostic = nestedDiagnostic
+    default:
+      return nil
+    }
+    guard let diagnostic else {
+      return nil
+    }
+    return "Rejected malformed known process-protocol frame \(kind): \(diagnostic.message)"
   }
 
   static func futureTurnState() throws -> SignalboxProcessServerMessage {
