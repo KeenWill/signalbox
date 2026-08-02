@@ -11,11 +11,12 @@ use git2::{BranchType, ObjectFormat, Repository, RepositoryInitOptions, Signatur
 use crate::LocalGitExecutor;
 use crate::arguments::{
     GitBranchCreateArguments, GitBranchSwitchArguments, GitCommitArguments, GitDiffArguments,
-    GitStageArguments, LocalOperation,
+    GitLogArguments, GitStageArguments, LocalOperation,
 };
 use crate::failure::LocalGitFailure;
-use crate::limits::MAX_COMMIT_MESSAGE_BYTES;
+use crate::limits::{MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_STAGE_PATHS};
 use crate::pinning::parse_pack_index;
+use crate::status_reference::StatusHeadSnapshot;
 use crate::tests::support::{
     CHANGED_CONTENT, FIX_BRANCH, Fixture, INITIAL_CONTENT, MODEL_MESSAGE, Sha256Fixture,
     TRACKED_PATH, commit_all, execute, identity, install_deleted_conflict,
@@ -43,6 +44,43 @@ fn commit_arguments_reject_an_over_byte_budget_message_during_decode() {
     let message = "x".repeat(MAX_COMMIT_MESSAGE_BYTES + 1);
     let result = serde_json::from_value::<GitCommitArguments>(serde_json::json!({
         "message": message,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn log_arguments_reject_zero_entries_during_decode() {
+    let result = serde_json::from_value::<GitLogArguments>(serde_json::json!({
+        "max_entries": 0,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn log_arguments_reject_entries_above_the_bound_during_decode() {
+    let result = serde_json::from_value::<GitLogArguments>(serde_json::json!({
+        "max_entries": MAX_LOG_ENTRIES + 1,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn stage_arguments_reject_an_empty_path_list_during_decode() {
+    let result = serde_json::from_value::<GitStageArguments>(serde_json::json!({
+        "paths": [],
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn stage_arguments_reject_a_path_list_above_the_bound_during_decode() {
+    let paths = vec![TRACKED_PATH; MAX_STAGE_PATHS + 1];
+    let result = serde_json::from_value::<GitStageArguments>(serde_json::json!({
+        "paths": paths,
     }));
 
     assert!(result.is_err());
@@ -90,6 +128,7 @@ fn branch_switch_checks_out_root_level_changes_inside_the_injected_root() {
             name: FIX_BRANCH.to_owned(),
         }),
     );
+    let status = execute(&executor, LocalOperation::Status);
 
     assert_eq!(
         fs::read(fixture.root().join(TRACKED_PATH)).expect("switched content reads"),
@@ -99,6 +138,7 @@ fn branch_switch_checks_out_root_level_changes_inside_the_injected_root() {
         repository.head().expect("switched HEAD exists").shorthand(),
         Ok(FIX_BRANCH)
     );
+    assert_eq!(status["branch"], FIX_BRANCH);
 }
 
 #[test]
@@ -132,6 +172,23 @@ fn branch_switch_rejects_merge_state_from_the_injected_git_directory() {
             .shorthand(),
         Ok("main")
     );
+}
+
+#[test]
+fn status_head_snapshot_rejects_a_branch_tip_changed_during_the_operation() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let snapshot = StatusHeadSnapshot::capture(&executor.repository_authority)
+        .expect("status HEAD snapshot captures");
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+
+    let failure = snapshot
+        .validate(&executor.repository_authority)
+        .expect_err("changed branch tip rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]

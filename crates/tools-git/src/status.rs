@@ -22,7 +22,7 @@ use crate::limits::{
 };
 use crate::pinning::{PinnedRepository, repository_filemode};
 use crate::result::{StatusEntry, StatusResult};
-use crate::status_reference::status_head;
+use crate::status_reference::StatusHeadSnapshot;
 
 pub(super) fn status<FileSystem: WorkspaceFileSystem>(
     repository: &Repository,
@@ -31,7 +31,10 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
     root: &WorkspaceRoot,
     untracked: Vec<PathBuf>,
 ) -> Result<StatusResult, LocalGitFailure> {
-    let (branch, branch_truncated, head_oid) = status_head(authority)?;
+    let head_snapshot = StatusHeadSnapshot::capture(authority)?;
+    let branch = head_snapshot.branch.clone();
+    let branch_truncated = head_snapshot.branch_truncated;
+    let head_oid = head_snapshot.target;
     let head = head_oid.map(|oid| oid.to_string());
     let head_tree = head_oid
         .map(|oid| tree_for_commit(repository, oid))
@@ -213,13 +216,15 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
             worktree: entry.worktree,
         });
     }
-    Ok(StatusResult {
+    let result = StatusResult {
         branch,
         branch_truncated,
         head,
         entries,
         truncated,
-    })
+    };
+    head_snapshot.validate(authority)?;
+    Ok(result)
 }
 
 pub(super) struct RawStatusEntry {

@@ -383,7 +383,15 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         self.repository_authority.validate_supported_layout()?;
         let observed = validate_repository_layout(&self.root_path, self.root.identity())
             .map_err(|_| LocalGitFailure::Repository)?;
-        if observed == self.repository_identity {
+        // HEAD is operation state, not repository identity. A completed branch
+        // switch or detached commit establishes the next operation's baseline;
+        // each operation separately snapshots and revalidates the references it
+        // reads before returning.
+        if observed.root == self.repository_identity.root
+            && observed.git_directory == self.repository_identity.git_directory
+            && observed.refs == self.repository_identity.refs
+            && observed.config == self.repository_identity.config
+        {
             Ok(())
         } else {
             Err(LocalGitFailure::Repository)

@@ -52,9 +52,23 @@ pub struct GitLogArguments {
     #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
     pub(super) revision: String,
     /// Maximum commits returned.
-    #[serde(default = "default_log_entries")]
+    #[serde(
+        default = "default_log_entries",
+        deserialize_with = "deserialize_log_entries"
+    )]
     #[schemars(range(min = 1, max = MAX_LOG_ENTRIES))]
     pub(super) max_entries: usize,
+}
+
+fn deserialize_log_entries<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let max_entries = usize::deserialize(deserializer)?;
+    if !(1..=MAX_LOG_ENTRIES).contains(&max_entries) {
+        return Err(D::Error::custom("invalid bounded log entry count"));
+    }
+    Ok(max_entries)
 }
 
 /// Exact root-relative paths to stage.
@@ -62,8 +76,20 @@ pub struct GitLogArguments {
 #[serde(deny_unknown_fields)]
 pub struct GitStageArguments {
     /// Files to add, update, or remove from the index.
+    #[serde(deserialize_with = "deserialize_stage_paths")]
     #[schemars(length(min = 1, max = MAX_STAGE_PATHS))]
     pub(super) paths: Vec<String>,
+}
+
+fn deserialize_stage_paths<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let paths = Vec::<String>::deserialize(deserializer)?;
+    if paths.is_empty() || paths.len() > MAX_STAGE_PATHS {
+        return Err(D::Error::custom("invalid bounded stage path count"));
+    }
+    Ok(paths)
 }
 
 /// Verbatim commit-message arguments.

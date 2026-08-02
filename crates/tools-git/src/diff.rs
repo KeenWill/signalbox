@@ -16,7 +16,8 @@ use signalbox_tools_workspace::{
 
 use crate::arguments::GitDiffArguments;
 use crate::bounded::{
-    bounded_text, resolve_bounded_tree, tree_files, validate_index_objects, validate_tree_discovery,
+    bounded_text, resolve_bounded_tree, tree_files, tree_for_commit, validate_index_objects,
+    validate_tree_discovery,
 };
 use crate::executor::regular_file_mode;
 use crate::failure::LocalGitFailure;
@@ -26,7 +27,7 @@ use crate::result::DiffResult;
 use crate::status::{
     charge_worktree_bytes, conflicted_index_paths, index_backed_worktree_files, index_files,
 };
-use crate::status_reference::worktree_head_tree;
+use crate::status_reference::StatusHeadSnapshot;
 
 pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
     repository: &Repository,
@@ -58,7 +59,11 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
     root: &WorkspaceRoot,
     untracked: Vec<PathBuf>,
 ) -> Result<DiffResult, LocalGitFailure> {
-    let head_tree = worktree_head_tree(repository, authority)?;
+    let head_snapshot = StatusHeadSnapshot::capture(authority)?;
+    let head_tree = head_snapshot
+        .target
+        .map(|target| tree_for_commit(repository, target))
+        .transpose()?;
     let head_files = match head_tree.as_ref() {
         Some(tree) => {
             validate_tree_discovery(repository, tree)?;
@@ -180,7 +185,9 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
             break;
         }
     }
-    render_patch_bytes(bytes, truncated)
+    let result = render_patch_bytes(bytes, truncated)?;
+    head_snapshot.validate(authority)?;
+    Ok(result)
 }
 
 pub(super) fn diff_object_buffer(
