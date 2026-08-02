@@ -1,23 +1,28 @@
 use std::{
     ffi::OsStr,
     fmt, fs,
-    io::Read,
+    io::{Read, Seek},
     ops::{Deref, DerefMut},
     os::{fd::OwnedFd, unix::ffi::OsStrExt},
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
+use flate2::read::ZlibDecoder;
 use git2::{Config, ErrorCode, ObjectFormat, Odb, Repository, RepositoryInitOptions};
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
     RepositoryIdentity, descriptor_path, descriptor_path_from_fd, file_identity,
+    file_snapshot_identity,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::open_repository_config_at;
-use crate::limits::{MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES, MAX_PACK_FILE_BYTES};
+use crate::limits::{
+    MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
+    MAX_PACK_FILE_BYTES, MAX_REPOSITORY_INSPECTIONS,
+};
 
 pub(super) struct PinnedRepository {
     pub(super) root: fs::File,
@@ -35,6 +40,38 @@ pub(super) struct RepositoryShell {
 
 pub(super) struct PinnedObjectDatabase {
     pub(super) directory: tempfile::TempDir,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ObjectDirectoryKind {
+    Loose { filename_bytes: usize },
+    Pack,
+}
+
+impl ObjectDirectoryKind {
+    fn validates_name(self, name: &OsStr) -> bool {
+        match self {
+            Self::Loose { filename_bytes } => {
+                name.as_bytes().len() == filename_bytes
+                    && name.as_bytes().iter().all(u8::is_ascii_hexdigit)
+            }
+            Self::Pack => true,
+        }
+    }
+
+    fn compressed_file_limit(self) -> usize {
+        match self {
+            Self::Loose { .. } => MAX_OBJECT_BYTES.saturating_mul(2),
+            Self::Pack => MAX_PACK_FILE_BYTES,
+        }
+    }
+
+    fn validate_content(self, file: &mut fs::File) -> Result<(), LocalGitFailure> {
+        match self {
+            Self::Loose { .. } => validate_loose_object_header(file),
+            Self::Pack => Ok(()),
+        }
+    }
 }
 
 impl fmt::Debug for PinnedRepository {
@@ -163,6 +200,9 @@ impl PinnedObjectDatabase {
             .object_id_bytes()
             .saturating_mul(2)
             .saturating_sub(2);
+        let loose_kind = ObjectDirectoryKind::Loose {
+            filename_bytes: loose_name_bytes,
+        };
         let mut inspected = 0_usize;
         let mut captured_bytes = 0_u64;
         for entry in fs::read_dir(descriptor_path_from_fd(&objects))
@@ -170,7 +210,7 @@ impl PinnedObjectDatabase {
         {
             let entry = entry.map_err(|_| LocalGitFailure::Repository)?;
             inspected = inspected.saturating_add(1);
-            if inspected > 100_000 {
+            if inspected > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitFailure::Repository);
             }
             let name = entry.file_name();
@@ -191,7 +231,7 @@ impl PinnedObjectDatabase {
                     &directory.path().join("pack"),
                     &mut inspected,
                     &mut captured_bytes,
-                    None,
+                    ObjectDirectoryKind::Pack,
                 )?;
                 continue;
             }
@@ -212,7 +252,7 @@ impl PinnedObjectDatabase {
                 &destination,
                 &mut inspected,
                 &mut captured_bytes,
-                Some(loose_name_bytes),
+                loose_kind,
             )?;
         }
         Ok(Self { directory })
@@ -235,20 +275,18 @@ pub(super) fn pin_object_directory(
     destination: &Path,
     inspected: &mut usize,
     captured_bytes: &mut u64,
-    loose_name_bytes: Option<usize>,
+    kind: ObjectDirectoryKind,
 ) -> Result<(), LocalGitFailure> {
     for entry in
         fs::read_dir(descriptor_path_from_fd(source)).map_err(|_| LocalGitFailure::Repository)?
     {
         let entry = entry.map_err(|_| LocalGitFailure::Repository)?;
         *inspected = inspected.saturating_add(1);
-        if *inspected > 100_000 {
+        if *inspected > MAX_REPOSITORY_INSPECTIONS {
             return Err(LocalGitFailure::Repository);
         }
         let name = entry.file_name();
-        if loose_name_bytes.is_some_and(|expected| {
-            name.as_bytes().len() != expected || !name.as_bytes().iter().all(u8::is_ascii_hexdigit)
-        }) {
+        if !kind.validates_name(&name) {
             return Err(LocalGitFailure::Repository);
         }
         let descriptor = openat(
@@ -260,11 +298,7 @@ pub(super) fn pin_object_directory(
         .map_err(|_| LocalGitFailure::Repository)?;
         let mut file = fs::File::from(descriptor);
         let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-        let per_file_limit = if loose_name_bytes.is_some() {
-            MAX_OBJECT_BYTES.saturating_mul(2)
-        } else {
-            MAX_PACK_FILE_BYTES
-        } as u64;
+        let per_file_limit = kind.compressed_file_limit() as u64;
         if !metadata.is_file()
             || metadata.len() > per_file_limit
             || captured_bytes.saturating_add(metadata.len()) > MAX_OBJECT_DATABASE_BYTES as u64
@@ -272,6 +306,7 @@ pub(super) fn pin_object_directory(
             return Err(LocalGitFailure::Repository);
         }
         let mut snapshot = fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(destination.join(&name))
@@ -281,9 +316,14 @@ pub(super) fn pin_object_directory(
             &mut snapshot,
         )
         .map_err(|_| LocalGitFailure::Operation)?;
-        if copied != metadata.len() {
+        let after_copy = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
+        if copied != metadata.len()
+            || file_snapshot_identity(&metadata) != file_snapshot_identity(&after_copy)
+        {
             return Err(LocalGitFailure::Repository);
         }
+        snapshot.rewind().map_err(|_| LocalGitFailure::Operation)?;
+        kind.validate_content(&mut snapshot)?;
         *captured_bytes = captured_bytes.saturating_add(copied);
     }
     Ok(())
@@ -305,12 +345,15 @@ pub(super) fn live_object_database_bytes(
         .object_id_bytes()
         .saturating_mul(2)
         .saturating_sub(2);
+    let loose_kind = ObjectDirectoryKind::Loose {
+        filename_bytes: loose_name_bytes,
+    };
     for entry in
         fs::read_dir(descriptor_path_from_fd(&objects)).map_err(|_| LocalGitFailure::Repository)?
     {
         let entry = entry.map_err(|_| LocalGitFailure::Repository)?;
         inspected = inspected.saturating_add(1);
-        if inspected > 100_000 {
+        if inspected > MAX_REPOSITORY_INSPECTIONS {
             return Err(LocalGitFailure::Repository);
         }
         let name = entry.file_name();
@@ -325,7 +368,7 @@ pub(super) fn live_object_database_bytes(
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Repository)?;
-            measure_object_directory(&pack, &mut inspected, &mut bytes, None)?;
+            measure_object_directory(&pack, &mut inspected, &mut bytes, ObjectDirectoryKind::Pack)?;
             continue;
         }
         if name.as_bytes().len() != 2 || !name.as_bytes().iter().all(u8::is_ascii_hexdigit) {
@@ -338,7 +381,7 @@ pub(super) fn live_object_database_bytes(
             Mode::empty(),
         )
         .map_err(|_| LocalGitFailure::Repository)?;
-        measure_object_directory(&loose, &mut inspected, &mut bytes, Some(loose_name_bytes))?;
+        measure_object_directory(&loose, &mut inspected, &mut bytes, loose_kind)?;
     }
     Ok(bytes)
 }
@@ -347,20 +390,18 @@ pub(super) fn measure_object_directory(
     directory: &OwnedFd,
     inspected: &mut usize,
     total_bytes: &mut u64,
-    loose_name_bytes: Option<usize>,
+    kind: ObjectDirectoryKind,
 ) -> Result<(), LocalGitFailure> {
     for entry in
         fs::read_dir(descriptor_path_from_fd(directory)).map_err(|_| LocalGitFailure::Repository)?
     {
         let entry = entry.map_err(|_| LocalGitFailure::Repository)?;
         *inspected = inspected.saturating_add(1);
-        if *inspected > 100_000 {
+        if *inspected > MAX_REPOSITORY_INSPECTIONS {
             return Err(LocalGitFailure::Repository);
         }
         let name = entry.file_name();
-        if loose_name_bytes.is_some_and(|expected| {
-            name.as_bytes().len() != expected || !name.as_bytes().iter().all(u8::is_ascii_hexdigit)
-        }) {
+        if !kind.validates_name(&name) {
             return Err(LocalGitFailure::Repository);
         }
         let descriptor = openat(
@@ -370,14 +411,9 @@ pub(super) fn measure_object_directory(
             Mode::empty(),
         )
         .map_err(|_| LocalGitFailure::Repository)?;
-        let metadata = fs::File::from(descriptor)
-            .metadata()
-            .map_err(|_| LocalGitFailure::Repository)?;
-        let per_file_limit = if loose_name_bytes.is_some() {
-            MAX_OBJECT_BYTES.saturating_mul(2)
-        } else {
-            MAX_PACK_FILE_BYTES
-        } as u64;
+        let mut file = fs::File::from(descriptor);
+        let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
+        let per_file_limit = kind.compressed_file_limit() as u64;
         *total_bytes = total_bytes
             .checked_add(metadata.len())
             .filter(|bytes| *bytes <= MAX_OBJECT_DATABASE_BYTES as u64)
@@ -385,6 +421,48 @@ pub(super) fn measure_object_directory(
         if !metadata.is_file() || metadata.len() > per_file_limit {
             return Err(LocalGitFailure::Repository);
         }
+        kind.validate_content(&mut file)?;
+    }
+    Ok(())
+}
+
+fn validate_loose_object_header(file: &mut fs::File) -> Result<(), LocalGitFailure> {
+    let decoded_limit = MAX_LOOSE_OBJECT_HEADER_BYTES
+        .saturating_add(MAX_OBJECT_BYTES)
+        .saturating_add(1);
+    let mut decoded = Vec::with_capacity(decoded_limit);
+    let mut decoder = ZlibDecoder::new(&mut *file);
+    Read::by_ref(&mut decoder)
+        .take((decoded_limit + 1) as u64)
+        .read_to_end(&mut decoded)
+        .map_err(|_| LocalGitFailure::Repository)?;
+    drop(decoder);
+    file.rewind().map_err(|_| LocalGitFailure::Repository)?;
+    if decoded.len() > decoded_limit {
+        return Err(LocalGitFailure::Repository);
+    }
+    let header_end = decoded
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(LocalGitFailure::Repository)?;
+    if header_end > MAX_LOOSE_OBJECT_HEADER_BYTES {
+        return Err(LocalGitFailure::Repository);
+    }
+    let header =
+        std::str::from_utf8(&decoded[..header_end]).map_err(|_| LocalGitFailure::Repository)?;
+    let (kind, declared_text) = header.split_once(' ').ok_or(LocalGitFailure::Repository)?;
+    if !matches!(kind, "blob" | "tree" | "commit" | "tag") {
+        return Err(LocalGitFailure::Repository);
+    }
+    let declared_bytes = declared_text
+        .parse::<usize>()
+        .ok()
+        .filter(|bytes| *bytes <= MAX_OBJECT_BYTES)
+        .ok_or(LocalGitFailure::Repository)?;
+    if declared_bytes.to_string() != declared_text
+        || decoded.len() != header_end.saturating_add(1).saturating_add(declared_bytes)
+    {
+        return Err(LocalGitFailure::Repository);
     }
     Ok(())
 }

@@ -8,9 +8,10 @@ use rustix::fs::{CWD, Mode, OFlags, openat};
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
 use crate::layout::{reject_administrative_symlinks, validate_repository_layout};
+use crate::limits::MAX_OBJECT_BYTES;
 use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
 use crate::reference_read::resolve_pinned_reference_chain;
-use crate::tests::support::{Fixture, Sha256Fixture};
+use crate::tests::support::{Fixture, Sha256Fixture, plant_loose_blob};
 
 #[test]
 fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
@@ -80,6 +81,22 @@ fn repository_config_rejects_a_utf8_bom_before_an_include_section() {
 }
 
 #[test]
+fn repository_config_rejects_a_tab_delimited_filter_section() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[filter\t\"demo\"]\nclean = /outside/filter\n",
+    )
+    .expect("tab-delimited fixture filter config writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("tab-delimited filter section rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
 fn repository_open_parses_the_validated_config_snapshot() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");
@@ -127,6 +144,26 @@ fn repository_shell_and_object_capture_reject_descendant_replacement() {
 
     assert!(outside_lookup_failed);
     assert_eq!(capture_failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_capture_rejects_a_compressed_loose_object_above_the_decoded_limit() {
+    let fixture = Fixture::new();
+    let content = vec![0_u8; MAX_OBJECT_BYTES + 1];
+    let object_path = plant_loose_blob(fixture.root(), &content);
+    let compressed_bytes = fs::metadata(object_path)
+        .expect("oversized loose object metadata reads")
+        .len();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = PinnedObjectDatabase::capture(&authority)
+        .err()
+        .expect("oversized decoded loose object rejects capture");
+
+    assert!(compressed_bytes < content.len() as u64);
+    assert_eq!(failure, LocalGitFailure::Repository);
 }
 
 #[test]

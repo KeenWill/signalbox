@@ -15,8 +15,8 @@ use rustix::{
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{RepositoryIdentity, file_identity, file_snapshot_identity};
 use crate::limits::{
-    MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REVISION_BYTES, MAX_SHALLOW_BYTES,
-    MAX_SHALLOW_ENTRIES,
+    MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
+    MAX_REVISION_BYTES, MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES,
 };
 
 pub(super) struct RepositoryConfig {
@@ -94,7 +94,7 @@ fn reject_administrative_symlinks_for_format(
                 continue;
             }
             inspected = inspected.saturating_add(1);
-            if inspected > 100_000 {
+            if inspected > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
             let mut relative = relative_directory.clone();
@@ -248,12 +248,16 @@ fn validate_repository_config_descriptor(
             let closing = normalized
                 .find(']')
                 .ok_or(LocalGitToolsConstructionError::Repository)?;
-            let header = &normalized[..=closing];
-            section = if header.starts_with("[core]") {
+            let header = normalized[1..closing].trim();
+            let section_name = header
+                .split(|character: char| character.is_ascii_whitespace() || character == '.')
+                .next()
+                .unwrap_or("");
+            section = if header == "core" {
                 "core"
-            } else if header.starts_with("[extensions]") {
+            } else if header == "extensions" {
                 "extensions"
-            } else if header.starts_with("[filter ") || header.starts_with("[include") {
+            } else if matches!(section_name, "filter" | "include" | "includeif") {
                 return Err(LocalGitToolsConstructionError::Repository);
             } else {
                 ""

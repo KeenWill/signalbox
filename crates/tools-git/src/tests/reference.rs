@@ -77,6 +77,77 @@ fn reference_publication_rolls_back_when_its_hierarchy_is_replaced() {
 }
 
 #[test]
+fn absent_reference_publication_preserves_a_post_publish_replacement() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("missing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_test_hooks(
+            &authority,
+            &expected,
+            || {},
+            || {
+                fs::remove_file(&reference_path).expect("published reference removes");
+                fs::write(&reference_path, format!("{actor_target}\n"))
+                    .expect("actor replacement reference writes");
+            },
+        )
+        .expect_err("post-publish replacement rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("actor replacement reference reads"),
+        format!("{actor_target}\n")
+    );
+}
+
+#[test]
+fn exchanged_reference_publication_preserves_a_post_publish_replacement() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_test_hooks(
+            &authority,
+            &expected,
+            || {},
+            || {
+                fs::remove_file(&reference_path).expect("published reference removes");
+                fs::write(&reference_path, format!("{actor_target}\n"))
+                    .expect("actor replacement reference writes");
+            },
+        )
+        .expect_err("post-publish replacement rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("actor replacement reference reads"),
+        format!("{actor_target}\n")
+    );
+}
+
+#[test]
 fn loose_reference_rejects_growth_after_metadata_capture() {
     let fixture = Fixture::new();
     let name = "refs/heads/growing";

@@ -1,8 +1,11 @@
 //! Shared fixtures for the local Git tool tests.
 
-use std::{fs, path::Path};
+use std::{fs, io::Write, path::Path};
 
-use git2::{IndexAddOption, ObjectFormat, Oid, Repository, RepositoryInitOptions, Signature};
+use flate2::{Compression, write::ZlibEncoder};
+use git2::{
+    IndexAddOption, ObjectFormat, ObjectType, Oid, Repository, RepositoryInitOptions, Signature,
+};
 use tempfile::TempDir;
 
 pub(super) const AUTHOR_NAME: &str = "Signalbox Fixer";
@@ -91,4 +94,18 @@ pub(super) fn commit_index(repository: &Repository, message: &str) -> Oid {
             &parents,
         )
         .expect("fixture commit writes")
+}
+
+pub(super) fn plant_loose_blob(root: &Path, content: &[u8]) -> std::path::PathBuf {
+    let object_id = Oid::hash_object(ObjectType::Blob, content).expect("blob object hashes");
+    let object_id = object_id.to_string();
+    let object_directory = root.join(".git/objects").join(&object_id[..2]);
+    let object_path = object_directory.join(&object_id[2..]);
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    write!(encoder, "blob {}\0", content.len()).expect("blob header compresses");
+    encoder.write_all(content).expect("blob content compresses");
+    let compressed = encoder.finish().expect("blob compression finishes");
+    fs::create_dir_all(&object_directory).expect("loose object directory constructs");
+    fs::write(&object_path, compressed).expect("loose object writes");
+    object_path
 }

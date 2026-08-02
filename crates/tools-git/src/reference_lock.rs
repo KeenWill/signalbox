@@ -202,11 +202,13 @@ impl ReferenceLock {
             let packed_namespace_is_clear =
                 packed_reference_namespace_conflicts(authority, &self.name)
                     .is_ok_and(|conflicts| !conflicts);
-            if !packed_is_current
+            let publication_is_owned = self.published_path_still_owned();
+            if !publication_is_owned
+                || !packed_is_current
                 || !packed_namespace_is_clear
                 || !self.hierarchy_is_current(authority)
             {
-                if self.published_path_still_owned() {
+                if publication_is_owned {
                     let _ = unlinkat(&self.parent, &self.leaf, AtFlags::empty());
                 }
                 return Err(LocalGitFailure::Operation);
@@ -228,19 +230,24 @@ impl ReferenceLock {
             .is_ok_and(|current| current == expected_packed);
         let packed_namespace_is_clear = packed_reference_namespace_conflicts(authority, &self.name)
             .is_ok_and(|conflicts| !conflicts);
-        if displaced.as_ref() != Ok(expected)
+        let displaced_is_current = displaced.as_ref() == Ok(expected);
+        let publication_is_owned = self.published_path_still_owned();
+        if !displaced_is_current
+            || !publication_is_owned
             || !packed_is_current
             || !packed_namespace_is_clear
             || !self.hierarchy_is_current(authority)
         {
-            renameat_with(
-                &self.parent,
-                &self.lock_name,
-                &self.parent,
-                &self.leaf,
-                RenameFlags::EXCHANGE,
-            )
-            .map_err(|_| LocalGitFailure::Operation)?;
+            if displaced_is_current && publication_is_owned {
+                renameat_with(
+                    &self.parent,
+                    &self.lock_name,
+                    &self.parent,
+                    &self.leaf,
+                    RenameFlags::EXCHANGE,
+                )
+                .map_err(|_| LocalGitFailure::Operation)?;
+            }
             return Err(LocalGitFailure::Operation);
         }
         if unlinkat(&self.parent, &self.lock_name, AtFlags::empty()).is_err() {
