@@ -8,6 +8,7 @@ use std::{
         unix::ffi::OsStringExt,
         unix::fs::symlink,
     },
+    path::Path,
 };
 
 use git2::{ObjectFormat, ObjectType};
@@ -846,6 +847,30 @@ fn authority_operation_rejects_live_config_bytes_changed_after_open() {
 
     assert_eq!(failure, LocalGitFailure::Repository);
     assert!(!lock_path.exists());
+}
+
+#[test]
+fn authority_operation_rejects_an_administrative_symlink_created_after_open() {
+    let fixture = Fixture::new();
+    let administrative_symlink = fixture.root().join(".git/hooks/escape");
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    symlink("/outside", &administrative_symlink).expect("late administrative symlink constructs");
+
+    let failure = ReferenceLock::acquire(&authority, "refs/heads/topic")
+        .err()
+        .expect("late administrative symlink rejects authority operation");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(!lock_path.exists());
+    assert_eq!(
+        fs::read_link(administrative_symlink).expect("administrative symlink remains"),
+        Path::new("/outside")
+    );
 }
 
 #[test]

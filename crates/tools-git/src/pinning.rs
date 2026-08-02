@@ -29,7 +29,7 @@ use crate::descriptor::{
 use crate::failure::LocalGitFailure;
 use crate::layout::{
     object_id_bytes, open_repository_config_at, open_repository_head_at, open_repository_refs_at,
-    parse_full_object_id_bytes, validate_live_shallow,
+    parse_full_object_id_bytes, reject_administrative_symlinks, validate_live_shallow,
 };
 use crate::limits::{
     MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
@@ -377,6 +377,9 @@ fn validate_supported_layout(
     validate_head_at(git_directory, object_format, head_identity, head_bytes)?;
     validate_directory_binding(git_directory, OsStr::new("refs"), refs)?;
     validate_directory_binding(root, OsStr::new(".git"), git_directory)?;
+    let administrative_directory = dup(git_directory).map_err(|_| LocalGitFailure::Repository)?;
+    reject_administrative_symlinks(&administrative_directory, object_format)
+        .map_err(|_| LocalGitFailure::Repository)?;
     validate_root_path_binding(root_path, root)
 }
 
