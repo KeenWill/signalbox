@@ -1368,7 +1368,12 @@ fn source_fits_single_shot_import(
     match encode_client_line(&frame) {
         Ok(_) => Ok(true),
         Err(FrameEncodeError::OversizedFrame) => Ok(false),
-        Err(error) => Err(ClientError::Encode(error)),
+        Err(FrameEncodeError::Validation(error)) => {
+            Err(ClientError::Encode(FrameEncodeError::Validation(error)))
+        }
+        Err(FrameEncodeError::Json(error)) => {
+            Err(ClientError::Encode(FrameEncodeError::Json(error)))
+        }
     }
 }
 
