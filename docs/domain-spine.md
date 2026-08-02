@@ -850,8 +850,6 @@ pub enum DelegationOutcomeReason {
     ChildExecutionFailed,
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
-    BackgroundRelationship,
-    RelationshipPolicyContinue,
 }
 pub enum DelegationOutcome {
     ResultReturned { content: DelegationContent, reason: DelegationOutcomeReason, provenance: DelegationProvenance },
@@ -874,9 +872,13 @@ impl DelegationEvent {
     // accessors: ordinal(), message(), outcome()
 }
 pub enum DelegationLifecycle { Active, Terminal }
-pub struct ChildWait { /* private spawning request + child */ }
+pub struct ChildWait { /* private awaiting request + spawning request + child */ }
 impl ChildWait {
-    // accessors: spawning_request(), child()
+    // accessors: awaiting_request(), spawning_request(), child()
+}
+pub struct DelegationWait { /* private */ }
+impl DelegationWait {
+    // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }
 pub struct SessionDelegation { /* private */ }
 impl SessionDelegation {
@@ -884,8 +886,9 @@ impl SessionDelegation {
         spawning_request: &ToolRequest,
         child: SessionId,
         policy: ChildRelationshipPolicy,
-        wait_mode: DelegationWaitMode,
     ) -> Result<Self, DelegationTransitionError>;
+    pub fn register_wait(&self, awaiting_request: &ToolRequest, mode: DelegationWaitMode)
+        -> Result<DelegationWait, DelegationTransitionError>;
     pub fn deliver_message(
         self,
         id: DelegationMessageId,
@@ -894,8 +897,8 @@ impl SessionDelegation {
     ) -> Result<Self, DelegationTransitionError>;
     pub fn record_outcome(self, outcome: DelegationOutcome)
         -> Result<Self, DelegationTransitionError>;
-    // accessors: spawning_request(), parent(), child(), policy(), wait_mode(), lifecycle(),
-    //   events(), child_creation_provenance(), foreground_wait()
+    // accessors: spawning_request(), parent(), child(), policy(), lifecycle(),
+    //   events(), child_creation_provenance()
 }
 pub enum DelegationTransitionFailure {
     SameSession,
@@ -8006,7 +8009,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
-| domain: session_delegation                         | 18                   |
+| domain: session_delegation                         | 19                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8034,7 +8037,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **618 (+7 free fn)** |
+| **signalbox-domain total**                         | **619 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
