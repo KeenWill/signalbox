@@ -209,6 +209,7 @@ fn read_packed_references_with_hook<AfterRead: FnOnce()>(
             .ok_or(LocalGitFailure::Operation)?;
         if existing.is_empty()
             || !existing.starts_with(b"refs/")
+            || std::str::from_utf8(existing).is_err()
             || !valid_reference_name(existing)
             || !names.insert(existing.to_vec())
             || (sorted

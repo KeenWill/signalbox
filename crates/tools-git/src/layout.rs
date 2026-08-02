@@ -237,6 +237,10 @@ fn reject_administrative_symlinks_for_format(
             if inspected > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
+            if directory_kind == AdministrativeDirectoryKind::References && name.to_str().is_none()
+            {
+                return Err(LocalGitToolsConstructionError::Repository);
+            }
             match openat(
                 &current,
                 name,
@@ -300,6 +304,40 @@ fn reject_administrative_symlinks_for_format(
             {
                 validate_shallow_file_at(&current, name, &mut file, object_format)?;
             }
+            if directory_kind == AdministrativeDirectoryKind::Root
+                && name == OsStr::new("packed-refs")
+            {
+                validate_packed_reference_name_encoding(&mut file)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_packed_reference_name_encoding(
+    file: &mut fs::File,
+) -> Result<(), LocalGitToolsConstructionError> {
+    let mut bytes = Vec::with_capacity(MAX_PACKED_REFS_BYTES);
+    Read::by_ref(file)
+        .take((MAX_PACKED_REFS_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    if bytes.len() > MAX_PACKED_REFS_BYTES {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if line.is_empty() || line.starts_with(b"#") || line.starts_with(b"^") {
+            continue;
+        }
+        let separator = line
+            .iter()
+            .position(|byte| *byte == b' ')
+            .ok_or(LocalGitToolsConstructionError::Repository)?;
+        let name = line
+            .get(separator + 1..)
+            .ok_or(LocalGitToolsConstructionError::Repository)?;
+        if std::str::from_utf8(name).is_err() {
+            return Err(LocalGitToolsConstructionError::Repository);
         }
     }
     Ok(())

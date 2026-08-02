@@ -1,10 +1,11 @@
 //! Repository-layout scan properties.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     os::{
         fd::{AsFd, OwnedFd},
+        unix::ffi::OsStringExt,
         unix::fs::symlink,
     },
 };
@@ -78,6 +79,23 @@ fn repository_layout_rejects_a_non_utf8_symbolic_head() {
     let failure =
         validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
             .expect_err("non-UTF-8 symbolic HEAD rejects admission");
+
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn repository_layout_rejects_a_non_utf8_loose_reference_name() {
+    let fixture = Fixture::new();
+    let name = OsString::from_vec(b"nonutf-\xff".to_vec());
+    fs::write(
+        fixture.root().join(".git/refs/heads").join(name),
+        format!("{}\n", fixture.initial),
+    )
+    .expect("non-UTF-8 loose reference writes");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("non-UTF-8 loose reference rejects admission");
 
     assert_repository_construction_failure(failure);
 }
@@ -390,6 +408,27 @@ fn object_capture_rejects_a_pack_file_rewritten_after_scan() {
     })
     .err()
     .expect("rewritten pack file rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_capture_rejects_an_alternate_added_after_final_leaf_validation() {
+    let fixture = Fixture::new();
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let info = fixture.root().join(".git/objects/info");
+    fs::create_dir_all(&info).expect("object info directory exists");
+
+    let failure = PinnedObjectDatabase::capture_with_post_bindings_test_hook(&authority, || {
+        fs::write(info.join("alternates"), b"../outside\n")
+            .expect("racing alternate writes after final leaf validation");
+    })
+    .err()
+    .expect("late object alternate rejects capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }

@@ -35,6 +35,27 @@ fn index_lock_acquisition_failure_removes_the_created_lock() {
 }
 
 #[test]
+fn repository_index_acquisition_rejects_a_head_transition_after_snapshot() {
+    let fixture = Fixture::new();
+    let head_path = fixture.root().join(".git/HEAD");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = IndexLock::acquire_for_repository_with_test_hook(&authority, || {
+        fs::write(&head_path, b"ref: refs/heads/racing\n").expect("racing HEAD writes");
+    })
+    .err()
+    .expect("HEAD transition rejects repository index acquisition");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(!lock_path.exists());
+}
+
+#[test]
 fn index_lock_private_snapshot_failure_removes_the_created_lock() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");

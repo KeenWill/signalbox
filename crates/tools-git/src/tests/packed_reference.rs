@@ -61,6 +61,24 @@ fn abbreviated_packed_reference_object_id_is_rejected() {
 }
 
 #[test]
+fn repository_layout_rejects_a_non_utf8_packed_reference_name() {
+    let fixture = Fixture::new();
+    let mut packed = format!("{} refs/heads/", fixture.initial).into_bytes();
+    packed.extend_from_slice(b"nonutf-\xff\n");
+    fs::write(fixture.root().join(".git/packed-refs"), packed)
+        .expect("non-UTF-8 packed reference writes");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("non-UTF-8 packed reference rejects admission");
+
+    assert!(matches!(
+        failure,
+        crate::construction::LocalGitToolsConstructionError::Repository
+    ));
+}
+
+#[test]
 fn abbreviated_peeled_packed_reference_object_id_is_rejected() {
     let fixture = Fixture::new();
     let name = "refs/heads/peeled";

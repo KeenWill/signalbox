@@ -480,12 +480,20 @@ fn config_snapshot_bytes(file: &fs::File) -> Result<Vec<u8>, LocalGitFailure> {
 
 impl PinnedObjectDatabase {
     pub(super) fn capture(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
-        Self::capture_with_hook(authority, || {})
+        Self::capture_with_hooks(authority, || {}, || {})
     }
 
     fn capture_with_hook<AfterScan: FnOnce()>(
         authority: &PinnedRepository,
         after_scan: AfterScan,
+    ) -> Result<Self, LocalGitFailure> {
+        Self::capture_with_hooks(authority, after_scan, || {})
+    }
+
+    fn capture_with_hooks<AfterScan: FnOnce(), AfterFinalBindings: FnOnce()>(
+        authority: &PinnedRepository,
+        after_scan: AfterScan,
+        after_final_bindings: AfterFinalBindings,
     ) -> Result<Self, LocalGitFailure> {
         authority.validate_object_layout()?;
         let objects = openat(
@@ -595,6 +603,8 @@ impl PinnedObjectDatabase {
             &objects,
         )?;
         validate_object_child_bindings(&objects, &pinned_children)?;
+        after_final_bindings();
+        authority.validate_object_layout()?;
         Ok(snapshot)
     }
 
@@ -604,6 +614,14 @@ impl PinnedObjectDatabase {
         after_scan: AfterScan,
     ) -> Result<Self, LocalGitFailure> {
         Self::capture_with_hook(authority, after_scan)
+    }
+
+    #[cfg(test)]
+    pub(super) fn capture_with_post_bindings_test_hook<AfterFinalBindings: FnOnce()>(
+        authority: &PinnedRepository,
+        after_final_bindings: AfterFinalBindings,
+    ) -> Result<Self, LocalGitFailure> {
+        Self::capture_with_hooks(authority, || {}, after_final_bindings)
     }
 
     pub(super) fn add_to(&self, object_database: &Odb<'_>) -> Result<(), LocalGitFailure> {

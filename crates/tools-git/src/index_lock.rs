@@ -84,6 +84,13 @@ impl IndexLock {
     pub(super) fn acquire_for_repository(
         authority: &PinnedRepository,
     ) -> Result<(Self, Index), LocalGitFailure> {
+        Self::acquire_for_repository_with_hook(authority, || {})
+    }
+
+    fn acquire_for_repository_with_hook<AfterSnapshot: FnOnce()>(
+        authority: &PinnedRepository,
+        after_snapshot: AfterSnapshot,
+    ) -> Result<(Self, Index), LocalGitFailure> {
         authority.validate_supported_layout()?;
         let operation_guard = authority.operation_guard()?;
         let (mut lock, index) = Self::acquire_at_with_private_directory_and_mode(
@@ -95,9 +102,18 @@ impl IndexLock {
             tempfile::tempdir,
             || {},
         )?;
-        authority.validate_supported_layout()?;
+        after_snapshot();
+        operation_guard.validate_supported_layout()?;
         lock.operation_guard = Some(operation_guard);
         Ok((lock, index))
+    }
+
+    #[cfg(test)]
+    pub(super) fn acquire_for_repository_with_test_hook<AfterSnapshot: FnOnce()>(
+        authority: &PinnedRepository,
+        after_snapshot: AfterSnapshot,
+    ) -> Result<(Self, Index), LocalGitFailure> {
+        Self::acquire_for_repository_with_hook(authority, after_snapshot)
     }
 
     #[cfg(test)]

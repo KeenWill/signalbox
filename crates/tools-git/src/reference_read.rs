@@ -46,14 +46,19 @@ pub(super) fn read_pinned_reference(
     authority: &PinnedRepository,
     name: &str,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
-    read_pinned_reference_with_hooks(authority, name, || {}, || {})
+    read_pinned_reference_with_hooks(authority, name, || {}, || {}, || {})
 }
 
-fn read_pinned_reference_with_hooks<AfterMetadata: FnOnce(), AfterFirstRead: FnOnce()>(
+fn read_pinned_reference_with_hooks<
+    AfterMetadata: FnOnce(),
+    AfterFirstRead: FnOnce(),
+    AfterConfirmation: FnOnce(),
+>(
     authority: &PinnedRepository,
     name: &str,
     after_metadata: AfterMetadata,
     after_first_read: AfterFirstRead,
+    after_confirmation: AfterConfirmation,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
     validate_reference_name(name)?;
     let bound = match open_reference_parent(authority, name, ReferenceParentMode::ExistingOnly) {
@@ -86,6 +91,10 @@ fn read_pinned_reference_with_hooks<AfterMetadata: FnOnce(), AfterFirstRead: FnO
     }
     let confirmed = read_reference_leaf(&bound.directory, &bound.leaf, authority, name)?;
     if confirmed != value {
+        return Err(LocalGitFailure::Operation);
+    }
+    after_confirmation();
+    if !bound.hierarchy_is_current(authority) {
         return Err(LocalGitFailure::Operation);
     }
     Ok(value)
@@ -236,7 +245,7 @@ pub(super) fn read_pinned_reference_with_test_hook<Hook: FnOnce()>(
     name: &str,
     after_metadata: Hook,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
-    read_pinned_reference_with_hooks(authority, name, after_metadata, || {})
+    read_pinned_reference_with_hooks(authority, name, after_metadata, || {}, || {})
 }
 
 #[cfg(test)]
@@ -245,7 +254,16 @@ pub(super) fn read_pinned_reference_with_post_read_test_hook<Hook: FnOnce()>(
     name: &str,
     after_first_read: Hook,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
-    read_pinned_reference_with_hooks(authority, name, || {}, after_first_read)
+    read_pinned_reference_with_hooks(authority, name, || {}, after_first_read, || {})
+}
+
+#[cfg(test)]
+pub(super) fn read_pinned_reference_with_post_confirmation_test_hook<Hook: FnOnce()>(
+    authority: &PinnedRepository,
+    name: &str,
+    after_confirmation: Hook,
+) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    read_pinned_reference_with_hooks(authority, name, || {}, || {}, after_confirmation)
 }
 
 pub(super) fn resolve_pinned_reference_chain(
@@ -260,7 +278,21 @@ pub(super) fn resolve_pinned_reference_chain_from(
     start: &str,
     locks: Option<&[ReferenceLock]>,
 ) -> Result<(Vec<String>, Option<git2::Oid>), LocalGitFailure> {
+    resolve_pinned_reference_chain_from_with_hook(authority, start, locks, || {})
+}
+
+fn resolve_pinned_reference_chain_from_with_hook<AfterFirstRead: FnOnce()>(
+    authority: &PinnedRepository,
+    start: &str,
+    locks: Option<&[ReferenceLock]>,
+    after_first_read: AfterFirstRead,
+) -> Result<(Vec<String>, Option<git2::Oid>), LocalGitFailure> {
     const MAX_SYMBOLIC_REFERENCE_DEPTH: usize = 16;
+    let operation_guard = locks
+        .is_none()
+        .then(|| authority.operation_guard())
+        .transpose()?;
+    let mut after_first_read = Some(after_first_read);
     let mut names = Vec::new();
     let mut current = start.to_owned();
     loop {
@@ -275,6 +307,12 @@ pub(super) fn resolve_pinned_reference_chain_from(
                 .read(authority)?,
             None => read_pinned_reference(authority, &current)?,
         };
+        if names.is_empty() {
+            after_first_read.take().ok_or(LocalGitFailure::Operation)?();
+        }
+        if let Some(operation_guard) = &operation_guard {
+            operation_guard.validate_supported_layout()?;
+        }
         names.push(current);
         match value {
             PinnedReferenceValue::Direct(oid) => return Ok((names, Some(oid))),
@@ -282,4 +320,12 @@ pub(super) fn resolve_pinned_reference_chain_from(
             PinnedReferenceValue::Missing => return Ok((names, None)),
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn resolve_pinned_reference_chain_with_test_hook<AfterFirstRead: FnOnce()>(
+    authority: &PinnedRepository,
+    after_first_read: AfterFirstRead,
+) -> Result<(Vec<String>, Option<git2::Oid>), LocalGitFailure> {
+    resolve_pinned_reference_chain_from_with_hook(authority, "HEAD", None, after_first_read)
 }

@@ -14,8 +14,9 @@ use crate::reference_lock::{
     open_reference_parent,
 };
 use crate::reference_read::{
+    read_pinned_reference_with_post_confirmation_test_hook,
     read_pinned_reference_with_post_read_test_hook, read_pinned_reference_with_test_hook,
-    read_reference_leaf_with_test_hook,
+    read_reference_leaf_with_test_hook, resolve_pinned_reference_chain_with_test_hook,
 };
 use crate::tests::support::{
     Fixture, Sha256Fixture, real_git_contended_lock, real_git_contended_reference,
@@ -1190,6 +1191,48 @@ fn loose_reference_rejects_a_parent_path_replacement_after_open() {
         fs::read_to_string(parent_path.join("topic")).expect("replacement reference reads"),
         actor_target
     );
+}
+
+#[test]
+fn loose_reference_rejects_a_parent_replaced_after_confirmation() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/parent/topic";
+    let parent_path = fixture.root().join(".git/refs/heads/parent");
+    let retired_path = fixture.root().join(".git/refs/heads/parent.retired");
+    let reference_path = parent_path.join("topic");
+    fs::create_dir(&parent_path).expect("fixture reference parent constructs");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = read_pinned_reference_with_post_confirmation_test_hook(&authority, name, || {
+        fs::rename(&parent_path, &retired_path).expect("confirmed parent retires");
+        fs::create_dir(&parent_path).expect("replacement parent constructs");
+    })
+    .expect_err("post-confirmation hierarchy replacement rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn unlocked_reference_chain_rejects_a_head_transition_after_its_first_read() {
+    let fixture = Fixture::new();
+    let head_path = fixture.root().join(".git/HEAD");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = resolve_pinned_reference_chain_with_test_hook(&authority, || {
+        fs::write(&head_path, b"ref: refs/heads/racing\n").expect("racing HEAD writes");
+    })
+    .expect_err("HEAD transition rejects unlocked reference-chain resolution");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
 }
 
 #[test]
