@@ -494,7 +494,7 @@ public enum SignalboxEventNormalizer {
     }
 
     private static func formattedPlanReadArguments(_ json: String) -> String? {
-        guard let value = decode(PlanReadArguments.self, from: json) else {
+        guard let value = decodePlanReadArguments(json) else {
             return nil
         }
         return [
@@ -531,6 +531,24 @@ public enum SignalboxEventNormalizer {
         ] + history + [
             "History truncated: \(yesNo(value.historyTruncated))"
         ]).joined(separator: "\n")
+    }
+
+    private static func decodePlanReadArguments(_ json: String) -> PlanReadArguments? {
+        guard
+            let payload = decode(SignalboxJSONValue.self, from: json),
+            case .object(let fields) = payload,
+            Set(fields.keys).isSubset(of: ["after_entry_id", "include_history"]),
+            let value = decode(PlanReadArguments.self, from: json),
+            value.afterEntryID.map({ $0 > 0 }) ?? true
+        else {
+            return nil
+        }
+        if let includeHistory = fields["include_history"],
+            case .bool = includeHistory
+        {
+            return value
+        }
+        return fields["include_history"] == nil ? value : nil
     }
 
     private static func formattedPlanWriteArguments(_ json: String) -> String? {

@@ -5034,6 +5034,7 @@ private enum ProcessProjectionFixture {
   static let planReviseRequestID = "ffffffff-5555-4555-8555-555555555554"
   static let planStatusRequestID = "ffffffff-5555-4555-8555-555555555555"
   static let malformedPlanRequestID = "ffffffff-5555-4555-8555-555555555556"
+  static let malformedPlanReadRequestID = "ffffffff-5555-4555-8555-555555555557"
   static let planReadArguments = #"{"include_history":true}"#
   static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress","dependencies":[2],"readiness":"waiting"}],"next_after_entry_id":null,"plan_truncated":false,"history":[],"history_truncated":false}"#
   static let planCreateArguments = #"{"kind":"create","text":"Draft protocol"}"#
@@ -5045,8 +5046,10 @@ private enum ProcessProjectionFixture {
   static let planWriteArguments = #"{"kind":"depends_on","entry_id":1,"dependency_id":2}"#
   static let planWriteOutput = #"{"event":{"ordinal":4,"kind":"depends_on","entry_id":1,"dependency_id":2,"provenance":{}}}"#
   static let malformedPlanArguments = #"{"kind":"create","text":"Draft protocol","unexpected":true}"#
+  static let malformedPlanReadArguments = #"{"after_entry_id":0,"unexpected":true}"#
   static let planDisplayNames = [
     "Plan read", "Plan update", "Plan update", "Plan update", "Plan update", "Plan update",
+    "Plan read",
   ]
   static let planArgumentPresentations = [
     "After entry: Beginning\nInclude history: Yes",
@@ -5055,6 +5058,7 @@ private enum ProcessProjectionFixture {
     "Set entry #1 to Completed",
     "Make entry #1 depend on entry #2",
     malformedPlanArguments,
+    malformedPlanReadArguments,
   ]
   static let planOutputPresentations = [
     "Entries\n#1 [In progress, Waiting] Audit protocol\nDependencies: #2\nNext entry: None\nPlan truncated: No\nHistory\nNone\nHistory truncated: No",
@@ -5062,6 +5066,7 @@ private enum ProcessProjectionFixture {
     "Event #2: Revise entry #1: Audit protocol",
     "Event #3: Set entry #1 to Completed",
     "Event #4: Make entry #1 depend on entry #2",
+    "No output yet",
     "No output yet",
   ]
   static let firstPendingID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
@@ -6538,6 +6543,18 @@ private enum ProcessProjectionFixture {
             toolRequestID: SignalboxToolInvocationID(rawValue: malformedPlanRequestID),
             toolName: "plan_write",
             arguments: malformedPlanArguments,
+            output: nil,
+            status: .proposed
+          )
+        )
+      ),
+      SignalboxStoredEvent(
+        eventID: SignalboxEventID(rawValue: 7),
+        event: .processTool(
+          SignalboxProcessToolEvent(
+            toolRequestID: SignalboxToolInvocationID(rawValue: malformedPlanReadRequestID),
+            toolName: "plan_read",
+            arguments: malformedPlanReadArguments,
             output: nil,
             status: .proposed
           )

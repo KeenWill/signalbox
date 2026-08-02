@@ -1798,7 +1798,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
               cursor: followed.cursor
             )
           }
-        default:
+        case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+          .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
+          .turnRefused, .turnCancelled, .turnReconciliationRequired,
+          .turnToolReconciliationRequired, .unknown:
           break
         }
         applyLiveEvent(followed)
