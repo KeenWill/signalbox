@@ -27,15 +27,17 @@ lock inventory were verified against PR #314
 was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified against this PR (`agent/plan-tool`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`). This page covers the Postgres
-representation in `crates/persistence` (source and migrations), migration
-discipline, durable command storage and replay equality, the fail-closed
-reconstitution boundary, the lock protocol, pending-steering durable state, the
-corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
-Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision,
+posture, and outbox storage were verified through this PR
+(`agent/approval-judge-storage`). This page covers the Postgres representation
+in `crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
