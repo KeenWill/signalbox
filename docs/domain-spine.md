@@ -853,13 +853,19 @@ pub struct ParentTerminationAuthority { /* private exact applied command authori
 impl ParentTerminationAuthority {
     // accessors: parent(), turn(), command(), scope(), kind()
 }
-pub struct DelegationCascadeDisposition { /* private relationship identity + outcome */ }
-impl DelegationCascadeDisposition {
-    // accessors: spawning_request(), parent(), child(), outcome()
+pub enum DelegationCascadeSource {
+    Root,
+    ParentDisposition { spawning_request: ToolRequestId },
 }
-pub struct DelegationCascadeEvaluation { /* private ordered dispositions */ }
+pub struct DelegationCascadeActionPlan { /* private unproven edge action + root origin */ }
+impl DelegationCascadeActionPlan {
+    // accessors: spawning_request(), parent(), child(), policy(),
+    // spawning_provenance(), source(), effective_parent_kind(), action(),
+    // origin_authority()
+}
+pub struct DelegationCascadeEvaluation { /* private ordered unproven action plans */ }
 impl DelegationCascadeEvaluation {
-    pub const fn dispositions(&self) -> &[DelegationCascadeDisposition];
+    pub const fn action_plans(&self) -> &[DelegationCascadeActionPlan];
 }
 pub enum DelegationCascadeEvaluationFailure {
     AuthorityScopeMismatch,
@@ -876,9 +882,8 @@ pub enum DelegationCascadeEvaluationFailure {
     UnreachableRelationship {
         spawning_request: ToolRequestId,
     },
-    RelationshipTransition {
+    MissingSpawnProvenance {
         spawning_request: ToolRequestId,
-        failure: DelegationTransitionFailure,
     },
 }
 pub fn evaluate_delegation_cascade(
@@ -8070,7 +8075,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
-| domain: session_delegation                         | 27                   |
+| domain: session_delegation                         | 28                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8098,7 +8103,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **626 (+8 free fn)** |
+| **signalbox-domain total**                         | **627 (+8 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

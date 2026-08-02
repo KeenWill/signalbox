@@ -112,20 +112,34 @@ impl ParentTerminationAuthority {
     }
 }
 
-/// One policy-derived disposition for an evaluated relationship edge.
+/// Unproven causal source for one cascade action plan.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DelegationCascadeSource {
+    /// The exact applied root parent termination directly selects this edge.
+    Root,
+    /// A preceding planned child disposition would make that child this edge's parent.
+    ParentDisposition { spawning_request: ToolRequestId },
+}
+
+/// One unproven policy-derived action plan for an evaluated relationship edge.
 ///
-/// The disposition retains the relationship identity separately from its
-/// outcome so a persistence caller can correlate an ordered plan without
-/// inferring an edge from provenance.
+/// This value carries the exact root authority only as cascade origin. It does
+/// not claim that scheduling has applied the planned action to this edge; the
+/// scheduling/persistence boundary must later seal that transition's evidence.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DelegationCascadeDisposition {
+pub struct DelegationCascadeActionPlan {
     spawning_request: ToolRequestId,
     parent: SessionId,
     child: SessionId,
-    outcome: DelegationOutcome,
+    policy: ChildRelationshipPolicy,
+    spawning_provenance: DelegationProvenance,
+    source: DelegationCascadeSource,
+    effective_parent_kind: ParentTerminationKind,
+    action: BoundChildAction,
+    origin_authority: ParentTerminationAuthority,
 }
 
-impl DelegationCascadeDisposition {
+impl DelegationCascadeActionPlan {
     pub const fn spawning_request(&self) -> ToolRequestId {
         self.spawning_request
     }
@@ -138,20 +152,40 @@ impl DelegationCascadeDisposition {
         self.child
     }
 
-    pub const fn outcome(&self) -> &DelegationOutcome {
-        &self.outcome
+    pub const fn policy(&self) -> ChildRelationshipPolicy {
+        self.policy
+    }
+
+    pub const fn spawning_provenance(&self) -> DelegationProvenance {
+        self.spawning_provenance
+    }
+
+    pub const fn source(&self) -> DelegationCascadeSource {
+        self.source
+    }
+
+    pub const fn effective_parent_kind(&self) -> ParentTerminationKind {
+        self.effective_parent_kind
+    }
+
+    pub const fn action(&self) -> BoundChildAction {
+        self.action
+    }
+
+    pub const fn origin_authority(&self) -> ParentTerminationAuthority {
+        self.origin_authority
     }
 }
 
 /// Complete deterministic result of evaluating a parent termination cascade.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DelegationCascadeEvaluation {
-    dispositions: Box<[DelegationCascadeDisposition]>,
+    action_plans: Box<[DelegationCascadeActionPlan]>,
 }
 
 impl DelegationCascadeEvaluation {
-    pub const fn dispositions(&self) -> &[DelegationCascadeDisposition] {
-        &self.dispositions
+    pub const fn action_plans(&self) -> &[DelegationCascadeActionPlan] {
+        &self.action_plans
     }
 }
 
@@ -172,9 +206,8 @@ pub enum DelegationCascadeEvaluationFailure {
     UnreachableRelationship {
         spawning_request: ToolRequestId,
     },
-    RelationshipTransition {
+    MissingSpawnProvenance {
         spawning_request: ToolRequestId,
-        failure: DelegationTransitionFailure,
     },
 }
 
@@ -826,19 +859,14 @@ impl SessionDelegation {
     }
 }
 
-#[derive(Clone, Copy)]
-enum PlannedCascadeAction {
-    ContinueRunning,
-    Stop,
-    Cancel,
-}
-
 /// Evaluates one parent termination against an already locked relationship inventory.
 ///
 /// The ordered reachable relationships must contain the complete structurally
 /// reachable tree in the caller's stable spawning-request order. This function
-/// does not acquire or imply locks. It returns dispositions in that supplied
-/// order, omitting only descendants below an explicitly pruned relationship.
+/// does not acquire or imply locks. It returns unproven action plans in that
+/// supplied order, omitting only descendants below an explicitly pruned
+/// relationship. Only the input authority is sealed; no per-edge applied
+/// authority or outcome is fabricated here.
 pub fn evaluate_delegation_cascade(
     ordered_reachable_relationships: &[SessionDelegation],
     scope: DescendantTerminationScope,
@@ -849,7 +877,7 @@ pub fn evaluate_delegation_cascade(
     }
     if scope == DescendantTerminationScope::ParentAlone {
         return Ok(DelegationCascadeEvaluation {
-            dispositions: Box::new([]),
+            action_plans: Box::new([]),
         });
     }
     validate_cascade_inventory_order(ordered_reachable_relationships)?;
@@ -861,25 +889,21 @@ pub fn evaluate_delegation_cascade(
         authority.parent(),
         authority.kind(),
     );
-    let mut dispositions = Vec::new();
+    let mut action_plans = Vec::new();
     for (relation, planned) in ordered_reachable_relationships.iter().zip(planned) {
-        let Some((parent_kind, action)) = planned else {
+        let Some((source, parent_kind, action)) = planned else {
             continue;
         };
-        let disposition = cascade_disposition(relation, authority, parent_kind, action)?;
-        relation
-            .clone()
-            .record_outcome(disposition.outcome().clone())
-            .map_err(
-                |error| DelegationCascadeEvaluationFailure::RelationshipTransition {
-                    spawning_request: relation.spawning_request(),
-                    failure: error.failure(),
-                },
-            )?;
-        dispositions.push(disposition);
+        action_plans.push(cascade_action_plan(
+            relation,
+            authority,
+            source,
+            parent_kind,
+            action,
+        )?);
     }
     Ok(DelegationCascadeEvaluation {
-        dispositions: dispositions.into_boxed_slice(),
+        action_plans: action_plans.into_boxed_slice(),
     })
 }
 
@@ -949,24 +973,41 @@ fn plan_cascade_actions(
     children_by_parent: &BTreeMap<SessionId, Vec<usize>>,
     root: SessionId,
     root_kind: ParentTerminationKind,
-) -> Vec<Option<(ParentTerminationKind, PlannedCascadeAction)>> {
+) -> Vec<
+    Option<(
+        DelegationCascadeSource,
+        ParentTerminationKind,
+        BoundChildAction,
+    )>,
+> {
     let mut planned = vec![None; relationships.len()];
-    let mut pending_parents = vec![(root, root_kind)];
-    while let Some((parent, parent_kind)) = pending_parents.pop() {
+    let mut pending_parents = vec![(root, root_kind, DelegationCascadeSource::Root)];
+    while let Some((parent, parent_kind, source)) = pending_parents.pop() {
         let Some(children) = children_by_parent.get(&parent) else {
             continue;
         };
         for index in children {
             let relation = &relationships[*index];
             let action = cascade_action(relation.policy(), parent_kind);
-            planned[*index] = Some((parent_kind, action));
+            planned[*index] = Some((source, parent_kind, action));
+            let child_source = DelegationCascadeSource::ParentDisposition {
+                spawning_request: relation.spawning_request(),
+            };
             match action {
-                PlannedCascadeAction::ContinueRunning => {}
-                PlannedCascadeAction::Stop => {
-                    pending_parents.push((relation.child(), ParentTerminationKind::Stopped));
+                BoundChildAction::KeepRunning => {}
+                BoundChildAction::Stop => {
+                    pending_parents.push((
+                        relation.child(),
+                        ParentTerminationKind::Stopped,
+                        child_source,
+                    ));
                 }
-                PlannedCascadeAction::Cancel => {
-                    pending_parents.push((relation.child(), ParentTerminationKind::Cancelled));
+                BoundChildAction::Cancel => {
+                    pending_parents.push((
+                        relation.child(),
+                        ParentTerminationKind::Cancelled,
+                        child_source,
+                    ));
                 }
             }
         }
@@ -977,8 +1018,8 @@ fn plan_cascade_actions(
 const fn cascade_action(
     policy: ChildRelationshipPolicy,
     parent_kind: ParentTerminationKind,
-) -> PlannedCascadeAction {
-    let action = match (policy, parent_kind) {
+) -> BoundChildAction {
+    match (policy, parent_kind) {
         (ChildRelationshipPolicy::Background, _) => BoundChildAction::KeepRunning,
         (
             ChildRelationshipPolicy::Bound {
@@ -993,59 +1034,37 @@ const fn cascade_action(
             },
             ParentTerminationKind::Cancelled,
         ) => on_parent_cancelled,
-    };
-    match action {
-        BoundChildAction::KeepRunning => PlannedCascadeAction::ContinueRunning,
-        BoundChildAction::Stop => PlannedCascadeAction::Stop,
-        BoundChildAction::Cancel => PlannedCascadeAction::Cancel,
     }
 }
 
-fn cascade_disposition(
+fn cascade_action_plan(
     relation: &SessionDelegation,
-    authority: ParentTerminationAuthority,
-    parent_kind: ParentTerminationKind,
-    action: PlannedCascadeAction,
-) -> Result<DelegationCascadeDisposition, DelegationCascadeEvaluationFailure> {
-    let spawning_turn = relation.events().first().and_then(|event| match event {
+    origin_authority: ParentTerminationAuthority,
+    source: DelegationCascadeSource,
+    effective_parent_kind: ParentTerminationKind,
+    action: BoundChildAction,
+) -> Result<DelegationCascadeActionPlan, DelegationCascadeEvaluationFailure> {
+    let spawning_provenance = relation.events().first().and_then(|event| match event {
         DelegationEvent::Spawned { provenance, .. } => {
-            provenance.tool_request().map(|(_, turn, _)| turn)
+            provenance.tool_request().map(|_| *provenance)
         }
         DelegationEvent::MessageDelivered { .. } | DelegationEvent::OutcomeRecorded { .. } => None,
     });
-    let Some(turn) = spawning_turn else {
-        return Err(DelegationCascadeEvaluationFailure::RelationshipTransition {
+    let Some(spawning_provenance) = spawning_provenance else {
+        return Err(DelegationCascadeEvaluationFailure::MissingSpawnProvenance {
             spawning_request: relation.spawning_request(),
-            failure: DelegationTransitionFailure::MissingSpawnEvent,
         });
     };
-    let reason = match parent_kind {
-        ParentTerminationKind::Stopped => DelegationOutcomeReason::ParentStopped {
-            scope: authority.scope(),
-        },
-        ParentTerminationKind::Cancelled => DelegationOutcomeReason::ParentCancelled {
-            scope: authority.scope(),
-        },
-    };
-    let provenance = DelegationProvenance::from_parent_termination(ParentTerminationAuthority {
-        parent: relation.parent(),
-        turn,
-        command: authority.command(),
-        kind: parent_kind,
-        scope: authority.scope(),
-    });
-    let outcome = match action {
-        PlannedCascadeAction::ContinueRunning => {
-            DelegationOutcome::ContinueRunning { reason, provenance }
-        }
-        PlannedCascadeAction::Stop => DelegationOutcome::ChildStopped { reason, provenance },
-        PlannedCascadeAction::Cancel => DelegationOutcome::ChildCancelled { reason, provenance },
-    };
-    Ok(DelegationCascadeDisposition {
+    Ok(DelegationCascadeActionPlan {
         spawning_request: relation.spawning_request(),
         parent: relation.parent(),
         child: relation.child(),
-        outcome,
+        policy: relation.policy(),
+        spawning_provenance,
+        source,
+        effective_parent_kind,
+        action,
+        origin_authority,
     })
 }
 
@@ -1845,7 +1864,7 @@ mod tests {
 
     /// S19 / INV-010: parent-alone evaluates no relationship and creates no descendant authority.
     #[test]
-    fn s19_inv010_cascade_parent_alone_returns_no_dispositions() {
+    fn s19_inv010_cascade_parent_alone_returns_no_action_plans() {
         let relationship = cascade_relationship(CascadeRelationshipFacts {
             spawning_request: 10,
             parent: 1,
@@ -1862,10 +1881,10 @@ mod tests {
         let evaluation = evaluate_delegation_cascade(&[relationship.relation], scope, authority)
             .expect("parent-alone has no descendant work");
 
-        assert_eq!(evaluation.dispositions(), []);
+        assert_eq!(evaluation.action_plans(), []);
     }
 
-    /// S19 / INV-010: every selected edge in a mixed tree receives one explicit typed disposition.
+    /// S19 / INV-010: every selected edge in a mixed tree receives one explicit action plan.
     #[test]
     fn s19_inv010_cascade_mixed_tree_has_no_silent_orphan_or_kill() {
         let background = cascade_relationship(CascadeRelationshipFacts {
@@ -1916,46 +1935,34 @@ mod tests {
 
         let evaluation = evaluate_delegation_cascade(&inventory, scope, authority)
             .expect("mixed tree evaluates");
-        let dispositions = evaluation.dispositions();
+        let plans = evaluation.action_plans();
 
-        assert_eq!(dispositions.len(), 4);
+        assert_eq!(plans.len(), inventory.len());
         assert_eq!(
-            dispositions[0].spawning_request(),
+            plans[0].spawning_request(),
             background.relation.spawning_request()
         );
         assert_eq!(
-            dispositions[1].spawning_request(),
+            plans[1].spawning_request(),
             keep_running.relation.spawning_request()
         );
         assert_eq!(
-            dispositions[2].spawning_request(),
+            plans[2].spawning_request(),
             stopped.relation.spawning_request()
         );
         assert_eq!(
-            dispositions[3].spawning_request(),
+            plans[3].spawning_request(),
             cancelled.relation.spawning_request()
         );
-        assert!(matches!(
-            dispositions[0].outcome(),
-            DelegationOutcome::ContinueRunning { .. }
-        ));
-        assert!(matches!(
-            dispositions[1].outcome(),
-            DelegationOutcome::ContinueRunning { .. }
-        ));
-        assert!(matches!(
-            dispositions[2].outcome(),
-            DelegationOutcome::ChildStopped { .. }
-        ));
-        assert!(matches!(
-            dispositions[3].outcome(),
-            DelegationOutcome::ChildCancelled { .. }
-        ));
+        assert_eq!(plans[0].action(), BoundChildAction::KeepRunning);
+        assert_eq!(plans[1].action(), BoundChildAction::KeepRunning);
+        assert_eq!(plans[2].action(), BoundChildAction::Stop);
+        assert_eq!(plans[3].action(), BoundChildAction::Cancel);
     }
 
     /// S19 / INV-010: surviving background and bound edges prune their descendants.
     #[test]
-    fn s19_inv010_cascade_background_survival_prunes_nested_work() {
+    fn s19_inv010_cascade_keep_running_edges_prune_nested_work() {
         let background = cascade_relationship(CascadeRelationshipFacts {
             spawning_request: 10,
             parent: 1,
@@ -2004,40 +2011,24 @@ mod tests {
 
         let evaluation = evaluate_delegation_cascade(&inventory, scope, authority)
             .expect("background and bound keep-running branches survive");
-        let dispositions = evaluation.dispositions();
+        let plans = evaluation.action_plans();
 
-        assert_eq!(dispositions.len(), 2);
+        assert_eq!(plans.len(), inventory[..2].len());
         assert_eq!(
-            dispositions[0].spawning_request(),
+            plans[0].spawning_request(),
             background.relation.spawning_request()
         );
         assert_eq!(
-            dispositions[1].spawning_request(),
+            plans[1].spawning_request(),
             bound_keep_running.relation.spawning_request()
         );
-        assert!(matches!(
-            dispositions[0].outcome(),
-            DelegationOutcome::ContinueRunning {
-                reason: DelegationOutcomeReason::ParentStopped {
-                    scope: DescendantTerminationScope::ParentAndDescendants
-                },
-                ..
-            }
-        ));
-        assert!(matches!(
-            dispositions[1].outcome(),
-            DelegationOutcome::ContinueRunning {
-                reason: DelegationOutcomeReason::ParentStopped {
-                    scope: DescendantTerminationScope::ParentAndDescendants
-                },
-                ..
-            }
-        ));
+        assert_eq!(plans[0].action(), BoundChildAction::KeepRunning);
+        assert_eq!(plans[1].action(), BoundChildAction::KeepRunning);
     }
 
-    /// S19 / INV-010: recursive evaluation switches to each selected stop or cancel policy arm.
+    /// S19 / INV-010: root stop to child cancel records the nested source chain.
     #[test]
-    fn s19_inv010_cascade_nested_propagation_uses_selected_policy_arms() {
+    fn s19_inv010_cascade_stop_to_cancel_tracks_nested_source_chain() {
         let cancelled_by_stop = cascade_relationship(CascadeRelationshipFacts {
             spawning_request: 20,
             parent: 1,
@@ -2069,48 +2060,53 @@ mod tests {
 
         let evaluation = evaluate_delegation_cascade(&inventory, scope, authority)
             .expect("nested bound cascade evaluates");
-        let dispositions = evaluation.dispositions();
+        let plans = evaluation.action_plans();
 
-        assert_eq!(dispositions.len(), 2);
-        assert!(matches!(
-            dispositions[0].outcome(),
-            DelegationOutcome::ChildStopped {
-                reason: DelegationOutcomeReason::ParentCancelled {
-                    scope: DescendantTerminationScope::ParentAndDescendants
-                },
-                ..
-            }
-        ));
-        assert!(matches!(
-            dispositions[1].outcome(),
-            DelegationOutcome::ChildCancelled {
-                reason: DelegationOutcomeReason::ParentStopped {
-                    scope: DescendantTerminationScope::ParentAndDescendants
-                },
-                ..
-            }
-        ));
+        assert_eq!(plans.len(), inventory.len());
+        assert_eq!(plans[0].action(), BoundChildAction::Stop);
+        assert_eq!(plans[1].action(), BoundChildAction::Cancel);
         assert_eq!(
-            outcome_provenance(dispositions[0].outcome()).parent_command(),
+            plans[0].source(),
+            DelegationCascadeSource::ParentDisposition {
+                spawning_request: cancelled_by_stop.relation.spawning_request()
+            }
+        );
+        assert_eq!(plans[1].source(), DelegationCascadeSource::Root);
+        assert_eq!(
+            plans[0].effective_parent_kind(),
+            ParentTerminationKind::Cancelled
+        );
+        assert_eq!(
+            plans[1].effective_parent_kind(),
+            ParentTerminationKind::Stopped
+        );
+        assert_ne!(
+            plans[0].effective_parent_kind(),
+            plans[0].origin_authority().kind()
+        );
+        assert_eq!(plans[0].origin_authority(), authority);
+        assert_eq!(plans[1].origin_authority(), authority);
+        assert_eq!(
+            plans[0].spawning_provenance().tool_request(),
             Some((
                 stopped_by_cancel.relation.parent(),
                 stopped_by_cancel.spawning_turn,
-                authority.command()
+                stopped_by_cancel.relation.spawning_request()
             ))
         );
         assert_eq!(
-            outcome_provenance(dispositions[1].outcome()).parent_command(),
+            plans[1].spawning_provenance().tool_request(),
             Some((
                 cancelled_by_stop.relation.parent(),
                 cancelled_by_stop.spawning_turn,
-                authority.command()
+                cancelled_by_stop.relation.spawning_request()
             ))
         );
     }
 
-    /// S19 / INV-010: parent stop yields stopped outcome, reason, and exact command provenance.
+    /// S19 / INV-010: a stop plan keeps root authority distinct from spawn provenance.
     #[test]
-    fn s19_inv010_cascade_stop_preserves_typed_reason_and_provenance() {
+    fn s19_inv010_cascade_stop_plan_does_not_fabricate_edge_authority() {
         let relationship = cascade_relationship(CascadeRelationshipFacts {
             spawning_request: 10,
             parent: 1,
@@ -2126,6 +2122,7 @@ mod tests {
             kind: ParentTerminationKind::Stopped,
             scope,
         });
+        assert_ne!(authority.turn(), relationship.spawning_turn);
 
         let evaluation = evaluate_delegation_cascade(
             std::slice::from_ref(&relationship.relation),
@@ -2133,32 +2130,29 @@ mod tests {
             authority,
         )
         .expect("stop cascade evaluates");
-        let disposition = &evaluation.dispositions()[0];
+        let plan = &evaluation.action_plans()[0];
 
-        assert_eq!(disposition.parent(), relationship.relation.parent());
-        assert_eq!(disposition.child(), relationship.relation.child());
-        assert!(matches!(
-            disposition.outcome(),
-            DelegationOutcome::ChildStopped {
-                reason: DelegationOutcomeReason::ParentStopped {
-                    scope: DescendantTerminationScope::ParentAndDescendants
-                },
-                ..
-            }
-        ));
+        assert_eq!(plan.parent(), relationship.relation.parent());
+        assert_eq!(plan.child(), relationship.relation.child());
+        assert_eq!(plan.policy(), relationship.relation.policy());
+        assert_eq!(plan.source(), DelegationCascadeSource::Root);
+        assert_eq!(plan.action(), BoundChildAction::Stop);
+        assert_eq!(plan.effective_parent_kind(), authority.kind());
+        assert_eq!(plan.origin_authority(), authority);
+        assert_eq!(plan.origin_authority().turn(), authority.turn());
         assert_eq!(
-            outcome_provenance(disposition.outcome()).parent_command(),
+            plan.spawning_provenance().tool_request(),
             Some((
                 relationship.relation.parent(),
                 relationship.spawning_turn,
-                authority.command()
+                relationship.relation.spawning_request()
             ))
         );
     }
 
-    /// S19 / INV-010: parent cancellation yields cancelled outcome, reason, and exact command provenance.
+    /// S19 / INV-010: parent cancellation selects a cancel plan without sealing an outcome.
     #[test]
-    fn s19_inv010_cascade_cancel_preserves_typed_reason_and_provenance() {
+    fn s19_inv010_cascade_cancel_returns_unproven_action_plan() {
         let relationship = cascade_relationship(CascadeRelationshipFacts {
             spawning_request: 10,
             parent: 1,
@@ -2181,28 +2175,23 @@ mod tests {
             authority,
         )
         .expect("cancel cascade evaluates");
-        let disposition = &evaluation.dispositions()[0];
+        let plan = &evaluation.action_plans()[0];
 
-        assert!(matches!(
-            disposition.outcome(),
-            DelegationOutcome::ChildCancelled {
-                reason: DelegationOutcomeReason::ParentCancelled {
-                    scope: DescendantTerminationScope::ParentAndDescendants
-                },
-                ..
-            }
-        ));
+        assert_eq!(plan.source(), DelegationCascadeSource::Root);
+        assert_eq!(plan.action(), BoundChildAction::Cancel);
+        assert_eq!(plan.effective_parent_kind(), authority.kind());
+        assert_eq!(plan.origin_authority(), authority);
         assert_eq!(
-            outcome_provenance(disposition.outcome()).parent_command(),
+            plan.spawning_provenance().tool_request(),
             Some((
                 relationship.relation.parent(),
                 relationship.spawning_turn,
-                authority.command()
+                relationship.relation.spawning_request()
             ))
         );
     }
 
-    /// S19 / INV-012: applying and reevaluating an equal cascade returns the same disposition.
+    /// S19 / INV-012: reevaluating equal inputs returns the same unproven plan.
     #[test]
     fn s19_inv012_cascade_equal_replay_is_idempotent() {
         let relationship = cascade_relationship(CascadeRelationshipFacts {
@@ -2226,13 +2215,13 @@ mod tests {
             authority,
         )
         .expect("first cascade evaluates");
-        let recorded = relationship
-            .relation
-            .record_outcome(first.dispositions()[0].outcome().clone())
-            .expect("first disposition records");
 
-        let replay = evaluate_delegation_cascade(&[recorded], scope, authority)
-            .expect("equal cascade replay evaluates");
+        let replay = evaluate_delegation_cascade(
+            std::slice::from_ref(&relationship.relation),
+            scope,
+            authority,
+        )
+        .expect("equal cascade replay evaluates");
 
         assert_eq!(replay, first, "equal cascade replay must remain stable");
     }

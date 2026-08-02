@@ -214,10 +214,10 @@ pub use session::{
 };
 pub use session_delegation::{
     BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRejection,
-    DelegationCascadeDisposition, DelegationCascadeEvaluation, DelegationCascadeEvaluationFailure,
-    DelegationContent, DelegationContentError, DelegationEvent, DelegationEventOrdinal,
-    DelegationLifecycle, DelegationMessage, DelegationMessageDirection, DelegationOutcome,
-    DelegationOutcomeReason, DelegationProvenance, DelegationTransitionError,
+    DelegationCascadeActionPlan, DelegationCascadeEvaluation, DelegationCascadeEvaluationFailure,
+    DelegationCascadeSource, DelegationContent, DelegationContentError, DelegationEvent,
+    DelegationEventOrdinal, DelegationLifecycle, DelegationMessage, DelegationMessageDirection,
+    DelegationOutcome, DelegationOutcomeReason, DelegationProvenance, DelegationTransitionError,
     DelegationTransitionFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
     ParentTerminationAuthority, ParentTerminationKind, SessionDelegation, TerminalChildTurn,
     evaluate_delegation_cascade,
