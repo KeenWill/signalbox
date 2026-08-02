@@ -2854,16 +2854,13 @@ mod aggregate_tests {
             message_request(RequestFixture::ParentMessage, relation.child(), "changed");
         let first_dispatch = dispatch_for(first.request());
         let conflicting_dispatch = dispatch_for(conflicting.request());
+        let conflicting_id = delegation_message_id(6);
         let (relation, _) = relation
             .deliver_message(first, delegation_message_id(5), &first_dispatch)
             .expect("first request authority appends");
         let error = relation
             .clone()
-            .deliver_message(
-                conflicting.clone(),
-                delegation_message_id(6),
-                &conflicting_dispatch,
-            )
+            .deliver_message(conflicting.clone(), conflicting_id, &conflicting_dispatch)
             .expect_err("one request authority cannot carry changed content");
 
         assert_eq!(
@@ -2873,7 +2870,7 @@ mod aggregate_tests {
         let (returned_relation, returned_request, returned_id) = rejected_message(error);
         assert_eq!(returned_relation, relation);
         assert_eq!(returned_request, conflicting);
-        assert_eq!(returned_id, delegation_message_id(6));
+        assert_eq!(returned_id, conflicting_id);
     }
 
     /// S18 / INV-010: returned child result terminalizes exactly once.
@@ -3132,7 +3129,7 @@ mod aggregate_tests {
         assert_eq!(recorded.kind(), DelegationOutcomeKind::ChildCancelled);
         assert_eq!(
             recorded.provenance().child_turn(),
-            Some((relation.child(), turn_id(7)))
+            Some((relation.child(), relation.child_turn()))
         );
     }
 
