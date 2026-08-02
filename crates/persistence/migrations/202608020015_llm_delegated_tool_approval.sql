@@ -41,6 +41,8 @@ CREATE TABLE tool_approval_judge_model_call (
     direct_model_selection_id uuid NOT NULL,
     resolved_provider_model_identity_id uuid NOT NULL,
     credential_reference text NOT NULL,
+    usage_input_includes_cache_tokens boolean NOT NULL DEFAULT false,
+    usage_provenance_kind text NOT NULL DEFAULT 'reported',
     state_kind text NOT NULL,
     terminal_disposition_kind text,
     recommendation_kind text,
@@ -89,6 +91,8 @@ CREATE TABLE tool_approval_judge_model_call (
         ),
     CONSTRAINT tool_approval_judge_call_credential_nonempty
         CHECK (char_length(credential_reference) > 0),
+    CONSTRAINT tool_approval_judge_call_usage_provenance_closed
+        CHECK (usage_provenance_kind IN ('reported', 'estimated')),
     CONSTRAINT tool_approval_judge_call_usage_u64_range
         CHECK (
             (
@@ -190,12 +194,14 @@ BEGIN
         OLD.model_call_id, OLD.request_id, OLD.session_id, OLD.turn_id,
         OLD.direct_model_selection_id,
         OLD.resolved_provider_model_identity_id,
-        OLD.credential_reference
+        OLD.credential_reference, OLD.usage_input_includes_cache_tokens,
+        OLD.usage_provenance_kind
     ) IS DISTINCT FROM ROW(
         NEW.model_call_id, NEW.request_id, NEW.session_id, NEW.turn_id,
         NEW.direct_model_selection_id,
         NEW.resolved_provider_model_identity_id,
-        NEW.credential_reference
+        NEW.credential_reference, NEW.usage_input_includes_cache_tokens,
+        NEW.usage_provenance_kind
     ) THEN
         RAISE EXCEPTION 'approval judge authorization facts are immutable'
             USING ERRCODE = '23514';

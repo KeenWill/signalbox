@@ -3,6 +3,9 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The credential billing-kind registry and versioned per-model rate catalog are
+verified against PR #389 (`agent/cost-accounting`).
+
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
 (`agent/credential-reference-total`). This includes signalboxd configuration
@@ -402,9 +405,14 @@ fail-closed:
   `version = 1` fails startup.
 - At least one `[[adapter_mappings]]` entry is required. Each entry gives one
   exact `model_family`, the build-provided `adapter`, and its non-secret
-  `credential_profile`. Duplicate families, an adapter this daemon build does
-  not provide, or a credential profile that adapter does not provide are typed
-  startup failures. Nothing is inferred from model spelling.
+  `credential_profile`. The profile must name one declared
+  `[[credential_profiles]]` entry. Duplicate families, an adapter this daemon
+  build does not provide, or an undeclared profile are typed startup failures.
+  Nothing is inferred from model spelling.
+- At least one `[[credential_profiles]]` entry is required. Each exact `name`
+  carries one closed `billing_kind`: `api_metered` or `subscription`. Duplicate
+  names, unknown kinds, and unknown fields are rejected. Billing kind belongs to
+  authentication, not to the adapter selected by a mapping.
 - Unknown fields are rejected at the root and inside every table. Why: a
   silently ignored key would let a typo change model meaning invisibly, so
   unrecognized content fails explicitly instead.
@@ -486,22 +494,36 @@ Each `[[models]]` entry defines one direct selection:
 - `max_output_tokens` — required positive `u32` output-token ceiling.
 - `context_window_tokens` — required positive `u32` context ceiling, not smaller
   than `max_output_tokens`.
+- the optional all-or-none rate set — `rate_version`,
+  `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
+  `cache_creation_input_usd_per_million_tokens`, and
+  `cache_read_input_usd_per_million_tokens`. The four rates are nonnegative
+  decimal USD strings per million tokens. A derived figure is absent when
+  multiplying, dividing by one million, or summing those rates and the reported
+  counts would lose decimal precision. The version is nonempty, unpadded,
+  NUL-free, and at most 128 UTF-8 bytes. Declaring only part of the set is a
+  configuration error; omitting all five is valid and yields no dollar figure
+  for that model.
 
-This build provides exactly `anthropic` with profile `anthropic-primary` and
-`codex_cli` with profile `codex-subscription-primary`. A Codex mapping also
-requires `[codex_cli]` with an absolute executable path naming an existing
-regular file and an absolute, existing `working_directory`; construction
-validates that shape and platform support without invoking Codex or inspecting
-login state. The Codex CLI continues to own its external subscription login
-exactly as the adapter contract specifies. OpenAI HTTP and Claude CLI mappings
-are not provided by this build.
+This build provides exactly `anthropic` and `codex_cli`. Anthropic mappings use
+the declared `anthropic-primary` profile. Codex mappings may select any declared
+profile, but every Codex family in one daemon configuration must select the same
+one because the composed CLI runtime has one ambient authentication context. A
+Codex mapping also requires `[codex_cli]` with an absolute executable path
+naming an existing regular file and an absolute, existing `working_directory`;
+construction validates that shape and platform support without invoking Codex or
+inspecting login state. The Codex CLI owns its external login exactly as the
+adapter contract specifies. OpenAI HTTP and Claude CLI mappings are not provided
+by this build.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
 aliases are rejected). Duplicate selection keys, duplicate aliases, and
-conflicting runtime meanings for one target are all rejected.
+conflicting runtime meanings for one target are all rejected. If more than one
+model entry names the same target, its complete rate set or complete rate
+absence must also agree; a rated and unrated entry cannot share a target.
 
-One valid document yields three correlated immutable in-memory catalogs:
+One valid document yields correlated immutable in-memory catalogs:
 
 - the domain `ModelTargetCatalog`, mapping each `DirectModelSelection` to its
   exact `ResolvedProviderTarget`, used by execution-time target resolution;
@@ -513,6 +535,9 @@ One valid document yields three correlated immutable in-memory catalogs:
   selects a session-pinned credential entry. A provider model routed to
   different adapters or a target assigned conflicting families is rejected at
   startup.
+- the profile-to-billing-kind registry and target-to-versioned-rate catalog used
+  only when a read surface derives dollar cost. Rates are never written to a
+  model-call row.
 
 The file is read once at startup and never reread; changing the catalog is a
 process restart. Why: pinned targets and frozen selections must not change
@@ -684,6 +709,29 @@ subsequent turn resolves its target through the same static table and selects
 the latest session credential snapshot entry for that target's family. A
 prepared or in-flight predecessor retains its call pin (INV-046).
 
+Dollar cost is derived only while reading a terminal call: the call's pinned
+target selects the current configured rate version, and the exact credential
+profile stored on that call selects `api_metered` or `subscription`. An
+API-metered profile produces `real`; a subscription profile produces
+`metered_equivalent`, regardless of adapter kind. A missing rate set, missing
+historical profile declaration, call with no present usage axis, or historical
+call whose input/cache semantics predate the durable pin produces no dollar
+figure rather than zero. Codex CLI's reported `input_tokens` includes its
+reported cache-creation and cache-read breakdowns. Derivation therefore applies
+the ordinary input rate only when both cache breakdown axes are present and can
+be subtracted from total input; an omitted breakdown leaves ordinary input
+unreported while any independently reported output or cache axis remains
+priceable. Each cache rate is applied once. That inclusive-input meaning is
+pinned on the call when it is prepared, so a later configuration restart that
+reuses the target with another adapter cannot reinterpret historical usage. A
+cache breakdown larger than total input yields no figure. A credential update
+that advances the session head cannot relabel an earlier call because that call
+retains its original profile pin. Deployment keeps one profile name's billing
+meaning stable and uses a new name when an authentication update changes that
+meaning. The parser cannot detect a same-name semantic rewrite across
+configuration restarts; such a rewrite would relabel historical reads and is
+invalid deployment evolution.
+
 In the provider bridge, a durably resolved target with no `RuntimeModelCatalog`
 mapping is a typed adapter defect (`UnconfiguredTarget`), never provider
 evidence; both catalogs derive from the one document, so this indicates a
@@ -699,10 +747,10 @@ deployment-side rules that code cannot enforce are stated in
 - **Reference/value split.** A `CredentialReference` is the non-secret name of
   one credential; a `CredentialValue` carries the secret bytes. References are
   safe in configuration, errors, logs, and durable records; values are safe only
-  at the adapter boundary. Why: rotation preserves the stable name so no record
-  or log ever needs the secret (INV-035). Three references exist today: the
-  composition constants `anthropic-primary`, `codex-subscription-primary`, and
-  `github-primary`.
+  at the adapter boundary. Why: value rotation preserves the stable name so no
+  record or log ever needs the secret (INV-035). The composition constants are
+  `anthropic-primary`, `codex-subscription-primary`, and `github-primary`; model
+  configuration may declare additional non-secret profiles.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
   the Anthropic and GitHub references to their corresponding deployment paths
   and reads the file for every Anthropic model-call, code-host operation, or
@@ -712,11 +760,13 @@ deployment-side rules that code cannot enforce are stated in
   reference-scoped: a foreign reference fails typed `Unmapped`; a missing file
   is `Unavailable`; an unreadable file is `Unreadable` — all reference-only
   errors.
-- **External Codex login.** `codex-subscription-primary` names the
-  operator-selected ambient Codex CLI login. The daemon and adapter neither
-  locate nor read its credential store and invent no credential-value shape; the
-  fresh CLI process resolves login state under the adapter's existing
-  environment contract.
+- **External Codex login.** A Codex mapping's profile names the
+  operator-selected ambient Codex CLI login. The default example uses
+  `codex-subscription-primary`. The daemon and adapter neither locate nor read
+  its credential store and invent no credential-value shape; the fresh CLI
+  process resolves login state under the adapter's existing environment
+  contract. The profile's configured billing kind labels derived cost; adapter
+  kind does not.
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
