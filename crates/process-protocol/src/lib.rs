@@ -72,6 +72,9 @@ pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 /// Maximum UTF-8 bytes in one delegate approval rationale.
 const MAX_TOOL_DECISION_RATIONALE_BYTES: usize = 4_096;
 
+/// Maximum UTF-8 bytes in one user-authored tool denial reason.
+const MAX_TOOL_DENIAL_REASON_BYTES: usize = 1_024;
+
 /// Maximum total UTF-8 bytes in one complete metadata object or filter.
 pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
 
@@ -1675,10 +1678,23 @@ fn validate_tool_approval_event_shape(
 ) -> Result<(), FrameValidationError> {
     let shape_matches = match (decision, decider, rationale) {
         (
-            ToolApprovalEventDecision::Approve {} | ToolApprovalEventDecision::Deny { .. },
+            ToolApprovalEventDecision::Approve {}
+            | ToolApprovalEventDecision::Deny { reason: None },
             ToolApprovalEventDecider::User { .. },
             None,
         ) => true,
+        (
+            ToolApprovalEventDecision::Deny {
+                reason: Some(reason),
+            },
+            ToolApprovalEventDecider::User { .. },
+            None,
+        ) => {
+            !reason.is_empty()
+                && reason.len() <= MAX_TOOL_DENIAL_REASON_BYTES
+                && !has_surrounding_posix_whitespace(reason)
+                && !reason.chars().any(char::is_control)
+        }
         (
             ToolApprovalEventDecision::Approve {}
             | ToolApprovalEventDecision::Deny { reason: None },
@@ -1695,6 +1711,17 @@ fn validate_tool_approval_event_shape(
         return Err(FrameValidationError::ToolApprovalShape);
     }
     Ok(())
+}
+
+fn has_surrounding_posix_whitespace(value: &str) -> bool {
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        || value
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
 }
 
 /// Validates the wire restatement of the derived display-title shape:
@@ -5281,11 +5308,11 @@ mod tests {
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-        MAX_TOOL_DECISION_RATIONALE_BYTES, MetadataActor, MetadataLastWriter, ModelCallDisposition,
-        ModelCallState, ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
-        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
-        ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
-        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        MAX_TOOL_DECISION_RATIONALE_BYTES, MAX_TOOL_DENIAL_REASON_BYTES, MetadataActor,
+        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
+        ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
+        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
+        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -8298,6 +8325,25 @@ mod tests {
             r#"{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}"#,
         )?;
         assert_server_message_round_trip(
+            request(15)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(9),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Deny {
+                        reason: Some(String::from("user declined")),
+                    },
+                    decider: ToolApprovalEventDecider::User {
+                        command_id: uuid(9),
+                    },
+                    rationale: None,
+                },
+            },
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"user declined"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}"#,
+        )?;
+        assert_server_message_round_trip(
             request(4)?,
             ServerMessage::SessionEvent {
                 cursor: CanonicalU64::new(9),
@@ -8340,6 +8386,27 @@ mod tests {
             r#"{"version":1,"request_id":"10","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""#,
             oversized_rationale.as_str(),
             r#""}}}"#,
+        ]
+        .concat();
+        assert_server_malformed(&oversized_frame);
+    }
+
+    #[test]
+    fn tool_approval_decision_events_reject_invalid_user_denial_reasons() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"11","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":""},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"12","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":" surrounding whitespace"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"13","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"unsafe\u0000reason"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
+        );
+        let oversized_reason = "x".repeat(MAX_TOOL_DENIAL_REASON_BYTES + 1);
+        let oversized_frame = [
+            r#"{"version":1,"request_id":"14","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":""#,
+            oversized_reason.as_str(),
+            r#""},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
         ]
         .concat();
         assert_server_malformed(&oversized_frame);

@@ -1447,7 +1447,8 @@ carry no user-authored reason. Its decider is exactly `user { command_id }` or
 `delegate { model_selection_id, model_call_id }`; `rationale` is
 required-nullable and present only for a delegate decision. A delegate denial
 has a null `reason`; its rationale is 1 through 4,096 UTF-8 bytes and contains
-no U+0000.
+no U+0000. A present user denial reason is nonempty, at most 1,024 UTF-8 bytes,
+contains no Unicode control scalar, and has no surrounding POSIX whitespace.
 
 The protocol additionally admits
 `tool_batch_transition { turn_id, model_call_id, state }`, where `state` is
