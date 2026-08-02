@@ -5,7 +5,7 @@ use rustix::fs::{Mode, OFlags, openat};
 use crate::descriptor::file_snapshot_identity;
 use crate::failure::LocalGitFailure;
 use crate::layout::{parse_full_object_id, valid_reference_name};
-use crate::limits::MAX_PACKED_REFS_BYTES;
+use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_REFERENCE_BYTES};
 use crate::pinning::PinnedRepository;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +208,7 @@ fn read_packed_references_with_hook<AfterRead: FnOnce()>(
             .get(separator + 1..)
             .ok_or(LocalGitFailure::Operation)?;
         if existing.is_empty()
+            || existing.len() > MAX_REFERENCE_BYTES
             || !existing.starts_with(b"refs/")
             || std::str::from_utf8(existing).is_err()
             || !valid_reference_name(existing)

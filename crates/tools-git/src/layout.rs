@@ -336,7 +336,7 @@ fn validate_packed_reference_name_encoding(
         let name = line
             .get(separator + 1..)
             .ok_or(LocalGitToolsConstructionError::Repository)?;
-        if std::str::from_utf8(name).is_err() {
+        if name.len() > MAX_REFERENCE_BYTES || std::str::from_utf8(name).is_err() {
             return Err(LocalGitToolsConstructionError::Repository);
         }
     }

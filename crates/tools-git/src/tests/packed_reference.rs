@@ -6,6 +6,7 @@ use git2::Repository;
 
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_repository_layout;
+use crate::limits::MAX_REFERENCE_BYTES;
 use crate::packed_reference::{
     PackedReferenceNamespace, PackedReferenceState, packed_reference_state,
     packed_reference_target, read_packed_references_with_test_hook,
@@ -71,6 +72,26 @@ fn repository_layout_rejects_a_non_utf8_packed_reference_name() {
     let failure =
         validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
             .expect_err("non-UTF-8 packed reference rejects admission");
+
+    assert!(matches!(
+        failure,
+        crate::construction::LocalGitToolsConstructionError::Repository
+    ));
+}
+
+#[test]
+fn repository_layout_rejects_an_oversized_packed_reference_name() {
+    let fixture = Fixture::new();
+    let name = format!("refs/heads/{}", "x".repeat(MAX_REFERENCE_BYTES));
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        format!("{} {name}\n", fixture.initial),
+    )
+    .expect("oversized packed reference writes");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("oversized packed reference rejects admission");
 
     assert!(matches!(
         failure,

@@ -834,16 +834,16 @@ fn symbolic_reference_preparation_rejects_an_oversized_target_without_mutation()
 fn oversized_reference_name_cannot_fall_back_to_packed_references() {
     let fixture = Fixture::new();
     let name = format!("refs/heads/{}", "a".repeat(MAX_REFERENCE_BYTES));
-    fs::write(
-        fixture.root().join(".git/packed-refs"),
-        format!("# pack-refs with: sorted\n{} {name}\n", fixture.initial),
-    )
-    .expect("oversized packed reference writes");
     let expected_identity =
         validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
             .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        format!("# pack-refs with: sorted\n{} {name}\n", fixture.initial),
+    )
+    .expect("late oversized packed reference writes");
 
     let failure = crate::reference_read::read_pinned_reference(&authority, &name)
         .expect_err("oversized packed fallback rejects");
