@@ -66,6 +66,7 @@ CREATE TABLE session_delegation_wait (
     parent_turn_id uuid NOT NULL,
     child_session_id uuid NOT NULL,
     wait_mode text NOT NULL CHECK (wait_mode IN ('foreground', 'background')),
+    CHECK (awaiting_tool_request_id <> spawning_tool_request_id),
     FOREIGN KEY (awaiting_tool_request_id, parent_turn_id, parent_session_id)
         REFERENCES tool_request(request_id, turn_id, session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
@@ -209,8 +210,22 @@ FOR EACH ROW EXECUTE FUNCTION guard_session_delegation_event_append();
 
 CREATE FUNCTION require_session_delegation_event_payload()
 RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE payload_count bigint;
+DECLARE
+    payload_count bigint;
+    stored_direction text;
+    relation_parent uuid;
+    relation_child uuid;
+    relation_policy text;
+    stopped_action text;
+    cancelled_action text;
+    expected_outcome text;
 BEGIN
+    SELECT parent_session_id, child_session_id, policy_kind,
+           on_parent_stopped, on_parent_cancelled
+      INTO relation_parent, relation_child, relation_policy,
+           stopped_action, cancelled_action
+      FROM session_delegation
+     WHERE spawning_tool_request_id = NEW.spawning_tool_request_id;
     SELECT CASE NEW.event_kind
         WHEN 'message_delivered' THEN (SELECT count(*) FROM session_message
             WHERE spawning_tool_request_id = NEW.spawning_tool_request_id
@@ -226,6 +241,71 @@ BEGIN
             AND NEW.outcome_kind <> 'continue_running' AND payload_count <> 1) THEN
         RAISE EXCEPTION 'delegation event requires its exact payload row'
             USING ERRCODE = '23503', CONSTRAINT = 'session_delegation_event_requires_payload';
+    END IF;
+    IF NEW.event_kind = 'spawned' AND NOT (
+        NEW.provenance_kind = 'tool_request'
+        AND NEW.provenance_session_id = relation_parent
+        AND NEW.provenance_tool_request_id = NEW.spawning_tool_request_id
+    ) THEN
+        RAISE EXCEPTION 'spawn provenance does not match delegation parent'
+            USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
+    ELSIF NEW.event_kind = 'message_delivered' THEN
+        SELECT direction INTO stored_direction FROM session_message
+         WHERE spawning_tool_request_id = NEW.spawning_tool_request_id
+           AND event_ordinal = NEW.event_ordinal;
+        IF NEW.provenance_kind <> 'tool_request'
+            OR (stored_direction = 'parent_to_child'
+                AND NEW.provenance_session_id <> relation_parent)
+            OR (stored_direction = 'child_to_parent'
+                AND NEW.provenance_session_id <> relation_child) THEN
+            RAISE EXCEPTION 'message direction does not match delegation provenance'
+                USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
+        END IF;
+    ELSIF NEW.event_kind = 'outcome_recorded' THEN
+        IF NEW.reason_kind = 'child_completed' THEN
+            IF NEW.outcome_kind <> 'result_returned'
+                OR NEW.provenance_kind <> 'tool_request'
+                OR NEW.provenance_session_id <> relation_child THEN
+                RAISE EXCEPTION 'child completion has invalid provenance or outcome'
+                    USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
+            END IF;
+        ELSIF NEW.reason_kind = 'child_execution_failed' THEN
+            IF NEW.outcome_kind <> 'child_failed'
+                OR NEW.provenance_kind <> 'child_turn'
+                OR NEW.provenance_session_id <> relation_child THEN
+                RAISE EXCEPTION 'child failure has invalid provenance or outcome'
+                    USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
+            END IF;
+        ELSIF NEW.reason_kind IN (
+            'parent_stopped_parent_and_descendants',
+            'parent_cancelled_parent_and_descendants'
+        ) THEN
+            IF NEW.provenance_kind <> 'parent_command'
+                OR NEW.provenance_session_id <> relation_parent THEN
+                RAISE EXCEPTION 'parent disposition has invalid provenance'
+                    USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
+            END IF;
+            IF relation_policy = 'background' THEN
+                expected_outcome := 'continue_running';
+            ELSIF NEW.reason_kind = 'parent_stopped_parent_and_descendants' THEN
+                expected_outcome := CASE stopped_action
+                    WHEN 'keep_running' THEN 'continue_running'
+                    WHEN 'stop' THEN 'child_stopped'
+                    WHEN 'cancel' THEN 'child_cancelled' END;
+            ELSE
+                expected_outcome := CASE cancelled_action
+                    WHEN 'keep_running' THEN 'continue_running'
+                    WHEN 'stop' THEN 'child_stopped'
+                    WHEN 'cancel' THEN 'child_cancelled' END;
+            END IF;
+            IF NEW.outcome_kind <> expected_outcome THEN
+                RAISE EXCEPTION 'parent disposition contradicts relationship policy'
+                    USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'outcome reason is not a delegation descendant event'
+                USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
+        END IF;
     END IF;
     RETURN NULL;
 END;

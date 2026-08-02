@@ -385,7 +385,8 @@ async fn load_from_connection(
            FROM session_delegation AS relation
            JOIN tool_request AS request
              ON request.request_id = relation.spawning_tool_request_id
-          WHERE relation.spawning_tool_request_id = $1",
+          WHERE relation.spawning_tool_request_id = $1
+          FOR UPDATE OF relation",
     )
     .bind(spawning_request.into_uuid())
     .fetch_optional(&mut *connection)
