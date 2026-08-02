@@ -452,6 +452,91 @@ CREATE TRIGGER tool_approval_decided_outbox_event_cannot_be_truncated
 BEFORE TRUNCATE ON tool_approval_decided_outbox_event
 FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
 
+CREATE FUNCTION require_completed_tool_approval_judge_decision()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_decisions bigint;
+BEGIN
+    IF NEW.state_kind <> 'terminal'
+       OR NEW.terminal_disposition_kind <> 'completed'
+       OR NEW.recommendation_kind = 'escalate_to_human'
+    THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT count(*)
+      INTO matching_decisions
+      FROM tool_approval_decision AS decision
+     WHERE decision.request_id = NEW.request_id
+       AND decision.decision_source = 'delegate'
+       AND decision.decision_kind = NEW.recommendation_kind
+       AND decision.delegate_model_selection_id =
+           NEW.direct_model_selection_id
+       AND decision.delegate_model_call_id = NEW.model_call_id
+       AND decision.rationale = NEW.rationale;
+    IF matching_decisions <> 1 THEN
+        RAISE EXCEPTION
+            'completed approval judge lacks its exact decision'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'tool_approval_judge_completed_requires_decision_effect';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER tool_approval_judge_completed_requires_decision_effect
+AFTER INSERT OR UPDATE ON tool_approval_judge_model_call
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_completed_tool_approval_judge_decision();
+
+CREATE FUNCTION require_delegate_tool_approval_effect()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_effects bigint;
+BEGIN
+    IF NEW.decision_source <> 'delegate' THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT count(*)
+      INTO matching_effects
+      FROM tool_approval_decided_outbox_event AS dispatched
+      JOIN tool_request AS request
+        ON request.request_id = dispatched.request_id
+      JOIN turn_lifecycle AS lifecycle
+        ON lifecycle.turn_id = request.turn_id
+       AND lifecycle.session_id = request.session_id
+     WHERE dispatched.request_id = NEW.request_id
+       AND NOT (
+            lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
+            AND lifecycle.approval_tool_request_id = NEW.request_id
+       );
+    IF matching_effects <> 1 THEN
+        RAISE EXCEPTION
+            'delegate decision lacks its outbox and lifecycle effect'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'tool_approval_delegate_requires_atomic_effect';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER tool_approval_delegate_requires_atomic_effect
+AFTER INSERT OR UPDATE ON tool_approval_decision
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_delegate_tool_approval_effect();
+
 CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
 RETURNS trigger
 LANGUAGE plpgsql

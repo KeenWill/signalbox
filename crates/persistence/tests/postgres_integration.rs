@@ -3190,6 +3190,95 @@ async fn approval_guard_judge_completion_respects_posture() -> Result<(), Box<dy
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_completed_judge_requires_atomic_decision_effect()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e54,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let mut transaction = pool.begin().await?;
+    insert_completed_judge(
+        &mut transaction,
+        &fixture,
+        *request,
+        0x7e55,
+        "approve",
+        None,
+    )
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("completed approve requires its decision, event, and lifecycle effect");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_judge_completed_requires_decision_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_delegate_decision_requires_event_and_lifecycle_effect()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e56,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let mut transaction = pool.begin().await?;
+    let (selection, call) = insert_completed_judge(
+        &mut transaction,
+        &fixture,
+        *request,
+        0x7e57,
+        "approve",
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source,
+             delegate_model_selection_id, delegate_model_call_id, rationale)
+         VALUES ($1, 'approve', 'delegate', $2, $3, 'fixture rationale')",
+    )
+    .bind(request.into_uuid())
+    .bind(selection)
+    .bind(call)
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("delegate approval requires its event and advanced lifecycle");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_delegate_requires_atomic_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_unsent_judge_call_rejects_usage() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
