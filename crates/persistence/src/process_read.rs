@@ -10,8 +10,8 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
     ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
-    ModelCallId, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolAttemptId,
-    ToolRequestId, TurnAttemptId, TurnId,
+    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryRef, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -430,7 +430,7 @@ pub struct ProcessTranscriptTurn {
     state: ProcessTurnState,
 }
 
-/// Exact provider-reported token fields for one terminal model call.
+/// Exact token fields for one terminal model call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessModelCallTokenUsage {
     input_tokens: Option<u64>,
@@ -439,49 +439,113 @@ pub struct ProcessModelCallTokenUsage {
     cache_read_input_tokens: Option<u64>,
 }
 
+/// Closed provenance of one terminal model call's usage fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessModelCallUsageProvenance {
+    /// Counts reported by the provider or adapter stream.
+    Reported,
+    /// Counts produced by an explicit estimator.
+    Estimated,
+}
+
+impl ProcessModelCallUsageProvenance {
+    fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "reported" => Some(Self::Reported),
+            "estimated" => Some(Self::Estimated),
+            _ => None,
+        }
+    }
+}
+
+/// Closed meaning of a provider-reported model-call input-token count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessModelCallInputTokenSemantics {
+    /// The input count excludes the separately reported cache axes.
+    CacheExclusive,
+    /// The input count includes the separately reported cache axes.
+    CacheInclusive,
+}
+
+impl ProcessModelCallInputTokenSemantics {
+    const fn from_storage(value: Option<bool>) -> Option<Self> {
+        match value {
+            Some(true) => Some(Self::CacheInclusive),
+            Some(false) => Some(Self::CacheExclusive),
+            None => None,
+        }
+    }
+}
+
 impl ProcessModelCallTokenUsage {
-    /// Returns the provider-reported input-token count.
+    /// Returns the input-token count when present.
     pub const fn input_tokens(self) -> Option<u64> {
         self.input_tokens
     }
 
-    /// Returns the provider-reported output-token count.
+    /// Returns the output-token count when present.
     pub const fn output_tokens(self) -> Option<u64> {
         self.output_tokens
     }
 
-    /// Returns the provider-reported cache-creation input-token count.
+    /// Returns the cache-creation input-token count when present.
     pub const fn cache_creation_input_tokens(self) -> Option<u64> {
         self.cache_creation_input_tokens
     }
 
-    /// Returns the provider-reported cache-read input-token count.
+    /// Returns the cache-read input-token count when present.
     pub const fn cache_read_input_tokens(self) -> Option<u64> {
         self.cache_read_input_tokens
     }
 }
 
-/// One terminal model call's provider-reported token evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// One terminal model call's typed token evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessTranscriptModelCallUsage {
     turn: TurnId,
     call: ModelCallId,
+    target: ResolvedProviderTarget,
+    credential_profile: String,
+    input_token_semantics: Option<ProcessModelCallInputTokenSemantics>,
+    provenance: ProcessModelCallUsageProvenance,
     usage: ProcessModelCallTokenUsage,
 }
 
 impl ProcessTranscriptModelCallUsage {
     /// Returns the owning turn.
-    pub const fn turn(self) -> TurnId {
+    pub const fn turn(&self) -> TurnId {
         self.turn
     }
 
     /// Returns the terminal model-call identity.
-    pub const fn call(self) -> ModelCallId {
+    pub const fn call(&self) -> ModelCallId {
         self.call
     }
 
+    /// Returns the immutable provider target whose configured rates apply.
+    pub const fn target(&self) -> ResolvedProviderTarget {
+        self.target
+    }
+
+    /// Returns the event-sourced credential profile pinned into this call.
+    pub fn credential_profile(&self) -> &str {
+        &self.credential_profile
+    }
+
+    /// Returns the pinned meaning of this call's reported input-token count.
+    ///
+    /// Absence identifies a call prepared before that semantic pin existed.
+    pub const fn input_token_semantics(&self) -> Option<ProcessModelCallInputTokenSemantics> {
+        self.input_token_semantics
+    }
+
+    /// Returns the closed provenance of this call's token fields.
+    pub const fn provenance(&self) -> ProcessModelCallUsageProvenance {
+        self.provenance
+    }
+
     /// Returns the exact independently optional provider fields.
-    pub const fn usage(self) -> ProcessModelCallTokenUsage {
+    pub const fn usage(&self) -> ProcessModelCallTokenUsage {
         self.usage
     }
 }
@@ -784,7 +848,7 @@ impl ProcessTranscriptSnapshot {
 pub enum ProcessTranscriptItem {
     /// One turn in acceptance order.
     Turn(ProcessTranscriptTurn),
-    /// One terminal model call's provider-reported token evidence.
+    /// One terminal model call's typed token evidence.
     ModelCallUsage(ProcessTranscriptModelCallUsage),
     /// One semantic entry in frontier order.
     Entry(ProcessTranscriptEntry),
@@ -1847,10 +1911,16 @@ async fn load_terminal_model_call_count(
     session: SessionId,
 ) -> Result<u64, ProcessReadError> {
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(*)
-           FROM model_call
-          WHERE session_id = $1
-            AND state_kind = 'terminal'",
+        "SELECT
+            (SELECT count(*)
+               FROM model_call
+              WHERE session_id = $1
+                AND state_kind = 'terminal')
+            +
+            (SELECT count(*)
+               FROM tool_approval_judge_model_call
+              WHERE session_id = $1
+                AND state_kind = 'terminal')",
     )
     .bind(session_id_to_uuid(session))
     .fetch_one(&mut **transaction)
@@ -1865,28 +1935,46 @@ async fn load_next_model_call_usage(
     after: Option<(u64, ModelCallId)>,
 ) -> Result<Option<PgRow>, ProcessReadError> {
     sqlx::query(
-        "SELECT
+        "WITH terminal_call AS (
+            SELECT turn_id, session_id, model_call_id,
+                   resolved_provider_model_identity_id, credential_reference,
+                   usage_provenance_kind, usage_input_includes_cache_tokens,
+                   usage_input_tokens, usage_output_tokens,
+                   usage_cache_creation_input_tokens,
+                   usage_cache_read_input_tokens
+              FROM model_call
+             WHERE session_id = $1 AND state_kind = 'terminal'
+            UNION ALL
+            SELECT turn_id, session_id, model_call_id,
+                   resolved_provider_model_identity_id, credential_reference,
+                   usage_provenance_kind, usage_input_includes_cache_tokens,
+                   input_tokens, output_tokens,
+                   cache_creation_input_tokens, cache_read_input_tokens
+              FROM tool_approval_judge_model_call
+             WHERE session_id = $1 AND state_kind = 'terminal'
+         )
+         SELECT
             turn.acceptance_position,
             call.turn_id,
             call.model_call_id,
+            call.resolved_provider_model_identity_id,
+            call.credential_reference,
+            call.usage_provenance_kind,
+            call.usage_input_includes_cache_tokens,
             call.usage_input_tokens,
             call.usage_output_tokens,
             call.usage_cache_creation_input_tokens,
             call.usage_cache_read_input_tokens
-           FROM model_call AS call
+           FROM terminal_call AS call
            JOIN turn_lifecycle AS turn
              ON turn.turn_id = call.turn_id
             AND turn.session_id = call.session_id
-          WHERE call.session_id = $1
-            AND call.state_kind = 'terminal'
-            AND (
-                $2::numeric IS NULL
-                OR turn.acceptance_position > $2
-                OR (
-                    turn.acceptance_position = $2
-                    AND call.model_call_id > $3
-                )
-            )
+          WHERE $2::numeric IS NULL
+             OR turn.acceptance_position > $2
+             OR (
+                 turn.acceptance_position = $2
+                 AND call.model_call_id > $3
+             )
           ORDER BY turn.acceptance_position, call.model_call_id
           LIMIT 1",
     )
@@ -1905,6 +1993,15 @@ fn decode_model_call_usage(
         required(row, "acceptance_position")?,
         "model-call turn acceptance position",
     )?;
+    let provenance_value = required::<String>(row, "usage_provenance_kind")?;
+    let Some(provenance) = ProcessModelCallUsageProvenance::from_storage(provenance_value.as_str())
+    else {
+        return Err(ProcessReadCorruption::Unsupported {
+            field: "usage_provenance_kind",
+            value: provenance_value,
+        }
+        .into());
+    };
     let input_tokens = row
         .try_get::<Option<Decimal>, _>("usage_input_tokens")?
         .map(|value| decode_nonnegative(value, "model-call input tokens"))
@@ -1926,6 +2023,15 @@ fn decode_model_call_usage(
         ProcessTranscriptModelCallUsage {
             turn: TurnId::from_uuid(required(row, "turn_id")?),
             call: ModelCallId::from_uuid(required(row, "model_call_id")?),
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(required(
+                row,
+                "resolved_provider_model_identity_id",
+            )?)),
+            credential_profile: required(row, "credential_reference")?,
+            input_token_semantics: ProcessModelCallInputTokenSemantics::from_storage(
+                row.try_get("usage_input_includes_cache_tokens")?,
+            ),
+            provenance,
             usage: ProcessModelCallTokenUsage {
                 input_tokens,
                 output_tokens,
@@ -3410,7 +3516,10 @@ mod tests {
     use signalbox_domain::TurnId;
     use sqlx::types::Uuid;
 
-    use super::decode_execution_lineage_tip;
+    use super::{
+        ProcessModelCallInputTokenSemantics, ProcessModelCallUsageProvenance,
+        decode_execution_lineage_tip,
+    };
 
     fn turn(value: u128) -> TurnId {
         TurnId::from_uuid(Uuid::from_u128(value))
@@ -3434,5 +3543,37 @@ mod tests {
     #[test]
     fn inv032_latest_frontier_rejects_branched_execution_lineage() {
         assert!(decode_execution_lineage_tip(3, 1, 3, 2, true, false, Some(turn(2))).is_err());
+    }
+
+    #[test]
+    fn model_call_usage_provenance_storage_mapping_is_closed() {
+        assert_eq!(
+            ProcessModelCallUsageProvenance::from_storage("reported"),
+            Some(ProcessModelCallUsageProvenance::Reported)
+        );
+        assert_eq!(
+            ProcessModelCallUsageProvenance::from_storage("estimated"),
+            Some(ProcessModelCallUsageProvenance::Estimated)
+        );
+        assert_eq!(
+            ProcessModelCallUsageProvenance::from_storage("inferred"),
+            None
+        );
+    }
+
+    #[test]
+    fn historical_model_call_input_semantics_remain_unknown() {
+        assert_eq!(
+            ProcessModelCallInputTokenSemantics::from_storage(None),
+            None
+        );
+        assert_eq!(
+            ProcessModelCallInputTokenSemantics::from_storage(Some(false)),
+            Some(ProcessModelCallInputTokenSemantics::CacheExclusive)
+        );
+        assert_eq!(
+            ProcessModelCallInputTokenSemantics::from_storage(Some(true)),
+            Some(ProcessModelCallInputTokenSemantics::CacheInclusive)
+        );
     }
 }

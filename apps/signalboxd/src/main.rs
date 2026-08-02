@@ -1010,7 +1010,7 @@ async fn run_hub(
             Err(_error) => {
                 let failure = erase_startup_cause(
                     RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("unknown_tool_approval_posture"),
+                    SanitizedStartupCause::Static("tool_approval_posture_names_unknown_tool"),
                 );
                 let _ = database.close().await;
                 return Err(failure);
@@ -1154,7 +1154,8 @@ async fn run_hub(
         model_targets,
         credential_reference,
     )
-    .with_session_credentials(model_configuration.credential_family_catalog());
+    .with_session_credentials(model_configuration.credential_family_catalog())
+    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,

@@ -20,24 +20,24 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
-at this foundation proposal extends the same laws to the runner locus. This page
-owns logical tool requests, approval policy and decisions, physical tool
-attempts, result admission, intra-turn continuation, crash classification, the
-compiled registry, and the daemon-local catalog. Turn and attempt lifecycle law
-lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entry vocabulary in
-[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
-provider translation in [model-call-execution](model-call-execution.md);
-durable-command identity in [identity-and-commands](identity-and-commands.md);
-and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant test index](../invariants.md). The The
-approval-delegation stack rooted at this foundation proposal adds frozen
-per-tool postures, recorded judge calls, and typed decision provenance; these
-paragraphs become verified only with its child pull requests.
-
-runner-locus paragraphs in this page are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests.
+at this foundation proposal extends the same laws to the runner locus. The
+non-overridable explicit-approval posture is verified through PR #366
+(`agent/exec-tools`). This page owns logical tool requests, approval policy and
+decisions, physical tool attempts, result admission, intra-turn continuation,
+crash classification, the compiled registry, and the daemon-local catalog. Turn
+and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
+model-call staging and provider translation in
+[model-call-execution](model-call-execution.md); durable-command identity in
+[identity-and-commands](identity-and-commands.md); and relational mechanics in
+[persistence-protocol](persistence-protocol.md). Invariant tags cite
+[the invariant test index](../invariants.md). The runner-locus paragraphs in
+this page are the foundation proposal at the bottom of their implementing stack
+and become verified only with those child pull requests. The approval-delegation
+stack rooted at this foundation proposal adds frozen per-tool postures, recorded
+judge calls, and typed decision provenance; those paragraphs become verified
+only with its child pull requests.
 
 ## Intra-turn rounds and request batches
 
@@ -105,12 +105,16 @@ policy has no decider or rationale. Neither automated path can claim user agency
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
 or `Human`. The selected posture is frozen into every resulting request. An
-explicit posture is authoritative: `Auto` records `PolicyAuto`, `Delegated`
-parks for a judge, and `Human` parks for the user even when the session blanket
-would otherwise approve. When the mapping omits the posture, the existing
-precedence below is unchanged.
+`AlwaysConfirm` permission remains human-only regardless of that mapping or the
+session blanket. For every other definition, an explicit posture is
+authoritative: `Auto` records `PolicyAuto`, `Delegated` parks for a judge, and
+`Human` parks for the user even when the session blanket would otherwise
+approve. When the mapping omits the posture, the existing precedence below is
+unchanged.
 
-Daemon-local execution keeps this precedence:
+Daemon-local execution first leaves an `AlwaysConfirm` declaration undecided;
+the dangerous blanket cannot override that posture. All other declarations keep
+this precedence:
 
 1. the frozen session posture `DangerousToolAutoApproval::ApproveAll`;
 2. the registry default (`Auto` or `Confirm`); then
@@ -169,14 +173,17 @@ reference, state, disposition, and reported token usage. Its closed result is
 
 The judge may approve or deny only a request frozen as `Delegated`. An
 `EscalateToHuman` result stores the completed call but no approval decision and
-leaves the same request parked. A request frozen as `Human` admits only that
-escalation result from a delegate; a delegate approval or denial is rejected by
-both domain reconstruction and relational provenance constraints (INV-049). Thus
-delegation can narrow authority but never widen it. A completed approve or deny
-atomically records the decision and advances the same proposal-ordered batch
-transition used by a user decision. Each explicit user or delegate decision
-emits one ordered `ToolApprovalDecided` event carrying the decision, decider
-kind and identity, and delegate rationale when present.
+leaves the same request parked. A `KnownFailed`, `Refused`, `Cancelled`, or
+`Ambiguous` terminal judge call likewise retains that park while immediately
+admitting a user decision, so a terminal judge failure cannot strand the
+approval wait. A request frozen as `Human` admits only that escalation result
+from a delegate; a delegate approval or denial is rejected by both domain
+reconstruction and relational provenance constraints (INV-049). Thus delegation
+can narrow authority but never widen it. A completed approve or deny atomically
+records the decision and advances the same proposal-ordered batch transition
+used by a user decision. Each explicit user or delegate decision emits one
+ordered `ToolApprovalDecided` event carrying the decision, decider kind and
+identity, and delegate rationale when present.
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and
@@ -208,9 +215,9 @@ intact.
 
 The application `ToolCatalog` port supplies immutable daemon-local
 `ToolDefinition` values: name, model-facing description, argument JSON Schema,
-permission default (`Auto` or `Confirm`), optional approval posture (`Auto`,
-`Delegated`, or `Human`), and the stored two-class crash classification used by
-the implemented local attempt machinery.
+permission default (`Auto`, `Confirm`, or `AlwaysConfirm`), optional approval
+posture (`Auto`, `Delegated`, or `Human`), and the stored two-class crash
+classification used by the implemented local attempt machinery.
 
 The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
 per runner-advertisable name. It carries a required checked model-facing
@@ -775,6 +782,66 @@ next-attempt or atomic result-projection-and-continuation transaction instead of
 failing the turn or waiting for process-local wake state. Restart never requires
 the current continuation attempt to disappear.
 
+## Session-delegation tool family
+
+This section is the foundation proposal at the bottom of the delegation stack.
+The daemon catalog adds three automatic, daemon-local tools. Their invoking
+session, turn, and request always come from trusted dispatch correlation and
+never from model arguments.
+
+- `spawn_session` takes `task` plus a `relationship` object. The relationship is
+  either `background`, or `bound` with separately labeled `on_parent_stopped`
+  and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`). It
+  atomically creates one delegated, no-ancestry child and its initial task work,
+  then returns the child session identity. Equal physical replay of the same
+  logical request returns that child; a second child cannot attach to the
+  request. Version one imposes no fixed active-child-count limit; admission
+  checks the complete locked relationship inventory for request and child
+  uniqueness.
+
+- `await_session` takes the related child identity and `foreground` or
+  `background`. Foreground converts the exact logical request into a durable
+  child wait and produces its tool result only when the child's delivered
+  content or typed terminal outcome exists. Background records delivery and
+  immediately returns a registration receipt; completion later wakes the parent.
+  When the result already exists, background still records delivery and returns
+  `session_await_registered`, while foreground returns the child outcome.
+  Replaying an already delivered wait returns that same mode-specific receipt or
+  outcome.
+
+- `send_session_message` takes the related peer identity and bounded nonempty
+  content. It verifies that the invoker is exactly the parent or child, appends
+  the next relationship message, and returns its identity and ordinal. Either
+  side may call it while the other is active, idle, stopped, or cancelled.
+
+The initial task is not accepted user input. Spawn records one `DelegatedTask`
+semantic origin in the child, bound to the exact spawning request and its parent
+session and turn; the task bytes are the checked `spawn_session` argument. The
+child's first turn is a delegation-origin turn whose starting frontier contains
+that entry, never an `OriginAcceptedInput`, and no `Actor::User` or
+accepted-input row is invented. Exact replay reuses the same semantic entry and
+turn origin.
+
+`await_session` foreground parking is a logical tool transition, not a physical
+executor kept in flight. It ends any current physical attempt before committing
+`AwaitingChild`; restart therefore resumes from durable wait/result rows and
+cannot duplicate an external effect. The delivered tool result is copied from
+the child's terminal result record. The executor never reads or returns the
+child transcript.
+
+The child's normal terminal completion transaction concatenates the definitive
+ordered `AssistantText` entries from its proof-bearing completed call without a
+separator and admits those exact bytes as `DelegationContent`; `await_session`
+adapts that value to `ToolResultContent`. Zero entries or a concatenation beyond
+the 1 MiB returned-result ceiling records `ChildFailed` with
+`ChildResultUnavailable`. Task and message strings additionally must fit their
+complete normalized JSON argument envelope, so that ceiling is not their exact
+maximum. Execution failure, child cancellation, and proof-bearing parent-policy
+outcomes materialize their closed results instead. This copy is part of the
+child transition, not a later transcript projection. Duplicate observation is
+idempotent by spawning request and cannot attach a late result to another parent
+tool call.
+
 ## Provider bridge and daemon catalog
 
 The provider-neutral application operation carries ordered conversation messages
@@ -1089,8 +1156,8 @@ detail.
 
 ### Session plan tools
 
-This catalog family is verified through PR #387 (`agent/tool-exercise-smoke`) at
-implementation ref `6ca4e31dffcb5b88d9f149cf1c347f8aa34843a3`.
+This catalog family is verified through PR #385 (`agent/plan-dependencies`) at
+implementation ref `550c0f8a9d46560c5dfade52214f2c91982359db`.
 
 The process-lifetime daemon catalog always includes `plan_write` and `plan_read`
 in both base and fully mapped production composition. `signalboxd` binds their
@@ -1102,21 +1169,23 @@ neither schema accepts a session identity. Both declarations default to `Auto`.
 
 `plan_write` accepts exactly one tagged operation. `create` takes nonempty text
 of at most 4,096 Unicode scalars and creates a pending entry whose identity is
-its positive creation-event ordinal. `revise` replaces the text of one positive
+its positive creation-event ordinal; `revise` replaces the text of one positive
 `entry_id`; `set_status` selects `pending`, `in_progress`, `completed`, or
-`abandoned` for that entry. Text cannot contain U+0000. One successful
-invocation appends exactly one session-local event with the trusted
-physical-attempt provenance and returns that event as compact JSON. A revision
-or status change for an absent entry is a definite known failure and appends
-nothing.
+`abandoned`; and `depends_on` links two existing entries. Text cannot contain
+U+0000. Success appends one event with trusted provenance and returns compact
+JSON. Missing entries and self or cyclic links yield typed known failures and
+append nothing. A thirty-third distinct dependency for one entry yields the
+typed `DependencyLimitReached` known failure and appends nothing; duplicate
+links remain in history but fold once by first append.
 
 `plan_read` accepts an optional positive exclusive `after_entry_id` cursor and
-`include_history`, which defaults to false. It returns folded current entries in
-creation order, at most 100 per page, with `next_after_entry_id` and
-`plan_truncated`; when requested, `history` contains at most 100 chronological
-events and carries an independent `history_truncated` label. Compact-result
-admission may retain a smaller prefix, preserving the matching truncation labels
-instead of returning oversized evidence.
+`include_history`, which defaults to false. It returns at most 100 folded
+entries in creation order, including dependencies and derived `ready` or
+`waiting` readiness: an entry is waiting exactly while any dependency is not
+completed. The page carries `next_after_entry_id` and `plan_truncated`;
+requested `history` contains at most 100 chronological events with independent
+`history_truncated`. Compact admission may retain a smaller prefix while
+preserving those labels.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four

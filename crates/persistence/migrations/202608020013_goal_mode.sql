@@ -335,7 +335,16 @@ BEGIN
            tool_use.assistant_response_part_ordinal
      WHERE request.request_id = NEW.model_tool_request_id
        AND request.session_id = NEW.session_id
-       AND request.turn_id = NEW.model_turn_id;
+       AND request.turn_id = NEW.model_turn_id
+       AND NOT EXISTS (
+           SELECT 1
+             FROM semantic_transcript_entry AS later_part
+            WHERE later_part.source_session_id = tool_use.source_session_id
+              AND later_part.producing_model_call_id =
+                  tool_use.producing_model_call_id
+              AND later_part.assistant_response_part_ordinal >
+                  tool_use.assistant_response_part_ordinal
+       );
 
     expected_arguments := CASE NEW.event_kind
         WHEN 'achieved' THEN jsonb_build_object(
@@ -748,6 +757,20 @@ BEGIN
             OR predecessor.terminal_disposition_kind <> 'completed' THEN
             RAISE EXCEPTION 'goal continuation requires a successfully completed predecessor'
                 USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_completed_predecessor';
+        END IF;
+        IF EXISTS (
+            SELECT 1
+              FROM goal_turn AS later_goal
+              JOIN turn_lifecycle AS later
+                ON later.session_id = later_goal.session_id
+               AND later.turn_id = later_goal.turn_id
+             WHERE later_goal.session_id = NEW.session_id
+               AND later_goal.goal_generation = NEW.goal_generation
+               AND later_goal.turn_id <> NEW.turn_id
+               AND later.acceptance_position > predecessor.acceptance_position
+        ) THEN
+            RAISE EXCEPTION 'goal continuation requires the latest accepted goal turn'
+                USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_latest_predecessor';
         END IF;
         SELECT statement INTO expected_content FROM goal_event
          WHERE session_id = NEW.session_id

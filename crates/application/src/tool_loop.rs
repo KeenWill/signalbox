@@ -1574,6 +1574,11 @@ pub(crate) fn initial_tool_approval(
     posture: DangerousToolAutoApproval,
     definition: Option<&ToolDefinition>,
 ) -> InitialToolApproval {
+    if definition.is_some_and(|definition| {
+        definition.permission_default() == ToolPermissionDefault::AlwaysConfirm
+    }) {
+        return InitialToolApproval::AlwaysConfirm;
+    }
     if let Some(posture) = definition.and_then(ToolDefinition::approval_posture) {
         return match posture {
             ToolApprovalPosture::Auto => InitialToolApproval::PolicyAuto,
@@ -1588,7 +1593,9 @@ pub(crate) fn initial_tool_approval(
             .unwrap_or(ToolPermissionDefault::Confirm)
         {
             ToolPermissionDefault::Auto => InitialToolApproval::PolicyAuto,
-            ToolPermissionDefault::Confirm => InitialToolApproval::Confirm,
+            ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm => {
+                InitialToolApproval::Confirm
+            }
         },
     }
 }
@@ -1634,6 +1641,14 @@ mod tests {
             schema(),
             permission,
             effect,
+        )
+    }
+
+    fn confirmation_definition(name: &str) -> ToolDefinition {
+        definition(
+            name,
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
         )
     }
 
@@ -2032,39 +2047,48 @@ mod tests {
     }
 
     #[test]
-    fn configured_postures_override_policy_while_absence_preserves_it() {
-        let confirm = definition(
-            "confirm",
-            ToolPermissionDefault::Confirm,
-            ToolEffectClass::EffectFree,
-        );
-        let delegated = confirm
-            .clone()
-            .with_approval_posture(ToolApprovalPosture::Delegated);
-        let human = confirm
-            .clone()
-            .with_approval_posture(ToolApprovalPosture::Human);
-        let automatic = confirm.with_approval_posture(ToolApprovalPosture::Auto);
+    fn absent_posture_preserves_legacy_confirmation() {
+        const SUBJECT_TOOL: &str = "subject";
 
         assert_eq!(
             initial_tool_approval(
                 DangerousToolAutoApproval::Disabled,
-                Some(&definition(
-                    "absent",
-                    ToolPermissionDefault::Confirm,
-                    ToolEffectClass::EffectFree,
-                ))
+                Some(&confirmation_definition(SUBJECT_TOOL)),
             ),
             InitialToolApproval::Confirm
         );
+    }
+
+    #[test]
+    fn delegated_posture_overrides_confirmation_policy() {
+        const SUBJECT_TOOL: &str = "subject";
+        let delegated = confirmation_definition(SUBJECT_TOOL)
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&delegated)),
             InitialToolApproval::Delegated
         );
+    }
+
+    #[test]
+    fn human_posture_overrides_dangerous_session_blanket() {
+        const SUBJECT_TOOL: &str = "subject";
+        let human =
+            confirmation_definition(SUBJECT_TOOL).with_approval_posture(ToolApprovalPosture::Human);
+
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&human)),
             InitialToolApproval::Human
         );
+    }
+
+    #[test]
+    fn auto_posture_overrides_confirmation_policy() {
+        const SUBJECT_TOOL: &str = "subject";
+        let automatic =
+            confirmation_definition(SUBJECT_TOOL).with_approval_posture(ToolApprovalPosture::Auto);
+
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&automatic)),
             InitialToolApproval::PolicyAuto
@@ -2096,6 +2120,34 @@ mod tests {
         assert_ne!(
             ToolDecisionSource::PolicyAuto,
             ToolDecisionSource::UserCommand
+        );
+    }
+
+    #[test]
+    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
+        let explicit = definition(
+            "explicit",
+            ToolPermissionDefault::AlwaysConfirm,
+            ToolEffectClass::ExternalEffect,
+        );
+        let configured_delegate = explicit
+            .clone()
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&explicit)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&explicit)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(
+                DangerousToolAutoApproval::ApproveAll,
+                Some(&configured_delegate)
+            ),
+            InitialToolApproval::AlwaysConfirm
         );
     }
 

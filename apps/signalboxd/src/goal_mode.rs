@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::HubModelConfiguration;
 
 pub(crate) const GOAL_DECLARE_NAME: &str = "goal_declare";
-const GOAL_DECLARE_DESCRIPTION: &str = "Declares the current commissioned goal achieved or blocked for the invoking session. Write the exact report or need as assistant text immediately before this call.";
+const GOAL_DECLARE_DESCRIPTION: &str = "Declares the current commissioned goal achieved or blocked for the invoking session. Write the exact report or need as assistant text immediately before this final response call.";
 const GOAL_DECLARE_SCHEMA: &str = r#"{
     "oneOf": [
         {
@@ -52,7 +52,7 @@ const GOAL_DECLARE_SCHEMA: &str = r#"{
     ],
     "type": "object"
 }"#;
-const GOAL_DECLARE_INVALID_ARGUMENTS: &str = "expected achieved or a model-selectable blocked reason; write the exact report or need as assistant text immediately before the call";
+const GOAL_DECLARE_INVALID_ARGUMENTS: &str = "expected achieved or a model-selectable blocked reason; write the exact report or need as assistant text immediately before the final response call";
 const GOAL_DECLARE_REJECTED: &str =
     "goal transition rejected for the invoking session and goal turn";
 const GOAL_DECLARE_RESULT: &str = "{\"status\":\"applied\"}";
@@ -310,6 +310,12 @@ pub enum PostgresGoalPassDispositionError {
     Repository(GoalRepositoryError),
     /// The checked static execution-failure need no longer satisfies the domain.
     InvalidStaticNeed,
+    /// The current defaults select an alias absent from daemon configuration.
+    UnknownModelAlias,
+    /// No successor goal-event ordinal can be represented.
+    EventOrdinalExhausted,
+    /// No successor accepted-input position can be represented.
+    AcceptancePositionExhausted,
 }
 
 impl fmt::Display for PostgresGoalPassDispositionError {
@@ -323,6 +329,15 @@ impl fmt::Display for PostgresGoalPassDispositionError {
             }
             Self::InvalidStaticNeed => formatter
                 .write_str("goal scheduler disposition static execution-failure need is invalid"),
+            Self::UnknownModelAlias => {
+                formatter.write_str("goal continuation selected an unavailable model alias")
+            }
+            Self::EventOrdinalExhausted => {
+                formatter.write_str("goal continuation event ordinal is exhausted")
+            }
+            Self::AcceptancePositionExhausted => {
+                formatter.write_str("goal continuation acceptance position is exhausted")
+            }
         }
     }
 }
@@ -331,7 +346,10 @@ impl Error for PostgresGoalPassDispositionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Repository(error) => Some(error),
-            Self::InvalidStaticNeed => None,
+            Self::InvalidStaticNeed
+            | Self::UnknownModelAlias
+            | Self::EventOrdinalExhausted
+            | Self::AcceptancePositionExhausted => None,
         }
     }
 }
@@ -350,7 +368,10 @@ impl ClassifyOperatorFailure for PostgresGoalPassDispositionError {
                 }
             }
             Self::Repository(GoalRepositoryError::DifferentCommandKind { .. })
-            | Self::InvalidStaticNeed => OperatorFailureClass::CallerOrHubBug,
+            | Self::InvalidStaticNeed
+            | Self::UnknownModelAlias
+            | Self::EventOrdinalExhausted
+            | Self::AcceptancePositionExhausted => OperatorFailureClass::CallerOrHubBug,
             Self::Repository(GoalRepositoryError::Corruption(_)) => {
                 OperatorFailureClass::FailClosedCorruption
             }
@@ -368,6 +389,9 @@ impl ClassifyOperatorFailure for PostgresGoalPassDispositionError {
             }
             Self::Repository(GoalRepositoryError::Corruption(_)) => "goal_disposition_corruption",
             Self::InvalidStaticNeed => "goal_disposition_static_need",
+            Self::UnknownModelAlias => "goal_continuation_unknown_model_alias",
+            Self::EventOrdinalExhausted => "goal_continuation_event_ordinal_exhausted",
+            Self::AcceptancePositionExhausted => "goal_continuation_acceptance_position_exhausted",
         }
     }
 }
@@ -421,18 +445,8 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                     adapter.model_configuration.resolve_alias(alias)
                 })
                 .await?;
-            match outcome {
-                GoalTurnContinuationOutcome::Scheduled { .. } => {
-                    let _ = adapter.eligibility_nudge.nudge(session);
-                }
-                GoalTurnContinuationOutcome::NotTerminal
-                | GoalTurnContinuationOutcome::Blocked { .. }
-                | GoalTurnContinuationOutcome::NotPursuing
-                | GoalTurnContinuationOutcome::NotCurrentGoalTurn
-                | GoalTurnContinuationOutcome::UnknownModelAlias { .. }
-                | GoalTurnContinuationOutcome::EventOrdinalExhausted
-                | GoalTurnContinuationOutcome::AcceptancePositionExhausted { .. }
-                | GoalTurnContinuationOutcome::AlreadyScheduled => {}
+            if continuation_scheduled(outcome)? {
+                let _ = adapter.eligibility_nudge.nudge(session);
             }
             Ok(())
         }
@@ -458,6 +472,28 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 | GoalTransitionOutcome::Rejected(_)
                 | GoalTransitionOutcome::NotCurrentGoalTurn => Ok(()),
             }
+        }
+    }
+}
+
+fn continuation_scheduled(
+    outcome: GoalTurnContinuationOutcome,
+) -> Result<bool, PostgresGoalPassDispositionError> {
+    match outcome {
+        GoalTurnContinuationOutcome::Scheduled { .. } => Ok(true),
+        GoalTurnContinuationOutcome::NotTerminal
+        | GoalTurnContinuationOutcome::Blocked { .. }
+        | GoalTurnContinuationOutcome::NotPursuing
+        | GoalTurnContinuationOutcome::NotCurrentGoalTurn
+        | GoalTurnContinuationOutcome::AlreadyScheduled => Ok(false),
+        GoalTurnContinuationOutcome::UnknownModelAlias { .. } => {
+            Err(PostgresGoalPassDispositionError::UnknownModelAlias)
+        }
+        GoalTurnContinuationOutcome::EventOrdinalExhausted => {
+            Err(PostgresGoalPassDispositionError::EventOrdinalExhausted)
+        }
+        GoalTurnContinuationOutcome::AcceptancePositionExhausted { .. } => {
+            Err(PostgresGoalPassDispositionError::AcceptancePositionExhausted)
         }
     }
 }
@@ -524,6 +560,36 @@ mod tests {
         assert_eq!(
             invalid_static_need.to_string(),
             "goal scheduler disposition static execution-failure need is invalid"
+        );
+    }
+
+    #[test]
+    fn terminal_continuation_boundaries_surface_closed_errors() {
+        let unknown_alias =
+            continuation_scheduled(GoalTurnContinuationOutcome::UnknownModelAlias {
+                alias: signalbox_domain::ModelAlias::from_uuid(Uuid::from_u128(0x51)),
+            })
+            .expect_err("an unavailable continuation alias is surfaced");
+        let event_ordinal =
+            continuation_scheduled(GoalTurnContinuationOutcome::EventOrdinalExhausted)
+                .expect_err("event ordinal exhaustion is surfaced");
+        let acceptance_position =
+            continuation_scheduled(GoalTurnContinuationOutcome::AcceptancePositionExhausted {
+                last: signalbox_domain::SessionInputPosition::first(),
+            })
+            .expect_err("acceptance position exhaustion is surfaced");
+
+        assert_eq!(
+            unknown_alias.operator_failure_cause_code(),
+            "goal_continuation_unknown_model_alias"
+        );
+        assert_eq!(
+            event_ordinal.operator_failure_cause_code(),
+            "goal_continuation_event_ordinal_exhausted"
+        );
+        assert_eq!(
+            acceptance_position.operator_failure_cause_code(),
+            "goal_continuation_acceptance_position_exhausted"
         );
     }
 

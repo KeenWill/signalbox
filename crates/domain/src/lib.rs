@@ -27,7 +27,9 @@ mod review_workflow;
 mod runner;
 mod semantic_entry;
 mod session;
+mod session_delegation;
 mod session_metadata;
+mod session_placement;
 mod session_template;
 mod submit_input;
 mod tool;
@@ -207,9 +209,18 @@ pub use session::{
     CreateSessionReconstitutionError, CreateSessionReconstitutionFailure,
     CreateSessionReconstitutionInput, ImportedSessionRelationship, ImportedSessionSeed,
     InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
-    SessionCreationCause, SessionCreationProvenance, SessionReconstitutionError,
-    SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
-    TranscriptFrontier,
+    SessionCreationCause, SessionCreationProvenance, SessionPlacementReconstitutionFacts,
+    SessionReconstitutionError, SessionReconstitutionFailure, SessionReconstitutionInput,
+    TranscriptAncestry, TranscriptFrontier,
+};
+pub use session_delegation::{
+    BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,
+    DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationContentFailure,
+    DelegationMessage, DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome,
+    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
+    DelegationRequestFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
+    ParentTerminationAuthority, ParentTerminationCommandSource, ParentTerminationKind,
+    TerminalChildTurn,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
@@ -218,6 +229,12 @@ pub use session_metadata::{
     ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
     ReplaceSessionMetadataSessionNotFound, SessionMetadataContent, SessionMetadataContentError,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SessionMetadataUpdatedAt,
+};
+pub use session_placement::{
+    RootPlacementGlobalReadIntent, SessionPlacement, SessionPlacementDirectory,
+    SessionPlacementError, SessionPlacementEvent, SessionPlacementEventKind, SessionPlacementPath,
+    SessionPlacementPathError, SessionPlacementVersion, SessionReadRefusalReason,
+    SessionReadScopeDecision, SessionReadScopeRefusal, VersionedSessionPlacement,
 };
 pub use session_template::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateNameError,
@@ -350,6 +367,11 @@ define_identity!(
 define_identity!(
     /// Identifies one durable, independently browsable conversation.
     SessionId
+);
+
+define_identity!(
+    /// Identifies one immutable message within a delegated-session relation.
+    DelegationMessageId
 );
 
 define_identity!(

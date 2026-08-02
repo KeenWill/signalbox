@@ -1760,6 +1760,7 @@ where
                         }
                     }
                 }
+                debug_assert_eq!(stopped_approval_index, tool_approvals.len());
                 return ModelCallTerminalIdentityCandidates::ToolRound {
                     continuing: ToolRoundModelCallIdentities::new(
                         continuing,
@@ -2294,6 +2295,14 @@ mod tests {
             session_id,
             version,
             defaults.clone(),
+            signalbox_domain::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session_id,
+                current_pointer_version: signalbox_domain::SessionPlacementVersion::INITIAL,
+                selected_event_session: session_id,
+                selected_event: signalbox_domain::VersionedSessionPlacement::initial(
+                    signalbox_domain::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("fixture Session facts are correlated");
@@ -3059,6 +3068,18 @@ mod tests {
         };
         assert_eq!(*first_approval, InitialToolApproval::PolicyAuto);
         assert_eq!(*second_approval, InitialToolApproval::Confirm);
+
+        let non_overridable_approvals = [
+            InitialToolApproval::PolicyAuto,
+            InitialToolApproval::AlwaysConfirm,
+        ];
+        service.ids = FixedIds::baseline();
+        let ModelCallTerminalIdentityCandidates::ToolRound { continuing, .. } =
+            service.next_terminal_identities(&observation, &non_overridable_approvals)
+        else {
+            panic!("tool response requires both race-safe closures");
+        };
+        assert_eq!(continuing.continuation_attempt(), None);
         assert_eq!(
             stopped,
             StoppedToolRoundModelCallIdentities::new(

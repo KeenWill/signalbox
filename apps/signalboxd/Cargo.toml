@@ -27,6 +27,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
     "blocking",
     "rustls-no-provider",
 ] }
+rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
 rustls = { version = "0.23.35", default-features = false, features = ["ring"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
@@ -47,6 +48,7 @@ signalbox-tools-code-host = { path = "../../crates/tools-code-host" }
 signalbox-tools-conversations = { path = "../../crates/tools-conversations" }
 signalbox-tools-github = { path = "../../crates/tools-github" }
 signalbox-tools-plan = { path = "../../crates/tools-plan" }
+signalbox-tools-web = { path = "../../crates/tools-web" }
 signalbox-tools-workspace = { path = "../../crates/tools-workspace" }
 rustix = { version = "1.1.4", default-features = false, features = [
     "fs",

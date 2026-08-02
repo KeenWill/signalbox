@@ -1,0 +1,18 @@
+Generated with git version 2.43.0 using SHA-1 object format.
+
+The repository was initialized with `git init -b main`. Two deterministic,
+empty commits used Signalbox Fixture <fixture@example.test> and timestamps
+2000-01-01T00:00:00Z and 2000-01-02T00:00:00Z. The generator created topic,
+lock-fixture, and contended at the first commit, ran `git pack-refs --all`,
+then used `git update-ref` to move topic and lock-fixture to the second commit.
+
+The successful updates left the loose reference bytes recorded here and no
+`.lock` entry. A final `git update-ref` attempted to move contended while the
+recorded pre-existing lock was present; Git exited 128, preserved both files,
+and reported that the reference could not be locked.
+
+The packed replacement record was produced by `git update-ref` under
+`refs/replace/` followed by `git pack-refs --all`.
+
+initial: 5b157a42f41234f041d36f0eb1f2540600127609
+replacement: 3c54f8667c0ace9b4d5f3b6fbf2160859e74e138
