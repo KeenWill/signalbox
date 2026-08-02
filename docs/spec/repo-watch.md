@@ -24,7 +24,7 @@ verification references.
 **Foundation contract.** Repository watch has one optional, versioned TOML
 section. It contains a list of repositories, a list of signal-reviewer logins,
 and versioned structured rules. Each repository entry names exactly one
-`owner/name` repository, a positive polling interval, and its own credential
+`namespace/name` repository, a positive polling interval, and its own credential
 file. Duplicate repositories, unreadable credential files, unknown keys,
 unsupported versions, zero intervals, malformed values, and invalid rules fail
 configuration before any watch task starts. Other daemon GitHub credentials do
@@ -114,7 +114,7 @@ PR based on that branch. Repeated identical observations emit nothing.
 structs, not a string DSL. Fields within one rule are conjunctive and distinct
 rules are disjunctive. Omitting every target field means everything; requiring
 labels or supplying regex fields narrows only that rule. There is no global
-ownership switch.
+targeting switch.
 
 **Implemented behavior and foundation contract.** Version one has exactly these
 matcher fields:
@@ -129,7 +129,7 @@ matcher fields:
   `BranchWorkflowRunCompleted`.
 
 **Implemented behavior and foundation contract.** The last two fields are the
-owner-ratified payload qualifiers. They do not split event kinds by payload. For
+ratified payload qualifiers. They do not split event kinds by payload. For
 `ChecksCompleted`, `success` and `failure` map to the same conclusion values
 used by the qualifier. A supplied payload qualifier is false for an event kind
 to which it does not apply. Expressiveness grows only by adding versioned
@@ -149,7 +149,7 @@ session-template name; when a fact matches, `params` is the exact injected
 tagged context for that event. No unused action variant is reserved.
 
 **Implemented behavior and foundation contract.** Dispatch context is the
-owner-ratified tagged union:
+ratified tagged union:
 
 - `PullRequestContext { repo, number, head_sha, event }`; or
 - `BranchContext { repo, branch, workflow, conclusion, event }`.
@@ -180,11 +180,11 @@ make such a rule invalid rather than silently changing its key.
 **Foundation contract.** Dispatch admission and its audit record are one durable
 transaction. The record links the triggering event, rule identity and version,
 singleton key, action ordinal, session-template provenance, and newly created
-session. A currently owned singleton refuses another dispatch. A terminal owner
-releases the singleton, while cooldown suppresses a successor until its recorded
-interval has elapsed. Equal recovery cannot create a second session for the same
-admitted action. The append-only dispatch record is the answer to “who owns this
-PR now”; no mutable ownership flag replaces it.
+session. An occupied singleton refuses another dispatch. A terminal dispatched
+session releases the singleton, while cooldown suppresses a successor until its
+recorded interval has elapsed. Equal recovery cannot create a second session for
+the same admitted action. The append-only dispatch record identifies the session
+responsible for the PR; no mutable assignment flag replaces it.
 
 ## First live rule
 
@@ -204,8 +204,8 @@ bytes before parsing, bounds body and header sizes, rejects missing or malformed
 delivery identity, deduplicates delivery identities, and maps accepted payloads
 into the identical versioned event vocabulary. It has its own listener,
 authentication, admission rules, rate limits, telemetry, and credential
-material. It is never multiplexed onto or tunneled through the owner-private
-local process-protocol socket.
+material. It is never multiplexed onto or tunneled through the local
+process-protocol socket.
 
 **Committed unimplemented functionality.** A future webhook receiver does not
 grant GitHub-originated data process-protocol authority, session authority, or
@@ -221,4 +221,4 @@ compatibility only; version one provides no listener or webhook configuration.
 **Deferred or undecided work.** No repository-watch design question remains open
 for the commissioned version-one stack. Additional transports, event kinds,
 payload qualifiers, matcher fields, actions, and singleton scopes require later
-owner-approved extensions.
+ratified extensions.

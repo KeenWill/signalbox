@@ -83,7 +83,7 @@ macro_rules! bounded_text {
     };
 }
 
-/// A GitHub repository in canonical `owner/name` spelling.
+/// A GitHub repository in canonical `namespace/name` spelling.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RepositorySlug(String);
 
@@ -91,9 +91,9 @@ impl RepositorySlug {
     pub fn try_new(value: String) -> Result<Self, RepoWatchTextError> {
         validate_text(&value, MAX_REPOSITORY_BYTES)?;
         let mut parts = value.split('/');
-        let owner = parts.next().unwrap_or_default();
+        let namespace = parts.next().unwrap_or_default();
         let repository = parts.next().unwrap_or_default();
-        if owner.is_empty() || repository.is_empty() || parts.next().is_some() {
+        if namespace.is_empty() || repository.is_empty() || parts.next().is_some() {
             return Err(RepoWatchTextError::Malformed);
         }
         Ok(Self(value))
@@ -1018,12 +1018,12 @@ mod tests {
     };
 
     #[test]
-    fn repository_slug_requires_exact_owner_and_name() {
+    fn repository_slug_requires_exact_namespace_and_name() {
         assert_eq!(
-            RepositorySlug::try_new(String::from("owner")),
+            RepositorySlug::try_new(String::from("namespace")),
             Err(RepoWatchTextError::Malformed)
         );
-        assert!(RepositorySlug::try_new(String::from("owner/repo")).is_ok());
+        assert!(RepositorySlug::try_new(String::from("namespace/repo")).is_ok());
     }
 
     #[test]
@@ -1062,7 +1062,7 @@ mod tests {
 
     #[test]
     fn branch_event_produces_tagged_branch_context() -> Result<(), Box<dyn Error>> {
-        let repository = RepositorySlug::try_new(String::from("owner/repo"))?;
+        let repository = RepositorySlug::try_new(String::from("namespace/repo"))?;
         let branch = BranchName::try_new(String::from("main"))?;
         let conclusion = CheckConclusion::Failure;
         let event = RepoWatchEvent::branch_workflow(
@@ -1082,7 +1082,7 @@ mod tests {
 
     #[test]
     fn pull_request_event_produces_tagged_pull_request_context() -> Result<(), Box<dyn Error>> {
-        let repository = RepositorySlug::try_new(String::from("owner/repo"))?;
+        let repository = RepositorySlug::try_new(String::from("namespace/repo"))?;
         let number = PullRequestNumber::new(NonZeroU64::MIN);
         let head_sha =
             super::CommitSha::try_new(String::from("0123456789abcdef0123456789abcdef01234567"))?;
@@ -1130,7 +1130,7 @@ mod tests {
 
     #[test]
     fn rule_validation_rejects_a_template_context_mismatch() -> Result<(), Box<dyn Error>> {
-        let template = SessionTemplateName::try_new(String::from("branch-owner"))?;
+        let template = SessionTemplateName::try_new(String::from("branch-handler"))?;
         let rule = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("branch-failure"))?,
             RepoWatchMatcherV1::new(
