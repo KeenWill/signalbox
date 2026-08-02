@@ -46,7 +46,7 @@ use signalboxd::runner_protocol_runtime::{
 };
 use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE,
-    ConfiguredApprovalPostureError, DaemonTools, DaemonToolsConstructionError,
+    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonTools, DaemonToolsConstructionError,
     FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
     GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
     LocalProcessListener, LocalSocketError, OtlpRuntime, PostgresGoalPassDisposition,
