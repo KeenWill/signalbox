@@ -2094,11 +2094,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           return nil
         }
         switch turn.state {
-        case .failed, .completed, .refused, .cancelled:
+        case .failed, .completed, .refused, .cancelled, .reconciliationRequired,
+          .toolReconciliationRequired:
           return turn.turnID
         case .queued, .activeRunning, .activeAwaitingToolApproval,
-          .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
-          .reconciliationRequired, .toolReconciliationRequired, .unknown:
+          .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .unknown:
           return nil
         }
       })

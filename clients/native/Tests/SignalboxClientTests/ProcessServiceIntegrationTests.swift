@@ -928,6 +928,64 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testModelReconciliationSideSnapshotRejectsBufferedActivationLifecycle() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let trigger = try ProcessProjectionFixture.activatedEvent(
+      cursor: ProcessProjectionFixture.bufferedTransitionCursor
+    )
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithModelReconciliationTurn(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(.event(trigger))
+
+    XCTAssertNil(viewModel.activeTurnID)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertTrue(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testToolReconciliationSideSnapshotRejectsBufferedActivationLifecycle() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let trigger = try ProcessProjectionFixture.activatedEvent(
+      cursor: ProcessProjectionFixture.bufferedTransitionCursor
+    )
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithToolReconciliationTurn(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(.event(trigger))
+
+    XCTAssertNil(viewModel.activeTurnID)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertTrue(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testSideSnapshotFenceKeepsRecoveryAcrossBufferedActivation() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -4715,6 +4773,55 @@ private enum ProcessProjectionFixture {
   static func snapshotWithCompletedTurn(
     cursor: UInt64
   ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithTerminalTurnState(
+      """
+      {
+        "type":"completed",
+        "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+        "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+        "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+      }
+      """,
+      cursor: cursor
+    )
+  }
+
+  static func snapshotWithModelReconciliationTurn(
+    cursor: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithTerminalTurnState(
+      """
+      {
+        "type":"reconciliation_required",
+        "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+        "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+        "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+      }
+      """,
+      cursor: cursor
+    )
+  }
+
+  static func snapshotWithToolReconciliationTurn(
+    cursor: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithTerminalTurnState(
+      """
+      {
+        "type":"tool_reconciliation_required",
+        "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+        "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+        "terminal_tool_attempt_id":"\(reconciliationAttempt)"
+      }
+      """,
+      cursor: cursor
+    )
+  }
+
+  private static func snapshotWithTerminalTurnState(
+    _ state: String,
+    cursor: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
         """
@@ -4729,12 +4836,7 @@ private enum ProcessProjectionFixture {
           "type":"transcript_turn",
           "turn_id":"\(ProcessDriverFixture.turn)",
           "acceptance_position":"1",
-          "state":{
-            "type":"completed",
-            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
-            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
-            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
-          }
+          "state":\(state)
         }
         """,
         """
