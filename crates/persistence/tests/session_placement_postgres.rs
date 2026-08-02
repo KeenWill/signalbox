@@ -745,11 +745,11 @@ async fn s36_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Er
     let error = repository
         .handle(first)
         .await
-        .expect_err("an applied receipt cannot name another command's event");
+        .expect_err("an applied receipt cannot bypass placement history authentication");
     let SessionPlacementRepositoryError::Corruption(reason) = error else {
         panic!("cross-wired receipt fails with typed corruption")
     };
-    assert_eq!(reason, "applied event provenance");
+    assert_eq!(reason, "session placement provenance receipt");
 
     pool.close().await;
     drop(container);
@@ -1410,7 +1410,7 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_update_handle_applies_first_command() -> Result<(), Box<dyn Error>> {
-    let (container, pool, repository, update) = placement_update_fixture().await?;
+    let (container, pool, repository, update) = placement_authentication_fixture().await?;
     let first = repository.handle(update).await?;
     let applied = recorded_applied_update(&first);
     let expected_version = SessionPlacementVersion::try_from_u64(UPDATE_FIXTURE_RESULT_VERSION)
@@ -1430,7 +1430,7 @@ async fn s36_inv012_update_handle_applies_first_command() -> Result<(), Box<dyn 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_update_handle_replays_equal_command() -> Result<(), Box<dyn Error>> {
-    let (container, pool, repository, update) = placement_update_fixture().await?;
+    let (container, pool, repository, update) = placement_authentication_fixture().await?;
     let first = repository.handle(update.clone()).await?;
 
     assert_eq!(repository.handle(update).await?, first);
@@ -1444,7 +1444,7 @@ async fn s36_inv012_update_handle_replays_equal_command() -> Result<(), Box<dyn 
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_update_replay_authenticates_the_applied_predecessor_chain()
 -> Result<(), Box<dyn Error>> {
-    let (container, pool, repository, update) = placement_update_fixture().await?;
+    let (container, pool, repository, update) = placement_authentication_fixture().await?;
     repository.handle(update.clone()).await?;
     cross_wire_initial_placement_provenance(&pool, update.session(), update.command_id()).await?;
 
@@ -1459,7 +1459,7 @@ async fn s36_inv012_update_replay_authenticates_the_applied_predecessor_chain()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_current_placement_rejects_an_incomplete_applied_receipt()
 -> Result<(), Box<dyn Error>> {
-    let (container, pool, repository, update) = placement_update_fixture().await?;
+    let (container, pool, repository, update) = placement_authentication_fixture().await?;
     repository.handle(update.clone()).await?;
     sqlx::query(
         "ALTER TABLE update_session_placement_command
@@ -1492,7 +1492,7 @@ async fn s36_inv012_current_placement_rejects_an_incomplete_applied_receipt()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_update_handle_rejects_conflicting_reuse() -> Result<(), Box<dyn Error>> {
-    let (container, pool, repository, update) = placement_update_fixture().await?;
+    let (container, pool, repository, update) = placement_authentication_fixture().await?;
     repository.handle(update).await?;
     let command_id = command(UPDATE_FIXTURE_COMMAND_ID_SEED);
     let session_id = session(UPDATE_FIXTURE_SESSION_ID_SEED);
@@ -1514,7 +1514,7 @@ async fn s36_inv012_update_handle_rejects_conflicting_reuse() -> Result<(), Box<
     Ok(())
 }
 
-async fn placement_update_fixture() -> Result<
+async fn placement_authentication_fixture() -> Result<
     (
         ContainerAsync<Postgres>,
         PgPool,
