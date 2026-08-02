@@ -398,7 +398,9 @@ impl SessionDelegation {
         mode: DelegationWaitMode,
     ) -> Result<DelegationWait, DelegationTransitionError> {
         self.require_active()?;
-        if awaiting_request.session() != self.parent {
+        if awaiting_request.session() != self.parent
+            || awaiting_request.id() == self.spawning_request
+        {
             return Err(self.fail(DelegationTransitionFailure::InvalidProvenance));
         }
         Ok(DelegationWait {
@@ -713,6 +715,25 @@ mod tests {
             .register_wait(&await_request(2), DelegationWaitMode::Background)
             .expect("parent registers background delivery");
         assert_eq!(registration.foreground_subject(), None);
+    }
+
+    /// S18 / INV-010: the spawning request cannot masquerade as a later await request.
+    #[test]
+    fn s18_inv010_wait_registration_requires_distinct_parent_work() {
+        let spawning_request = request(2);
+        let relation = SessionDelegation::spawn(
+            &spawning_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let error = relation
+            .register_wait(&spawning_request, DelegationWaitMode::Foreground)
+            .expect_err("spawn request cannot register its own wait");
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidProvenance
+        );
     }
 
     /// S18 / INV-010: message direction is derived from exact request ownership and unrelated senders fail closed.
