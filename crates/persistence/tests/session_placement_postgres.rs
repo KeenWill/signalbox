@@ -168,71 +168,113 @@ async fn s36_pathless_creation_keeps_the_legacy_unscoped_value() -> Result<(), B
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_placement_update_appends_history_and_equal_replay_preserves_it()
--> Result<(), Box<dyn Error>> {
+struct PlacementUpdateFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SessionPlacementRepository,
+    update: UpdateSessionPlacement,
+    session: SessionId,
+}
+
+async fn placement_update_fixture() -> Result<PlacementUpdateFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let creation_command = command(0x103);
-    let session_id = session(0x203);
+    let session = session(0x203);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            creation_command,
-            session_id,
+            command(0x103),
+            session,
             SessionPlacement::pathless(),
         ))
         .await?;
-    let update_command = command(0x104);
     let update = UpdateSessionPlacement::new(
-        update_command,
-        session_id,
+        command(0x104),
+        session,
         SessionPlacementVersion::INITIAL,
         scoped("projects.foo.session"),
     );
     let repository = SessionPlacementRepository::new(pool.clone());
+    Ok(PlacementUpdateFixture {
+        container,
+        pool,
+        repository,
+        update,
+        session,
+    })
+}
 
-    let first = repository.handle(update.clone()).await?;
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_placement_update_returns_successor_event_shape() -> Result<(), Box<dyn Error>> {
+    let fixture = placement_update_fixture().await?;
+    let expected_prior = fixture.update.expected_version();
+    let expected_version = expected_prior
+        .next()
+        .expect("fixture expected version has a successor");
+    let result = fixture.repository.handle(fixture.update).await?;
     let SessionPlacementRepositoryOutcome::Recorded(UpdateSessionPlacementResult::Applied(applied)) =
-        &first
+        result
     else {
         panic!("fixture update must apply")
     };
     let event = applied.event();
-    assert_eq!(event.kind(), SessionPlacementEventKind::Updated);
-    assert_eq!(
-        event.prior_version(),
-        Some(SessionPlacementVersion::INITIAL)
-    );
-    assert_eq!(
-        event.placement().version(),
-        SessionPlacementVersion::try_from_u64(2).expect("fixture successor version is positive")
-    );
-    assert_eq!(repository.handle(update).await?, first);
-    let history: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT version::bigint, event_kind
-           FROM session_placement_event
-          WHERE session_id = $1 ORDER BY version",
-    )
-    .bind(*session_id.as_uuid())
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        history,
-        vec![(1, "created".to_owned()), (2, "updated".to_owned())]
-    );
 
-    pool.close().await;
-    drop(container);
+    assert_eq!(event.kind(), SessionPlacementEventKind::Updated);
+    assert_eq!(event.prior_version(), Some(expected_prior));
+    assert_eq!(event.placement().version(), expected_version);
+
+    fixture.pool.close().await;
+    drop(fixture.container);
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_missing_placement_head_fails_closed_for_reads_and_updates()
--> Result<(), Box<dyn Error>> {
+async fn s36_equal_placement_update_replay_returns_recorded_result() -> Result<(), Box<dyn Error>> {
+    let fixture = placement_update_fixture().await?;
+    let first = fixture.repository.handle(fixture.update.clone()).await?;
+
+    assert_eq!(fixture.repository.handle(fixture.update).await?, first);
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_placement_update_appends_created_and_updated_history() -> Result<(), Box<dyn Error>> {
+    let fixture = placement_update_fixture().await?;
+    fixture.repository.handle(fixture.update).await?;
+    let history: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT version::bigint, event_kind
+           FROM session_placement_event
+          WHERE session_id = $1 ORDER BY version",
+    )
+    .bind(*fixture.session.as_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        history,
+        vec![(1, "created".to_owned()), (2, "updated".to_owned())]
+    );
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+struct MissingPlacementHeadFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    session: SessionId,
+    creation: signalbox_domain::PreparedCreateSession,
+}
+
+async fn missing_placement_head_fixture() -> Result<MissingPlacementHeadFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x204);
-    let creation = creation(command(0x105), session_id, SessionPlacement::pathless());
+    let session = session(0x204);
+    let creation = creation(command(0x105), session, SessionPlacement::pathless());
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation.clone())
         .await?;
@@ -243,44 +285,73 @@ async fn s36_missing_placement_head_fails_closed_for_reads_and_updates()
     )
     .execute(&pool)
     .await?;
-    let repository = SessionPlacementRepository::new(pool.clone());
-    let read_error = repository
-        .load_current(session_id)
+    Ok(MissingPlacementHeadFixture {
+        container,
+        pool,
+        session,
+        creation,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_public_placement_read_rejects_a_missing_current_head() -> Result<(), Box<dyn Error>> {
+    let fixture = missing_placement_head_fixture().await?;
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
+        .load_current(fixture.session)
         .await
         .expect_err("a public read must reject a present session without a placement head");
-    let SessionPlacementRepositoryError::Corruption(read_reason) = read_error else {
-        panic!("missing placement history fails a public read with typed corruption")
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a missing placement head fails a public read with typed corruption")
     };
-    assert_eq!(read_reason, "session placement head missing");
+    assert_eq!(reason, "session placement head missing");
 
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_placement_update_rejects_a_missing_current_head() -> Result<(), Box<dyn Error>> {
+    let fixture = missing_placement_head_fixture().await?;
     let update = UpdateSessionPlacement::new(
         command(0x106),
-        session_id,
+        fixture.session,
         SessionPlacementVersion::INITIAL,
         SessionPlacement::pathless(),
     );
-
-    let error = repository
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(update)
         .await
         .expect_err("a present session without placement history is corruption");
     let SessionPlacementRepositoryError::Corruption(reason) = error else {
-        panic!("missing placement history fails with typed corruption")
+        panic!("a missing placement head fails an update with typed corruption")
     };
     assert_eq!(reason, "session placement head missing");
-    let creation_error = CreateSessionRepository::new(pool.clone(), credential_pin())
-        .handle(creation)
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_creation_replay_rejects_a_missing_current_placement_head() -> Result<(), Box<dyn Error>>
+{
+    let fixture = missing_placement_head_fixture().await?;
+    let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+        .handle(fixture.creation)
         .await
         .expect_err("creation replay requires its current placement head");
-    let CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Missing(field)) =
-        creation_error
+    let CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Missing(field)) = error
     else {
-        panic!("missing placement head fails creation replay with typed corruption")
+        panic!("a missing placement head fails creation replay with typed corruption")
     };
     assert_eq!(field, "current_placement_head_version");
 
-    pool.close().await;
-    drop(container);
+    fixture.pool.close().await;
+    drop(fixture.container);
     Ok(())
 }
 
@@ -604,6 +675,150 @@ async fn s36_current_read_and_update_authenticate_the_placement_update_receipt()
         panic!("cross-wired current placement fails update with typed corruption")
     };
     assert_eq!(update_reason, "session placement provenance receipt");
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_applied_update_replay_requires_the_event_to_reach_the_current_head()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(0x223);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x125),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    let update = UpdateSessionPlacement::new(
+        command(0x126),
+        session_id,
+        SessionPlacementVersion::INITIAL,
+        scoped("projects.foo.head"),
+    );
+    let repository = SessionPlacementRepository::new(pool.clone());
+    repository.handle(update.clone()).await?;
+    sqlx::query("ALTER TABLE session_current_placement DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_current_placement SET current_version = 1
+          WHERE session_id = $1",
+    )
+    .bind(*session_id.as_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = repository
+        .handle(update)
+        .await
+        .expect_err("applied replay requires its event to have reached the current head");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a lagging placement head fails applied replay with typed corruption")
+    };
+    assert_eq!(reason, "applied event not reached by placement head");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_current_read_rejects_a_corrupt_placement_update_typed_header()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(0x220);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x120),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    SessionPlacementRepository::new(pool.clone())
+        .handle(UpdateSessionPlacement::new(
+            command(0x121),
+            session_id,
+            SessionPlacementVersion::INITIAL,
+            scoped("projects.foo.header"),
+        ))
+        .await?;
+    sqlx::query("ALTER TABLE update_session_placement_command DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE update_session_placement_command DROP CONSTRAINT
+             update_session_placement_command_command_kind_check",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE update_session_placement_command
+            SET command_kind = 'goal'
+          WHERE session_id = $1",
+    )
+    .bind(*session_id.as_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = SessionPlacementRepository::new(pool.clone())
+        .load_current(session_id)
+        .await
+        .expect_err("a public read authenticates the placement update typed header");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a corrupt placement update header fails with typed corruption")
+    };
+    assert_eq!(reason, "session placement provenance receipt");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_creation_receipt_must_match_the_session_ancestry_family() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(0x221);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x122),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    sqlx::query("ALTER TABLE session DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session
+            SET ancestry_kind = 'imported_conversation',
+                imported_conversation_id = $2,
+                imported_frontier_entry_id = $3,
+                imported_frontier_position = 1,
+                imported_relationship_kind = 'resume'
+          WHERE session_id = $1",
+    )
+    .bind(*session_id.as_uuid())
+    .bind(Uuid::from_u128(0x320))
+    .bind(Uuid::from_u128(0x321))
+    .execute(&pool)
+    .await?;
+
+    let error = SessionPlacementRepository::new(pool.clone())
+        .load_current(session_id)
+        .await
+        .expect_err("a native receipt cannot authenticate imported ancestry");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a cross-family creation receipt fails with typed corruption")
+    };
+    assert_eq!(reason, "session placement provenance receipt");
+
     pool.close().await;
     drop(container);
     Ok(())

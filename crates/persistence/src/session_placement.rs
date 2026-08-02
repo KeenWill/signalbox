@@ -102,7 +102,18 @@ impl SessionPlacementRepository {
                     SessionPlacementRepositoryOutcome::ConflictingReuse { command_id }
                 });
             }
-            Some(_) => {
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::ReplaceSessionMetadata
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
+                | CommandKind::CompactSession
+                | CommandKind::Goal,
+            ) => {
                 transaction.rollback().await?;
                 return Ok(SessionPlacementRepositoryOutcome::ConflictingReuse { command_id });
             }
@@ -135,7 +146,18 @@ impl SessionPlacementRepository {
                         SessionPlacementRepositoryOutcome::ConflictingReuse { command_id }
                     }
                 }
-                Some(_) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
+                Some(
+                    CommandKind::CreateSession
+                    | CommandKind::CreateSessionFromImportedFrontier
+                    | CommandKind::ReplaceSessionDefaults
+                    | CommandKind::ReplaceSessionMetadata
+                    | CommandKind::SubmitInput
+                    | CommandKind::DecideToolRequest
+                    | CommandKind::ReviewWorkflow
+                    | CommandKind::ReviewOrchestration
+                    | CommandKind::CompactSession
+                    | CommandKind::Goal,
+                ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(SessionPlacementRepositoryError::Corruption(
                         "winner claim missing",
@@ -226,13 +248,14 @@ pub(crate) async fn load_current(
     session: SessionId,
 ) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
     let row = sqlx::query(
-        "SELECT head.session_id AS head_session_id,
+        "SELECT session.ancestry_kind,
+                head.session_id AS head_session_id,
                 event.session_id AS event_session_id,
                 event.version, event.prior_version, event.event_kind,
                 event.placement_path, event.root_global_read_intent,
-                native_creation.command_id AS native_creation_command_id,
-                imported_creation.command_id AS imported_creation_command_id,
-                placement_update.command_id AS placement_update_command_id
+                native_registry.command_id AS native_creation_command_id,
+                imported_registry.command_id AS imported_creation_command_id,
+                placement_update_registry.command_id AS placement_update_command_id
            FROM session
            LEFT JOIN session_current_placement AS head
              ON head.session_id = session.session_id
@@ -242,23 +265,41 @@ pub(crate) async fn load_current(
            LEFT JOIN create_session_command AS native_creation
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
+            AND native_creation.command_kind = 'create_session'
+            AND native_creation.storage_version IN (1, 2, 3, 4, 6)
             AND native_creation.result_kind = 'applied'
             AND native_creation.placement_path IS NOT DISTINCT FROM event.placement_path
             AND native_creation.root_global_read_intent = event.root_global_read_intent
+           LEFT JOIN durable_command AS native_registry
+             ON native_registry.command_id = native_creation.command_id
+            AND native_registry.command_kind = native_creation.command_kind
+            AND native_registry.storage_version = native_creation.storage_version
            LEFT JOIN create_session_from_imported_frontier_command AS imported_creation
              ON imported_creation.command_id = event.provenance_command_id
             AND imported_creation.created_session_id = event.session_id
+            AND imported_creation.command_kind = 'create_session_from_imported_frontier'
+            AND imported_creation.storage_version BETWEEN 1 AND 3
             AND imported_creation.result_kind = 'applied'
             AND event.placement_path IS NULL
             AND NOT event.root_global_read_intent
+           LEFT JOIN durable_command AS imported_registry
+             ON imported_registry.command_id = imported_creation.command_id
+            AND imported_registry.command_kind = imported_creation.command_kind
+            AND imported_registry.storage_version = imported_creation.storage_version
            LEFT JOIN update_session_placement_command AS placement_update
              ON placement_update.command_id = event.provenance_command_id
             AND placement_update.session_id = event.session_id
+            AND placement_update.command_kind = 'update_session_placement'
+            AND placement_update.storage_version = 1
             AND placement_update.result_kind = 'applied'
             AND placement_update.result_version = event.version
             AND placement_update.expected_version = event.prior_version
             AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
             AND placement_update.root_global_read_intent = event.root_global_read_intent
+           LEFT JOIN durable_command AS placement_update_registry
+             ON placement_update_registry.command_id = placement_update.command_id
+            AND placement_update_registry.command_kind = placement_update.command_kind
+            AND placement_update_registry.storage_version = placement_update.storage_version
           WHERE session.session_id = $1",
     )
     .bind(session_id_to_uuid(session))
@@ -296,6 +337,12 @@ async fn load_current_for_update(
     missing_head_result(connection, session).await
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlacementCreationFamily {
+    Native,
+    ImportedConversation,
+}
+
 fn decode_authenticated_placement(
     row: PgRow,
 ) -> Result<VersionedSessionPlacement, SessionPlacementRepositoryError> {
@@ -309,6 +356,16 @@ fn decode_authenticated_placement(
             .ok_or(SessionPlacementRepositoryError::Corruption(
                 "current placement event kind",
             ))?;
+    let ancestry: String = row.try_get("ancestry_kind")?;
+    let creation_family = match ancestry.as_str() {
+        "none" => PlacementCreationFamily::Native,
+        "imported_conversation" => PlacementCreationFamily::ImportedConversation,
+        _ => {
+            return Err(SessionPlacementRepositoryError::Corruption(
+                "session ancestry kind",
+            ));
+        }
+    };
     let native_creation: Option<sqlx::types::Uuid> = row.try_get("native_creation_command_id")?;
     let imported_creation: Option<sqlx::types::Uuid> =
         row.try_get("imported_creation_command_id")?;
@@ -318,7 +375,14 @@ fn decode_authenticated_placement(
             version == SessionPlacementVersion::INITIAL
                 && prior.is_none()
                 && update.is_none()
-                && (native_creation.is_some() != imported_creation.is_some())
+                && match creation_family {
+                    PlacementCreationFamily::Native => {
+                        native_creation.is_some() && imported_creation.is_none()
+                    }
+                    PlacementCreationFamily::ImportedConversation => {
+                        imported_creation.is_some() && native_creation.is_none()
+                    }
+                }
         }
         SessionPlacementEventKind::Updated => {
             prior.is_some()
@@ -348,12 +412,18 @@ async fn missing_head_result(
             .bind(session_id_to_uuid(session))
             .fetch_one(&mut *connection)
             .await?;
-    if session_exists {
-        Err(SessionPlacementRepositoryError::Corruption(
+    if !session_exists {
+        return Ok(None);
+    }
+    let row = sqlx::query(lock_inventory::UPDATE_SESSION_PLACEMENT_HEAD)
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&mut *connection)
+        .await?;
+    match row {
+        Some(row) => decode_authenticated_placement(row).map(Some),
+        None => Err(SessionPlacementRepositoryError::Corruption(
             "session placement head missing",
-        ))
-    } else {
-        Ok(None)
+        )),
     }
 }
 
@@ -434,12 +504,15 @@ async fn load_record(
     SessionPlacementRepositoryError,
 > {
     let row = sqlx::query(
-        "SELECT command.*, event.prior_version, event.version AS result_event_version,
+        "SELECT command.*, head.current_version AS current_placement_version,
+                event.prior_version, event.version AS result_event_version,
                 event.event_kind AS result_event_kind,
                 event.placement_path AS result_path,
                 event.root_global_read_intent AS result_root_intent,
                 event.provenance_command_id AS result_provenance_command_id
            FROM update_session_placement_command AS command
+           LEFT JOIN session_current_placement AS head
+             ON head.session_id = command.session_id
            LEFT JOIN session_placement_event AS event
              ON event.session_id = command.session_id
             AND event.version = command.result_version
@@ -481,8 +554,11 @@ fn decode_record(
     validate_terminal_field_shape(
         result_kind,
         rejection,
-        result_version.is_some(),
-        result_current_version.is_some(),
+        TerminalFieldPresence {
+            result_version: result_version.is_some(),
+            current_version: result_current_version.is_some(),
+        }
+        .shape(),
     )?;
     let result = match (result_kind, rejection) {
         (SessionPlacementResultStorageKind::Applied, None) => {
@@ -522,6 +598,13 @@ fn decode_record(
                 SessionPlacementRepositoryError::Corruption("result version"),
             )?)?;
             let event_result_version = decode_version(required(&row, "result_event_version")?)?;
+            let current_placement_version =
+                decode_version(required(&row, "current_placement_version")?)?;
+            if current_placement_version.as_u64() < event_result_version.as_u64() {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied event not reached by placement head",
+                ));
+            }
             if recorded_result_version != event_result_version {
                 return Err(SessionPlacementRepositoryError::Corruption(
                     "applied result version",
@@ -585,7 +668,15 @@ fn decode_record(
                 )?,
             )
         }
-        _ => {
+        (
+            SessionPlacementResultStorageKind::Applied,
+            Some(
+                SessionPlacementRejectionStorageKind::SessionNotFound
+                | SessionPlacementRejectionStorageKind::CurrentVersionMismatch
+                | SessionPlacementRejectionStorageKind::VersionExhausted,
+            ),
+        )
+        | (SessionPlacementResultStorageKind::Rejected, None) => {
             return Err(SessionPlacementRepositoryError::Corruption(
                 "terminal result shape",
             ));
@@ -611,28 +702,96 @@ fn validate_typed_header(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalFieldShape {
+    Neither,
+    ResultVersion,
+    CurrentVersion,
+    Both,
+}
+
+struct TerminalFieldPresence {
+    result_version: bool,
+    current_version: bool,
+}
+
+impl TerminalFieldPresence {
+    const fn shape(self) -> TerminalFieldShape {
+        match (self.result_version, self.current_version) {
+            (false, false) => TerminalFieldShape::Neither,
+            (true, false) => TerminalFieldShape::ResultVersion,
+            (false, true) => TerminalFieldShape::CurrentVersion,
+            (true, true) => TerminalFieldShape::Both,
+        }
+    }
+}
+
 fn validate_terminal_field_shape(
     result_kind: SessionPlacementResultStorageKind,
     rejection: Option<SessionPlacementRejectionStorageKind>,
-    has_result_version: bool,
-    has_current_version: bool,
+    fields: TerminalFieldShape,
 ) -> Result<(), SessionPlacementRepositoryError> {
-    let valid = match (result_kind, rejection) {
-        (SessionPlacementResultStorageKind::Applied, None) => {
-            has_result_version && !has_current_version
+    let valid = match (result_kind, rejection, fields) {
+        (SessionPlacementResultStorageKind::Applied, None, TerminalFieldShape::ResultVersion) => {
+            true
         }
         (
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::SessionNotFound),
-        ) => !has_result_version && !has_current_version,
+            TerminalFieldShape::Neither,
+        ) => true,
         (
             SessionPlacementResultStorageKind::Rejected,
             Some(
                 SessionPlacementRejectionStorageKind::CurrentVersionMismatch
                 | SessionPlacementRejectionStorageKind::VersionExhausted,
             ),
-        ) => !has_result_version && has_current_version,
-        _ => false,
+            TerminalFieldShape::CurrentVersion,
+        ) => true,
+        (
+            SessionPlacementResultStorageKind::Applied,
+            None,
+            TerminalFieldShape::Neither
+            | TerminalFieldShape::CurrentVersion
+            | TerminalFieldShape::Both,
+        )
+        | (
+            SessionPlacementResultStorageKind::Applied,
+            Some(
+                SessionPlacementRejectionStorageKind::SessionNotFound
+                | SessionPlacementRejectionStorageKind::CurrentVersionMismatch
+                | SessionPlacementRejectionStorageKind::VersionExhausted,
+            ),
+            TerminalFieldShape::Neither
+            | TerminalFieldShape::ResultVersion
+            | TerminalFieldShape::CurrentVersion
+            | TerminalFieldShape::Both,
+        )
+        | (
+            SessionPlacementResultStorageKind::Rejected,
+            None,
+            TerminalFieldShape::Neither
+            | TerminalFieldShape::ResultVersion
+            | TerminalFieldShape::CurrentVersion
+            | TerminalFieldShape::Both,
+        )
+        | (
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+            TerminalFieldShape::ResultVersion
+            | TerminalFieldShape::CurrentVersion
+            | TerminalFieldShape::Both,
+        )
+        | (
+            SessionPlacementResultStorageKind::Rejected,
+            Some(
+                SessionPlacementRejectionStorageKind::CurrentVersionMismatch
+                | SessionPlacementRejectionStorageKind::VersionExhausted,
+            ),
+            TerminalFieldShape::Neither
+            | TerminalFieldShape::ResultVersion
+            | TerminalFieldShape::Both,
+        ) => false,
     };
     if valid {
         Ok(())
@@ -747,26 +906,22 @@ mod tests {
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Applied,
             None,
-            true,
-            true,
+            TerminalFieldShape::Both,
         ));
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::SessionNotFound),
-            true,
-            false,
+            TerminalFieldShape::ResultVersion,
         ));
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch),
-            true,
-            true,
+            TerminalFieldShape::Both,
         ));
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::VersionExhausted),
-            true,
-            true,
+            TerminalFieldShape::Both,
         ));
     }
 
