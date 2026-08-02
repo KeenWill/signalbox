@@ -22778,10 +22778,12 @@ async fn session_plan_projection_rechecks_duplicate_edge_against_preexisting_cyc
     Ok(())
 }
 
-/// Dependency append validates both creation roots before graph traversal.
+/// Complete dependency-prefix certification rejects an untrusted creation root
+/// on an existing edge before append-specific target validation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_dependency_append_rejects_an_untrusted_root() -> Result<(), Box<dyn Error>> {
+async fn session_plan_append_certification_rejects_an_untrusted_projected_root()
+-> Result<(), Box<dyn Error>> {
     const ROOT_EVENT_ORDINAL: u64 = 1;
     const CORRUPTED_TEXT: &str = "rewritten without durable request authority";
     let (container, pool, _database_url) = migrated_postgres().await?;
@@ -22828,11 +22830,11 @@ async fn session_plan_dependency_append_rejects_an_untrusted_root() -> Result<()
             },
         ))
         .await
-        .expect_err("the repository rejects the untrusted dependency root");
+        .expect_err("certification rejects the untrusted projected dependency root");
 
     assert_eq!(
         plan_repository_error_kind(repository_error),
-        PlanRepositoryErrorKind::UntrustedProvenance
+        PlanRepositoryErrorKind::EventSequence
     );
 
     pool.close().await;
