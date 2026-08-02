@@ -4198,7 +4198,7 @@ fn encode_tool_decision_source(
         ToolDecisionSource::UserCommand => Ok("owner_command"),
         ToolDecisionSource::PolicyAuto => Ok("policy_auto"),
         ToolDecisionSource::SessionBlanket => Ok("session_blanket"),
-        ToolDecisionSource::SessionOverride | ToolDecisionSource::JudgeRecommendation => {
+        ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             Err(ModelCallRepositoryError::InvalidTransition(
                 "unimplemented tool-decision source cannot be stored",
             ))
