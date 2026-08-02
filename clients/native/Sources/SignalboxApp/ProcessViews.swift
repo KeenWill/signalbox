@@ -2141,6 +2141,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       + (hasUnrecognizedLiveTimelineHistoryBoundary ? 1 : 0)
   }
 
+  /// Discards the oldest unknown-event card so a future-event stream cannot exhaust
+  /// retained presentation memory, installing a visible boundary on first eviction.
   private func evictOldestUnrecognizedLiveTimelineItem() -> Bool {
     guard
       let index = timelinePresentationOrder.firstIndex(where: { key in
