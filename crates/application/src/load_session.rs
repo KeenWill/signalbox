@@ -102,6 +102,12 @@ mod tests {
             SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
                 DirectModelSelection::from_uuid(Uuid::from_u128(decorrelated_model)),
             )),
+            id,
+            signalbox_domain::SessionPlacementVersion::INITIAL,
+            id,
+            signalbox_domain::VersionedSessionPlacement::initial(
+                signalbox_domain::SessionPlacement::pathless(),
+            ),
         )
         .reconstitute()
         .expect("test facts form one complete current session")

@@ -239,6 +239,12 @@ mod tests {
             id,
             current,
             defaults(1),
+            id,
+            signalbox_domain::SessionPlacementVersion::INITIAL,
+            id,
+            signalbox_domain::VersionedSessionPlacement::initial(
+                signalbox_domain::SessionPlacement::pathless(),
+            ),
         )
         .reconstitute()
         .expect("test facts form one complete current session")

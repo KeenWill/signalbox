@@ -789,6 +789,10 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
+        current_placement: VersionedSessionPlacement,
     ) -> Self;
     pub const fn new_with_template_provenance(
         requested_session: SessionId,
@@ -800,6 +804,10 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
+        current_placement: VersionedSessionPlacement,
     ) -> Self;
     pub const fn new_with_template_and_placement(
         requested_session: SessionId,

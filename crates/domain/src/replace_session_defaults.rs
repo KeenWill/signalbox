@@ -715,6 +715,10 @@ mod tests {
             id,
             version(current),
             defaults(1),
+            id,
+            crate::SessionPlacementVersion::INITIAL,
+            id,
+            crate::VersionedSessionPlacement::initial(crate::SessionPlacement::pathless()),
         )
         .reconstitute()
         .expect("test session projection is complete")

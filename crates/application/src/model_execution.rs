@@ -2292,6 +2292,12 @@ mod tests {
             session_id,
             version,
             defaults.clone(),
+            session_id,
+            signalbox_domain::SessionPlacementVersion::INITIAL,
+            session_id,
+            signalbox_domain::VersionedSessionPlacement::initial(
+                signalbox_domain::SessionPlacement::pathless(),
+            ),
         )
         .reconstitute()
         .expect("fixture Session facts are correlated");

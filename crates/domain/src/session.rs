@@ -719,7 +719,7 @@ pub struct SessionReconstitutionInput {
 }
 
 impl SessionReconstitutionInput {
-    /// Supplies the complete typed facts required by the current-session
+    /// Supplies every independently stored fact required by the current-session
     /// reconstitution seam.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
@@ -731,6 +731,10 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
+        current_placement: VersionedSessionPlacement,
     ) -> Self {
         Self::new_with_template_and_placement(
             requested_session,
@@ -742,14 +746,15 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            stored_session,
-            SessionPlacementVersion::INITIAL,
-            stored_session,
-            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            current_placement_session,
+            current_placement_version,
+            placement_session,
+            current_placement,
         )
     }
 
-    /// Supplies complete typed facts including optional template provenance.
+    /// Supplies every independently stored fact, including optional template
+    /// provenance, required by the current-session reconstitution seam.
     #[allow(clippy::too_many_arguments)]
     pub const fn new_with_template_provenance(
         requested_session: SessionId,
@@ -761,6 +766,10 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
+        current_placement: VersionedSessionPlacement,
     ) -> Self {
         Self::new_with_template_and_placement(
             requested_session,
@@ -772,10 +781,10 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            stored_session,
-            SessionPlacementVersion::INITIAL,
-            stored_session,
-            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            current_placement_session,
+            current_placement_version,
+            placement_session,
+            current_placement,
         )
     }
 
@@ -1487,7 +1496,18 @@ mod tests {
         defaults: SessionConfigurationDefaults,
     ) -> SessionReconstitutionInput {
         SessionReconstitutionInput::new(
-            session, session, provenance, session, version, session, version, defaults,
+            session,
+            session,
+            provenance,
+            session,
+            version,
+            session,
+            version,
+            defaults,
+            session,
+            SessionPlacementVersion::INITIAL,
+            session,
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         )
     }
 

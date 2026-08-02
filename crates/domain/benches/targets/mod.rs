@@ -126,6 +126,12 @@ fn current_session() -> Result<Session, FixtureError> {
         session,
         version,
         defaults,
+        session,
+        signalbox_domain::SessionPlacementVersion::INITIAL,
+        session,
+        signalbox_domain::VersionedSessionPlacement::initial(
+            signalbox_domain::SessionPlacement::pathless(),
+        ),
     )
     .reconstitute()
     .map_err(|_| FixtureError::Session)
