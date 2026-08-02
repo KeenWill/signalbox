@@ -824,6 +824,60 @@ async fn s36_applied_update_replay_requires_the_event_to_reach_the_current_head(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_rejected_update_replay_requires_the_reported_version_to_reach_the_current_head()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(0x226);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x12a),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    let repository = SessionPlacementRepository::new(pool.clone());
+    repository
+        .handle(UpdateSessionPlacement::new(
+            command(0x12b),
+            session_id,
+            SessionPlacementVersion::INITIAL,
+            scoped("projects.foo.reached"),
+        ))
+        .await?;
+    let rejected = UpdateSessionPlacement::new(
+        command(0x12c),
+        session_id,
+        SessionPlacementVersion::try_from_u64(3).expect("fixture mismatch version is positive"),
+        scoped("projects.foo.rejected"),
+    );
+    repository.handle(rejected.clone()).await?;
+    sqlx::query("ALTER TABLE session_current_placement DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_current_placement SET current_version = 1
+          WHERE session_id = $1",
+    )
+    .bind(*session_id.as_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = repository
+        .handle(rejected)
+        .await
+        .expect_err("rejected replay requires the reported version to have reached the head");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a lagging placement head fails rejected replay with typed corruption")
+    };
+    assert_eq!(reason, "rejection event not reached by placement head");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_current_read_rejects_a_corrupt_placement_update_typed_header()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
@@ -973,7 +1027,7 @@ async fn s36_current_placement_read_rejects_a_pre_v6_scoped_creation_receipt()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
+async fn s36_storage_version_five_creation_materializes_pathless_placement()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let command_id = command(0x118);
@@ -1006,13 +1060,13 @@ async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
         .bind(*command_id.as_uuid())
         .execute(&mut *transaction)
         .await?;
-    sqlx::query("UPDATE durable_command SET storage_version = 4 WHERE command_id = $1")
+    sqlx::query("UPDATE durable_command SET storage_version = 5 WHERE command_id = $1")
         .bind(*command_id.as_uuid())
         .execute(&mut *transaction)
         .await?;
     sqlx::query(
         "UPDATE legacy_creation
-            SET storage_version = 4, placement_path = NULL,
+            SET storage_version = 5, placement_path = NULL,
                 root_global_read_intent = FALSE",
     )
     .execute(&mut *transaction)

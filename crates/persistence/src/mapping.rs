@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn session_placement_discriminator_mappings_are_closed() {
+    fn session_placement_event_kind_mapping_is_closed() {
         assert_eq!(
             session_placement_event_kind_from_str(session_placement_event_kind_to_str(
                 SessionPlacementEventKind::Created,
@@ -586,6 +586,10 @@ mod tests {
             Some(SessionPlacementEventKind::Updated)
         );
         assert_eq!(session_placement_event_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn session_placement_result_kind_mapping_is_closed() {
         assert_eq!(
             session_placement_result_kind_from_str(session_placement_result_kind_to_str(
                 SessionPlacementResultStorageKind::Applied,
@@ -599,6 +603,10 @@ mod tests {
             Some(SessionPlacementResultStorageKind::Rejected)
         );
         assert_eq!(session_placement_result_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn session_placement_rejection_kind_mapping_is_closed() {
         assert_eq!(
             session_placement_rejection_from_str("session_not_found"),
             Some(SessionPlacementRejectionStorageKind::SessionNotFound)

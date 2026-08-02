@@ -266,9 +266,9 @@ pub(crate) async fn load_current(
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
-            AND native_creation.storage_version IN (1, 2, 3, 4, 6)
+            AND native_creation.storage_version IN (1, 2, 3, 4, 5, 6)
             AND (native_creation.storage_version = 6
-                 OR (native_creation.storage_version IN (1, 2, 3, 4)
+                 OR (native_creation.storage_version IN (1, 2, 3, 4, 5)
                      AND event.placement_path IS NULL
                      AND NOT event.root_global_read_intent))
             AND native_creation.result_kind = 'applied'
@@ -347,9 +347,9 @@ async fn load_authenticated_version(
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
-            AND native_creation.storage_version IN (1, 2, 3, 4, 6)
+            AND native_creation.storage_version IN (1, 2, 3, 4, 5, 6)
             AND (native_creation.storage_version = 6
-                 OR (native_creation.storage_version IN (1, 2, 3, 4)
+                 OR (native_creation.storage_version IN (1, 2, 3, 4, 5)
                      AND event.placement_path IS NULL
                      AND NOT event.root_global_read_intent))
             AND native_creation.result_kind = 'applied'
@@ -734,6 +734,7 @@ fn decode_record(
                     "rejection current placement event",
                 ));
             }
+            require_rejection_version_reached(&row, current)?;
             UpdateSessionPlacementResult::Rejected(
                 UpdateSessionPlacementRejection::current_version_mismatch(&command, current)
                     .ok_or(SessionPlacementRepositoryError::Corruption(
@@ -758,6 +759,7 @@ fn decode_record(
                     "rejection current placement event",
                 ));
             }
+            require_rejection_version_reached(&row, current)?;
             UpdateSessionPlacementResult::Rejected(
                 UpdateSessionPlacementRejection::version_exhausted(&command, current).ok_or(
                     SessionPlacementRepositoryError::Corruption("version exhaustion evidence"),
@@ -779,6 +781,19 @@ fn decode_record(
         }
     };
     Ok((command, result))
+}
+
+fn require_rejection_version_reached(
+    row: &PgRow,
+    reported_version: SessionPlacementVersion,
+) -> Result<(), SessionPlacementRepositoryError> {
+    let current_placement_version = decode_version(required(row, "current_placement_version")?)?;
+    if current_placement_version.as_u64() < reported_version.as_u64() {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "rejection event not reached by placement head",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_typed_header(
