@@ -12640,6 +12640,7 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
     sqlx::query(
         "ALTER TABLE session
          DROP CONSTRAINT session_creation_cause_closed,
+         DROP CONSTRAINT session_delegated_cause_shape,
          DISABLE TRIGGER session_is_append_only",
     )
     .execute(&pool)
