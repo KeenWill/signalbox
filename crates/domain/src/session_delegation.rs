@@ -219,18 +219,13 @@ impl TerminalChildTurn {
             ) => TerminalChildTurnKind::Returned,
             (
                 crate::AcceptedInputTurnSchedulingStatus::TerminalFailed
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalRefused
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalReconciliationRequired,
+                | crate::AcceptedInputTurnSchedulingStatus::TerminalRefused,
                 DelegationOutcomeReason::ChildExecutionFailed,
             ) => TerminalChildTurnKind::Failed,
             (
                 crate::AcceptedInputTurnSchedulingStatus::TerminalCompleted,
                 DelegationOutcomeReason::ChildResultUnavailable,
             ) => TerminalChildTurnKind::Failed,
-            (
-                crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled,
-                DelegationOutcomeReason::ChildStopped,
-            ) => TerminalChildTurnKind::Stopped,
             (
                 crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled,
                 DelegationOutcomeReason::ChildCancelled,
@@ -563,12 +558,11 @@ impl SessionDelegation {
         policy: ChildRelationshipPolicy,
     ) -> Result<Self, DelegationTransitionError> {
         let parent = spawning_request.session();
-        let Some(task) = spawn_task(spawning_request, policy) else {
-            return Err(DelegationTransitionError {
+        let task =
+            spawn_task(spawning_request, policy).map_err(|failure| DelegationTransitionError {
                 spawning_request: spawning_request.id(),
-                failure: DelegationTransitionFailure::InvalidToolRequestPurpose,
-            });
-        };
+                failure,
+            })?;
         if parent == child {
             return Err(DelegationTransitionError {
                 spawning_request: spawning_request.id(),
@@ -919,13 +913,28 @@ fn request_arguments_match(request: &ToolRequest, expected: serde_json::Value) -
     serde_json::from_str::<serde_json::Value>(request.arguments().as_str())
         .is_ok_and(|value| value == expected)
 }
-fn spawn_task(request: &ToolRequest, policy: ChildRelationshipPolicy) -> Option<DelegationContent> {
+fn spawn_task(
+    request: &ToolRequest,
+    policy: ChildRelationshipPolicy,
+) -> Result<DelegationContent, DelegationTransitionFailure> {
     if request.name().as_str() != SPAWN_SESSION_TOOL_NAME {
-        return None;
+        return Err(DelegationTransitionFailure::InvalidToolRequestPurpose);
     }
-    let value = serde_json::from_str::<serde_json::Value>(request.arguments().as_str()).ok()?;
-    let task = DelegationContent::try_new(value.get("task")?.as_str()?.to_owned()).ok()?;
-    (value == serde_json::json!({ "relationship": relationship_argument(policy), "task": task.as_str() })).then_some(task)
+    let value = serde_json::from_str::<serde_json::Value>(request.arguments().as_str())
+        .map_err(|_| DelegationTransitionFailure::InvalidToolRequestPurpose)?;
+    let task_text = value
+        .get("task")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(DelegationTransitionFailure::InvalidToolRequestPurpose)?;
+    let task = DelegationContent::try_new(task_text.to_owned())
+        .map_err(DelegationTransitionFailure::InvalidTaskContent)?;
+    (value
+        == serde_json::json!({
+            "relationship": relationship_argument(policy),
+            "task": task.as_str()
+        }))
+    .then_some(task)
+    .ok_or(DelegationTransitionFailure::InvalidToolRequestPurpose)
 }
 fn relationship_argument(policy: ChildRelationshipPolicy) -> serde_json::Value {
     match policy {
@@ -1037,6 +1046,7 @@ pub enum DelegationTransitionFailure {
     MissingSpawnEvent,
     InvalidProvenance,
     InvalidToolRequestPurpose,
+    InvalidTaskContent(DelegationContentError),
     DuplicateMessageIdentity,
     ConflictingMessageReplay,
     DuplicateOutcomeAuthority,
@@ -1230,6 +1240,32 @@ mod tests {
         assert_eq!(
             error.failure(),
             DelegationTransitionFailure::InvalidToolRequestPurpose
+        );
+    }
+
+    /// S18 / INV-010: malformed task content keeps its precise admission failure.
+    #[test]
+    fn s18_inv010_spawn_preserves_invalid_task_content_failure() {
+        let invalid_task = named_request(
+            2,
+            SPAWN_SESSION_TOOL_NAME,
+            serde_json::json!({
+                "relationship": relationship_argument(ChildRelationshipPolicy::Background),
+                "task": "",
+            }),
+        );
+        let error = SessionDelegation::spawn(
+            &invalid_task,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect_err("empty task is not admitted");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidTaskContent(DelegationContentError::Invalid(
+                crate::NonEmptyUnicodeTextFailure::Empty
+            ))
         );
     }
 
@@ -1547,15 +1583,15 @@ mod tests {
         )
         .expect("distinct child");
         let relation = relation
-            .record_outcome(DelegationOutcome::ChildStopped {
-                reason: DelegationOutcomeReason::ChildStopped,
+            .record_outcome(DelegationOutcome::ChildCancelled {
+                reason: DelegationOutcomeReason::ChildCancelled,
                 provenance: terminal_provenance(
                     3,
                     child_request.turn(),
-                    TerminalChildTurnKind::Stopped,
+                    TerminalChildTurnKind::Cancelled,
                 ),
             })
-            .expect("child records its own stop");
+            .expect("child records its own cancellation");
         let (relation, _) = relation
             .deliver_message(
                 &parent_message_request,

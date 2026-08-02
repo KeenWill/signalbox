@@ -210,6 +210,9 @@ that variant.
 | `replace_session_defaults`              | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean), `system_prompt` (string or null)                                         | Install one complete immutable defaults epoch as the user actor, conditional on the exact current epoch.                                                                                                                                                                                                                                                                        |
 | `reconcile_turn`                        | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                           | Supply the user reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                                                                                                                                                            |
 | `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                          | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin and explicitly selecting delegated-child scope.                                                                                                                                                                                                          |
+| `spawn_session`                         | `session_id`, `turn_id`, and `tool_request_id` (canonical UUID strings), `task` (string), `relationship` (`background {}` or `bound { on_parent_stopped, on_parent_cancelled }`, whose actions are `keep_running`, `stop`, or `cancel`)                                  | Apply the exact already-issued spawn tool request and atomically create its delegated child.                                                                                                                                                                                                                                                                                    |
+| `await_session`                         | `session_id`, `turn_id`, `tool_request_id`, and `child_session_id` (canonical UUID strings), `mode` (`foreground` or `background`)                                                                                                                                       | Apply the exact already-issued await tool request for the related child.                                                                                                                                                                                                                                                                                                        |
+| `send_session_message`                  | `session_id`, `turn_id`, `tool_request_id`, and `peer_session_id` (canonical UUID strings), `content` (string)                                                                                                                                                           | Apply the exact already-issued message tool request to the other session on the relationship.                                                                                                                                                                                                                                                                                   |
 | `decide_tool_request`                   | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                         | Supply the user decision for one pending tool request through the canonical decision command.                                                                                                                                                                                                                                                                                   |
 | `read_session_defaults`                 | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                              | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                                                                                                                                                          |
 | `list_conversations`                    | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                      | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                                                                                                                                                  |
@@ -649,6 +652,7 @@ Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted non-review mutation request — `create_session`,
 `create_session_from_template`, `create_session_from_imported_frontier`,
 `submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
+`spawn_session`, `await_session`, `send_session_message`,
 `replace_session_metadata`, `replace_session_defaults`, `compact_session`,
 `import_conversation`, `replace_lost_runner`, `abandon_lost_runner`, or
 `promote_pending_runner` — produces exactly one of:
@@ -665,6 +669,14 @@ that variant. Every accepted non-review mutation request — `create_session`,
   `decision` object; the receipt mirrors the recorded applied result and
   intentionally echoes no session, because the session is not part of the
   canonical decision payload;
+- `session_spawned` with `tool_request_id`, `child_session_id`, and the exact
+  recorded `relationship` object;
+- `session_await_registered` with `tool_request_id`, `child_session_id`, and
+  `mode = background`, or `session_await_completed` with `tool_request_id`,
+  `child_session_id`, closed `outcome`, nullable `content`, and exact
+  `provenance` for a foreground result already delivered;
+- `session_message_sent` with `tool_request_id`, `message_id`, `direction`, and
+  positive canonical-decimal `ordinal`;
 - `session_metadata_replaced` with `session_id`, the complete `metadata`
   snapshot installed by that recorded handling, and its non-null `last_writer`;
 - `session_defaults_replaced` with `session_id`, the newly installed
@@ -1357,8 +1369,10 @@ object, and returns
 `session_spawned { tool_request_id, child_session_id, relationship }`.
 `await_session` carries the related child and wait mode, and returns either
 `session_await_registered { tool_request_id, child_session_id, mode }` for
-background or the already-delivered child outcome for foreground.
-`send_session_message` carries the related peer and bounded content, and returns
+background or
+`session_await_completed { tool_request_id, child_session_id, outcome, content, provenance }`
+for a foreground result already delivered. `send_session_message` carries the
+related peer and bounded content, and returns
 `session_message_sent { tool_request_id, message_id, direction, ordinal }`.
 Replaying an already-applied logical request returns its recorded receipt.
 
@@ -1370,7 +1384,8 @@ Session-follow updates add these closed event shapes:
 - `child_result { spawning_request_id, child_session_id, outcome, content, provenance }`,
   where content is present only for `returned` and the other outcomes are
   `failed`, `stopped`, or `cancelled`, and provenance is either the exact child
-  turn or the exact parent session, parent turn, and durable command;
+  turn for returned, failed, or cancelled, or the exact parent session, parent
+  turn, and durable command for a parent-policy stopped/cancelled outcome;
 - `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, provenance }`,
   including `continue_running` and the same closed provenance union; and
 - `delegation_wake { spawning_request_id, subject }`, where `subject` is exactly
