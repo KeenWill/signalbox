@@ -24,6 +24,7 @@ public struct SignalboxTimelineMessage: Equatable, Sendable {
     public let eventID: SignalboxEventID
     public let role: SignalboxMessageRole
     public let text: String
+    public let unrecognizedKind: String?
     public let thinkingText: String?
     public let isStreaming: Bool
     public let createdAt: Date?
@@ -215,6 +216,7 @@ public enum SignalboxEventNormalizer {
                     eventID: record.eventID,
                     role: event.role,
                     text: event.text,
+                    unrecognizedKind: event.unrecognizedKind,
                     thinkingText: nil,
                     isStreaming: false,
                     createdAt: nil
@@ -323,6 +325,7 @@ public enum SignalboxEventNormalizer {
                 eventID: record.eventID,
                 role: event.message.role,
                 text: text,
+                unrecognizedKind: nil,
                 thinkingText: thinkingText.isEmpty ? nil : thinkingText,
                 isStreaming: event.isStreaming,
                 createdAt: event.createdAt
