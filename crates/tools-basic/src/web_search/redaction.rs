@@ -167,6 +167,19 @@ impl CredentialScrubber {
         let Ok(url) = Url::parse(text) else {
             return true;
         };
+        let default_port = match url.scheme() {
+            "http" => 80,
+            "https" => 443,
+            _ => return true,
+        };
+        if url_variants.iter().any(|variant| {
+            removed_default_port_path_fragment(variant, default_port).is_some_and(|fragment| {
+                unicode_case_insensitive_contains(text, &fragment)
+                    || encoded_contains_credential(text, &fragment)
+            })
+        }) {
+            return true;
+        }
         if url.port().is_some()
             && url_variants.iter().any(|variant| {
                 discarded_port_zero_prefix_context(variant).is_some_and(|retained_context| {

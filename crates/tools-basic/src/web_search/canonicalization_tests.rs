@@ -1250,6 +1250,31 @@ fn web_search_rejects_port_path_zero_credential_in_result_url() {
     );
 }
 
+/// INV-035: removal of a scheme-default port cannot conceal a credential
+/// whose retained spelling spans authority context and the result path.
+#[test]
+fn web_search_rejects_removed_default_port_path_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_DEFAULT_PORT_PATH_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("default-port path fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// A credential that parses as a host plus explicit port does not turn the
 /// host alone into a collision with an unrelated provider result.
 #[test]

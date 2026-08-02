@@ -83,6 +83,18 @@ pub(super) fn canonicalized_port_path_zero_fragments(value: &str) -> Vec<String>
         .collect()
 }
 
+pub(super) fn removed_default_port_path_fragment(value: &str, default_port: u16) -> Option<String> {
+    let (authority_context, port_and_path) = value.rsplit_once(':')?;
+    let (port_fragment, path_suffix) = port_and_path.split_once('/')?;
+    if port_fragment.is_empty()
+        || !port_fragment.bytes().all(|byte| byte.is_ascii_digit())
+        || port_fragment.parse::<u16>().ok()? != default_port
+    {
+        return None;
+    }
+    Some(format!("{authority_context}/{path_suffix}"))
+}
+
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
     let candidate = format!("http://{value}/");
     let url = Url::parse(&candidate).ok()?;

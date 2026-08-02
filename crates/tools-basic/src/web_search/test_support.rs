@@ -42,6 +42,8 @@ pub(super) const FIXTURE_INTERNAL_ZERO_PORT_RESULT_URL: &str = "https://example.
 
 pub(super) const FIXTURE_PORT_PATH_ZERO_RESULT_URL: &str = "https://example.com:0400/path";
 
+pub(super) const FIXTURE_DEFAULT_PORT_PATH_RESULT_URL: &str = "http://example.com:80/path";
+
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
 
 pub(super) const FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL: &str = "https://[0db8::1]/";
@@ -177,6 +179,8 @@ pub(super) const URL_IPV6_AUTHORITY_PORT_ZERO_COLLISION_KEY: &str = "]:0";
 pub(super) const URL_INTERNAL_PORT_ZERO_COLLISION_KEY: &str = "m:04";
 
 pub(super) const URL_PORT_PATH_ZERO_COLLISION_KEY: &str = "00/p";
+
+pub(super) const URL_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "m:80/p";
 
 pub(super) const URL_AUTHORITY_WITH_PORT_NON_COLLISION_KEY: &str = "com:1";
 
