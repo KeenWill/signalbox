@@ -3102,7 +3102,9 @@ class DocsConsistencyTests(unittest.TestCase):
             "names itself as its own `via` carrier", failures[0].message
         )
 
-    def test_inherited_carrier_is_revalidated_against_current_state(self) -> None:
+    def test_inherited_unintegrated_carrier_is_preserved_through_child_ci(
+        self,
+    ) -> None:
         run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
         carried_page = (
             "# Example\n\n"
@@ -3130,12 +3132,42 @@ class DocsConsistencyTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
             failures = run_checks(self.root)
 
+        self.assertEqual(failure_categories(failures), [])
+
+    def test_inherited_carrier_on_a_merged_primary_still_rejects(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        carried_page = (
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/inner`; via PR #77 "
+            "`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n"
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            carried_page, encoding="utf-8"
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "carried merged-primary fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
         self.assertEqual(
             failure_categories(failures),
             ["spec-verification-history"],
         )
         self.assertIn(
-            "cites carrier PR #77 (`agent/stack-base`)", failures[0].message
+            "a `via` carrier tail is not permitted", failures[0].message
         )
 
     def test_inherited_carrier_reference_cannot_shed_its_tail(self) -> None:

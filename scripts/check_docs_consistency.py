@@ -35,9 +35,13 @@ The check is deterministic and offline. It verifies:
    the carrier's own pull request. It is a violation otherwise, including when
    ``#N`` has its own merge commit, and a PR can never name itself as its
    carrier. Inherited identities preserve carrier state so a base page's
-   carried reference cannot shed its tail under inheritance, but an inherited
-   carrier is still revalidated against the current history and event —
-   inheritance protects the reference's shape, never a stale carrier claim.
+   carried reference cannot shed its tail under inheritance, and a matching
+   inherited carrier that has not yet entered integration history is
+   preserved — in the immediate-base stack topology the eventual carrier is
+   often neither merged nor the current event while a child validates, and
+   integration-branch runs judge the claim after the stack lands. Structural
+   violations reject even when inherited: a primary with its own merge
+   commit, or a reference naming itself as carrier.
    The carrier components may wrap across block-quote continuation lines;
    quote markers count as scaffolding only at line prefixes, at least one gap
    character must follow the semicolon, and any tail not matching the exact
@@ -3604,6 +3608,8 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                         in integration_branches[carrier_number]
                     )
                     if carrier_in_history:
+                        continue
+                    if inherited_match:
                         continue
                     if event_error is not None:
                         violations.append(
