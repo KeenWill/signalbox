@@ -1158,7 +1158,7 @@ INV-tagged test names and attached doc comments.
   before command handling. Stale updates are authoritative typed rejections.
   Ancestor, pathless-target, and disjoint scoped reads are typed refusals rather
   than empty successful results.
-- **Required invariants:** INV-008, INV-012, INV-049.
+- **Required invariants:** INV-008, INV-012, INV-050.
 - **Remaining questions:** None.
 
 ## Coverage note
