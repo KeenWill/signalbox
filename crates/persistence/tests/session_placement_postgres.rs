@@ -11,7 +11,8 @@ use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults, SessionCreationCause,
     SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementPath,
-    SessionPlacementVersion, TranscriptAncestry,
+    SessionPlacementVersion, TranscriptAncestry, UpdateSessionPlacement,
+    UpdateSessionPlacementResult,
 };
 use signalbox_persistence::{
     create_session::{
@@ -19,6 +20,7 @@ use signalbox_persistence::{
     },
     local_test_connection_options, migrate,
     session::SessionRepository,
+    session_placement::{SessionPlacementRepository, SessionPlacementRepositoryOutcome},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -73,6 +75,10 @@ fn root(path: &str) -> SessionPlacement {
         RootPlacementGlobalReadIntent::Acknowledged,
     )
     .unwrap()
+}
+
+fn scoped(path: &str) -> SessionPlacement {
+    SessionPlacement::scoped(SessionPlacementPath::try_new(path.to_owned()).unwrap()).unwrap()
 }
 
 fn creation(
@@ -398,6 +404,60 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
     );
 
     transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_update_handle_applies_replays_and_rejects_conflicting_reuse()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(0x20c);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x10c),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    let command_id = command(0x10d);
+    let update = UpdateSessionPlacement::new(
+        command_id,
+        session_id,
+        SessionPlacementVersion::INITIAL,
+        scoped("projects.foo.session"),
+    );
+    let repository = SessionPlacementRepository::new(pool.clone());
+    let first = repository.handle(update.clone()).await?;
+    let SessionPlacementRepositoryOutcome::Recorded(UpdateSessionPlacementResult::Applied(applied)) =
+        &first
+    else {
+        panic!("the first update must apply")
+    };
+    let expected_version = SessionPlacementVersion::INITIAL
+        .next()
+        .expect("the initial placement version has a successor");
+
+    assert_eq!(
+        applied.event().prior_version(),
+        Some(SessionPlacementVersion::INITIAL)
+    );
+    assert_eq!(applied.event().placement().version(), expected_version);
+    assert_eq!(repository.handle(update).await?, first);
+    assert_eq!(
+        repository
+            .handle(UpdateSessionPlacement::new(
+                command_id,
+                session_id,
+                SessionPlacementVersion::INITIAL,
+                scoped("projects.foo.conflict"),
+            ))
+            .await?,
+        SessionPlacementRepositoryOutcome::ConflictingReuse { command_id }
+    );
+
     pool.close().await;
     drop(container);
     Ok(())
