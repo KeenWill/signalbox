@@ -493,6 +493,22 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(projection.activity, ProcessProjectionFixture.runningActivity)
   }
 
+  func testUnknownTranscriptEntryPresentationKindIsBounded() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownEntryKind(
+      ProcessProjectionFixture.oversizedUnknownState
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let record = try XCTUnwrap(projection.records.first)
+    let event = try ProcessProjectionFixture.conservativeEvent(in: record)
+
+    XCTAssertEqual(
+      event.kind.utf8.count,
+      SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+  }
+
   func testTurnActivationSideProjectionRejectsMissingActivatedTurn() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithoutTurns()
     let trigger = try ProcessProjectionFixture.activatedEvent()
@@ -696,6 +712,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     viewModel.apply(
       .sideSnapshot(
         snapshot: try ProcessProjectionFixture.snapshotWithUnknownCurrentModelCallState(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.completedModelCallEvent(
+          cursor: ProcessProjectionFixture.bufferedTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testKnownRecoverySideSnapshotSurvivesBufferedTransition() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    viewModel.apply(.event(trigger))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(
           cursor: ProcessProjectionFixture.sideSnapshotCursor
         ),
         trigger: trigger
@@ -4353,6 +4401,98 @@ private enum ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func snapshotWithKnownRecoveryTurn(
+    cursor: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"\(cursor)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"active_awaiting_model_call_recovery",
+            "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage":{
+            "input_tokens":null,
+            "output_tokens":null,
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":null
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"\(cursor)",
+          "turn_count":"1",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithUnknownEntryKind(
+    _ kind: String
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{"type":"\(kind)"}
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"1"
+        }
+        """,
+      ]
     )
   }
 

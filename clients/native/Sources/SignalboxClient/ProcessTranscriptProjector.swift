@@ -320,7 +320,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         message,
         event: .processConservative(
           SignalboxProcessConservativeEvent(
-            kind: kind,
+            kind: SignalboxProcessPresentation.retainedLabel(kind),
             diagnostic: diagnostic?.message ?? "The entry kind is not rendered by this client."
           )
         )

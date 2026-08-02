@@ -1665,6 +1665,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     canSubmit
       && activeTurnID != nil
       && activity.state != .waitingForToolDecision
+      && activity.state != .recoveryRequired
   }
 
   func apply(_ update: SignalboxSessionSynchronizationDriverUpdate) {
@@ -1714,7 +1715,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
             return (turn.turnID, snapshot.cursor.rawValue)
           })
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
-        if !mutationBlocksByTurnID.isEmpty {
+        if !mutationBlocksByTurnID.isEmpty
+          || projection.activity.state == .recoveryRequired
+        {
           activity = projection.activity
         } else if projection.activity.state == .waitingForToolDecision,
           sideSnapshotApprovalMatchesTrigger(snapshot, trigger: trigger)
