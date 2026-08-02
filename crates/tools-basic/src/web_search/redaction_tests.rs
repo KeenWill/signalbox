@@ -293,8 +293,8 @@ fn web_search_success_evidence_redacts_text_matching_decoded_credential() {
     assert!(!content.contains(REVERSE_ENCODED_COLLISION_VALUE));
 }
 
-/// INV-035: a terminated standard named HTML reference not implemented by the
-/// local decoder fails closed before reversible output can expose a credential.
+/// INV-035: a terminated standard named HTML reference is decoded before
+/// reversible output can expose a credential.
 #[test]
 fn web_search_redacts_terminated_standard_named_reference_in_result_text() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
@@ -316,6 +316,14 @@ fn web_search_redacts_terminated_standard_named_reference_in_result_text() {
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY));
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE));
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_ESCAPED_VALUE));
+}
+
+#[test]
+fn web_search_decodes_supported_named_nonbreaking_space_reference() {
+    assert_eq!(
+        decode_html_character_reference(SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE).as_deref(),
+        Some(SUPPORTED_NAMED_NONBREAKING_SPACE_VALUE)
+    );
 }
 
 /// INV-035: a syntactically plausible but unimplemented terminated named

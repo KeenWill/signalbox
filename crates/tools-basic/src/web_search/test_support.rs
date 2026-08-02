@@ -104,6 +104,10 @@ pub(super) const FIXTURE_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
 pub(super) const FIXTURE_ESCAPED_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
     "Synthetic &amp;copy; snippet";
 
+pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE: &str = "nbsp";
+
+pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_VALUE: &str = "\u{a0}";
+
 pub(super) const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
 
 pub(super) const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";

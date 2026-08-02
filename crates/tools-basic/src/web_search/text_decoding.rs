@@ -267,8 +267,10 @@ pub(super) fn decode_html_character_reference(entity: &str) -> Option<String> {
     let named = match entity {
         "amp" | "AMP" => Some("&"),
         "apos" => Some("'"),
+        "ast" => Some("*"),
         "gt" | "GT" => Some(">"),
         "lt" | "LT" => Some("<"),
+        "nbsp" => Some("\u{a0}"),
         "quot" | "QUOT" => Some("\""),
         _ => None,
     };
