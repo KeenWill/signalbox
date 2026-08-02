@@ -886,6 +886,15 @@ its `TranscriptAncestry` is independently `None`. Delegation does not copy,
 reference, merge, or expose the parent transcript, and it does not widen the
 none-or-one ancestry baseline.
 
+The child copies the complete `SessionConfigurationDefaults` value from the
+immutable defaults epoch frozen to the parent turn that owns the spawning
+request. The spawn transaction resolves that stored epoch through the parent
+turn's frozen defaults version and establishes the exact copy as the child's
+defaults version one. It never reads the parent's current-defaults pointer for
+this choice, so replacement after parent-turn acceptance, including replacement
+while the spawn request awaits approval or execution, cannot change the child.
+Tool arguments supply no defaults field.
+
 Each spawning request creates at most one immutable parent/child relationship.
 The relationship records the exact parent session and turn, child session, and
 one parent-chosen policy:
