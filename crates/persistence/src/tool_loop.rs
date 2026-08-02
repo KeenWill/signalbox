@@ -4,7 +4,11 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, HashSet},
+    error::Error,
+    fmt,
+};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -194,16 +198,18 @@ pub struct PostgresToolLoopRepository {
     continuation_targets: Option<signalbox_domain::ModelTargetCatalog>,
     continuation_credential: Option<ModelCallCredentialReference>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    cache_inclusive_input_targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
 }
 
 impl PostgresToolLoopRepository {
     /// Uses the shared production pool.
-    pub const fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
             continuation_targets: None,
             continuation_credential: None,
             credential_families: None,
+            cache_inclusive_input_targets: HashSet::new(),
         }
     }
 
@@ -219,7 +225,16 @@ impl PostgresToolLoopRepository {
             continuation_targets: Some(targets),
             continuation_credential: Some(credential_reference),
             credential_families: None,
+            cache_inclusive_input_targets: HashSet::new(),
         }
+    }
+
+    pub(crate) fn with_cache_inclusive_input_targets(
+        mut self,
+        targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
+    ) -> Self {
+        self.cache_inclusive_input_targets = targets;
+        self
     }
 
     /// Selects continuation credentials from the session's latest snapshot.
@@ -752,9 +767,15 @@ impl PostgresToolLoopRepository {
                 },
             )
             .await?;
-            insert_prepared_call(&mut transaction, prepared, credential_reference)
-                .await
-                .map_err(map_model_call_error)?;
+            insert_prepared_call(
+                &mut transaction,
+                prepared,
+                credential_reference,
+                self.cache_inclusive_input_targets
+                    .contains(&prepared.call().target()),
+            )
+            .await
+            .map_err(map_model_call_error)?;
             let rows = sqlx::query(
                 "UPDATE turn_lifecycle
                     SET active_tool_round_call_id = NULL,
@@ -855,6 +876,7 @@ impl PostgresToolLoopRepository {
                 targets,
                 credential_reference,
                 self.credential_families.as_ref(),
+                &self.cache_inclusive_input_targets,
                 &projection,
                 identities.call(),
                 identities.target_failure().clone(),

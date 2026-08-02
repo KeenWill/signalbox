@@ -128,11 +128,13 @@ pub(crate) struct SnapshotContent {
     pub(crate) content: ContentFragment,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SnapshotModelCallUsage {
     pub(crate) turn_id: CanonicalUuid,
     pub(crate) model_call_id: CanonicalUuid,
+    pub(crate) usage_provenance: signalbox_process_protocol::UsageProvenance,
     pub(crate) usage: ModelCallTokenUsage,
+    pub(crate) cost: Option<signalbox_process_protocol::ModelCallDollarCost>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -392,12 +394,16 @@ fn snapshot_record(message: ServerMessage) -> Result<SnapshotRecord, ClientError
         ServerMessage::TranscriptModelCallUsage {
             turn_id,
             model_call_id,
+            usage_provenance,
             usage,
+            cost,
             ..
         } => Ok(SnapshotRecord::ModelCallUsage(SnapshotModelCallUsage {
             turn_id,
             model_call_id,
+            usage_provenance,
             usage,
+            cost,
         })),
         ServerMessage::TranscriptEntry {
             entry_index,
