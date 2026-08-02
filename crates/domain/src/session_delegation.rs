@@ -1235,7 +1235,7 @@ mod tests {
 
         assert_eq!(
             error.failure(),
-            DelegationTransitionFailure::InvalidProvenance
+            DelegationTransitionFailure::InvalidToolRequestPurpose
         );
     }
 
@@ -1410,7 +1410,7 @@ mod tests {
         );
         assert_eq!(
             error.failure(),
-            DelegationTransitionFailure::InvalidToolRequestPurpose
+            DelegationTransitionFailure::InvalidProvenance
         );
     }
 
