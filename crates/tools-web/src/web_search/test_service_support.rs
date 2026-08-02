@@ -6,8 +6,8 @@ use signalbox_application::{
     UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, AuthorizedToolAttempt, ContextFrontierId, CorrelatedToolAttemptObservation,
-    CurrentToolAttempt, EndedToolAttempt, ModelCallId, NormalizedToolArguments,
+    AcceptedInputId, ContextFrontierId, CorrelatedToolAttemptObservation, CurrentToolAttempt,
+    EndedToolAttempt, ModelCallId, NormalizedToolArguments,
     ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId, SessionId,
     ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
@@ -99,7 +99,7 @@ pub(super) const BOUNDARY_WHITESPACE_BOUND_COLLISION_KEY: &[u8] = b"KnownFailed 
 pub(super) const TIMESTAMP_COLLISION_KEY: &str = "2026";
 
 pub(super) const FORMATTER_EVENT_BOUNDARY_COLLISION_KEY: &str =
-    "Z  WARN signalbox_tools_basic_web_search";
+    "Z  WARN signalbox_tools_web_web_search";
 
 pub(super) const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
 
@@ -422,9 +422,9 @@ impl ToolExecutionTransaction for ExecutorFixtureTransaction {
         _session: SessionId,
         _turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<AuthorizedToolAttempt, Self::Error> {
+    ) -> Result<signalbox_domain::ToolDispatchAuthority, Self::Error> {
         self.batch
-            .authorize_attempt(attempt)
+            .authorize_dispatch(attempt)
             .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)
     }
 

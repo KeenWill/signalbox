@@ -363,11 +363,11 @@ mod tests {
         ToolExecutionTransaction, ToolInputSchema, UuidV7ToolLoopIdGenerator,
     };
     use signalbox_domain::{
-        AcceptedInputId, AuthorizedToolAttempt, ContextFrontierId,
-        CorrelatedToolAttemptObservation, CurrentToolAttempt, EndedToolAttempt, ModelCallId,
-        NormalizedToolArguments, ResolvedContextFrontierReconstitutionInput,
-        SemanticTranscriptEntryId, SessionId, ToolApprovalResolutionReconstitutionInput,
-        ToolAttemptCrashOutcome, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+        AcceptedInputId, ContextFrontierId, CorrelatedToolAttemptObservation, CurrentToolAttempt,
+        EndedToolAttempt, ModelCallId, NormalizedToolArguments,
+        ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId, SessionId,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
+        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
         ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
         ToolExecutionError, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         TurnAttemptId, TurnId,
@@ -505,9 +505,9 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
             attempt: signalbox_domain::ToolAttemptId,
-        ) -> Result<AuthorizedToolAttempt, Self::Error> {
+        ) -> Result<signalbox_domain::ToolDispatchAuthority, Self::Error> {
             self.batch
-                .authorize_attempt(attempt)
+                .authorize_dispatch(attempt)
                 .map_err(|_| CurrentTimeExecutorError::ArgumentValidationDrift)
         }
 

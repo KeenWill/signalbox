@@ -28,14 +28,15 @@ was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
 extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`); and the session-placement event, current
-head, and creation transaction were verified through this PR
-(`agent/scoped-visibility-creation`). This page covers the Postgres
-representation in `crates/persistence` (source and migrations), migration
-discipline, durable command storage and replay equality, the fail-closed
-reconstitution boundary, the lock protocol, pending-steering durable state, the
-corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
-Session aggregate semantics live in
+PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
+posture storage were verified through PR #420 (`agent/approval-judge-storage`);
+and the session-placement event, current head, and creation transaction were
+verified through PR #415 (`agent/scoped-visibility-creation`). This page covers
+the Postgres representation in `crates/persistence` (source and migrations),
+migration discipline, durable command storage and replay equality, the
+fail-closed reconstitution boundary, the lock protocol, pending-steering durable
+state, the corruption taxonomy, commit-ambiguity handling, and the transactional
+outbox. Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -183,7 +184,8 @@ Implemented table families (across the forward-only migrations):
   alongside the disposition before terminal-row immutability applies;
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
   plus the resolved `context_frontier_member` compatibility projection;
-- `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
+- `tool_round`, `tool_request`, `tool_approval_decision`,
+  `tool_approval_judge_model_call`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
 - `goal_event`, whose session-local positive ordinal sequence retains the
@@ -193,7 +195,12 @@ Implemented table families (across the forward-only migrations):
 - `session_plan_event` retains every exact-provenance event. On access, the
   trigger-only first-distinct-edge projection (max 32/entry) rejects headless,
   duplicate, nonchronological, over-limit, or cyclic state; `session_plan_head`
-  certifies both tips; and
+  certifies both tips;
+- migration `202608020015` freezes `approval_posture` on each tool request,
+  records dedicated approval-judge calls in the global model-call identity
+  namespace only while their request is the current active approval wait, and
+  correlates delegate decisions to their completed call, selection,
+  recommendation, and rationale; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -493,7 +500,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Seven explicit lock statements live
+`crates/persistence/src/lock_inventory.rs`. Eleven explicit lock statements live
 in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
@@ -516,7 +523,13 @@ in the schema instead:
 - the goal-event continuity trigger in that migration takes `FOR NO KEY UPDATE`
   on the event's session row before reading the preceding event, serializing
   ordinal and generation assignment even when the Rust transaction reached that
-  row first with `FOR NO KEY UPDATE`.
+  row first with `FOR NO KEY UPDATE`;
+- the approval-judge insert guard (migration `202608020015`) first takes
+  `FOR UPDATE` on the `tool_request` row and then on the request's active
+  `turn_lifecycle` row before it admits a prepared judge call; and
+- the deferred approval-decision authority trigger in that migration takes
+  `FOR UPDATE` on the `tool_request` row before it checks for a nonterminal
+  judge call and validates the decision's frozen-posture authority.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -582,14 +595,23 @@ Locks per transaction, in acquisition order:
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
-  the `session_scheduler` row `FOR UPDATE` is the first and only explicit lock.
-  An unseen decision command first claims the user-global registry; after
-  resolving the request's owning session it takes that scheduler lock before
-  reading or mutating the active tool batch. A replay resolves entirely from the
-  command registry and receipt and takes no lifecycle lock. Guarded
-  `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call updates then
-  serialize under the scheduler lock; their foreign keys may take implicit
-  `KEY SHARE` locks on parent rows.
+  the `session_scheduler` row `FOR UPDATE` is the first and only Rust-issued
+  explicit lock. An unseen decision command first claims the user-global
+  registry; after resolving the request's owning session it takes that scheduler
+  lock before reading or mutating the active tool batch. A replay resolves
+  entirely from the command registry and receipt and takes no lifecycle lock.
+  Guarded `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call
+  updates then serialize under the scheduler lock; their foreign keys may take
+  implicit `KEY SHARE` locks on parent rows. At decision commit, the deferred
+  authority trigger takes the `tool_request` row `FOR UPDATE` after the
+  scheduler lock and before checking that no nonterminal judge remains.
+
+- **Approval-judge preparation**: the schema guard first attempts to lock the
+  `tool_request` row `FOR UPDATE`, then locks the exact active `turn_lifecycle`
+  row `FOR UPDATE`, and only then checks for an existing decision and validates
+  the prepared call. This matches the decision insert's implicit request lock
+  before its lifecycle update, so opposing approval transactions cannot hold
+  those rows in reverse order.
 
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
