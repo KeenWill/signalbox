@@ -776,11 +776,11 @@ child transcript.
 
 The child's normal terminal completion transaction materializes its definitive
 returned text as `DelegationContent`; `await_session` adapts it to
-`ToolResultContent`, while failed, stopped, and cancelled terminal paths
-materialize their closed outcome instead. This copy is part of the child
-transition, not a later transcript projection. Duplicate observation is
-idempotent by spawning request and cannot attach a late result to another parent
-tool call.
+`ToolResultContent`, while failed or child-cancelled terminal paths and
+proof-bearing parent-policy stopped or cancelled outcomes materialize their
+closed result instead. This copy is part of the child transition, not a later
+transcript projection. Duplicate observation is idempotent by spawning request
+and cannot attach a late result to another parent tool call.
 
 ## Provider bridge and daemon catalog
 

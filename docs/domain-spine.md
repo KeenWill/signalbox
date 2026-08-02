@@ -848,7 +848,6 @@ impl DelegationMessage {
 pub enum DelegationOutcomeReason {
     ChildCompleted,
     ChildExecutionFailed,
-    ChildStopped,
     ChildCancelled,
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
