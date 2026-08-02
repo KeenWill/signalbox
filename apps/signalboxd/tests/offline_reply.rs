@@ -63,6 +63,10 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const GOAL_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "subscription"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"

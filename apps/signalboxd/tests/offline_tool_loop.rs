@@ -117,6 +117,10 @@ const FIXTURE_USER_CONTENT: &str = "offline tool-loop request";
 const PROCESS_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
