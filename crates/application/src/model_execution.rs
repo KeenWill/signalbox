@@ -2292,12 +2292,14 @@ mod tests {
             session_id,
             version,
             defaults.clone(),
-            session_id,
-            signalbox_domain::SessionPlacementVersion::INITIAL,
-            session_id,
-            signalbox_domain::VersionedSessionPlacement::initial(
-                signalbox_domain::SessionPlacement::pathless(),
-            ),
+            signalbox_domain::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session_id,
+                current_pointer_version: signalbox_domain::SessionPlacementVersion::INITIAL,
+                selected_event_session: session_id,
+                selected_event: signalbox_domain::VersionedSessionPlacement::initial(
+                    signalbox_domain::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("fixture Session facts are correlated");

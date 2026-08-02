@@ -264,7 +264,9 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 from recorded domain rejection.
 
 New `CreateSession` records use storage version 6 and new
-`CreateSessionFromImportedFrontier` records version 3; new
+`CreateSessionFromImportedFrontier` records remain written at version 3. Version
+4 is committed-unimplemented compatibility space for that command family's
+optional runner-placement payload: no present writer or decoder provides it. New
 `ReplaceSessionDefaults` records use version 3. All three families reconstitute
 version 1 with dangerous blanket approval disabled and versions 1 and 2 with no
 system prompt. Create-session versions 1 through 3 carry no template provenance;

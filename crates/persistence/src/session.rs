@@ -338,10 +338,12 @@ fn decode_complete(
         defaults_session,
         defaults_version,
         defaults,
-        placement.current_session,
-        placement.current_version,
-        placement.event_session,
-        placement.placement,
+        signalbox_domain::SessionPlacementReconstitutionFacts {
+            current_pointer_session: placement.current_session,
+            current_pointer_version: placement.current_version,
+            selected_event_session: placement.event_session,
+            selected_event: placement.placement,
+        },
     )
     .reconstitute()
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())

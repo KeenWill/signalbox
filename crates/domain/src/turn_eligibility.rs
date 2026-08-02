@@ -6820,10 +6820,14 @@ mod tests {
             session,
             version,
             defaults,
-            session,
-            crate::SessionPlacementVersion::INITIAL,
-            session,
-            crate::VersionedSessionPlacement::initial(crate::SessionPlacement::pathless()),
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session,
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: session,
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("test session facts are fully correlated")
@@ -13829,10 +13833,14 @@ mod tests {
             ancestral,
             version,
             defaults,
-            ancestral,
-            crate::SessionPlacementVersion::INITIAL,
-            ancestral,
-            crate::VersionedSessionPlacement::initial(crate::SessionPlacement::pathless()),
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: ancestral,
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: ancestral,
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("ancestral session facts are fully correlated");
