@@ -4572,6 +4572,14 @@ mod tests {
             session_id,
             SessionConfigurationDefaultsVersion::first(),
             defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session_id,
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: session_id,
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("session facts are correlated");

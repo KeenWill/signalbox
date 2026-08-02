@@ -28,6 +28,12 @@ pub(crate) const REVIEW_ORCHESTRATION_KIND: &str =
 pub(crate) const COMPACT_SESSION_KIND: &str =
     durable_command_kind_to_str(CommandKind::CompactSession);
 pub(crate) const GOAL_KIND: &str = durable_command_kind_to_str(CommandKind::Goal);
+pub(crate) const UPDATE_SESSION_PLACEMENT_KIND: &str =
+    durable_command_kind_to_str(CommandKind::UpdateSessionPlacement);
+
+pub(crate) const fn create_session_storage_version_is_supported(version: i16) -> bool {
+    matches!(version, 1..=4 | 6)
+}
 
 #[derive(Clone, Copy)]
 struct CommandKindDefinition {
@@ -38,13 +44,13 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 10] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 11] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
         typed_table: "create_session_command",
         minimum_version: 1,
-        maximum_version: 4,
+        maximum_version: 6,
     },
     CommandKindDefinition {
         kind: CommandKind::CreateSessionFromImportedFrontier,
@@ -109,11 +115,21 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 10] = [
         minimum_version: 1,
         maximum_version: 1,
     },
+    CommandKindDefinition {
+        kind: CommandKind::UpdateSessionPlacement,
+        spelling: UPDATE_SESSION_PLACEMENT_KIND,
+        typed_table: "update_session_placement_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
 ];
 
 impl CommandKindDefinition {
     const fn supports_version(self, version: i16) -> bool {
-        version >= self.minimum_version && version <= self.maximum_version
+        match self.kind {
+            CommandKind::CreateSession => create_session_storage_version_is_supported(version),
+            _ => version >= self.minimum_version && version <= self.maximum_version,
+        }
     }
 }
 
@@ -238,7 +254,10 @@ fn sole_typed_record(
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{COMMAND_KIND_DEFINITIONS, CommandKind, RegistryCorruption, sole_typed_record};
+    use super::{
+        COMMAND_KIND_DEFINITIONS, CommandKind, RegistryCorruption,
+        create_session_storage_version_is_supported, sole_typed_record,
+    };
 
     fn database_admitted_command_kinds() -> BTreeSet<String> {
         const CONSTRAINT: &str = "ADD CONSTRAINT durable_command_kind_closed";
@@ -281,6 +300,13 @@ mod tests {
             database_admitted_command_kinds(),
             registry_admitted_command_kinds()
         );
+    }
+
+    #[test]
+    fn create_session_version_five_is_rejected_until_its_payload_is_decoded() {
+        assert!(create_session_storage_version_is_supported(4));
+        assert!(!create_session_storage_version_is_supported(5));
+        assert!(create_session_storage_version_is_supported(6));
     }
 
     #[test]
