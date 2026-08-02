@@ -8,7 +8,7 @@ pub(super) fn report_credential_access_failure(
     correlation: &ToolAttemptDispatchCorrelation,
 ) {
     tracing::warn!(
-        target: "signalbox_tools_basic_web_search",
+        target: "signalbox_tools_web_web_search",
         parent: None,
         failure = ?error.failure,
         session_id = %correlation.session().as_uuid(),
@@ -37,7 +37,7 @@ pub(super) fn report_credential_value_failure(
     }
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let controlled_event = format!(
-        "WARN signalbox_tools_basic_web_search: web search credential value was unusable failure={:?} session_id={} turn_id={}",
+        "WARN signalbox_tools_web_web_search: web search credential value was unusable failure={:?} session_id={} turn_id={}",
         CredentialValueFailure::Unusable,
         correlation.session().as_uuid(),
         correlation.turn().as_uuid()
@@ -55,7 +55,7 @@ pub(super) fn report_credential_value_failure(
         ));
     }
     tracing::warn!(
-        target: "signalbox_tools_basic_web_search",
+        target: "signalbox_tools_web_web_search",
         parent: None,
         failure = ?CredentialValueFailure::Unusable,
         session_id = %correlation.session().as_uuid(),
@@ -72,7 +72,7 @@ pub(super) fn report_transport_failure(
 ) -> Result<(), WebSearchExecutorError> {
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let controlled_event = format!(
-        "WARN signalbox_tools_basic_web_search: web search transport failed failure={:?} session_id={} turn_id={}",
+        "WARN signalbox_tools_web_web_search: web search transport failed failure={:?} session_id={} turn_id={}",
         failure.class(),
         correlation.session().as_uuid(),
         correlation.turn().as_uuid()
@@ -90,7 +90,7 @@ pub(super) fn report_transport_failure(
         ));
     }
     tracing::event!(
-        target: "signalbox_tools_basic_web_search",
+        target: "signalbox_tools_web_web_search",
         parent: None,
         tracing::Level::WARN,
         failure = ?failure.class(),
@@ -108,7 +108,7 @@ pub(super) fn report_response_body_failure(
 ) -> Result<(), WebSearchExecutorError> {
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let controlled_event = format!(
-        "WARN signalbox_tools_basic_web_search: web search provider response body failed failure={failure_class:?} session_id={} turn_id={}",
+        "WARN signalbox_tools_web_web_search: web search provider response body failed failure={failure_class:?} session_id={} turn_id={}",
         correlation.session().as_uuid(),
         correlation.turn().as_uuid()
     );
@@ -125,7 +125,7 @@ pub(super) fn report_response_body_failure(
         ));
     }
     tracing::event!(
-        target: "signalbox_tools_basic_web_search",
+        target: "signalbox_tools_web_web_search",
         parent: None,
         tracing::Level::WARN,
         failure = ?failure_class,
@@ -147,7 +147,7 @@ pub(super) fn report_response_sanitization_failure(
 ) -> Result<(), WebSearchExecutorError> {
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
     let controlled_event = format!(
-        "WARN signalbox_tools_basic_web_search: web search response sanitization failed failure={:?} session_id={} turn_id={}",
+        "WARN signalbox_tools_web_web_search: web search response sanitization failed failure={:?} session_id={} turn_id={}",
         ResponseSanitizationFailure::EvidenceEncoding,
         correlation.session().as_uuid(),
         correlation.turn().as_uuid()
@@ -165,7 +165,7 @@ pub(super) fn report_response_sanitization_failure(
         ));
     }
     tracing::event!(
-        target: "signalbox_tools_basic_web_search",
+        target: "signalbox_tools_web_web_search",
         parent: None,
         tracing::Level::WARN,
         failure = ?ResponseSanitizationFailure::EvidenceEncoding,
