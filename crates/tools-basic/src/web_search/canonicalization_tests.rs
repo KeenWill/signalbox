@@ -284,6 +284,54 @@ fn web_search_rejects_preprocessed_dot_segment_credential_in_result_url() {
     );
 }
 
+/// INV-035: URL preprocessing composes with authority port normalization
+/// before completed provider result evidence is retained.
+#[test]
+fn web_search_rejects_preprocessed_authority_port_credential_in_result_url() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_INTERNAL_ZERO_PORT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("preprocessed authority-port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_PREPROCESSED_AUTHORITY_PORT_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: URL path shortening removes the empty segment immediately before
+/// a parent segment before completed evidence is retained.
+#[test]
+fn web_search_rejects_empty_segment_parent_normalized_credential_in_result_url() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: format!("{FIXTURE_ORIGIN_ONLY_RESULT_URL}/{URL_EMPTY_SEGMENT_DOT_COLLISION_KEY}"),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("empty-segment parent fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMPTY_SEGMENT_DOT_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: Unicode case folding is composed with reversible decoding and
 /// URL backslash normalization before completed evidence is retained.
 #[test]
@@ -605,6 +653,31 @@ fn web_search_rejects_canonicalized_ipv4_tail_credential_in_ipv6_result_host() {
     );
 }
 
+/// INV-035: a credential embedded within one decimal dotted-IPv4 tail
+/// component is compared with that component's canonical hexadecimal output.
+#[test]
+fn web_search_rejects_ipv4_tail_decimal_digit_substring_in_ipv6_result_host() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_IPV4_TAIL_IPV6_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("embedded IPv4-tail substring fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV4_TAIL_DIGIT_SUBSTRING_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a compressed IPv6 prefix and partial dotted IPv4 tail are
 /// canonicalized together before comparison with a result host.
 #[test]
@@ -876,6 +949,31 @@ fn web_search_rejects_credential_spanning_ipv4_separator_and_hexadecimal_prefix(
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_IPV4_SEPARATOR_SPANNING_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: padding within a separator-bound hexadecimal IPv4 component is
+/// normalized before the credential is compared with canonical result output.
+#[test]
+fn web_search_rejects_padded_separator_bound_hexadecimal_ipv4_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_PADDED_SEPARATOR_SPANNING_HEX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("padded separator-bound IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV4_PADDED_SEPARATOR_SPANNING_COLLISION_KEY
             .as_bytes()
             .to_vec(),
     ))

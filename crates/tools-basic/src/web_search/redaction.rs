@@ -1,5 +1,6 @@
 use reqwest::{Url, header::HeaderValue};
 use signalbox_application::ToolExecutorEvidence;
+use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_model_runtime::{CredentialValue, redact_text};
 
 use super::{canonicalization::*, result::fixed_result_diagnostic_outputs, text_decoding::*};
@@ -71,6 +72,21 @@ impl CredentialScrubber {
         std::iter::once(self.exact.as_str()).chain(self.decoded_variants.iter().map(String::as_str))
     }
 
+    fn url_collision_variants(&self) -> Vec<String> {
+        let mut variants = Vec::new();
+        for variant in self.reversible_variants() {
+            if !variants.iter().any(|retained| retained == variant) {
+                variants.push(String::from(variant));
+            }
+            if let Some(preprocessed) = url_preprocessed_credential_variant(variant)
+                && !variants.iter().any(|retained| retained == &preprocessed)
+            {
+                variants.push(preprocessed);
+            }
+        }
+        variants
+    }
+
     pub(super) fn output_collision_variants(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.exact.as_str())
             .chain(std::iter::once(self.json_escaped.as_str()))
@@ -84,27 +100,22 @@ impl CredentialScrubber {
         }) {
             return true;
         }
-        if self.reversible_variants().any(|variant| {
+        let url_variants = self.url_collision_variants();
+        if url_variants.iter().any(|variant| {
+            unicode_case_insensitive_contains(text, variant)
+                || encoded_contains_credential(text, variant)
+        }) {
+            return true;
+        }
+        if url_variants.iter().any(|variant| {
             let slash_normalized = variant.replace('\\', "/");
-            slash_normalized != variant
+            slash_normalized != variant.as_str()
                 && (unicode_case_insensitive_contains(text, &slash_normalized)
                     || encoded_contains_credential(text, &slash_normalized))
         }) {
             return true;
         }
-        if self.reversible_variants().any(|variant| {
-            url_preprocessed_credential_variant(variant).is_some_and(|normalized| {
-                unicode_case_insensitive_contains(text, &normalized)
-                    || encoded_contains_credential(text, &normalized)
-                    || normalize_url_path_dot_segments(&normalized).is_some_and(|composed| {
-                        unicode_case_insensitive_contains(text, &composed)
-                            || encoded_contains_credential(text, &composed)
-                    })
-            })
-        }) {
-            return true;
-        }
-        if self.reversible_variants().any(|variant| {
+        if url_variants.iter().any(|variant| {
             normalize_url_path_dot_segments(variant).is_some_and(|normalized| {
                 unicode_case_insensitive_contains(text, &normalized)
                     || encoded_contains_credential(text, &normalized)
@@ -112,7 +123,7 @@ impl CredentialScrubber {
         }) {
             return true;
         }
-        if self.reversible_variants().any(|variant| {
+        if url_variants.iter().any(|variant| {
             canonicalized_url_port_fragment(variant).is_some_and(|normalized| {
                 unicode_case_insensitive_contains(text, &normalized)
                     || encoded_contains_credential(text, &normalized)
@@ -120,7 +131,7 @@ impl CredentialScrubber {
         }) {
             return true;
         }
-        if self.reversible_variants().any(|variant| {
+        if url_variants.iter().any(|variant| {
             canonicalized_authority_port_zero_fragment(variant).is_some_and(|normalized| {
                 unicode_case_insensitive_contains(text, &normalized)
                     || encoded_contains_credential(text, &normalized)
@@ -128,7 +139,7 @@ impl CredentialScrubber {
         }) {
             return true;
         }
-        if self.reversible_variants().any(|variant| {
+        if url_variants.iter().any(|variant| {
             canonicalized_complete_url(variant).is_some_and(|normalized| {
                 unicode_case_insensitive_contains(text, &normalized)
                     || encoded_contains_credential(text, &normalized)
@@ -140,7 +151,7 @@ impl CredentialScrubber {
             return true;
         };
         if url.port().is_some()
-            && self.reversible_variants().any(|variant| {
+            && url_variants.iter().any(|variant| {
                 discarded_port_zero_prefix_context(variant).is_some_and(|retained_context| {
                     retained_context.is_empty()
                         || unicode_case_insensitive_contains(text, retained_context)
@@ -149,8 +160,8 @@ impl CredentialScrubber {
         {
             return true;
         }
-        if self
-            .reversible_variants()
+        if url_variants
+            .iter()
             .any(|variant| url.scheme().eq_ignore_ascii_case(variant))
         {
             return true;
@@ -158,7 +169,7 @@ impl CredentialScrubber {
         let Some(host) = url.host_str() else {
             return false;
         };
-        if self.reversible_variants().any(|variant| {
+        if url_variants.iter().any(|variant| {
             canonicalized_url_host(variant).is_some_and(|credential_host| {
                 unicode_case_insensitive_contains(host, &credential_host)
             })
@@ -166,8 +177,8 @@ impl CredentialScrubber {
             return true;
         }
         if let Some(result_host) = parse_ip_literal(host) {
-            if self
-                .reversible_variants()
+            if url_variants
+                .iter()
                 .any(|variant| parse_ip_literal(variant).is_some_and(|key| key == result_host))
             {
                 return true;
@@ -175,7 +186,7 @@ impl CredentialScrubber {
             match result_host {
                 std::net::IpAddr::V4(result_ipv4) => {
                     let result_components = result_ipv4.octets();
-                    return self.reversible_variants().any(|variant| {
+                    return url_variants.iter().any(|variant| {
                         legacy_ipv4_component_contains(variant, result_ipv4)
                             || canonicalized_ipv4_component_fragments(variant).any(|fragment| {
                                 result_components
@@ -189,7 +200,7 @@ impl CredentialScrubber {
                     let result_octets = result_ipv6.octets();
                     let result_hextets =
                         result_components.map(|component| format!("{component:x}"));
-                    return self.reversible_variants().any(|variant| {
+                    return url_variants.iter().any(|variant| {
                         let (mixed_components, mixed_octets) =
                             canonicalized_mixed_ipv6_ipv4_tail_fragments(variant);
                         canonicalized_ipv6_hextet_text_fragment(variant).is_some_and(|fragment| {
@@ -214,6 +225,7 @@ impl CredentialScrubber {
                                         .any(|window| window == fragment)
                                 },
                             )
+                            || ipv4_tail_component_contains(variant, &result_octets[12..])
                             || mixed_components.into_iter().any(|fragment| {
                                 result_components
                                     .windows(fragment.len())
@@ -228,7 +240,7 @@ impl CredentialScrubber {
                 }
             }
         }
-        if self.reversible_variants().any(|variant| {
+        if url_variants.iter().any(|variant| {
             idna::domain_to_ascii(variant).is_ok_and(|credential_host| {
                 unicode_case_insensitive_contains(host, &credential_host)
             })
@@ -242,7 +254,7 @@ impl CredentialScrubber {
         unicode_case_insensitive_contains(&unicode_host, &self.exact)
             || unicode_case_insensitive_contains(&unicode_host, &self.json_escaped)
             || self.contains_credential(&unicode_host)
-            || self.reversible_variants().any(|variant| {
+            || url_variants.iter().any(|variant| {
                 idna_mapped_unicode_variant(variant)
                     .is_some_and(|mapped| unicode_case_insensitive_contains(&unicode_host, &mapped))
             })
@@ -309,15 +321,25 @@ pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
         || fixed_result_diagnostic_outputs()
             .iter()
             .any(|output| text_contains_credential_variant(output, credential))
-        || fixed_evidence_diagnostic_outputs()
-            .iter()
-            .any(|output| text_contains_credential_variant(output, credential))
+        || fixed_evidence_diagnostic_outputs().is_none_or(|outputs| {
+            outputs
+                .iter()
+                .any(|output| text_contains_credential_variant(output, credential))
+        })
 }
 
-fn fixed_evidence_diagnostic_outputs() -> [String; 3] {
-    [
+fn fixed_evidence_diagnostic_outputs() -> Option<[String; 4]> {
+    let populated_detail =
+        ToolExecutionErrorDetail::try_new(String::from("diagnostic probe")).ok()?;
+    Some([
         format!("{:?}", ToolExecutorEvidence::CompletedText(String::new())),
         format!("{:?}", ToolExecutorEvidence::KnownFailed { detail: None }),
+        format!(
+            "{:?}",
+            ToolExecutorEvidence::KnownFailed {
+                detail: Some(populated_detail)
+            }
+        ),
         format!("{:?}", ToolExecutorEvidence::Ambiguous),
-    ]
+    ])
 }
