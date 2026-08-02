@@ -651,13 +651,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     #[cfg(test)]
     pub(super) fn branch_switch_with_head_publish_hook<Hook: FnOnce()>(
         &self,
-        repository: &Repository,
         arguments: GitBranchSwitchArguments,
         before_head_publish: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
+        self.validate_current_repository()?;
+        let repository = self.repository_authority.repository()?;
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        let object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&object_database)?;
+        repository
+            .set_odb(&object_database)
+            .map_err(|_| LocalGitFailure::Operation)?;
         self.branch_switch_with_hooks(
-            repository,
+            &repository,
             &pinned_objects,
             arguments,
             (|| {}, || {}, || {}, before_head_publish),
@@ -891,8 +898,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &checkout_state,
         )?;
         post_checkout();
-        let published_index_identity = match index_lock.commit() {
-            Ok(identity) => identity,
+        let published_index = match index_lock.commit() {
+            Ok(published_index) => published_index,
             Err(_) => {
                 rollback_checkout_atomically(
                     repository,
@@ -951,6 +958,15 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 || {
                     before_head_publish();
                     operation_state.validate(&self.repository_authority)?;
+                    published_index.validate()?;
+                    let (target_chain, target_now) = resolve_pinned_reference_chain_from(
+                        &self.repository_authority,
+                        &reference_name,
+                        Some(&reference_locks),
+                    )?;
+                    if target_chain != locked_chain || target_now != Some(target) {
+                        return Err(LocalGitFailure::Operation);
+                    }
                     self.validate_current_repository_identity()
                 },
             )
@@ -971,7 +987,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             let index_rollback = restore_index(
                 &self.repository_authority,
                 &original_index_bytes,
-                published_index_identity,
+                published_index.file_identity(),
             );
             worktree_rollback?;
             index_rollback?;

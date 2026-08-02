@@ -46,6 +46,13 @@ pub(super) struct IndexSnapshot {
     _file: fs::File,
 }
 
+#[derive(Debug)]
+pub(super) struct PublishedIndex {
+    parent: OwnedFd,
+    index_name: OsString,
+    expected: IndexSnapshotIdentity,
+}
+
 #[derive(Clone, Copy)]
 enum IndexSnapshotPermissions {
     PreserveSource,
@@ -98,6 +105,20 @@ impl IndexSnapshot {
         } else {
             Err(LocalGitFailure::Operation)
         }
+    }
+}
+
+impl PublishedIndex {
+    pub(super) fn validate(&self) -> Result<(), LocalGitFailure> {
+        if index_snapshot_identity_at(&self.parent, &self.index_name)? == Some(self.expected) {
+            Ok(())
+        } else {
+            Err(LocalGitFailure::Operation)
+        }
+    }
+
+    pub(super) fn file_identity(&self) -> FileIdentity {
+        self.expected.file
     }
 }
 
@@ -432,7 +453,7 @@ impl IndexLock {
         self.record_prepared_index(expected)
     }
 
-    pub(super) fn commit(self) -> Result<FileIdentity, LocalGitFailure> {
+    pub(super) fn commit(self) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, || {}, || {}, || {}, || {})
     }
 
@@ -440,7 +461,7 @@ impl IndexLock {
     pub(super) fn commit_with_test_hook<Hook: FnOnce()>(
         self,
         before_publish: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(before_publish, || {}, || {}, || {}, || {})
     }
 
@@ -448,7 +469,7 @@ impl IndexLock {
     pub(super) fn commit_with_pre_exchange_test_hook<Hook: FnOnce()>(
         self,
         before_exchange: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, before_exchange, || {}, || {}, || {})
     }
 
@@ -456,7 +477,7 @@ impl IndexLock {
     pub(super) fn commit_with_exchange_test_hook<Hook: FnOnce()>(
         self,
         after_exchange: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, || {}, after_exchange, || {}, || {})
     }
 
@@ -464,7 +485,7 @@ impl IndexLock {
     pub(super) fn commit_with_cleanup_test_hook<Hook: FnOnce()>(
         self,
         before_cleanup: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, || {}, || {}, before_cleanup, || {})
     }
 
@@ -472,7 +493,7 @@ impl IndexLock {
     pub(super) fn commit_with_post_cleanup_test_hook<Hook: FnOnce()>(
         self,
         after_displaced_remove: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, || {}, || {}, || {}, after_displaced_remove)
     }
 
@@ -489,9 +510,14 @@ impl IndexLock {
         after_exchange: AfterExchange,
         before_cleanup: BeforeCleanup,
         after_displaced_remove: AfterDisplacedRemove,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.validate_supported_layout()?;
         let prepared_index = self.prepared_index.ok_or(LocalGitFailure::Operation)?;
+        let published_index = PublishedIndex {
+            parent: dup(&self.parent).map_err(|_| LocalGitFailure::Operation)?,
+            index_name: self.index_name.clone(),
+            expected: prepared_index,
+        };
         before_publish();
         self.validate_supported_layout()?;
         if self.lock_snapshot_identity()? != prepared_index
@@ -530,7 +556,7 @@ impl IndexLock {
                                     == Ok(Some(prepared_index));
                             if publication_is_current && self.validate_supported_layout().is_ok() {
                                 self.committed = true;
-                                return Ok(self.identity);
+                                return Ok(published_index);
                             }
                             return Err(LocalGitFailure::Operation);
                         }
@@ -622,7 +648,7 @@ impl IndexLock {
             }
         }
         self.committed = true;
-        Ok(self.identity)
+        Ok(published_index)
     }
 
     fn record_prepared_index(

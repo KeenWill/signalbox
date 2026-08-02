@@ -287,7 +287,6 @@ fn branch_switch_rejects_operation_state_created_before_head_publication() {
 
     let failure = executor
         .branch_switch_with_head_publish_hook(
-            &repository,
             GitBranchSwitchArguments {
                 name: FIX_BRANCH.to_owned(),
             },
@@ -302,10 +301,101 @@ fn branch_switch_rejects_operation_state_created_before_head_publication() {
         .expect_err("changed operation state rejects HEAD publication");
     let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
 
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+}
+
+#[test]
+fn branch_switch_rejects_a_target_branch_changed_before_head_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    let foreign_target = commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_head_publish_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                fs::write(
+                    fixture.root().join(".git/refs/heads").join(FIX_BRANCH),
+                    format!("{foreign_target}\n"),
+                )
+                .expect("foreign target branch update writes");
+            },
+        )
+        .expect_err("changed target branch rejects HEAD publication");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
     assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
         observed.head().expect("original HEAD remains").shorthand(),
         Ok("main")
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root().join(".git/refs/heads").join(FIX_BRANCH))
+            .expect("foreign target branch remains"),
+        format!("{foreign_target}\n")
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("original worktree content reads"),
+        CHANGED_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn branch_switch_preserves_an_index_replaced_before_head_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let index_path = fixture.root().join(".git/index");
+    let actor_index = fs::read(&index_path).expect("actor index fixture reads");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_head_publish_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let replacement_path = fixture.root().join(".git/actor-index");
+                fs::write(&replacement_path, &actor_index).expect("actor index writes");
+                fs::rename(&replacement_path, &index_path).expect("actor index publishes");
+            },
+        )
+        .expect_err("replaced index rejects HEAD publication");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+    assert_eq!(
+        fs::read(&index_path).expect("actor index remains"),
+        actor_index
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("original worktree content reads"),
+        CHANGED_CONTENT.as_bytes()
     );
 }
 
