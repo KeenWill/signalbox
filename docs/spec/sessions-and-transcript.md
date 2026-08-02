@@ -492,11 +492,11 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because `UserInitiated` is the only constructible creation cause and every
-current session-creation boundary lacks actor attribution, the implemented
-default view is exactly all non-archived sessions. No visibility taxonomy,
-creation-time override, or inference from missing attribution is stored. The
-dependency for future creation-derived visibility is recorded in
+Because both `UserInitiated` and `Delegated` creation lack actor attribution,
+and neither cause grants or implies visibility, the implemented default view is
+exactly all non-archived sessions. No visibility taxonomy, creation-time
+override, or inference from creation provenance or missing attribution is
+stored. The dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 ## The session aggregate

@@ -4832,24 +4832,34 @@ pub(crate) mod tests {
         }
     }
 
-    /// Canonical sealed completion fixture: the live call derives assistant
-    /// entry 10, terminal entry 12, and terminal frontier 13 from the existing
-    /// session-1, turn-3, call-9 execution fixture.
-    pub(crate) fn completed_turn_fixture(value: &str) -> CompletedModelCallTurn {
+    /// Canonical sealed completion fixture: the live call derives up to two
+    /// assistant entries from identities 10 and 11, terminal entry 12, and
+    /// terminal frontier 13 from the existing session-1, turn-3, call-9
+    /// execution fixture.
+    pub(crate) fn completed_turn_fixture(values: &[&str]) -> CompletedModelCallTurn {
+        assert!(values.len() <= 2, "fixture has two assistant identities");
         let execution = in_flight_execution();
         let observation = correlated_observation(
             &execution,
             ModelCallTerminalObservation::Completed {
-                assistant_text: vec![
-                    AssistantText::try_new(value.to_owned()).expect("nonempty fixture text"),
-                ],
+                assistant_text: values
+                    .iter()
+                    .map(|value| {
+                        AssistantText::try_new((*value).to_owned()).expect("nonempty fixture text")
+                    })
+                    .collect(),
             },
         );
+        let assistant_entries = values
+            .iter()
+            .enumerate()
+            .map(|(ordinal, _)| semantic_transcript_entry_id(10 + ordinal as u128))
+            .collect();
         let outcome = execution
             .apply_terminal_observation(
                 observation,
                 ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
-                    vec![semantic_transcript_entry_id(10)],
+                    assistant_entries,
                     semantic_transcript_entry_id(12),
                     context_frontier_id(13),
                 )),

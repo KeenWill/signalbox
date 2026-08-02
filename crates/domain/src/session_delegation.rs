@@ -1064,6 +1064,7 @@ mod tests {
     #[test]
     fn await_request_rejects_carried_child_drift() {
         let child = session_id(2);
+        let unrelated_child = session_id(9);
         let awaiting = named_request(
             1,
             AWAIT_SESSION_TOOL_NAME,
@@ -1073,8 +1074,12 @@ mod tests {
             }),
         );
         assert!(
-            DelegationAwaitRequest::parse(awaiting, session_id(9), DelegationWaitMode::Foreground)
-                .is_err()
+            DelegationAwaitRequest::parse(
+                awaiting,
+                unrelated_child,
+                DelegationWaitMode::Foreground
+            )
+            .is_err()
         );
     }
 
@@ -1098,6 +1103,7 @@ mod tests {
     #[test]
     fn message_request_rejects_carried_peer_drift() {
         let message = content("progress update");
+        let unrelated_peer = session_id(9);
         let sending = named_request(
             2,
             SEND_SESSION_MESSAGE_TOOL_NAME,
@@ -1108,7 +1114,7 @@ mod tests {
         );
 
         assert!(
-            DelegationMessageRequest::parse(sending, session_id(9), message.as_str().into())
+            DelegationMessageRequest::parse(sending, unrelated_peer, message.as_str().into())
                 .is_err()
         );
     }
@@ -1132,7 +1138,7 @@ mod tests {
     #[test]
     fn s18_inv010_live_completed_call_proves_returned_content() {
         let expected = content("completed child result");
-        let completed = completed_turn_fixture(expected.as_str());
+        let completed = completed_turn_fixture(&[expected.as_str()]);
         let terminal = TerminalChildTurn::from_completed(&completed)
             .expect("live completed call seals terminal child evidence");
         let outcome = DelegationOutcome::from_terminal_child(terminal, Some(expected.clone()))
@@ -1140,6 +1146,39 @@ mod tests {
 
         assert_eq!(outcome.kind(), DelegationOutcomeKind::ResultReturned);
         assert_eq!(outcome.content(), Some(&expected));
+    }
+
+    /// S18 / INV-010: empty live completion is a typed unavailable result.
+    #[test]
+    fn s18_inv010_empty_live_completion_produces_unavailable_outcome() {
+        let completed = completed_turn_fixture(&[]);
+        let terminal = TerminalChildTurn::from_completed(&completed)
+            .expect("empty live completion remains terminal child evidence");
+        let outcome = DelegationOutcome::from_terminal_child(terminal, None)
+            .expect("empty completion derives an explicit failed outcome");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ChildFailed);
+        assert_eq!(
+            outcome.reason(),
+            DelegationOutcomeReason::ChildResultUnavailable
+        );
+    }
+
+    /// S18 / INV-010: oversized aggregate live completion is typed unavailable.
+    #[test]
+    fn s18_inv010_oversized_live_completion_produces_unavailable_outcome() {
+        let part = "x".repeat(DelegationContent::MAX_UTF8_BYTES / 2 + 1);
+        let completed = completed_turn_fixture(&[part.as_str(), part.as_str()]);
+        let terminal = TerminalChildTurn::from_completed(&completed)
+            .expect("oversized live completion remains terminal child evidence");
+        let outcome = DelegationOutcome::from_terminal_child(terminal, None)
+            .expect("oversized completion derives an explicit failed outcome");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ChildFailed);
+        assert_eq!(
+            outcome.reason(),
+            DelegationOutcomeReason::ChildResultUnavailable
+        );
     }
 
     /// S18 / INV-010: terminal proof authenticates returned content.
@@ -1211,18 +1250,18 @@ mod tests {
     fn content_bound_reports_exact_utf8_length() {
         let oversized_utf8_bytes = DelegationContent::MAX_UTF8_BYTES + 1;
         let value = "x".repeat(oversized_utf8_bytes);
+        let expected_failure = DelegationContentFailure::Oversized {
+            utf8_byte_length: oversized_utf8_bytes,
+        };
         let error = DelegationContent::try_new(value.clone())
             .expect_err("oversized content must fail without consuming the input");
 
-        assert_eq!(
-            error.failure(),
-            DelegationContentFailure::Oversized {
-                utf8_byte_length: oversized_utf8_bytes,
-            }
-        );
+        assert_eq!(error.failure(), expected_failure);
         assert_eq!(error.value(), value);
         expect!["delegation content is 1048577 bytes; maximum is 1048576"]
             .assert_eq(&error.to_string());
-        assert_eq!(error.into_parts().0, value);
+        let (rejected_value, failure) = error.into_parts();
+        assert_eq!(rejected_value, value);
+        assert_eq!(failure, expected_failure);
     }
 }
