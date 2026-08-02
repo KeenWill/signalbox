@@ -1433,6 +1433,7 @@ pub enum DeliveryRequest {
     },
     Interrupt {
         expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
         configuration: PerInputConfigurationChoices,
     },
     NextSafePoint {
@@ -7192,7 +7193,7 @@ impl GoalReconstitutionError {
 pub enum GoalUserAction {
     Attach(GoalStatement),
     Resume(Option<GoalGuidance>),
-    Stop,
+    Stop { descendant_scope: DescendantTerminationScope },
     Supersede(GoalStatement),
 }
 pub struct GoalUserCommand { /* private command identity + session + action */ }

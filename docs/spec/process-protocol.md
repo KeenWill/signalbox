@@ -1404,6 +1404,14 @@ successful cascade receipt includes the selected scope and the exact count of
 recorded descendant dispositions, so a zero-child choice and an unperformed
 cascade cannot be confused.
 
+The scope is part of the durable command intent, not receipt-only metadata.
+Domain `GoalUserAction::Stop { descendant_scope }` and
+`DeliveryRequest::Interrupt { descendant_scope, .. }` retain it; command
+storage, comparison, and reconstitution carry the same closed value. Reusing
+either durable command identity with another scope is `conflicting_reuse`, and
+an equal retry returns the already-recorded parent transition and
+descendant-disposition count without reevaluating the cascade.
+
 ## Durable update dispatch
 
 `DATABASE_URL` must name a direct or otherwise session-affine PostgreSQL

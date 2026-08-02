@@ -2715,6 +2715,7 @@ fn rejection_configuration(
         | DeliveryRequest::Interrupt {
             expected_active_turn,
             configuration,
+            ..
         } => Ok((configuration, Some(expected_active_turn))),
         DeliveryRequest::NextSafePoint { .. } => {
             Err(SubmitInputReconstitutionFailure::RejectionHasNoExplicitOriginConfiguration)
@@ -3155,19 +3156,19 @@ mod tests {
         AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, ActiveTurnPhase,
-        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FrozenAliasDefinition,
-        FrozenModelSelection, InitialSemanticTranscriptEntryPayload, IssuedOperationRef,
-        ModelCallDisposition, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-        ModelSelectionOverride, ModelSelectionRequest, NonEmptyIssuedOperationRefs,
-        NormalizedToolArguments, OriginConfiguration, PerInputConfigurationChoices,
-        PinnedProviderTargetReconstitutionInput, ReconciliationReason,
-        ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-        ResolvedProviderTarget, SemanticTranscriptEntryReconstitutionInput,
-        SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
-        SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-        SessionInputPosition, SessionReconstitutionInput, SteeringBinding,
-        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
+        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest,
+        DescendantTerminationScope, FrozenAliasDefinition, FrozenModelSelection,
+        InitialSemanticTranscriptEntryPayload, IssuedOperationRef, ModelCallDisposition,
+        ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
+        ModelSelectionRequest, NonEmptyIssuedOperationRefs, NormalizedToolArguments,
+        OriginConfiguration, PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput,
+        ReconciliationReason, ResolvedContextFrontierReconstitutionInput,
+        ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
+        SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
+        SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
+        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+        SessionCreationProvenance, SessionInputPosition, SessionReconstitutionInput,
+        SteeringBinding, ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
         ToolRequestOrdinal, ToolRequestReconstitutionInput, TranscriptAncestry, TurnDisposition,
         UserContent,
     };
@@ -3247,6 +3248,7 @@ mod tests {
             content("hello"),
             DeliveryRequest::Interrupt {
                 expected_active_turn,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
             },
         )
@@ -3808,6 +3810,37 @@ mod tests {
     #[test]
     fn s01_inv012_comparison_payload_is_structural() {
         let baseline = start_command(1, "hello", 1);
+        let parent_alone_interrupt = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(9),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        );
+        let equal_interrupt_replay = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(9),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        );
+        let conflicting_interrupt_replay = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(9),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        );
+
         assert_eq!(baseline, start_command(2, "hello", 1));
         assert_eq!(hash(&baseline), hash(&start_command(2, "hello", 1)));
         assert_ne!(baseline, start_command(1, "hello ", 1));
@@ -3833,6 +3866,8 @@ mod tests {
                 },
             )
         );
+        assert_eq!(parent_alone_interrupt, equal_interrupt_replay);
+        assert_ne!(parent_alone_interrupt, conflicting_interrupt_replay);
     }
 
     /// S01 / INV-007 / INV-008 / INV-028: start preparation creates exact
@@ -6419,6 +6454,7 @@ mod tests {
             content("hello"),
             DeliveryRequest::Interrupt {
                 expected_active_turn: turn_id(7),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: choices(
                     1,
                     ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(2))),

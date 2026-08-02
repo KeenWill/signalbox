@@ -16,16 +16,17 @@ use signalbox_domain::{
     ConsumedSteeringReconstitutionInput, ContextCompactionId,
     ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
     ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
-    ContextFrontierId, ContinuationRoundReconstitutionInput, DeliveryRequest, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
-    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
-    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedProviderTarget, SemanticTranscriptEntryId,
+    ContextFrontierId, ContinuationRoundReconstitutionInput, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
+    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, PerInputConfigurationChoices,
+    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
+    SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -4173,6 +4174,7 @@ fn encode_delivery(delivery: DeliveryRequest) -> EncodedDelivery {
         DeliveryRequest::Interrupt {
             expected_active_turn,
             configuration,
+            ..
         } => encode_configured_delivery(
             "interrupt",
             Some(expected_active_turn.into_uuid()),
@@ -6224,6 +6226,7 @@ fn decode_delivery(
             if kind == "interrupt" {
                 Ok(DeliveryRequest::Interrupt {
                     expected_active_turn: turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration,
                 })
             } else {

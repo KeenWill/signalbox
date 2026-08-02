@@ -17,13 +17,13 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
     CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, Goal, GoalCommandRejection,
-    GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
-    GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
-    GoalUserProvenance, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput, ToolRequestId,
-    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, FrozenAliasDefinition,
+    Goal, GoalCommandRejection, GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind,
+    GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
+    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest,
+    PreparedCreateSession, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
+    ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -863,7 +863,9 @@ async fn s_goal_inv048_complete_lineage_round_trips() -> Result<(), Box<dyn Erro
     let stop = GoalUserCommand::new(
         command(STOP_COMMAND),
         session(SESSION),
-        GoalUserAction::Stop,
+        GoalUserAction::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+        },
     );
     let stopped = superseded
         .stop(GoalUserProvenance::new(command(STOP_COMMAND)))
@@ -1097,7 +1099,9 @@ async fn inv048_stop_retires_queued_work_without_blocking_reattach() -> Result<(
             GoalUserCommand::new(
                 command(STOP_COMMAND),
                 session(SESSION),
-                GoalUserAction::Stop,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
             ),
             None,
             |_| None,
@@ -1167,7 +1171,9 @@ async fn inv048_stopped_queued_goal_is_absent_from_reconciliation_hints()
                 GoalUserCommand::new(
                     command(STOP_COMMAND),
                     session(SESSION),
-                    GoalUserAction::Stop,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
                 ),
                 None,
                 |_| None,
@@ -1227,7 +1233,9 @@ async fn inv048_stopped_replacement_does_not_corrupt_the_active_acceptance_tail(
             GoalUserCommand::new(
                 command(STOP_COMMAND),
                 session(SESSION),
-                GoalUserAction::Stop,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
             ),
             None,
             |_| None,
@@ -2658,7 +2666,13 @@ async fn inv048_stop_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
         async move {
             repository
                 .handle_user_command(
-                    GoalUserCommand::new(command(0x9a2), session(SESSION), GoalUserAction::Stop),
+                    GoalUserCommand::new(
+                        command(0x9a2),
+                        session(SESSION),
+                        GoalUserAction::Stop {
+                            descendant_scope: DescendantTerminationScope::ParentAlone,
+                        },
+                    ),
                     None,
                     |_| None,
                 )
