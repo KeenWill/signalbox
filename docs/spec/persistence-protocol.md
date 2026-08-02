@@ -986,17 +986,33 @@ protocol scope). Implemented storage:
   dedicated call, exact positive through position, appended summary, and result
   frontier.
 
-**Session-delegation foundation proposal.** The full delegation stack adds a
-version-one `delegation_wake_outbox_event` typed record. It names the exact
-spawning request and has one closed subject shape: `result` carries an equal
-`result_spawning_request_id`, while `message` carries a `DelegationMessageId`
-belonging to that relationship. Its header's `session_id` is the parent
-receiving a result wake or the peer receiving a message wake. The schema
-requires exactly the selected subject columns and correlates each identity to
-the same relationship; dispatch decodes the same closed union and rejects every
-other storage version. The header completeness trigger includes this record
-kind, and the record is append-only and rejects `TRUNCATE` with the rest of the
+**Session-delegation foundation proposal.** Migration `202608020018` in the full
+delegation stack adds one version-one `delegation_update_outbox_event` typed
+table, keyed by its `event_sequence` header foreign key and closed
+`update_kind`. Its common subject is the exact `spawning_request_id`; the
+shape-specific columns carry `child_session_id` and relationship for
+`child_spawned`, `await_request_id`, child, and mode for `child_waiting`, child,
+outcome, reason, and provenance for `child_lifecycle_disposition`, those fields
+plus nullable result content for `child_result`, or message identity, endpoints,
+ordinal, and content for `session_message`. `delegation_wake` instead carries
+one closed wake subject: `result` requires an equal
+`result_spawning_request_id`, while `message` requires a `DelegationMessageId`
+belonging to that relationship. The header's `session_id` is the stream
+receiving the update. Per-kind checks require exactly that shape's columns and
+reject all others; foreign keys correlate every supplied identity to the same
+relationship. Dispatch decodes the same closed union and rejects every other
+storage version. The header completeness trigger includes this record kind, and
+the typed record is append-only and rejects `TRUNCATE` with the rest of the
 family.
+
+Every client-observable delegation transition appends its corresponding typed
+update record in the transaction that commits the relationship, wait,
+disposition, result, or message. A result or message that makes dormant work
+runnable appends a distinct `delegation_wake` record in that same transaction;
+the internal wake subject does not stand in for the client-visible result or
+message update. A guarded transition that changes no durable state appends no
+update. State without its promised update, or an update without its state, is
+therefore unrepresentable.
 
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by

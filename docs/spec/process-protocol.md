@@ -664,7 +664,8 @@ produces exactly one of:
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`; a queued submit names the ordinary
   origin turn held behind its expected active turn, and a `stop_turn` acceptance
-  names the accepted immediate successor;
+  names the accepted immediate successor and additionally carries its exact
+  `descendant_scope` and canonical decimal `disposition_count`;
 - `steering_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `source_turn_id`; this is the normal receipt for
   accepted pending steering, which creates no turn;
@@ -703,6 +704,8 @@ produces exactly one of:
 
 **Implemented behavior.** An accepted goal mutation returns
 `goal_transition_applied { session_id, event_ordinal, generation }`. A
+`stop_goal` form additionally carries its exact `descendant_scope` and canonical
+decimal `disposition_count`; equal replay returns that same complete receipt. A
 successful `read_goal` returns `goal_history_start` with the current generation
 and immutable statement; `goal_history_state` with the current state; one or
 more contiguous `goal_history_item` messages with event ordinal, generation,
@@ -1502,8 +1505,12 @@ closed `event` object. The protocol admits these event shapes:
 | `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                     |
 | `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                             |
 | `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                     |
+| `child_spawned`                | `spawning_request_id`, `child_session_id`, and `relationship`                                              |
+| `child_waiting`                | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                  |
+| `child_lifecycle_disposition`  | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                           |
 | `child_result`                 | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                |
 | `session_message`              | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content` |
+| `delegation_wake`              | `spawning_request_id` and closed `subject`                                                                 |
 
 A `goal_turn_retired` event clears only the exact queued turn it names; an
 unmatched or already-active identity leaves local turn controls unchanged. A

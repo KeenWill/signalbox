@@ -4475,7 +4475,7 @@ fn close_cancelled_turn(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
@@ -4830,6 +4830,35 @@ mod tests {
             usage: ProviderReportedTokenUsage::unreported(),
             provider_failure_cause: None,
         }
+    }
+
+    /// Canonical sealed completion fixture: the live call derives assistant
+    /// entry 10, terminal entry 12, and terminal frontier 13 from the existing
+    /// session-1, turn-3, call-9 execution fixture.
+    pub(crate) fn completed_turn_fixture(value: &str) -> CompletedModelCallTurn {
+        let execution = in_flight_execution();
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new(value.to_owned()).expect("nonempty fixture text"),
+                ],
+            },
+        );
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![semantic_transcript_entry_id(10)],
+                    semantic_transcript_entry_id(12),
+                    context_frontier_id(13),
+                )),
+            )
+            .expect("definitive fixture completion is admissible");
+        let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+            panic!("completed fixture evidence selects completed outcome");
+        };
+        completed
     }
 
     fn tool_proposal(name: &str, arguments: &str) -> crate::ToolCallProposal {

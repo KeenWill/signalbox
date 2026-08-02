@@ -382,49 +382,6 @@ enum TerminalChildTurnKind {
     Cancelled,
 }
 
-/// Closed terminal disposition loaded for a delegation-origin turn.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TerminalChildTurnDisposition {
-    Completed,
-    Failed,
-    Refused,
-    Cancelled,
-    ReconciliationRequired,
-}
-
-/// Complete stored terminal projection for a delegation-origin turn.
-///
-/// This is a checked reconstitution input, not a live proof factory. The
-/// projection contains the exact terminal-call assistant entries followed by
-/// the turn's terminal marker; persistence obtains both from the durable
-/// terminal frontier without synthesizing accepted input.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TerminalChildTurnReconstitutionInput {
-    session: SessionId,
-    turn: TurnId,
-    disposition: TerminalChildTurnDisposition,
-    terminal_call: Option<crate::ModelCallId>,
-    terminal_projection: Box<[crate::SemanticTranscriptEntryReconstitutionInput]>,
-}
-
-impl TerminalChildTurnReconstitutionInput {
-    pub fn new(
-        session: SessionId,
-        turn: TurnId,
-        disposition: TerminalChildTurnDisposition,
-        terminal_call: Option<crate::ModelCallId>,
-        terminal_projection: Vec<crate::SemanticTranscriptEntryReconstitutionInput>,
-    ) -> Self {
-        Self {
-            session,
-            turn,
-            disposition,
-            terminal_call,
-            terminal_projection: terminal_projection.into_boxed_slice(),
-        }
-    }
-}
-
 /// Exact child turn sealed by checked terminal scheduling evidence.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TerminalChildTurn {
@@ -444,12 +401,6 @@ impl TerminalChildTurn {
             value.turn(),
             delegation_content_from_live_completed(value),
         ))
-    }
-
-    /// Reconstitutes terminal evidence for a delegated initial turn from its
-    /// exact durable terminal semantic projection.
-    pub fn reconstitute(input: TerminalChildTurnReconstitutionInput) -> Option<Self> {
-        terminal_child_from_stored_projection(&input)
     }
 
     pub fn from_scheduling(
@@ -517,82 +468,6 @@ fn delegation_content_from_live_completed(
         assistant_text.push(text.clone());
     }
     DelegationContent::from_assistant_text(&assistant_text).ok()
-}
-
-fn terminal_child_from_stored_projection(
-    input: &TerminalChildTurnReconstitutionInput,
-) -> Option<TerminalChildTurn> {
-    let (marker, assistant_entries) = input.terminal_projection.split_last()?;
-    if marker.source_session() != input.session {
-        return None;
-    }
-    match input.disposition {
-        TerminalChildTurnDisposition::Completed => {
-            let terminal_call = input.terminal_call?;
-            if !matches!(
-                marker.payload(),
-                crate::SemanticTranscriptEntryPayload::TurnCompleted { turn }
-                    if *turn == input.turn
-            ) {
-                return None;
-            }
-            let mut assistant_text = Vec::with_capacity(assistant_entries.len());
-            for entry in assistant_entries {
-                let crate::SemanticTranscriptEntryPayload::AssistantText {
-                    producing_call,
-                    value,
-                } = entry.payload()
-                else {
-                    return None;
-                };
-                if entry.source_session() != input.session || *producing_call != terminal_call {
-                    return None;
-                }
-                assistant_text.push(value.clone());
-            }
-            Some(terminal_from_completed_content(
-                input.session,
-                input.turn,
-                DelegationContent::from_assistant_text(&assistant_text).ok(),
-            ))
-        }
-        TerminalChildTurnDisposition::Failed | TerminalChildTurnDisposition::Refused
-            if assistant_entries.is_empty()
-                && matches!(
-                    marker.payload(),
-                    crate::SemanticTranscriptEntryPayload::TurnFailed { turn }
-                        if *turn == input.turn
-                ) =>
-        {
-            Some(TerminalChildTurn {
-                session: input.session,
-                turn: input.turn,
-                kind: TerminalChildTurnKind::Failed,
-                reason: DelegationOutcomeReason::ChildExecutionFailed,
-                result_digest: None,
-            })
-        }
-        TerminalChildTurnDisposition::Cancelled
-            if assistant_entries.is_empty()
-                && matches!(
-                    marker.payload(),
-                    crate::SemanticTranscriptEntryPayload::TurnCancelled { turn }
-                        if *turn == input.turn
-                ) =>
-        {
-            Some(TerminalChildTurn {
-                session: input.session,
-                turn: input.turn,
-                kind: TerminalChildTurnKind::Cancelled,
-                reason: DelegationOutcomeReason::ChildCancelled,
-                result_digest: None,
-            })
-        }
-        TerminalChildTurnDisposition::Failed
-        | TerminalChildTurnDisposition::Refused
-        | TerminalChildTurnDisposition::Cancelled
-        | TerminalChildTurnDisposition::ReconciliationRequired => None,
-    }
 }
 
 fn terminal_from_completed_content(
@@ -869,7 +744,10 @@ impl DelegationOutcome {
     pub const fn from_parent_policy(
         authority: ParentTerminationAuthority,
         action: BoundChildAction,
-    ) -> Self {
+    ) -> Option<Self> {
+        if matches!(authority.scope, DescendantTerminationScope::ParentAlone) {
+            return None;
+        }
         let reason = match authority.kind {
             ParentTerminationKind::Stopped => DelegationOutcomeReason::ParentStopped {
                 scope: authority.scope,
@@ -883,12 +761,12 @@ impl DelegationOutcome {
             BoundChildAction::Stop => DelegationOutcomeKind::ChildStopped,
             BoundChildAction::Cancel => DelegationOutcomeKind::ChildCancelled,
         };
-        Self {
+        Some(Self {
             kind,
             content: None,
             reason,
             provenance: DelegationProvenance::from_parent_termination(authority),
-        }
+        })
     }
 
     pub const fn kind(&self) -> DelegationOutcomeKind {
@@ -970,15 +848,15 @@ mod tests {
     use super::*;
     use crate::{
         NormalizedToolArguments, ToolCallProposal, ToolName, ToolRequestOrdinal,
-        test_support::{
-            accepted_input_id, model_call_id, semantic_transcript_entry_id, session_id,
-            tool_request_id, turn_id,
-        },
+        model_execution::tests::completed_turn_fixture,
+        test_support::{command_id, model_call_id, session_id, tool_request_id, turn_id},
     };
     use expect_test::expect;
 
     const TEST_TASK: &str = "inspect delegated work";
 
+    /// Canonical request fixture: seed N derives request N+100, session N, turn
+    /// N+10, call N+20, and ordinal zero.
     fn named_request(session: u128, name: &str, arguments: serde_json::Value) -> ToolRequest {
         ToolRequest::from_model_proposal(
             tool_request_id(session + 100),
@@ -998,37 +876,16 @@ mod tests {
         DelegationContent::try_new(value.into()).expect("bounded nonempty content")
     }
 
-    fn completed_projection(
-        parts: Vec<(crate::ModelCallId, String)>,
-    ) -> TerminalChildTurnReconstitutionInput {
-        let child = session_id(3);
-        let turn = turn_id(4);
-        let mut projection = parts
-            .into_iter()
-            .enumerate()
-            .map(|(position, (producing_call, value))| {
-                crate::SemanticTranscriptEntryReconstitutionInput::new(
-                    semantic_transcript_entry_id(position as u128 + 10),
-                    child,
-                    crate::SemanticTranscriptEntryPayload::AssistantText {
-                        producing_call,
-                        value: crate::AssistantText::try_new(value).expect("assistant text"),
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        projection.push(crate::SemanticTranscriptEntryReconstitutionInput::new(
-            semantic_transcript_entry_id(20),
-            child,
-            crate::SemanticTranscriptEntryPayload::TurnCompleted { turn },
-        ));
-        TerminalChildTurnReconstitutionInput::new(
-            child,
-            turn,
-            TerminalChildTurnDisposition::Completed,
-            Some(model_call_id(5)),
-            projection,
-        )
+    fn parent_termination_authority(
+        scope: DescendantTerminationScope,
+    ) -> ParentTerminationAuthority {
+        ParentTerminationAuthority {
+            parent: session_id(1),
+            turn: turn_id(2),
+            command: command_id(3),
+            kind: ParentTerminationKind::Stopped,
+            scope,
+        }
     }
 
     #[test]
@@ -1053,6 +910,30 @@ mod tests {
         assert_eq!(request.task(), &content(TEST_TASK));
         assert_eq!(request.policy(), ChildRelationshipPolicy::Background);
         assert_eq!(provenance.tool_request(), Some(expected_identity));
+    }
+
+    #[test]
+    fn spawn_request_accepts_canonical_bound_relationship() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let raw = named_request(
+            1,
+            SPAWN_SESSION_TOOL_NAME,
+            serde_json::json!({
+                "relationship": {
+                    "kind": "bound",
+                    "on_parent_cancelled": "cancel",
+                    "on_parent_stopped": "stop",
+                },
+                "task": TEST_TASK,
+            }),
+        );
+        let request = DelegatedSpawnRequest::parse(raw, TEST_TASK.into(), policy)
+            .expect("canonical bound relationship is admitted");
+
+        assert_eq!(request.policy(), policy);
     }
 
     #[test]
@@ -1181,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn await_and_message_requests_reject_every_carried_field_drift() {
+    fn await_request_rejects_carried_child_drift() {
         let child = session_id(2);
         let awaiting = named_request(
             1,
@@ -1191,6 +1072,31 @@ mod tests {
                 "mode": "foreground",
             }),
         );
+        assert!(
+            DelegationAwaitRequest::parse(awaiting, session_id(9), DelegationWaitMode::Foreground)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn await_request_rejects_carried_mode_drift() {
+        let child = session_id(2);
+        let awaiting = named_request(
+            1,
+            AWAIT_SESSION_TOOL_NAME,
+            serde_json::json!({
+                "child_session_id": child.as_uuid().to_string(),
+                "mode": "foreground",
+            }),
+        );
+
+        assert!(
+            DelegationAwaitRequest::parse(awaiting, child, DelegationWaitMode::Background).is_err()
+        );
+    }
+
+    #[test]
+    fn message_request_rejects_carried_peer_drift() {
         let message = content("progress update");
         let sending = named_request(
             2,
@@ -1202,101 +1108,43 @@ mod tests {
         );
 
         assert!(
-            DelegationAwaitRequest::parse(
-                awaiting.clone(),
-                session_id(9),
-                DelegationWaitMode::Foreground
-            )
-            .is_err()
+            DelegationMessageRequest::parse(sending, session_id(9), message.as_str().into())
+                .is_err()
         );
-        assert!(
-            DelegationAwaitRequest::parse(awaiting, child, DelegationWaitMode::Background).is_err()
+    }
+
+    #[test]
+    fn message_request_rejects_carried_content_drift() {
+        let message = content("progress update");
+        let sending = named_request(
+            2,
+            SEND_SESSION_MESSAGE_TOOL_NAME,
+            serde_json::json!({
+                "content": message.as_str(),
+                "peer_session_id": session_id(1).as_uuid().to_string(),
+            }),
         );
-        assert!(
-            DelegationMessageRequest::parse(
-                sending.clone(),
-                session_id(9),
-                message.as_str().into()
-            )
-            .is_err()
-        );
+
         assert!(DelegationMessageRequest::parse(sending, session_id(1), "drift".into()).is_err());
     }
 
-    /// S18 / INV-010: stored text from another call cannot fabricate a child result.
+    /// S18 / INV-010: a live completed call seals its own nonempty result.
     #[test]
-    fn s18_inv010_terminal_child_rejects_fabricated_assistant_text() {
-        let terminal = TerminalChildTurn::reconstitute(completed_projection(vec![(
-            model_call_id(8),
-            "fabricated result".into(),
-        )]));
+    fn s18_inv010_live_completed_call_proves_returned_content() {
+        let expected = content("completed child result");
+        let completed = completed_turn_fixture(expected.as_str());
+        let terminal = TerminalChildTurn::from_completed(&completed)
+            .expect("live completed call seals terminal child evidence");
+        let outcome = DelegationOutcome::from_terminal_child(terminal, Some(expected.clone()))
+            .expect("sealed live result authenticates its exact content");
 
-        assert_eq!(terminal, None);
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ResultReturned);
+        assert_eq!(outcome.content(), Some(&expected));
     }
 
-    /// S18 / INV-010: empty and oversized completions retain a typed unavailable reason.
+    /// S18 / INV-010: terminal proof authenticates returned content.
     #[test]
-    fn s18_inv010_terminal_child_classifies_unavailable_result_content() {
-        let empty = TerminalChildTurn::reconstitute(completed_projection(vec![]))
-            .expect("exact empty completion remains terminal evidence");
-        let part = "x".repeat(DelegationContent::MAX_UTF8_BYTES / 2 + 1);
-        let oversized = TerminalChildTurn::reconstitute(completed_projection(vec![
-            (model_call_id(5), part.clone()),
-            (model_call_id(5), part),
-        ]))
-        .expect("exact oversized completion remains terminal evidence");
-
-        assert_eq!(
-            empty.reason(),
-            DelegationOutcomeReason::ChildResultUnavailable
-        );
-        assert_eq!(
-            oversized.reason(),
-            DelegationOutcomeReason::ChildResultUnavailable
-        );
-    }
-
-    /// S18 / INV-010: reconciliation and accepted input cannot synthesize terminal results.
-    #[test]
-    fn s18_inv010_terminal_child_rejects_nonterminal_or_user_synthesis() {
-        let child = session_id(3);
-        let turn = turn_id(4);
-        let user_entry = crate::SemanticTranscriptEntryReconstitutionInput::new(
-            semantic_transcript_entry_id(10),
-            child,
-            crate::SemanticTranscriptEntryPayload::OriginAcceptedInput {
-                accepted_input: accepted_input_id(6),
-            },
-        );
-        let reconciliation = TerminalChildTurnReconstitutionInput::new(
-            child,
-            turn,
-            TerminalChildTurnDisposition::ReconciliationRequired,
-            None,
-            vec![user_entry.clone()],
-        );
-        let synthesized = TerminalChildTurnReconstitutionInput::new(
-            child,
-            turn,
-            TerminalChildTurnDisposition::Completed,
-            Some(model_call_id(5)),
-            vec![
-                user_entry,
-                crate::SemanticTranscriptEntryReconstitutionInput::new(
-                    semantic_transcript_entry_id(20),
-                    child,
-                    crate::SemanticTranscriptEntryPayload::TurnCompleted { turn },
-                ),
-            ],
-        );
-
-        assert_eq!(TerminalChildTurn::reconstitute(reconciliation), None);
-        assert_eq!(TerminalChildTurn::reconstitute(synthesized), None);
-    }
-
-    /// S18 / INV-010: terminal proof fixes outcome kind and authenticates returned content.
-    #[test]
-    fn s18_inv010_terminal_proof_rejects_fabricated_content_and_cannot_stop() {
+    fn s18_inv010_terminal_proof_rejects_fabricated_content() {
         let expected = content("stored result");
         let returned = TerminalChildTurn {
             session: session_id(3),
@@ -1305,22 +1153,57 @@ mod tests {
             reason: DelegationOutcomeReason::ChildCompleted,
             result_digest: Some(delegation_content_digest(&expected)),
         };
-        let cancelled = TerminalChildTurn {
-            kind: TerminalChildTurnKind::Cancelled,
-            reason: DelegationOutcomeReason::ChildCancelled,
-            result_digest: None,
-            ..returned
-        };
 
         assert_eq!(
             DelegationOutcome::from_terminal_child(returned, Some(content("fabricated"))),
             None
         );
+    }
+
+    /// S18 / INV-010: child-origin terminal proof cannot select stopped.
+    #[test]
+    fn s18_inv010_terminal_proof_cannot_construct_stopped_outcome() {
+        let cancelled = TerminalChildTurn {
+            session: session_id(3),
+            turn: turn_id(4),
+            kind: TerminalChildTurnKind::Cancelled,
+            reason: DelegationOutcomeReason::ChildCancelled,
+            result_digest: None,
+        };
+
         assert_eq!(
             DelegationOutcome::from_terminal_child(cancelled, None)
                 .expect("cancelled proof derives one outcome")
                 .kind(),
             DelegationOutcomeKind::ChildCancelled
+        );
+    }
+
+    /// S18 / INV-010: parent-alone authority cannot disposition descendants.
+    #[test]
+    fn s18_inv010_parent_alone_cannot_construct_descendant_outcome() {
+        let authority = parent_termination_authority(DescendantTerminationScope::ParentAlone);
+
+        assert_eq!(
+            DelegationOutcome::from_parent_policy(authority, BoundChildAction::Stop),
+            None
+        );
+    }
+
+    /// S18 / INV-010: parent-and-descendants authority admits bound policy.
+    #[test]
+    fn s18_inv010_parent_and_descendants_constructs_policy_outcome() {
+        let authority =
+            parent_termination_authority(DescendantTerminationScope::ParentAndDescendants);
+        let outcome = DelegationOutcome::from_parent_policy(authority, BoundChildAction::Stop)
+            .expect("descendant-scoped authority may apply bound policy");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ChildStopped);
+        assert_eq!(
+            outcome.reason(),
+            DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            }
         );
     }
 

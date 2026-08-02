@@ -873,20 +873,8 @@ impl DelegationMessageRequest {
 }
 
 pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
-pub enum TerminalChildTurnDisposition { Completed, Failed, Refused, Cancelled, ReconciliationRequired }
-pub struct TerminalChildTurnReconstitutionInput { /* private delegation-origin terminal disposition and exact semantic projection */ }
-impl TerminalChildTurnReconstitutionInput {
-    pub fn new(
-        session: SessionId,
-        turn: TurnId,
-        disposition: TerminalChildTurnDisposition,
-        terminal_call: Option<ModelCallId>,
-        terminal_projection: Vec<SemanticTranscriptEntryReconstitutionInput>,
-    ) -> Self;
-}
 impl TerminalChildTurn {
     pub fn from_completed(value: &CompletedModelCallTurn) -> Option<Self>;
-    pub fn reconstitute(input: TerminalChildTurnReconstitutionInput) -> Option<Self>;
     pub fn from_scheduling(
         value: &AcceptedInputTurnSchedulingProjection,
         reason: DelegationOutcomeReason,
@@ -931,7 +919,7 @@ impl DelegationOutcome {
     pub const fn from_parent_policy(
         authority: ParentTerminationAuthority,
         action: BoundChildAction,
-    ) -> Self;
+    ) -> Option<Self>;
     // accessors: kind(), content(), reason(), provenance()
 }
 pub struct ChildWait { /* private awaiting request + spawning request + child */ }
@@ -8038,7 +8026,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
-| domain: session_delegation                         | 25                   |
+| domain: session_delegation                         | 23                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8066,7 +8054,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **625 (+7 free fn)** |
+| **signalbox-domain total**                         | **623 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
