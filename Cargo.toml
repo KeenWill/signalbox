@@ -26,6 +26,7 @@ members = [
     "crates/tools-conversations",
     "crates/tools-github",
     "crates/tools-plan",
+    "crates/tools-web",
     "crates/tools-workspace",
 ]
 resolver = "3"

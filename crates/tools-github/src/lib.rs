@@ -35,7 +35,7 @@ use signalbox_model_runtime::{
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
-use signalbox_tools_basic::{
+use signalbox_tools_web::{
     PublicDestinationClientError, WebFetchTransportFailure, has_more_response_bytes,
     public_destination_client,
 };

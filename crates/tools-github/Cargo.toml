@@ -25,7 +25,7 @@ signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
 signalbox-model-runtime = { path = "../model-runtime" }
 signalbox-tool-contract = { path = "../tool-contract" }
-signalbox-tools-basic = { path = "../tools-basic" }
+signalbox-tools-web = { path = "../tools-web" }
 tracing = { version = "0.1.41", default-features = false }
 tokio = { version = "1.53.0", default-features = false, features = ["time"] }
 
