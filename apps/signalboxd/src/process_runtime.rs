@@ -361,9 +361,10 @@ async fn dispatch_updates(
                     event.sequence(),
                     event.kind(),
                 );
-                let update = ProcessUpdate::from(event);
-                let _ = fanouts.durable.send(update.clone());
-                let _ = fanouts.streaming.send(update);
+                if let Some(update) = ProcessUpdate::from_outbox(event) {
+                    let _ = fanouts.durable.send(update.clone());
+                    let _ = fanouts.streaming.send(update);
+                }
                 OutboxDeliveryDecision::Delivered
             })
             .await
@@ -424,7 +425,8 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         | DispatchedOutboxEventKind::InputAccepted { .. }
         | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
-        | DispatchedOutboxEventKind::ContextCompacted { .. } => {}
+        | DispatchedOutboxEventKind::ContextCompacted { .. }
+        | DispatchedOutboxEventKind::DelegationWake { .. } => {}
     }
 }
 
@@ -9853,13 +9855,13 @@ enum ProcessUpdate {
     ProviderTextDelta(ProviderTextDelta),
 }
 
-impl From<&DispatchedOutboxEvent> for ProcessUpdate {
-    fn from(event: &DispatchedOutboxEvent) -> Self {
-        Self::Durable {
+impl ProcessUpdate {
+    fn from_outbox(event: &DispatchedOutboxEvent) -> Option<Self> {
+        Some(Self::Durable {
             cursor: event.sequence(),
             session: event.session(),
-            event: ProcessUpdateEvent::from(event.kind()),
-        }
+            event: ProcessUpdateEvent::try_from(event.kind()).ok()?,
+        })
     }
 }
 
@@ -9924,9 +9926,11 @@ enum ProcessUpdateEvent {
     },
 }
 
-impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
-    fn from(event: &DispatchedOutboxEventKind) -> Self {
-        match event {
+impl TryFrom<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
+    type Error = ();
+
+    fn try_from(event: &DispatchedOutboxEventKind) -> Result<Self, Self::Error> {
+        Ok(match event {
             DispatchedOutboxEventKind::SessionCreated => Self::SessionCreated,
             DispatchedOutboxEventKind::InputAccepted {
                 accepted_input,
@@ -10025,7 +10029,8 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 operation: *operation,
                 terminal_frontier: *terminal_frontier,
             },
-        }
+            DispatchedOutboxEventKind::DelegationWake { .. } => return Err(()),
+        })
     }
 }
 
@@ -11992,7 +11997,9 @@ context_window_tokens = 200000
     #[test]
     fn goal_turn_retirement_projects_to_the_exact_wire_identity() {
         let turn = TurnId::from_uuid(Uuid::from_u128(7));
-        let update = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::GoalTurnRetired { turn });
+        let update =
+            ProcessUpdateEvent::try_from(&DispatchedOutboxEventKind::GoalTurnRetired { turn })
+                .expect("goal retirement is process-visible");
 
         assert_eq!(
             update.wire(),
@@ -12035,11 +12042,12 @@ context_window_tokens = 200000
             }
         );
 
-        let cancelled = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnCancelled {
+        let cancelled = ProcessUpdateEvent::try_from(&DispatchedOutboxEventKind::TurnCancelled {
             turn,
             cancellation_entry: entry,
             terminal_frontier: frontier,
-        });
+        })
+        .expect("turn cancellation is process-visible");
         assert_eq!(
             cancelled.wire(),
             SessionEvent::TurnCancelled {
@@ -12049,11 +12057,12 @@ context_window_tokens = 200000
             }
         );
         let reconciliation =
-            ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnReconciliationRequired {
+            ProcessUpdateEvent::try_from(&DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn,
                 operation: DispatchedReconciliationOperation::ModelCall(call),
                 terminal_frontier: frontier,
-            });
+            })
+            .expect("turn reconciliation is process-visible");
         assert_eq!(
             reconciliation.wire(),
             SessionEvent::TurnReconciliationRequired {
@@ -12063,13 +12072,15 @@ context_window_tokens = 200000
             }
         );
         let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(6));
-        let recovery = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::ToolBatchTransition {
-            turn,
-            producing_call: call,
-            state: DispatchedToolBatchState::RecoveryRequired {
-                attempt: tool_attempt,
-            },
-        });
+        let recovery =
+            ProcessUpdateEvent::try_from(&DispatchedOutboxEventKind::ToolBatchTransition {
+                turn,
+                producing_call: call,
+                state: DispatchedToolBatchState::RecoveryRequired {
+                    attempt: tool_attempt,
+                },
+            })
+            .expect("tool recovery is process-visible");
         assert_eq!(
             recovery.wire(),
             SessionEvent::ToolBatchTransition {
