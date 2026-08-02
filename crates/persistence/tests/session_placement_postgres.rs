@@ -243,6 +243,87 @@ async fn s36_creation_replay_rejects_cross_wired_placement_provenance() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let command_id = command(0x118);
+    let session_id = session(0x20c);
+    let legacy_placement = SessionPlacement::pathless();
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(command_id, session_id, legacy_placement.clone()))
+        .await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "CREATE TEMP TABLE legacy_creation ON COMMIT DROP AS
+         SELECT * FROM create_session_command WHERE command_id = $1",
+    )
+    .bind(*command_id.as_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM session_current_placement WHERE session_id = $1")
+        .bind(*session_id.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM session_placement_event WHERE session_id = $1")
+        .bind(*session_id.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM create_session_command WHERE command_id = $1")
+        .bind(*command_id.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE durable_command SET storage_version = 4 WHERE command_id = $1")
+        .bind(*command_id.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE legacy_creation
+            SET storage_version = 4, placement_path = NULL,
+                root_global_read_intent = FALSE",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("SET LOCAL session_replication_role = origin")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO create_session_command
+            (command_id, command_kind, storage_version, creation_cause,
+             ancestry_kind, initial_defaults_version, model_selection_kind,
+             direct_model_selection_id, model_alias_id, dangerous_tool_auto_approval,
+             system_prompt, template_name, template_content_digest, placement_path,
+             root_global_read_intent, result_kind, created_session_id)
+         SELECT command_id, command_kind, storage_version, creation_cause,
+                ancestry_kind, initial_defaults_version, model_selection_kind,
+                direct_model_selection_id, model_alias_id, dangerous_tool_auto_approval,
+                system_prompt, template_name, template_content_digest, placement_path,
+                root_global_read_intent, result_kind, created_session_id
+           FROM legacy_creation",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let loaded = SessionRepository::new(pool.clone())
+        .load_session(session_id)
+        .await?
+        .expect("the legacy session remains readable after rolling forward");
+    assert_eq!(
+        loaded.current_placement(),
+        &signalbox_domain::VersionedSessionPlacement::initial(legacy_placement)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;

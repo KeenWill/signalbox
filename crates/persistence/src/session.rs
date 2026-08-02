@@ -191,7 +191,10 @@ pub(crate) async fn load_session_from_connection(
             seed_frontier.owning_session_id AS seed_frontier_session_id,
             seed_frontier.context_frontier_id AS seed_frontier_id,
             seed_frontier.member_count AS seed_frontier_member_count
-            ,placement.version AS current_placement_version
+            ,placement_head.session_id AS current_placement_session_id
+            ,placement_head.current_version AS current_placement_head_version
+            ,placement.session_id AS current_placement_event_session_id
+            ,placement.version AS current_placement_event_version
             ,placement.prior_version AS current_placement_prior_version
             ,placement.event_kind AS current_placement_event_kind
             ,placement.placement_path AS current_placement_path
@@ -282,10 +285,16 @@ fn decode_complete(
         }
         let placement =
             decode_current_placement(&row, PlacementCreationFamily::ImportedConversation)?;
+        if placement.current_session != requested_session
+            || placement.event_session != requested_session
+            || placement.current_version != placement.placement.version()
+        {
+            return Err(SessionCorruption::Inconsistent("current placement selection").into());
+        }
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
-            placement,
+            placement.placement,
         )
         .map_err(map_imported_error);
     }
@@ -332,7 +341,10 @@ fn decode_complete(
         defaults_session,
         defaults_version,
         defaults,
-        placement,
+        placement.current_session,
+        placement.current_version,
+        placement.event_session,
+        placement.placement,
     )
     .reconstitute()
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())
@@ -344,12 +356,24 @@ enum PlacementCreationFamily {
     ImportedConversation,
 }
 
+struct DecodedCurrentPlacement {
+    current_session: SessionId,
+    current_version: SessionPlacementVersion,
+    event_session: SessionId,
+    placement: VersionedSessionPlacement,
+}
+
 fn decode_current_placement(
     row: &PgRow,
     creation_family: PlacementCreationFamily,
-) -> Result<VersionedSessionPlacement, SessionRepositoryError> {
-    let version =
-        crate::session_placement::decode_version(required(row, "current_placement_version")?)
+) -> Result<DecodedCurrentPlacement, SessionRepositoryError> {
+    let current_session = session_id_from_uuid(required(row, "current_placement_session_id")?);
+    let current_version =
+        crate::session_placement::decode_version(required(row, "current_placement_head_version")?)
+            .map_err(|_| SessionCorruption::Inconsistent("current placement head version"))?;
+    let event_session = session_id_from_uuid(required(row, "current_placement_event_session_id")?);
+    let event_version =
+        crate::session_placement::decode_version(required(row, "current_placement_event_version")?)
             .map_err(|_| SessionCorruption::Inconsistent("current placement version"))?;
     let prior = row
         .try_get::<Option<Decimal>, _>("current_placement_prior_version")?
@@ -369,7 +393,7 @@ fn decode_current_placement(
     let update: Option<Uuid> = row.try_get("current_placement_update_command_id")?;
     let receipt_is_valid = match event_kind {
         SessionPlacementEventKind::Created => {
-            version == SessionPlacementVersion::INITIAL
+            event_version == SessionPlacementVersion::INITIAL
                 && prior.is_none()
                 && update.is_none()
                 && match creation_family {
@@ -396,7 +420,12 @@ fn decode_current_placement(
         required(row, "current_placement_root_intent")?,
     )
     .map_err(|_| SessionCorruption::Inconsistent("current placement"))?;
-    Ok(VersionedSessionPlacement::reconstitute(version, placement))
+    Ok(DecodedCurrentPlacement {
+        current_session,
+        current_version,
+        event_session,
+        placement: VersionedSessionPlacement::reconstitute(event_version, placement),
+    })
 }
 
 fn decode_template_provenance(
