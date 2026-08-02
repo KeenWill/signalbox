@@ -1,10 +1,12 @@
 # Git authority threat model
 
-This page specifies the repository trust boundary implemented by the stack
-rooted at PR #409 (`agent/git-tools-authority`). The bottom slice establishes
-the authority and filesystem laws; its child slices add local operations, their
-typed tool surface, and explicitly approved repair writes. Daemon catalog wiring
-is outside this stack.
+The injected workspace-root and mutation boundary used here were verified
+through PR #360 (`agent/workspace-mutation-tools`). This page is the foundation
+proposal at the bottom of the implementing stack rooted at PR #409
+(`agent/git-tools-authority`): the bottom slice establishes the Git authority
+and filesystem laws, and its child slices add local operations, their typed tool
+surface, and explicitly approved repair writes. These paragraphs become verified
+only with that stack. Daemon catalog wiring is outside it.
 
 The deployment injects one workspace root. The Git family may operate only on a
 direct main worktree whose `.git` directory is immediately inside that root.
