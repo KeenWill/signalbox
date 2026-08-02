@@ -3518,6 +3518,7 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                 carrier = VIA_CARRIER.search(token.group(0))
                 carrier_match = (
                     carrier is not None
+                    and number not in integration_branches
                     and int(carrier.group(1)) in integration_branches
                     and carrier.group(2)
                     in integration_branches[int(carrier.group(1))]
@@ -3543,7 +3544,7 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     message = f"cannot inspect GitHub pull-request event: {event_error}"
                 elif in_flight_match:
                     message = "only one unmerged verification PR identity is permitted"
-                elif carrier is not None:
+                elif carrier is not None and number not in integration_branches:
                     message = (
                         f"PR #{number} cites carrier PR #{carrier.group(1)} "
                         f"(`{carrier.group(2)}`), which has no matching "

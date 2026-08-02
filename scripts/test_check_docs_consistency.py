@@ -2911,6 +2911,27 @@ class DocsConsistencyTests(unittest.TestCase):
             failures[0].message,
         )
 
+    def test_verification_ref_carrier_cannot_bypass_exact_branch_check(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/not-example`; via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            f"names `{self.merged_pr_branch}`", failures[0].message
+        )
+
     def test_verification_ref_rejects_one_parent_merge_subject_spoof(self) -> None:
         run_git(
             self.root,
