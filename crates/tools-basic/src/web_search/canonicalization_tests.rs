@@ -926,6 +926,29 @@ fn web_search_rejects_trailing_dot_ipv4_credential() {
     );
 }
 
+/// INV-035: removal of an IPv4 host's trailing dot cannot join the retained
+/// host suffix and path into a credential-bearing boundary fragment.
+#[test]
+fn web_search_rejects_removed_ipv4_trailing_dot_path_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_TRAILING_DOT_IPV4_PATH_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("trailing-dot IPv4 path fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV4_TRAILING_DOT_PATH_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a legacy octal credential is canonicalized in IPv4 component
 /// context before comparison with an already-canonical provider result host.
 #[test]
@@ -1534,6 +1557,31 @@ fn web_search_rejects_authority_default_port_prefix_credential() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_AUTHORITY_DEFAULT_PORT_PREFIX_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: removal of a scheme-default port cannot conceal a credential
+/// spanning authority context and a suffix of the removed port digits.
+#[test]
+fn web_search_rejects_authority_default_port_suffix_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_DEFAULT_PORT_ONLY_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("authority/default-port-suffix fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_AUTHORITY_DEFAULT_PORT_SUFFIX_COLLISION_KEY
             .as_bytes()
             .to_vec(),
     ))
