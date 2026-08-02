@@ -104,13 +104,8 @@ pub(super) const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
 
 pub(super) const FIXTURE_UNKNOWN_NAMED_REFERENCE_TITLE: &str = "Synthetic R&D; result";
 
-pub(super) const FIXTURE_ESCAPED_UNKNOWN_NAMED_REFERENCE_TITLE: &str = "Synthetic R&amp;D; result";
-
 pub(super) const FIXTURE_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
     "Synthetic &copy; snippet";
-
-pub(super) const FIXTURE_ESCAPED_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
-    "Synthetic &amp;copy; snippet";
 
 pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE: &str = "nbsp";
 
