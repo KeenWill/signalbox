@@ -216,7 +216,7 @@ pub use session_delegation::{
     BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegationContent,
     DelegationContentError, DelegationEvent, DelegationEventOrdinal, DelegationLifecycle,
     DelegationMessage, DelegationMessageDirection, DelegationOutcome, DelegationOutcomeReason,
-    DelegationProvenance, DelegationTransitionError, DelegationTransitionFailure,
+    DelegationProvenance, DelegationTransitionError, DelegationTransitionFailure, DelegationWait,
     DelegationWaitMode, DescendantTerminationScope, SessionDelegation,
 };
 pub use session_metadata::{

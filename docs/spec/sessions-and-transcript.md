@@ -909,7 +909,7 @@ relationships or descendant depth. Exceeding it is a typed spawn refusal and
 creates no child.
 
 Delegation messages are immutable, bounded, nonempty content records with a
-distinct `SessionMessageId`, the spawning relationship, exact sender and
+distinct `DelegationMessageId`, the spawning relationship, exact sender and
 recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
 child may each send to the other. `DelegationMessage` semantic entries refer to
 those records; they do not reclassify model-authored content as input from the
@@ -920,7 +920,7 @@ frontier in the same order until activation.
 
 A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned
-`ToolResultContent` or a typed failed, stopped, or cancelled outcome together
+`DelegationContent` or a typed failed, stopped, or cancelled outcome together
 with exact child turn/tool provenance. Delivery appends a `DelegationResult`
 semantic entry only to the target parent and is idempotent by the spawning
 request. A detached child may return after the parent has stopped or cancelled;

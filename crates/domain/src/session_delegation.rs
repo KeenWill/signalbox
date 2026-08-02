@@ -184,8 +184,6 @@ pub enum DelegationOutcomeReason {
     ChildExecutionFailed,
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
-    BackgroundRelationship,
-    RelationshipPolicyContinue,
 }
 
 /// Every child disposition, including an explicit no-change evaluation.
@@ -281,16 +279,58 @@ pub enum DelegationLifecycle {
 /// Exact subject retained by a foreground parent turn wait.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ChildWait {
+    awaiting_request: ToolRequestId,
     spawning_request: ToolRequestId,
     child: SessionId,
 }
 
 impl ChildWait {
+    pub const fn awaiting_request(self) -> ToolRequestId {
+        self.awaiting_request
+    }
     pub const fn spawning_request(self) -> ToolRequestId {
         self.spawning_request
     }
     pub const fn child(self) -> SessionId {
         self.child
+    }
+}
+
+/// One exact parent delivery registration made by an await tool request.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DelegationWait {
+    awaiting_request: ToolRequestId,
+    spawning_request: ToolRequestId,
+    parent: SessionId,
+    child: SessionId,
+    mode: DelegationWaitMode,
+}
+
+impl DelegationWait {
+    pub const fn awaiting_request(self) -> ToolRequestId {
+        self.awaiting_request
+    }
+    pub const fn spawning_request(self) -> ToolRequestId {
+        self.spawning_request
+    }
+    pub const fn parent(self) -> SessionId {
+        self.parent
+    }
+    pub const fn child(self) -> SessionId {
+        self.child
+    }
+    pub const fn mode(self) -> DelegationWaitMode {
+        self.mode
+    }
+    pub const fn foreground_subject(self) -> Option<ChildWait> {
+        match self.mode {
+            DelegationWaitMode::Foreground => Some(ChildWait {
+                awaiting_request: self.awaiting_request,
+                spawning_request: self.spawning_request,
+                child: self.child,
+            }),
+            DelegationWaitMode::Background => None,
+        }
     }
 }
 
@@ -301,7 +341,6 @@ pub struct SessionDelegation {
     parent: SessionId,
     child: SessionId,
     policy: ChildRelationshipPolicy,
-    wait_mode: DelegationWaitMode,
     lifecycle: DelegationLifecycle,
     events: Vec<DelegationEvent>,
 }
@@ -311,7 +350,6 @@ impl SessionDelegation {
         spawning_request: &ToolRequest,
         child: SessionId,
         policy: ChildRelationshipPolicy,
-        wait_mode: DelegationWaitMode,
     ) -> Result<Self, DelegationTransitionError> {
         let parent = spawning_request.session();
         if parent == child {
@@ -325,7 +363,6 @@ impl SessionDelegation {
             parent,
             child,
             policy,
-            wait_mode,
             lifecycle: DelegationLifecycle::Active,
             events: vec![DelegationEvent::Spawned {
                 ordinal: DelegationEventOrdinal::first(),
@@ -346,9 +383,6 @@ impl SessionDelegation {
     pub const fn policy(&self) -> ChildRelationshipPolicy {
         self.policy
     }
-    pub const fn wait_mode(&self) -> DelegationWaitMode {
-        self.wait_mode
-    }
     pub const fn lifecycle(&self) -> DelegationLifecycle {
         self.lifecycle
     }
@@ -358,14 +392,22 @@ impl SessionDelegation {
     pub const fn child_creation_provenance(&self) -> SessionCreationProvenance {
         SessionCreationProvenance::delegated(self.spawning_request)
     }
-    pub const fn foreground_wait(&self) -> Option<ChildWait> {
-        match self.wait_mode {
-            DelegationWaitMode::Foreground => Some(ChildWait {
-                spawning_request: self.spawning_request,
-                child: self.child,
-            }),
-            DelegationWaitMode::Background => None,
+    pub fn register_wait(
+        &self,
+        awaiting_request: &ToolRequest,
+        mode: DelegationWaitMode,
+    ) -> Result<DelegationWait, DelegationTransitionError> {
+        self.require_active()?;
+        if awaiting_request.session() != self.parent {
+            return Err(self.fail(DelegationTransitionFailure::InvalidProvenance));
         }
+        Ok(DelegationWait {
+            awaiting_request: awaiting_request.id(),
+            spawning_request: self.spawning_request,
+            parent: self.parent,
+            child: self.child,
+            mode,
+        })
     }
 
     pub fn deliver_message(
@@ -462,12 +504,19 @@ fn validate_outcome(
         | DelegationOutcome::ChildCancelled { reason, provenance }
         | DelegationOutcome::ContinueRunning { reason, provenance } => (*reason, *provenance),
     };
-    let provenance_matches = match provenance.kind {
-        DelegationProvenanceKind::ToolRequest { source_session, .. } => {
-            source_session == relation.child
-        }
-        DelegationProvenanceKind::ChildTurn { child, .. } => child == relation.child,
-        DelegationProvenanceKind::ParentCommand { parent, .. } => parent == relation.parent,
+    let provenance_matches = match outcome {
+        DelegationOutcome::ResultReturned { .. } => matches!(
+            provenance.kind,
+            DelegationProvenanceKind::ToolRequest { source_session, .. }
+                if source_session == relation.child
+        ),
+        DelegationOutcome::ChildFailed { .. } => matches!(
+            provenance.kind,
+            DelegationProvenanceKind::ChildTurn { child, .. } if child == relation.child
+        ),
+        DelegationOutcome::ChildStopped { .. }
+        | DelegationOutcome::ChildCancelled { .. }
+        | DelegationOutcome::ContinueRunning { .. } => parent_command_matches(relation, provenance),
     };
     if !provenance_matches {
         return Err(DelegationTransitionFailure::InvalidProvenance);
@@ -475,37 +524,76 @@ fn validate_outcome(
     let combination_matches = match outcome {
         DelegationOutcome::ResultReturned { .. } => {
             matches!(reason, DelegationOutcomeReason::ChildCompleted)
-                && matches!(
-                    provenance.kind,
-                    DelegationProvenanceKind::ToolRequest { .. }
-                )
         }
         DelegationOutcome::ChildFailed { .. } => {
             matches!(reason, DelegationOutcomeReason::ChildExecutionFailed)
-                && matches!(provenance.kind, DelegationProvenanceKind::ChildTurn { .. })
         }
         DelegationOutcome::ChildStopped { .. } => {
-            matches!(reason, DelegationOutcomeReason::ParentStopped { .. })
+            descendant_action(relation.policy, reason) == Some(BoundChildAction::Stop)
         }
         DelegationOutcome::ChildCancelled { .. } => {
-            matches!(reason, DelegationOutcomeReason::ParentCancelled { .. })
+            descendant_action(relation.policy, reason) == Some(BoundChildAction::Cancel)
         }
-        DelegationOutcome::ContinueRunning { .. } => matches!(
-            reason,
-            DelegationOutcomeReason::BackgroundRelationship
-                | DelegationOutcomeReason::RelationshipPolicyContinue
-                | DelegationOutcomeReason::ParentStopped {
-                    scope: DescendantTerminationScope::ParentAlone
-                }
-                | DelegationOutcomeReason::ParentCancelled {
-                    scope: DescendantTerminationScope::ParentAlone
-                }
-        ),
+        DelegationOutcome::ContinueRunning { .. } => {
+            descendant_action(relation.policy, reason) == Some(BoundChildAction::KeepRunning)
+        }
     };
     if combination_matches {
         Ok(())
     } else {
         Err(DelegationTransitionFailure::OutcomeReasonMismatch)
+    }
+}
+
+fn parent_command_matches(relation: &SessionDelegation, provenance: DelegationProvenance) -> bool {
+    matches!(
+        provenance.kind,
+        DelegationProvenanceKind::ParentCommand { parent, .. } if parent == relation.parent
+    )
+}
+
+fn descendant_action(
+    policy: ChildRelationshipPolicy,
+    reason: DelegationOutcomeReason,
+) -> Option<BoundChildAction> {
+    match (policy, reason) {
+        (
+            ChildRelationshipPolicy::Background,
+            DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            }
+            | DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ) => Some(BoundChildAction::KeepRunning),
+        (
+            ChildRelationshipPolicy::Bound {
+                on_parent_stopped, ..
+            },
+            DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ) => Some(on_parent_stopped),
+        (
+            ChildRelationshipPolicy::Bound {
+                on_parent_cancelled,
+                ..
+            },
+            DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ) => Some(on_parent_cancelled),
+        (
+            ChildRelationshipPolicy::Background | ChildRelationshipPolicy::Bound { .. },
+            DelegationOutcomeReason::ChildCompleted
+            | DelegationOutcomeReason::ChildExecutionFailed
+            | DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAlone,
+            }
+            | DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAlone,
+            },
+        ) => None,
     }
 }
 
@@ -554,6 +642,21 @@ mod tests {
             ),
         )
     }
+    /// A later await request in the same session, with identities distinct from spawn.
+    fn await_request(session: u128) -> ToolRequest {
+        ToolRequest::from_model_proposal(
+            tool_request_id(session + 200),
+            session_id(session),
+            turn_id(session + 11),
+            model_call_id(session + 21),
+            ToolRequestOrdinal::from_u32(0),
+            ToolCallProposal::new(
+                ToolName::try_new("await_session".into()).expect("valid name"),
+                NormalizedToolArguments::try_from_provider_text("{}".into())
+                    .expect("valid arguments"),
+            ),
+        )
+    }
     fn content(value: &str) -> DelegationContent {
         DelegationContent::try_new(value.into()).expect("nonempty bounded content")
     }
@@ -565,7 +668,6 @@ mod tests {
             &request(2),
             session_id(3),
             ChildRelationshipPolicy::Background,
-            DelegationWaitMode::Foreground,
         )
         .expect("distinct child");
         let provenance = relation.child_creation_provenance();
@@ -576,12 +678,43 @@ mod tests {
             }
         );
         assert_eq!(provenance.ancestry(), crate::TranscriptAncestry::None);
-        assert_eq!(relation.wait_mode(), DelegationWaitMode::Foreground);
-        let wait = relation.foreground_wait().expect("foreground wait exists");
+    }
+
+    /// S18 / INV-010: a foreground delivery registration yields the exact slot-retaining wait.
+    #[test]
+    fn s18_inv010_foreground_registration_yields_exact_child_wait() {
+        let relation = SessionDelegation::spawn(
+            &request(2),
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let registration = relation
+            .register_wait(&await_request(2), DelegationWaitMode::Foreground)
+            .expect("parent registers foreground delivery");
+        let wait = registration
+            .foreground_subject()
+            .expect("foreground wait exists");
         let phase = crate::ActiveTurnPhase::AwaitingChild { wait };
         assert!(phase.retains_progressing_slot());
+        assert_eq!(wait.awaiting_request(), registration.awaiting_request());
         assert_eq!(wait.spawning_request(), relation.spawning_request());
         assert_eq!(wait.child(), relation.child());
+    }
+
+    /// S18 / INV-010: a background delivery registration never retains the parent slot.
+    #[test]
+    fn s18_inv010_background_registration_has_no_child_wait() {
+        let relation = SessionDelegation::spawn(
+            &request(2),
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let registration = relation
+            .register_wait(&await_request(2), DelegationWaitMode::Background)
+            .expect("parent registers background delivery");
+        assert_eq!(registration.foreground_subject(), None);
     }
 
     /// S18 / INV-010: message direction is derived from exact request ownership and unrelated senders fail closed.
@@ -594,10 +727,8 @@ mod tests {
             &parent_request,
             session_id(3),
             ChildRelationshipPolicy::Background,
-            DelegationWaitMode::Background,
         )
         .expect("distinct child");
-        assert_eq!(relation.foreground_wait(), None);
         let relation = relation
             .deliver_message(
                 DelegationMessageId::from_uuid(uuid::Uuid::from_u128(7)),
@@ -640,11 +771,10 @@ mod tests {
         );
     }
 
-    /// S18 / INV-010: result content and child provenance terminalize once, while continue-running records a no-change event.
+    /// S19 / INV-010: a bound keep-running policy records a typed no-change event.
     #[test]
-    fn s18_inv010_outcomes_record_no_change_and_terminalize_exactly_once() {
+    fn s19_inv010_bound_keep_running_records_no_change() {
         let parent_request = request(2);
-        let child_request = request(3);
         let relation = SessionDelegation::spawn(
             &parent_request,
             session_id(3),
@@ -652,16 +782,31 @@ mod tests {
                 on_parent_stopped: BoundChildAction::KeepRunning,
                 on_parent_cancelled: BoundChildAction::Cancel,
             },
-            DelegationWaitMode::Background,
         )
         .expect("distinct child");
         let relation = relation
             .record_outcome(DelegationOutcome::ContinueRunning {
-                reason: DelegationOutcomeReason::RelationshipPolicyContinue,
+                reason: DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAndDescendants,
+                },
                 provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
             })
             .expect("no-change evaluation is recorded");
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
+        assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S18 / INV-010: returned content with exact child provenance terminalizes once.
+    #[test]
+    fn s18_inv010_returned_result_terminalizes_exactly_once() {
+        let parent_request = request(2);
+        let child_request = request(3);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
         let relation = relation
             .record_outcome(DelegationOutcome::ResultReturned {
                 content: content("delivered result"),
@@ -670,7 +815,7 @@ mod tests {
             })
             .expect("child result terminalizes");
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
-        assert_eq!(relation.events().len(), 3);
+        assert_eq!(relation.events().len(), 2);
         let error = relation
             .record_outcome(DelegationOutcome::ChildFailed {
                 reason: DelegationOutcomeReason::ChildExecutionFailed,
@@ -680,6 +825,98 @@ mod tests {
         assert_eq!(
             error.failure(),
             DelegationTransitionFailure::AlreadyTerminal
+        );
+    }
+
+    /// S19 / INV-010: a background child explicitly continues when a descendant stop evaluates it.
+    #[test]
+    fn s19_inv010_background_child_survives_parent_stop_with_typed_outcome() {
+        let parent_request = request(2);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let relation = relation
+            .record_outcome(DelegationOutcome::ContinueRunning {
+                reason: DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+            })
+            .expect("background relationship records survival");
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
+        assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S19 / INV-010: a background child explicitly continues when descendant cancellation evaluates it.
+    #[test]
+    fn s19_inv010_background_child_survives_parent_cancel_with_typed_outcome() {
+        let parent_request = request(2);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let relation = relation
+            .record_outcome(DelegationOutcome::ContinueRunning {
+                reason: DelegationOutcomeReason::ParentCancelled {
+                    scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+            })
+            .expect("background relationship records survival");
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
+        assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S19 / INV-010: a bound child accepts only its chosen parent-stop action.
+    #[test]
+    fn s19_inv010_bound_child_follows_parent_stop_policy() {
+        let parent_request = request(2);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        )
+        .expect("distinct child");
+        let relation = relation
+            .record_outcome(DelegationOutcome::ChildStopped {
+                reason: DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+            })
+            .expect("bound stop policy authorizes stopped outcome");
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+    }
+
+    /// S19 / INV-010: parent-alone creates no descendant outcome authority.
+    #[test]
+    fn s19_inv010_parent_alone_cannot_fabricate_child_disposition() {
+        let parent_request = request(2);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let error = relation
+            .record_outcome(DelegationOutcome::ContinueRunning {
+                reason: DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAlone,
+                },
+                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+            })
+            .expect_err("parent-alone does not evaluate descendants");
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::OutcomeReasonMismatch
         );
     }
 }

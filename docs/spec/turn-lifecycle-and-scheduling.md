@@ -788,15 +788,15 @@ clones over the shared pool; no shared locked service instance exists.
 ## Delegated waits, messages, and wake turns
 
 This section is the session-delegation foundation proposal and becomes verified
-only with its implementing child pull requests.
-`AwaitingChild { request, child }` is an active phase with no current attempt.
-It names the exact foreground `await_session` request and related child, retains
-the parent's sole progressing-turn slot, and survives restart unchanged until
-that relationship has one deliverable terminal result. Result consumption
-atomically appends the parent's delivered-result entry, returns the result as
-that tool request's content, and moves the same turn back to running with a
-fresh continuation attempt. A raw child identity or an unrelated result cannot
-release the wait.
+only with its implementing child pull requests. `AwaitingChild { wait }` is an
+active phase with no current attempt. Its wait names the exact foreground
+`await_session` request, spawning request, and child; it retains the parent's
+sole progressing-turn slot, and survives restart unchanged until that
+relationship has one deliverable terminal result. Result consumption atomically
+appends the parent's delivered-result entry, returns the result as that tool
+request's content, and moves the same turn back to running with a fresh
+continuation attempt. A raw child identity or an unrelated result cannot release
+the wait.
 
 A background await instead commits a delivery registration and returns its
 receipt immediately. It does not create `AwaitingChild` or retain the slot; the
