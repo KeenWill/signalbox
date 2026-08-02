@@ -355,26 +355,30 @@ async fn s36_creation_replay_rejects_a_missing_current_placement_head() -> Resul
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_impossible_mismatch_receipt_is_rejected_by_schema_and_replay()
--> Result<(), Box<dyn Error>> {
+struct StatefulRejectionReceiptFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SessionPlacementRepository,
+    update: UpdateSessionPlacement,
+    command: DurableCommandId,
+}
+
+async fn stateful_rejection_receipt_fixture()
+-> Result<StatefulRejectionReceiptFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x206);
+    let session = session(0x206);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
             command(0x110),
-            session_id,
+            session,
             SessionPlacement::pathless(),
         ))
         .await?;
-    let update_command = command(0x111);
-    let expected =
-        SessionPlacementVersion::try_from_u64(2).expect("fixture mismatch version is positive");
+    let command = command(0x111);
     let update = UpdateSessionPlacement::new(
-        update_command,
-        session_id,
-        expected,
+        command,
+        session,
+        SessionPlacementVersion::try_from_u64(2).expect("fixture mismatch version is positive"),
         SessionPlacement::pathless(),
     );
     let repository = SessionPlacementRepository::new(pool.clone());
@@ -382,39 +386,64 @@ async fn s36_impossible_mismatch_receipt_is_rejected_by_schema_and_replay()
     sqlx::query("ALTER TABLE update_session_placement_command DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
+    Ok(StatefulRejectionReceiptFixture {
+        container,
+        pool,
+        repository,
+        update,
+        command,
+    })
+}
 
-    let constraint_error = sqlx::query(
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_mismatch_receipt_schema_rejects_the_expected_version_as_current()
+-> Result<(), Box<dyn Error>> {
+    let fixture = stateful_rejection_receipt_fixture().await?;
+    let error = sqlx::query(
         "UPDATE update_session_placement_command
             SET result_current_version = expected_version
           WHERE command_id = $1",
     )
-    .bind(*update_command.as_uuid())
-    .execute(&pool)
+    .bind(*fixture.command.as_uuid())
+    .execute(&fixture.pool)
     .await
     .expect_err("mismatch evidence cannot claim the expected version is current");
     assert_eq!(
-        constraint_error
+        error
             .as_database_error()
             .and_then(|error| error.constraint()),
         Some(RESULT_SHAPE_CONSTRAINT)
     );
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_mismatch_receipt_replay_rejects_the_expected_version_as_current()
+-> Result<(), Box<dyn Error>> {
+    let fixture = stateful_rejection_receipt_fixture().await?;
     sqlx::query(
         "ALTER TABLE update_session_placement_command
          DROP CONSTRAINT update_session_placement_command_result_shape",
     )
-    .execute(&pool)
+    .execute(&fixture.pool)
     .await?;
     sqlx::query(
         "UPDATE update_session_placement_command
             SET result_current_version = expected_version
           WHERE command_id = $1",
     )
-    .bind(*update_command.as_uuid())
-    .execute(&pool)
+    .bind(*fixture.command.as_uuid())
+    .execute(&fixture.pool)
     .await?;
 
-    let error = repository
-        .handle(update)
+    let error = fixture
+        .repository
+        .handle(fixture.update)
         .await
         .expect_err("replay independently rejects impossible mismatch evidence");
     let SessionPlacementRepositoryError::Corruption(reason) = error else {
@@ -422,60 +451,48 @@ async fn s36_impossible_mismatch_receipt_is_rejected_by_schema_and_replay()
     };
     assert_eq!(reason, "mismatch rejection version");
 
-    pool.close().await;
-    drop(container);
+    fixture.pool.close().await;
+    drop(fixture.container);
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_impossible_exhaustion_receipt_is_rejected_by_schema_and_replay()
--> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x207);
-    CreateSessionRepository::new(pool.clone(), credential_pin())
-        .handle(creation(
-            command(0x112),
-            session_id,
-            SessionPlacement::pathless(),
-        ))
-        .await?;
-    let update_command = command(0x113);
-    let expected = SessionPlacementVersion::try_from_u64(2)
-        .expect("fixture non-exhausted version is positive");
-    let update = UpdateSessionPlacement::new(
-        update_command,
-        session_id,
-        expected,
-        SessionPlacement::pathless(),
-    );
-    let repository = SessionPlacementRepository::new(pool.clone());
-    repository.handle(update.clone()).await?;
-    sqlx::query("ALTER TABLE update_session_placement_command DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-
-    let constraint_error = sqlx::query(
+async fn s36_exhaustion_receipt_schema_requires_the_maximum_version() -> Result<(), Box<dyn Error>>
+{
+    let fixture = stateful_rejection_receipt_fixture().await?;
+    let error = sqlx::query(
         "UPDATE update_session_placement_command
             SET rejection_kind = 'version_exhausted',
                 result_current_version = expected_version
           WHERE command_id = $1",
     )
-    .bind(*update_command.as_uuid())
-    .execute(&pool)
+    .bind(*fixture.command.as_uuid())
+    .execute(&fixture.pool)
     .await
     .expect_err("exhaustion evidence requires the maximum version");
     assert_eq!(
-        constraint_error
+        error
             .as_database_error()
             .and_then(|error| error.constraint()),
         Some(RESULT_SHAPE_CONSTRAINT)
     );
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_exhaustion_receipt_replay_requires_the_maximum_version() -> Result<(), Box<dyn Error>>
+{
+    let fixture = stateful_rejection_receipt_fixture().await?;
     sqlx::query(
         "ALTER TABLE update_session_placement_command
          DROP CONSTRAINT update_session_placement_command_result_shape",
     )
-    .execute(&pool)
+    .execute(&fixture.pool)
     .await?;
     sqlx::query(
         "UPDATE update_session_placement_command
@@ -483,12 +500,13 @@ async fn s36_impossible_exhaustion_receipt_is_rejected_by_schema_and_replay()
                 result_current_version = expected_version
           WHERE command_id = $1",
     )
-    .bind(*update_command.as_uuid())
-    .execute(&pool)
+    .bind(*fixture.command.as_uuid())
+    .execute(&fixture.pool)
     .await?;
 
-    let error = repository
-        .handle(update)
+    let error = fixture
+        .repository
+        .handle(fixture.update)
         .await
         .expect_err("replay independently rejects non-maximum exhaustion evidence");
     let SessionPlacementRepositoryError::Corruption(reason) = error else {
@@ -496,8 +514,8 @@ async fn s36_impossible_exhaustion_receipt_is_rejected_by_schema_and_replay()
     };
     assert_eq!(reason, "version exhaustion ordinal");
 
-    pool.close().await;
-    drop(container);
+    fixture.pool.close().await;
+    drop(fixture.container);
     Ok(())
 }
 
@@ -894,6 +912,57 @@ async fn s36_creation_receipt_must_match_the_session_ancestry_family() -> Result
         .expect_err("a native receipt cannot authenticate imported ancestry");
     let SessionPlacementRepositoryError::Corruption(reason) = error else {
         panic!("a cross-family creation receipt fails with typed corruption")
+    };
+    assert_eq!(reason, "session placement provenance receipt");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_current_placement_read_rejects_a_pre_v6_scoped_creation_receipt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let command = command(0x129);
+    let session = session(0x225);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command,
+            session,
+            scoped("projects.foo.impossible_legacy"),
+        ))
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE create_session_command
+         DROP CONSTRAINT create_session_command_placement_versioned",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE durable_command SET storage_version = 4 WHERE command_id = $1")
+        .bind(*command.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE create_session_command SET storage_version = 4 WHERE command_id = $1")
+        .bind(*command.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL session_replication_role = origin")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+
+    let error = SessionPlacementRepository::new(pool.clone())
+        .load_current(session)
+        .await
+        .expect_err("pre-v6 creation receipts can authenticate only pathless placement");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a pre-v6 scoped creation receipt fails with typed corruption")
     };
     assert_eq!(reason, "session placement provenance receipt");
 

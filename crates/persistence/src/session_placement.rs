@@ -267,6 +267,10 @@ pub(crate) async fn load_current(
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
             AND native_creation.storage_version IN (1, 2, 3, 4, 6)
+            AND (native_creation.storage_version = 6
+                 OR (native_creation.storage_version IN (1, 2, 3, 4)
+                     AND event.placement_path IS NULL
+                     AND NOT event.root_global_read_intent))
             AND native_creation.result_kind = 'applied'
             AND native_creation.placement_path IS NOT DISTINCT FROM event.placement_path
             AND native_creation.root_global_read_intent = event.root_global_read_intent
@@ -344,6 +348,10 @@ async fn load_authenticated_version(
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
             AND native_creation.storage_version IN (1, 2, 3, 4, 6)
+            AND (native_creation.storage_version = 6
+                 OR (native_creation.storage_version IN (1, 2, 3, 4)
+                     AND event.placement_path IS NULL
+                     AND NOT event.root_global_read_intent))
             AND native_creation.result_kind = 'applied'
             AND native_creation.placement_path IS NOT DISTINCT FROM event.placement_path
             AND native_creation.root_global_read_intent = event.root_global_read_intent
