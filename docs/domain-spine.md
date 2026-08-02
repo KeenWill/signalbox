@@ -836,7 +836,7 @@ pub struct DelegationProvenance { /* private typed authority */ }
 impl DelegationProvenance {
     pub fn from_tool_request(request: &ToolRequest) -> Self;
     pub const fn from_child_turn(child: SessionId, turn: TurnId) -> Self;
-    pub const fn from_parent_command(parent: SessionId, command: DurableCommandId) -> Self;
+    pub const fn from_parent_command(parent: SessionId, turn: TurnId, command: DurableCommandId) -> Self;
     // accessors: tool_request(), child_turn(), parent_command()
 }
 
@@ -848,6 +848,8 @@ impl DelegationMessage {
 pub enum DelegationOutcomeReason {
     ChildCompleted,
     ChildExecutionFailed,
+    ChildStopped,
+    ChildCancelled,
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
 }

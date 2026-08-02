@@ -83,6 +83,7 @@ enum DelegationProvenanceKind {
     },
     ParentCommand {
         parent: SessionId,
+        turn: TurnId,
         command: DurableCommandId,
     },
 }
@@ -111,9 +112,17 @@ impl DelegationProvenance {
         }
     }
 
-    pub const fn from_parent_command(parent: SessionId, command: DurableCommandId) -> Self {
+    pub const fn from_parent_command(
+        parent: SessionId,
+        turn: TurnId,
+        command: DurableCommandId,
+    ) -> Self {
         Self {
-            kind: DelegationProvenanceKind::ParentCommand { parent, command },
+            kind: DelegationProvenanceKind::ParentCommand {
+                parent,
+                turn,
+                command,
+            },
         }
     }
 
@@ -137,9 +146,13 @@ impl DelegationProvenance {
         }
     }
 
-    pub const fn parent_command(&self) -> Option<(SessionId, DurableCommandId)> {
+    pub const fn parent_command(&self) -> Option<(SessionId, TurnId, DurableCommandId)> {
         match self.kind {
-            DelegationProvenanceKind::ParentCommand { parent, command } => Some((parent, command)),
+            DelegationProvenanceKind::ParentCommand {
+                parent,
+                turn,
+                command,
+            } => Some((parent, turn, command)),
             DelegationProvenanceKind::ToolRequest { .. }
             | DelegationProvenanceKind::ChildTurn { .. } => None,
         }
@@ -182,6 +195,8 @@ impl DelegationMessage {
 pub enum DelegationOutcomeReason {
     ChildCompleted,
     ChildExecutionFailed,
+    ChildStopped,
+    ChildCancelled,
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
 }
@@ -418,7 +433,6 @@ impl SessionDelegation {
         content: DelegationContent,
         provenance: DelegationProvenance,
     ) -> Result<Self, DelegationTransitionError> {
-        self.require_active()?;
         if self
             .events
             .iter()
@@ -514,15 +528,19 @@ fn validate_outcome(
         | DelegationOutcome::ContinueRunning { reason, provenance } => (*reason, *provenance),
     };
     let provenance_matches = match outcome {
-        DelegationOutcome::ResultReturned { .. } => matches!(
-            provenance.kind,
-            DelegationProvenanceKind::ToolRequest { source_session, .. }
-                if source_session == relation.child
-        ),
-        DelegationOutcome::ChildFailed { .. } => matches!(
-            provenance.kind,
-            DelegationProvenanceKind::ChildTurn { child, .. } if child == relation.child
-        ),
+        DelegationOutcome::ResultReturned { .. } | DelegationOutcome::ChildFailed { .. } => {
+            child_turn_matches(relation, provenance)
+        }
+        DelegationOutcome::ChildStopped { .. }
+            if reason == DelegationOutcomeReason::ChildStopped =>
+        {
+            child_turn_matches(relation, provenance)
+        }
+        DelegationOutcome::ChildCancelled { .. }
+            if reason == DelegationOutcomeReason::ChildCancelled =>
+        {
+            child_turn_matches(relation, provenance)
+        }
         DelegationOutcome::ChildStopped { .. }
         | DelegationOutcome::ChildCancelled { .. }
         | DelegationOutcome::ContinueRunning { .. } => parent_command_matches(relation, provenance),
@@ -538,10 +556,12 @@ fn validate_outcome(
             matches!(reason, DelegationOutcomeReason::ChildExecutionFailed)
         }
         DelegationOutcome::ChildStopped { .. } => {
-            descendant_action(relation.policy, reason) == Some(BoundChildAction::Stop)
+            reason == DelegationOutcomeReason::ChildStopped
+                || descendant_action(relation.policy, reason) == Some(BoundChildAction::Stop)
         }
         DelegationOutcome::ChildCancelled { .. } => {
-            descendant_action(relation.policy, reason) == Some(BoundChildAction::Cancel)
+            reason == DelegationOutcomeReason::ChildCancelled
+                || descendant_action(relation.policy, reason) == Some(BoundChildAction::Cancel)
         }
         DelegationOutcome::ContinueRunning { .. } => {
             descendant_action(relation.policy, reason) == Some(BoundChildAction::KeepRunning)
@@ -552,6 +572,13 @@ fn validate_outcome(
     } else {
         Err(DelegationTransitionFailure::OutcomeReasonMismatch)
     }
+}
+
+fn child_turn_matches(relation: &SessionDelegation, provenance: DelegationProvenance) -> bool {
+    matches!(
+        provenance.kind,
+        DelegationProvenanceKind::ChildTurn { child, .. } if child == relation.child
+    )
 }
 
 fn parent_command_matches(relation: &SessionDelegation, provenance: DelegationProvenance) -> bool {
@@ -596,6 +623,8 @@ fn descendant_action(
             ChildRelationshipPolicy::Background | ChildRelationshipPolicy::Bound { .. },
             DelegationOutcomeReason::ChildCompleted
             | DelegationOutcomeReason::ChildExecutionFailed
+            | DelegationOutcomeReason::ChildStopped
+            | DelegationOutcomeReason::ChildCancelled
             | DelegationOutcomeReason::ParentStopped {
                 scope: DescendantTerminationScope::ParentAlone,
             }
@@ -849,7 +878,11 @@ mod tests {
                 reason: DelegationOutcomeReason::ParentStopped {
                     scope: DescendantTerminationScope::ParentAndDescendants,
                 },
-                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+                provenance: DelegationProvenance::from_parent_command(
+                    session_id(2),
+                    parent_request.turn(),
+                    command_id(5),
+                ),
             })
             .expect("no-change evaluation is recorded");
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
@@ -871,7 +904,10 @@ mod tests {
             .record_outcome(DelegationOutcome::ResultReturned {
                 content: content("delivered result"),
                 reason: DelegationOutcomeReason::ChildCompleted,
-                provenance: DelegationProvenance::from_tool_request(&child_request),
+                provenance: DelegationProvenance::from_child_turn(
+                    session_id(3),
+                    child_request.turn(),
+                ),
             })
             .expect("child result terminalizes");
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
@@ -885,6 +921,81 @@ mod tests {
         assert_eq!(
             error.failure(),
             DelegationTransitionFailure::AlreadyTerminal
+        );
+    }
+
+    /// S18 / INV-010: terminal child disposition does not close either messaging direction.
+    #[test]
+    fn s18_inv010_messages_remain_available_after_child_terminalizes() {
+        let parent_request = request(2);
+        let child_request = request(3);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let relation = relation
+            .record_outcome(DelegationOutcome::ChildStopped {
+                reason: DelegationOutcomeReason::ChildStopped,
+                provenance: DelegationProvenance::from_child_turn(
+                    session_id(3),
+                    child_request.turn(),
+                ),
+            })
+            .expect("child records its own stop");
+        let relation = relation
+            .deliver_message(
+                DelegationMessageId::from_uuid(uuid::Uuid::from_u128(7)),
+                content("parent follow-up"),
+                DelegationProvenance::from_tool_request(&parent_request),
+            )
+            .expect("terminal relation remains messageable");
+        let relation = relation
+            .deliver_message(
+                DelegationMessageId::from_uuid(uuid::Uuid::from_u128(8)),
+                content("child follow-up"),
+                DelegationProvenance::from_tool_request(&child_request),
+            )
+            .expect("terminal child remains messageable");
+        let message = relation.events()[2]
+            .message()
+            .expect("third event is the follow-up message");
+        let reply = relation.events()[3]
+            .message()
+            .expect("fourth event is the child reply");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(
+            message.direction(),
+            DelegationMessageDirection::ParentToChild
+        );
+        assert_eq!(reply.direction(), DelegationMessageDirection::ChildToParent);
+    }
+
+    /// S19 / INV-010: a child may report its own cancellation with its exact turn.
+    #[test]
+    fn s19_inv010_child_cancel_records_child_turn_reason_and_provenance() {
+        let parent_request = request(2);
+        let child_request = request(3);
+        let provenance = DelegationProvenance::from_child_turn(session_id(3), child_request.turn());
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let relation = relation
+            .record_outcome(DelegationOutcome::ChildCancelled {
+                reason: DelegationOutcomeReason::ChildCancelled,
+                provenance,
+            })
+            .expect("child records its own cancellation");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(
+            provenance.child_turn(),
+            Some((relation.child(), child_request.turn()))
         );
     }
 
@@ -903,7 +1014,11 @@ mod tests {
                 reason: DelegationOutcomeReason::ParentStopped {
                     scope: DescendantTerminationScope::ParentAndDescendants,
                 },
-                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+                provenance: DelegationProvenance::from_parent_command(
+                    session_id(2),
+                    parent_request.turn(),
+                    command_id(5),
+                ),
             })
             .expect("background relationship records survival");
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
@@ -925,7 +1040,11 @@ mod tests {
                 reason: DelegationOutcomeReason::ParentCancelled {
                     scope: DescendantTerminationScope::ParentAndDescendants,
                 },
-                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+                provenance: DelegationProvenance::from_parent_command(
+                    session_id(2),
+                    parent_request.turn(),
+                    command_id(5),
+                ),
             })
             .expect("background relationship records survival");
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
@@ -936,6 +1055,11 @@ mod tests {
     #[test]
     fn s19_inv010_bound_child_follows_parent_stop_policy() {
         let parent_request = request(2);
+        let provenance = DelegationProvenance::from_parent_command(
+            session_id(2),
+            parent_request.turn(),
+            command_id(5),
+        );
         let relation = SessionDelegation::spawn(
             &parent_request,
             session_id(3),
@@ -950,10 +1074,14 @@ mod tests {
                 reason: DelegationOutcomeReason::ParentStopped {
                     scope: DescendantTerminationScope::ParentAndDescendants,
                 },
-                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+                provenance,
             })
             .expect("bound stop policy authorizes stopped outcome");
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(
+            provenance.parent_command(),
+            Some((session_id(2), parent_request.turn(), command_id(5)))
+        );
     }
 
     /// S19 / INV-010: parent-alone creates no descendant outcome authority.
@@ -971,7 +1099,11 @@ mod tests {
                 reason: DelegationOutcomeReason::ParentStopped {
                     scope: DescendantTerminationScope::ParentAlone,
                 },
-                provenance: DelegationProvenance::from_parent_command(session_id(2), command_id(5)),
+                provenance: DelegationProvenance::from_parent_command(
+                    session_id(2),
+                    parent_request.turn(),
+                    command_id(5),
+                ),
             })
             .expect_err("parent-alone does not evaluate descendants");
         assert_eq!(

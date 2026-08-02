@@ -911,21 +911,24 @@ creates no child.
 Delegation messages are immutable, bounded, nonempty content records with a
 distinct `DelegationMessageId`, the spawning relationship, exact sender and
 recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
-child may each send to the other. `DelegationMessage` semantic entries refer to
-those records; they do not reclassify model-authored content as input from the
-user. Undelivered messages remain FIFO. An active recipient consumes them at the
-next model-call safe point in ordinal order. An idle recipient gets one
-delegation-origin queued turn, and further messages coalesce into its starting
-frontier in the same order until activation.
+child may each send to the other before or after either session stops, cancels,
+or completes. `DelegationMessage` semantic entries refer to those records; they
+do not reclassify model-authored content as input from the user. Undelivered
+messages remain FIFO. An active recipient consumes them at the next model-call
+safe point in ordinal order. An idle recipient gets one delegation-origin queued
+turn, and further messages coalesce into its starting frontier in the same order
+until activation.
 
 A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned
 `DelegationContent` or a typed failed, stopped, or cancelled outcome together
-with exact child turn/tool provenance. Delivery appends a `DelegationResult`
-semantic entry only to the target parent and is idempotent by the spawning
-request. A detached child may return after the parent has stopped or cancelled;
-the result remains durable and independently inspectable even when no parent
-turn can consume it.
+with exact provenance. Returned content, failure, and a child's own stop or
+cancellation carry the exact child turn. A parent-policy stop or cancellation
+instead carries the exact parent session, turn, and durable user command.
+Delivery appends a `DelegationResult` semantic entry only to the target parent
+and is idempotent by the spawning request. A detached child may return after the
+parent has stopped or cancelled; the result remains durable and independently
+inspectable even when no parent turn can consume it.
 
 **Committed unimplemented functionality.** A spawned child defaults into its
 parent's directory. No present delegation or placement surface implements or

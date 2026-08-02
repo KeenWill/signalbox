@@ -914,11 +914,11 @@ transaction.
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
 typed reason and complete provenance columns: the spawning request, relevant
-parent session/turn event, and either the sending/declaring tool request or the
-user durable command. Continue-running is a real event kind, not absence of a
-terminal row. Deferred relationship-state checks reject a terminal or continued
-outcome without its event, two terminal outcomes, ordinal gaps, and an event
-whose reason/provenance shape does not match its kind.
+session and turn, and either the exact child turn or the exact parent durable
+command. Continue-running is a real event kind, not absence of a terminal row.
+Deferred relationship-state checks reject a terminal or continued outcome
+without its event, two terminal outcomes, ordinal gaps, and an event whose
+reason/provenance shape does not match its kind.
 
 `session_delegation_wait` records the exact awaiting tool request, relationship,
 parent turn, and foreground/background mode. A foreground row correlates the
@@ -926,9 +926,11 @@ turn's `awaiting_child` phase; a background row cannot. `session_message` is
 append-only, uniquely orders messages per relationship, and requires exact
 parent/child sender and recipient plus the sending tool request.
 `session_child_result` has at most one row per spawning request and carries
-exactly one returned-text, failed, stopped, or cancelled shape with child
-turn/tool provenance. Delivery satellites bind messages/results to their exact
-semantic entries; no transcript query supplies result content.
+exactly one returned-text, failed, stopped, or cancelled shape with child turn
+provenance for returned, failed, and child-originated terminal outcomes, or
+exact parent session/turn/command provenance for a policy-driven stop or
+cancellation. Delivery satellites bind messages/results to their exact semantic
+entries; no transcript query supplies result content.
 
 Parent-and-descendants termination locks relationship rows in stable spawning
 request order before it writes any disposition. The command and every evaluated

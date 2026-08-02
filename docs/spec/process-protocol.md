@@ -1367,11 +1367,12 @@ Session-follow updates add these closed event shapes:
 - `child_spawned { spawning_request_id, child_session_id, relationship }`;
 - `child_waiting { await_request_id, spawning_request_id, child_session_id, mode }`;
 - `delegation_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, content }`;
-- `child_result { spawning_request_id, child_session_id, outcome, content, child_turn_id, child_tool_request_id }`,
+- `child_result { spawning_request_id, child_session_id, outcome, content, provenance }`,
   where content is present only for `returned` and the other outcomes are
-  `failed`, `stopped`, or `cancelled`;
-- `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, parent_session_id, parent_turn_id, command_id }`,
-  including `continue_running`; and
+  `failed`, `stopped`, or `cancelled`, and provenance is either the exact child
+  turn or the exact parent session, parent turn, and durable command;
+- `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, provenance }`,
+  including `continue_running` and the same closed provenance union; and
 - `delegation_wake { spawning_request_id, subject }`, where subject is the exact
   result or message identity that made the followed session eligible.
 
