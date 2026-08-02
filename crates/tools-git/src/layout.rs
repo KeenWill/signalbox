@@ -187,9 +187,13 @@ pub(super) fn reject_administrative_symlinks(
 }
 
 pub(super) const fn object_id_hex_bytes(object_format: ObjectFormat) -> usize {
+    object_id_bytes(object_format) * 2
+}
+
+pub(super) const fn object_id_bytes(object_format: ObjectFormat) -> usize {
     match object_format {
-        ObjectFormat::Sha1 => 40,
-        ObjectFormat::Sha256 => 64,
+        ObjectFormat::Sha1 => 20,
+        ObjectFormat::Sha256 => 32,
     }
 }
 
@@ -314,10 +318,7 @@ pub(super) fn validate_shallow_file(
         return Err(LocalGitToolsConstructionError::Repository);
     }
     let mut entries = 0_usize;
-    let object_id_bytes = match object_format {
-        ObjectFormat::Sha1 => 40,
-        ObjectFormat::Sha256 => 64,
-    };
+    let object_id_bytes = object_id_hex_bytes(object_format);
     for line in records.split(|byte| *byte == b'\n') {
         entries = entries.saturating_add(1);
         if entries > MAX_SHALLOW_ENTRIES

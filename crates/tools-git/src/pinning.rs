@@ -28,7 +28,7 @@ use crate::descriptor::{
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::{
-    open_repository_config_at, open_repository_head_at, open_repository_refs_at,
+    object_id_bytes, open_repository_config_at, open_repository_head_at, open_repository_refs_at,
     validate_live_shallow,
 };
 use crate::limits::{
@@ -274,10 +274,7 @@ impl PinnedRepository {
     }
 
     pub(super) fn object_id_bytes(&self) -> usize {
-        match self.object_format {
-            ObjectFormat::Sha1 => 20,
-            ObjectFormat::Sha256 => 32,
-        }
+        object_id_bytes(self.object_format)
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {

@@ -72,12 +72,14 @@ struct ReferencePublicationHooks<
     BeforeExchange,
     AfterPublish,
     BeforeCleanup,
+    AfterDisplacedQuarantine,
     BeforeRollback,
 > {
     before_absent: BeforeAbsent,
     before_exchange: BeforeExchange,
     after_publish: AfterPublish,
     before_cleanup: BeforeCleanup,
+    after_displaced_quarantine: AfterDisplacedQuarantine,
     before_rollback: BeforeRollback,
 }
 
@@ -241,6 +243,7 @@ impl ReferenceLock {
                 before_exchange: || {},
                 after_publish: || {},
                 before_cleanup: || {},
+                after_displaced_quarantine: || {},
                 before_rollback: || {},
             },
         )
@@ -251,6 +254,7 @@ impl ReferenceLock {
         BeforeExchange: FnOnce(),
         AfterPublish: FnOnce(),
         BeforeCleanup: FnOnce(),
+        AfterDisplacedQuarantine: FnOnce(),
         BeforeRollback: FnOnce(),
     >(
         mut self,
@@ -261,6 +265,7 @@ impl ReferenceLock {
             BeforeExchange,
             AfterPublish,
             BeforeCleanup,
+            AfterDisplacedQuarantine,
             BeforeRollback,
         >,
     ) -> Result<(), LocalGitFailure> {
@@ -269,6 +274,7 @@ impl ReferenceLock {
             before_exchange,
             after_publish,
             before_cleanup,
+            after_displaced_quarantine,
             before_rollback,
         } = hooks;
         let mut before_rollback = Some(before_rollback);
@@ -405,6 +411,7 @@ impl ReferenceLock {
             &self.lock_name,
             expected_leaf_snapshot,
             self.prepared.ok_or(LocalGitFailure::Operation)?,
+            after_displaced_quarantine,
         )?;
         self.committed = true;
         Ok(())
@@ -426,6 +433,7 @@ impl ReferenceLock {
                 before_exchange: || {},
                 after_publish,
                 before_cleanup: || {},
+                after_displaced_quarantine: || {},
                 before_rollback: || {},
             },
         )
@@ -446,6 +454,28 @@ impl ReferenceLock {
                 before_exchange: || {},
                 after_publish: || {},
                 before_cleanup,
+                after_displaced_quarantine: || {},
+                before_rollback: || {},
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn publish_with_finalization_test_hook<AfterDisplacedQuarantine: FnOnce()>(
+        self,
+        authority: &PinnedRepository,
+        expected: &PinnedReferenceValue,
+        after_displaced_quarantine: AfterDisplacedQuarantine,
+    ) -> Result<(), LocalGitFailure> {
+        self.publish_with_hooks(
+            authority,
+            expected,
+            ReferencePublicationHooks {
+                before_absent: || {},
+                before_exchange: || {},
+                after_publish: || {},
+                before_cleanup: || {},
+                after_displaced_quarantine,
                 before_rollback: || {},
             },
         )
@@ -466,6 +496,7 @@ impl ReferenceLock {
                 before_exchange,
                 after_publish: || {},
                 before_cleanup: || {},
+                after_displaced_quarantine: || {},
                 before_rollback: || {},
             },
         )
@@ -490,6 +521,7 @@ impl ReferenceLock {
                 before_exchange: || {},
                 after_publish,
                 before_cleanup: || {},
+                after_displaced_quarantine: || {},
                 before_rollback,
             },
         )
@@ -583,10 +615,13 @@ fn finalize_reference_exchange_if_current(
     lock_name: &OsStr,
     displaced: ReferenceSnapshotIdentity,
     publication: ReferenceSnapshotIdentity,
+    after_displaced_quarantine: impl FnOnce(),
 ) -> Result<(), LocalGitFailure> {
+    if reference_snapshot_identity_at(parent, leaf) != Ok(Some(publication)) {
+        return Err(LocalGitFailure::Operation);
+    }
     let quarantine = QuarantineDirectory::create(parent)?;
     let quarantined_displaced = OsStr::new("displaced");
-    let quarantined_publication = OsStr::new("publication");
     renameat_with(
         parent,
         lock_name,
@@ -607,70 +642,14 @@ fn finalize_reference_exchange_if_current(
         );
         return Err(LocalGitFailure::Operation);
     }
-    if renameat_with(
-        parent,
-        leaf,
-        quarantine.descriptor(),
-        quarantined_publication,
-        RenameFlags::NOREPLACE,
-    )
-    .is_err()
-    {
-        let _ = renameat_with(
-            quarantine.descriptor(),
-            quarantined_displaced,
-            parent,
-            lock_name,
-            RenameFlags::NOREPLACE,
-        );
-        return Err(LocalGitFailure::Operation);
-    }
-    if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_publication)
-        != Ok(Some(publication))
-    {
-        restore_quarantined_publication(
-            parent,
-            leaf,
-            lock_name,
-            &quarantine,
-            quarantined_displaced,
-            quarantined_publication,
-            None,
-        )?;
-        return Err(LocalGitFailure::Operation);
-    }
-    if renameat_with(
-        quarantine.descriptor(),
-        quarantined_publication,
-        parent,
-        leaf,
-        RenameFlags::NOREPLACE,
-    )
-    .is_err()
-    {
-        restore_or_remove_quarantined_reference(
-            &quarantine,
-            quarantined_displaced,
-            parent,
-            lock_name,
-            None,
-        )?;
-        restore_or_remove_quarantined_reference(
-            &quarantine,
-            quarantined_publication,
-            parent,
-            leaf,
-            Some(publication),
-        )?;
-        return Err(LocalGitFailure::Operation);
-    }
+    after_displaced_quarantine();
     if reference_snapshot_identity_at(parent, leaf) != Ok(Some(publication)) {
         restore_or_remove_quarantined_reference(
             &quarantine,
             quarantined_displaced,
             parent,
             lock_name,
-            None,
+            Some(displaced),
         )?;
         return Err(LocalGitFailure::Operation);
     }

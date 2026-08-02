@@ -792,6 +792,33 @@ fn reference_publication_preserves_new_bytes_that_race_cleanup() {
 }
 
 #[test]
+fn reference_finalization_keeps_the_published_reference_visible() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let published = format!("{}\n", git2::Oid::ZERO_SHA1);
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    lock.publish_with_finalization_test_hook(&authority, &expected, || {
+        assert_eq!(
+            fs::read_to_string(&reference_path).expect("live publication remains readable"),
+            published
+        );
+        assert!(!lock_path.exists());
+    })
+    .expect("visible reference publication succeeds");
+}
+
+#[test]
 fn loose_reference_rejects_growth_after_metadata_capture() {
     let fixture = Fixture::new();
     let name = "refs/heads/growing";

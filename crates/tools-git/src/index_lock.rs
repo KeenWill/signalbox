@@ -20,6 +20,7 @@ use crate::descriptor::{
     remove_entry_if_identity, unsupported_common_directory_is_absent,
 };
 use crate::failure::LocalGitFailure;
+use crate::layout::object_id_bytes;
 use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
 use crate::pinning::{PinnedRepository, RepositoryOperationGuard};
 
@@ -1089,10 +1090,7 @@ fn snapshot_identity(
 }
 
 fn reject_split_index(bytes: &[u8], object_format: ObjectFormat) -> Result<(), LocalGitFailure> {
-    let object_id_bytes = match object_format {
-        ObjectFormat::Sha1 => 20,
-        ObjectFormat::Sha256 => 32,
-    };
+    let object_id_bytes = object_id_bytes(object_format);
     let extension_end = bytes
         .len()
         .checked_sub(object_id_bytes)
