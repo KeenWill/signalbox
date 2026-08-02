@@ -45,8 +45,11 @@ pub(super) enum WebSearchTransportFailureClass {
 pub(super) fn safe_collision_diagnostic(credential: &str) -> String {
     const DIAGNOSTIC: &str = "web search credential diagnostic suppressed";
     const REDACTION: &str = "[redacted]";
+    if credential.is_empty() {
+        return String::from(DIAGNOSTIC);
+    }
     let redacted = DIAGNOSTIC.replace(credential, REDACTION);
-    if !credential.is_empty() && !text_contains_credential_variant(&redacted, credential) {
+    if !text_contains_credential_variant(&redacted, credential) {
         return redacted;
     }
     if credential == "!" {

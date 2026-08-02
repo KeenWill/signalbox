@@ -205,7 +205,7 @@ fn provider_rejection_survives_incomplete_error_body() {
     let error = provider_rejection(failure);
 
     assert_eq!(error.status, PROVIDER_REJECTION_STATUS);
-    assert!(error.body.is_empty());
+    assert!(error.detail.is_none());
     assert_eq!(
         error.body_failure_class,
         Some(WebSearchTransportFailureClass::DispatchUnknown)

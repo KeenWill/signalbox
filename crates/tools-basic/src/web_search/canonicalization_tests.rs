@@ -2,10 +2,10 @@ use signalbox_model_runtime::CredentialValue;
 
 use super::{diagnostic::*, evidence::*, redaction::*, result::*, test_support::*};
 
-/// INV-035: a reversibly percent-encoded credential in a provider result
-/// URL is rejected before completed evidence can retain it.
+/// INV-035: an unapproved query parameter is structurally absent from output,
+/// even when its value is a reversibly percent-encoded credential.
 #[test]
-fn web_search_rejects_percent_encoded_credential_in_result_url() {
+fn web_search_drops_percent_encoded_credential_in_unapproved_query() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(FIXTURE_RESULT_TITLE),
         url: format!("{FIXTURE_RESULT_URL}?token={URL_ENCODED_COLLISION_VALUE}"),
@@ -19,16 +19,16 @@ fn web_search_rejects_percent_encoded_credential_in_result_url() {
     ))
     .expect("fixture credential is usable");
 
-    assert_eq!(
-        success_evidence(response, &scrubber),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber).expect("typed result encodes");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(URL_ENCODED_COLLISION_VALUE));
 }
 
-/// INV-035: a form-encoded space cannot retain a reversible credential in
-/// a provider result URL.
+/// INV-035: an unapproved query parameter is structurally absent from output,
+/// even when its value is a form-encoded credential.
 #[test]
-fn web_search_rejects_form_encoded_credential_in_result_url() {
+fn web_search_drops_form_encoded_credential_in_unapproved_query() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(FIXTURE_RESULT_TITLE),
         url: format!("{FIXTURE_RESULT_URL}?token={URL_FORM_COLLISION_VALUE}"),
@@ -42,10 +42,10 @@ fn web_search_rejects_form_encoded_credential_in_result_url() {
     ))
     .expect("fixture credential is usable");
 
-    assert_eq!(
-        success_evidence(response, &scrubber),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber).expect("typed result encodes");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(URL_FORM_COLLISION_VALUE));
 }
 
 /// INV-035: IDNA serialization cannot retain a reversible credential in a
@@ -188,6 +188,29 @@ fn web_search_rejects_tab_preprocessed_credential_in_result_url() {
     );
 }
 
+/// INV-035: URL preprocessing of a reversibly decoded leading C0 control
+/// cannot conceal a credential in completed provider result evidence.
+#[test]
+fn web_search_rejects_c0_preprocessed_decoded_credential_in_result_url() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_C0_PREPROCESSED_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("C0-preprocessed fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_C0_PREPROCESSED_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: URL backslash normalization is composed with reversible
 /// credential decoding before completed evidence is retained.
 #[test]
@@ -303,6 +326,54 @@ fn web_search_rejects_embedded_unicode_case_normalized_credential_in_result_host
     );
 }
 
+/// INV-035: IDNA mapping cannot delete credential code points and leave the
+/// canonicalized credential embedded in a provider result host.
+#[test]
+fn web_search_rejects_embedded_idna_mapped_credential_in_result_host() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_IDNA_REMOVED_CODE_POINT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("IDNA-mapped host fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IDNA_REMOVED_CODE_POINT_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: an IDNA compatibility mapping remains detectable when the
+/// credential is embedded inside a larger provider result host label.
+#[test]
+fn web_search_rejects_embedded_idna_compatibility_credential_in_result_host() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_IDNA_COMPATIBILITY_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("IDNA compatibility fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IDNA_COMPATIBILITY_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// IP-literal result hosts bypass domain-only IDNA decoding and remain
 /// valid structured search evidence.
 #[test]
@@ -356,6 +427,29 @@ fn web_search_rejects_canonicalized_ipv6_hextet_credential_in_result_host() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_IPV6_HEXTET_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential that becomes a proper substring of one IPv6 hextet
+/// after canonicalization cannot survive in a provider result host.
+#[test]
+fn web_search_rejects_canonicalized_embedded_ipv6_hextet_credential() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("embedded IPv6 hextet fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMBEDDED_IPV6_HEXTET_COLLISION_KEY.as_bytes().to_vec(),
     ))
     .expect("fixture credential is usable");
 
@@ -578,6 +672,146 @@ fn web_search_rejects_hex_credential_in_canonical_ipv4_component() {
     );
 }
 
+/// INV-035: a provider-added hexadecimal radix prefix cannot conceal a
+/// credential that forms the digits of one legacy IPv4 component.
+#[test]
+fn web_search_rejects_credential_inside_hexadecimal_ipv4_component() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_HEX_AFFIX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("hexadecimal-affix IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMBEDDED_HEX_IPV4_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a provider-added octal radix prefix cannot conceal a credential
+/// that forms the digits of one legacy IPv4 component.
+#[test]
+fn web_search_rejects_credential_inside_octal_ipv4_component() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_OCTAL_AFFIX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("octal-affix IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMBEDDED_OCTAL_IPV4_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential embedded inside the hexadecimal digits of a legacy
+/// IPv4 component cannot survive canonical host serialization.
+#[test]
+fn web_search_rejects_credential_substring_inside_hexadecimal_ipv4_digits() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_HEX_SUBSTRING_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("hexadecimal-substring IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_HEX_DIGIT_SUBSTRING_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential embedded inside the octal digits of a legacy IPv4
+/// component cannot survive canonical host serialization.
+#[test]
+fn web_search_rejects_credential_substring_inside_octal_ipv4_digits() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_OCTAL_SUBSTRING_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("octal-substring IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_OCTAL_DIGIT_SUBSTRING_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential spanning a hexadecimal radix marker and its first
+/// digit cannot survive canonical host serialization.
+#[test]
+fn web_search_rejects_credential_spanning_hexadecimal_ipv4_prefix() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_HEX_AFFIX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("hexadecimal-prefix IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_HEX_PREFIX_SPANNING_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential spanning an IPv4 component separator, hexadecimal
+/// radix marker, and first digit cannot survive canonical host serialization.
+#[test]
+fn web_search_rejects_credential_spanning_ipv4_separator_and_hexadecimal_prefix() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_SEPARATOR_SPANNING_HEX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("separator-spanning IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV4_SEPARATOR_SPANNING_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-octet final IPv4 component is preserved as one
 /// credential-derived fragment when compared with a canonical result host.
 #[test]
@@ -649,6 +883,99 @@ fn web_search_rejects_canonicalized_bare_port_credential_in_result_url() {
     );
 }
 
+/// INV-035: a credential normalized to a default HTTP port remains a numeric
+/// fragment when it is embedded in another provider result port.
+#[test]
+fn web_search_rejects_default_port_credential_fragment_in_result_url() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(URL_EMBEDDED_PORT_COLLISION_VALUE),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("embedded port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_DEFAULT_PORT_FRAGMENT_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential spanning the port delimiter and a discarded leading
+/// zero cannot survive numeric port canonicalization.
+#[test]
+fn web_search_rejects_discarded_leading_zero_port_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_LEADING_ZERO_PORT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("leading-zero port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_DISCARDED_PORT_ZERO_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential spanning an IPv6 authority boundary and a discarded
+/// leading port zero cannot survive typed URL canonicalization.
+#[test]
+fn web_search_rejects_discarded_port_zero_with_ipv6_authority_context() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_IPV6_LEADING_ZERO_PORT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("IPv6 leading-zero port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV6_AUTHORITY_PORT_ZERO_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// A credential that parses as a host plus explicit port does not turn the
+/// host alone into a collision with an unrelated provider result.
+#[test]
+fn web_search_preserves_unrelated_host_for_credential_with_explicit_port() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_AUTHORITY_WITH_PORT_NON_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert!(success_evidence(response, &scrubber).is_ok());
+}
+
 /// INV-035: complete URL credential variants are canonicalized before
 /// comparison with a provider result URL.
 #[test]
@@ -672,10 +999,10 @@ fn web_search_rejects_canonicalized_complete_url_credential() {
     );
 }
 
-/// INV-035: reversible decoding beyond the inspection bound fails closed
-/// before deeply encoded result text can enter completed evidence.
+/// INV-035: deeply encoded text in an unapproved query parameter is removed
+/// structurally, without depending on the scrubber's decode bound.
 #[test]
-fn web_search_rejects_result_url_encoding_beyond_the_decode_bound() {
+fn web_search_drops_unapproved_query_beyond_the_decode_bound() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(FIXTURE_RESULT_TITLE),
         url: format!("{FIXTURE_RESULT_URL}?token={EXCESSIVE_FORM_ENCODING_VALUE}"),
@@ -685,8 +1012,8 @@ fn web_search_rejects_result_url_encoding_beyond_the_decode_bound() {
     let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
         .expect("fixture response is admitted");
 
-    assert_eq!(
-        success_evidence(response, &scrubber()),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber()).expect("typed result encodes");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(EXCESSIVE_FORM_ENCODING_VALUE));
 }

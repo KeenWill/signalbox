@@ -6,19 +6,19 @@ use super::{
     transport_failure::*,
 };
 
-/// INV-035: unsupported named HTML-reference syntax fails closed instead
-/// of remaining potentially reversible text.
+/// A supported named HTML reference that does not encode the credential is
+/// preserved and does not create a request collision.
 #[test]
-fn web_search_unsupported_named_html_reference_fails_closed() {
+fn web_search_supported_named_html_reference_does_not_create_credential_collision() {
     let scrubber = scrubber();
 
-    let sanitized = scrubber.redact_text(SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE);
+    let sanitized = scrubber.redact_text(SAFE_SUPPORTED_NAMED_ENTITY_VALUE);
 
-    assert!(query_contains_credential(
-        SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE,
+    assert!(!query_contains_credential(
+        SAFE_SUPPORTED_NAMED_ENTITY_VALUE,
         SYNTHETIC_KEY,
     ));
-    assert_eq!(sanitized, "[redacted]");
+    assert_eq!(sanitized, SAFE_SUPPORTED_NAMED_ENTITY_VALUE);
 }
 
 /// The Brave provider mapping owns the exact endpoint and bounded web-only

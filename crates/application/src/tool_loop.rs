@@ -1560,6 +1560,11 @@ pub(crate) fn initial_tool_approval(
     posture: DangerousToolAutoApproval,
     definition: Option<&ToolDefinition>,
 ) -> InitialToolApproval {
+    if definition.is_some_and(|definition| {
+        definition.permission_default() == ToolPermissionDefault::AlwaysConfirm
+    }) {
+        return InitialToolApproval::AlwaysConfirm;
+    }
     match posture {
         DangerousToolAutoApproval::ApproveAll => InitialToolApproval::SessionBlanket,
         DangerousToolAutoApproval::Disabled => match definition
@@ -1567,7 +1572,9 @@ pub(crate) fn initial_tool_approval(
             .unwrap_or(ToolPermissionDefault::Confirm)
         {
             ToolPermissionDefault::Auto => InitialToolApproval::PolicyAuto,
-            ToolPermissionDefault::Confirm => InitialToolApproval::Confirm,
+            ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm => {
+                InitialToolApproval::Confirm
+            }
         },
     }
 }
@@ -2035,6 +2042,24 @@ mod tests {
         assert_ne!(
             ToolDecisionSource::PolicyAuto,
             ToolDecisionSource::UserCommand
+        );
+    }
+
+    #[test]
+    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
+        let explicit = definition(
+            "explicit",
+            ToolPermissionDefault::AlwaysConfirm,
+            ToolEffectClass::ExternalEffect,
+        );
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&explicit)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&explicit)),
+            InitialToolApproval::AlwaysConfirm
         );
     }
 

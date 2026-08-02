@@ -12,7 +12,7 @@ pub(super) const ACCEPT_HEADER_CASE_COLLISION_KEY: &str = "APPLICATION/JSON";
 
 pub(super) const PROVIDER_HOST_CASE_COLLISION_KEY: &str = "API.SEARCH.BRAVE.COM";
 
-pub(super) const SAFE_UNSUPPORTED_NAMED_ENTITY_VALUE: &str = "safe&nbsp;value";
+pub(super) const SAFE_SUPPORTED_NAMED_ENTITY_VALUE: &str = "safe&nbsp;value";
 
 pub(super) const LEADING_HEADER_WHITESPACE_KEY: &str = " fixture-search-key";
 

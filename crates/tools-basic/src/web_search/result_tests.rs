@@ -1,6 +1,7 @@
 use reqwest::StatusCode;
+use signalbox_model_runtime::CredentialValue;
 
-use super::{evidence::*, result::*, test_support::*};
+use super::{evidence::*, redaction::*, result::*, test_support::*};
 
 /// The structured output retains ten results and reports that the
 /// provider returned an omitted eleventh result.
@@ -78,24 +79,95 @@ fn web_search_result_preserves_canonicalizable_origin_url() {
     assert_eq!(result.url(), FIXTURE_CANONICAL_ORIGIN_RESULT_URL);
 }
 
+/// INV-035: result URL user information is discarded by the typed parser and
+/// cannot reach tool evidence.
+#[test]
+fn web_search_result_drops_parsed_user_information() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_USERINFO_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("userinfo fixture URL is parsed");
+
+    assert_eq!(result.url(), FIXTURE_RESULT_URL);
+}
+
+/// INV-035: result URL query parameters not named by the explicit allowlist
+/// are discarded before output construction.
+#[test]
+fn web_search_result_drops_unapproved_query_parameters() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_QUERY_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("query fixture URL is parsed");
+
+    assert_eq!(result.url(), FIXTURE_RESULT_URL);
+}
+
+/// INV-035: result URL fragments are discarded before output construction.
+#[test]
+fn web_search_result_drops_fragments() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_FRAGMENT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("fragment fixture URL is parsed");
+
+    assert_eq!(result.url(), FIXTURE_RESULT_URL);
+}
+
+/// INV-035: provider text is entity-escaped while the response is parsed,
+/// before any evidence renderer can observe it.
+#[test]
+fn web_search_result_entity_escapes_provider_text() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_MARKUP_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_MARKUP_SNIPPET),
+    })
+    .expect("markup provider-text fixture is bounded");
+
+    assert_eq!(result.title(), FIXTURE_ESCAPED_MARKUP_TITLE);
+    assert_eq!(result.snippet(), FIXTURE_ESCAPED_MARKUP_SNIPPET);
+}
+
 /// INV-035: provider response and error diagnostics never render
 /// provider-controlled fields that could reflect the API key.
 #[test]
 fn web_search_debug_output_omits_reflected_credential() {
-    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+    let fields = WebSearchResultFields {
         title: String::from(SYNTHETIC_KEY),
         url: format!("{FIXTURE_RESULT_URL}?token={SYNTHETIC_KEY}"),
         snippet: String::from(SYNTHETIC_KEY),
-    })
-    .expect("reflected fixture result is admitted");
+    };
+    let fields_debug = format!("{fields:?}");
+    let reflected = WebSearchResult::try_new(fields).expect("reflected fixture result is admitted");
     let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
         .expect("fixture response is admitted");
     let error =
         WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, SYNTHETIC_KEY.as_bytes().to_vec())
             .expect("fixture error body is bounded");
 
+    assert!(!fields_debug.contains(SYNTHETIC_KEY));
     assert!(!format!("{response:?}").contains(SYNTHETIC_KEY));
     assert!(!format!("{error:?}").contains(SYNTHETIC_KEY));
+}
+
+/// INV-035: response diagnostics do not render a result count that can equal
+/// a valid request credential.
+#[test]
+fn web_search_response_debug_omits_credential_shaped_result_count() {
+    let collision_key = debug_result_count_collision_key();
+    let credential = CredentialValue::new(collision_key.as_bytes().to_vec());
+    let response = response_with_result_count(DEBUG_RESULT_COUNT_COLLISION_COUNT);
+    let rendered = format!("{response:?}");
+
+    assert!(CredentialScrubber::try_new(&credential).is_some());
+    assert!(!rendered.contains(&collision_key));
 }
 
 #[test]

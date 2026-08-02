@@ -33,7 +33,8 @@ fn web_search_final_success_payload_rejects_credential_collision() {
 /// before the body can enter durable failure evidence.
 #[test]
 fn web_search_error_body_redacts_json_escaped_credential() {
-    let body = br#"{"message":"fixture-search-\u006bey"}"#.to_vec();
+    let escaped = ascii_json_unicode_escape(SYNTHETIC_KEY);
+    let body = format!(r#"{{"error":{{"detail":"{escaped}"}}}}"#).into_bytes();
     let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
         .expect("fixture error body is bounded");
     let detail = provider_error_detail(error, &scrubber())
@@ -43,17 +44,76 @@ fn web_search_error_body_redacts_json_escaped_credential() {
     assert!(!detail.as_str().contains(SYNTHETIC_KEY));
 }
 
+/// INV-035: only Brave's known nested error-detail component can become
+/// entity-escaped provider text in failure evidence.
+#[test]
+fn web_search_error_body_reads_nested_typed_detail() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": {"detail": FIXTURE_PROVIDER_ERROR_DETAIL},
+        "unknown": SYNTHETIC_KEY,
+    }))
+    .expect("fixture provider error encodes");
+    let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
+        .expect("fixture error body is bounded");
+    let detail = provider_error_detail(error, &scrubber())
+        .expect("detail is admitted")
+        .expect("detail does not collide");
+
+    assert!(
+        detail
+            .as_str()
+            .contains(FIXTURE_ESCAPED_PROVIDER_ERROR_DETAIL)
+    );
+    assert!(!detail.as_str().contains(SYNTHETIC_KEY));
+}
+
+/// INV-035: credential removal cannot turn an entity-escaped provider
+/// rejection detail into markup-bearing failure evidence.
+#[test]
+fn web_search_rejects_error_detail_collision_with_entity_escape_syntax() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": {"detail": FIXTURE_LITERAL_ENTITY_TITLE},
+    }))
+    .expect("fixture provider error encodes");
+    let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
+        .expect("fixture error body is bounded");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        ENTITY_ESCAPE_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(provider_error_detail(error, &scrubber), Ok(None));
+}
+
+/// INV-035: an unparsed provider error body contributes no text to failure
+/// evidence, independently of whether it collides with the credential.
+#[test]
+fn web_search_unparsed_error_body_never_enters_evidence() {
+    let error = WebSearchProviderError::new(
+        PROVIDER_REJECTION_STATUS,
+        FIXTURE_UNPARSED_PROVIDER_ERROR.as_bytes().to_vec(),
+    )
+    .expect("fixture error body is bounded");
+    let detail = provider_error_detail(error, &scrubber())
+        .expect("fixed detail is admitted")
+        .expect("fixed detail does not collide");
+
+    assert!(!detail.as_str().contains(FIXTURE_UNPARSED_PROVIDER_ERROR));
+}
+
 /// INV-035: error redaction precedes evidence truncation, so a credential
 /// crossing the retained prefix is replaced before the suffix is added.
 #[test]
 fn web_search_error_body_is_redacted_before_truncation() {
     let reflected = format!(
         "{}{}{}",
-        "a".repeat(MAX_ERROR_DETAIL_BYTES - 100),
+        "a".repeat(MAX_PROVIDER_RESPONSE_BYTES / 4),
         SYNTHETIC_KEY,
-        "z".repeat(MAX_ERROR_DETAIL_BYTES)
+        "z".repeat(MAX_PROVIDER_RESPONSE_BYTES / 4)
     );
-    let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, reflected.into_bytes())
+    let body = serde_json::to_vec(&serde_json::json!({"error": {"detail": reflected}}))
+        .expect("fixture provider error encodes");
+    let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
         .expect("fixture error body is bounded");
     let detail = provider_error_detail(error, &scrubber())
         .expect("detail is admitted")
@@ -67,14 +127,14 @@ fn web_search_error_body_is_redacted_before_truncation() {
 /// after the provider body has been sanitized.
 #[test]
 fn web_search_final_error_detail_rejects_credential_collision() {
-    const ERROR_PREFIX_COLLISION_KEY: &str = "provider";
+    const ERROR_PREFIX_COLLISION_KEY: &str = "rejected";
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         ERROR_PREFIX_COLLISION_KEY.as_bytes().to_vec(),
     ))
     .expect("fixture credential is usable");
     let error = WebSearchProviderError::new(
         PROVIDER_REJECTION_STATUS,
-        br#"{"message":"synthetic rejection"}"#.to_vec(),
+        br#"{"error":{"detail":"synthetic rejection"}}"#.to_vec(),
     )
     .expect("fixture error body is bounded");
 

@@ -108,13 +108,9 @@ pub(super) fn fixed_success_payload_contains_credential(credential: &str) -> boo
 }
 
 pub(super) fn fixed_result_debug_contains_credential(credential: &str) -> bool {
-    let result = WebSearchResult {
-        title: String::new(),
-        source_url: String::new(),
-        url: String::new(),
-        snippet: String::new(),
-    };
-    text_contains_credential_variant(&format!("{result:?}"), credential)
+    fixed_result_diagnostic_outputs()
+        .iter()
+        .any(|output| text_contains_credential_variant(output, credential))
 }
 
 pub(super) fn fixed_success_payloads() -> impl Iterator<Item = String> {
@@ -130,15 +126,6 @@ pub(super) fn fixed_success_payloads() -> impl Iterator<Item = String> {
             payload.to_string()
         })
     })
-}
-
-pub(super) const fn next_page_completeness_probe(
-    completeness: WebSearchPageCompleteness,
-) -> Option<WebSearchPageCompleteness> {
-    match completeness {
-        WebSearchPageCompleteness::Complete => Some(WebSearchPageCompleteness::MoreAvailable),
-        WebSearchPageCompleteness::MoreAvailable => None,
-    }
 }
 
 pub(super) fn fixed_request_metadata_contains_credential(
@@ -171,21 +158,4 @@ pub(super) fn fixed_request_metadata_contains_credential(
         || text_contains_credential_variant(&format!("{request:?}"), credential)
         || fixed_success_payload_contains_credential(credential)
         || fixed_result_debug_contains_credential(credential)
-        || (0..=MAX_PROVIDER_RESULTS).any(|result_count| {
-            std::iter::successors(Some(WebSearchPageCompleteness::Complete), |completeness| {
-                next_page_completeness_probe(*completeness)
-            })
-            .any(|completeness| {
-                text_contains_credential_variant(
-                    &format!(
-                        "{:?}",
-                        WebSearchResponseDebug {
-                            result_count,
-                            completeness,
-                        }
-                    ),
-                    credential,
-                )
-            })
-        })
 }

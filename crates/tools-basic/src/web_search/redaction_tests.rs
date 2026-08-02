@@ -22,6 +22,40 @@ fn web_search_success_evidence_redacts_reflected_credential() {
     assert!(!content.contains(SYNTHETIC_KEY));
 }
 
+/// INV-035: the URL-specific credential gate detects an exact credential in
+/// an admitted result path before completed evidence is constructed.
+#[test]
+fn web_search_rejects_plain_credential_in_result_url_path() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: fixture_result_url_with_path_segment(SYNTHETIC_KEY),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("credential-bearing path fixture is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+
+    assert_eq!(
+        success_evidence(response, &scrubber()),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: credentials colliding with fixed provider-result diagnostics are
+/// rejected before any provider response or error can be formatted.
+#[test]
+fn web_search_rejects_credentials_colliding_with_fixed_result_diagnostics() {
+    let provider_error_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        PROVIDER_ERROR_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
+    let placeholder_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
+
+    assert!(provider_error_collision.is_none());
+    assert!(placeholder_collision.is_none());
+}
+
 /// INV-035: JSON Unicode escapes in provider text are decoded within the
 /// bounded scrubber before completed evidence is formed.
 #[test]
@@ -149,10 +183,10 @@ fn web_search_success_evidence_redacts_text_matching_decoded_credential() {
     assert!(!content.contains(REVERSE_ENCODED_COLLISION_VALUE));
 }
 
-/// INV-035: an unimplemented standard named HTML reference fails closed
-/// before provider-controlled text enters completed evidence.
+/// INV-035: an unimplemented standard named HTML reference remains literal
+/// and is entity-escaped before provider-controlled text enters evidence.
 #[test]
-fn web_search_redacts_unsupported_named_html_reference_in_result_text() {
+fn web_search_preserves_escaped_unsupported_named_html_reference_in_result_text() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE),
         url: String::from(FIXTURE_RESULT_URL),
@@ -171,6 +205,50 @@ fn web_search_redacts_unsupported_named_html_reference_in_result_text() {
 
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY));
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE));
+    assert!(content.contains(UNSUPPORTED_NAMED_ENTITY_ESCAPED_VALUE));
+}
+
+/// INV-035: unknown terminated named references remain literal and are
+/// entity-escaped rather than causing all provider text to fail closed.
+#[test]
+fn web_search_preserves_entity_escaped_unknown_named_references() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_UNKNOWN_NAMED_REFERENCE_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET),
+    })
+    .expect("unknown named-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+
+    let evidence = success_evidence(response, &scrubber()).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    assert!(content.contains(FIXTURE_ESCAPED_UNKNOWN_NAMED_REFERENCE_TITLE));
+    assert!(content.contains(FIXTURE_ESCAPED_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET));
+}
+
+/// INV-035: credential removal cannot turn an entity-escaped literal into
+/// markup-bearing output after typed result construction.
+#[test]
+fn web_search_rejects_credential_collision_with_entity_escape_syntax() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_LITERAL_ENTITY_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("literal entity fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        ENTITY_ESCAPE_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
 }
 
 /// INV-035: semicolonless numeric HTML-reference syntax fails closed
@@ -219,6 +297,30 @@ fn web_search_redacts_semicolonless_named_reference_in_result_text() {
 
     assert!(!content.contains(SEMICOLONLESS_NAMED_HTML_COLLISION_KEY));
     assert!(!content.contains(SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE));
+}
+
+/// INV-035: an unknown named-reference prefix cannot hide a later recognized
+/// reference from credential decoding at a nested ampersand.
+#[test]
+fn web_search_redacts_recognized_reference_after_nested_ampersand() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(NESTED_NAMED_HTML_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("nested named-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        SEMICOLONLESS_NAMED_HTML_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(SEMICOLONLESS_NAMED_HTML_COLLISION_KEY));
+    assert!(!content.contains(NESTED_NAMED_HTML_COLLISION_VALUE));
 }
 
 /// INV-035: credential scrubbing cannot turn a checked result title into
@@ -289,10 +391,10 @@ fn web_search_redacts_html_encoded_credential_in_result_text() {
     assert!(!content.contains(HTML_ENTITY_COLLISION_VALUE));
 }
 
-/// INV-035: an over-window numeric HTML reference fails closed before
+/// INV-035: an over-window numeric HTML reference is redacted before
 /// provider-controlled evidence is retained.
 #[test]
-fn web_search_rejects_over_window_numeric_reference_in_result_text() {
+fn web_search_redacts_over_window_numeric_reference_in_result_text() {
     let reflection = over_window_numeric_html_reflection();
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: reflection.clone(),
@@ -449,13 +551,13 @@ fn web_search_html_reference_scan_handles_multibyte_boundaries() {
     ));
 }
 
-/// INV-035: character-reference terminator search is bounded and fails
-/// closed at every ampersand in a maximum-size provider body.
+/// INV-035: numeric character-reference terminator search is bounded and
+/// fails closed in a maximum-size provider body.
 #[test]
 fn web_search_html_reference_scan_bounds_and_rejects_distant_terminator() {
     let source = distant_html_reference_terminator();
 
-    assert_eq!(decode_html_character_references(&source), None);
+    assert!(decode_html_character_references(&source).is_none());
 }
 
 /// INV-035: credential removal cannot reproduce a key that overlaps the
