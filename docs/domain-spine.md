@@ -7433,6 +7433,7 @@ pub enum RepoWatchTextError {
     Empty,
     ContainsNull,
     TooLong { bytes: usize, maximum: usize },
+    TooManyCharacters { characters: usize, maximum: usize },
     Malformed,
     UnanchoredPattern,
     InvalidPattern,
@@ -7629,6 +7630,10 @@ impl RepoWatchEvent {
 
 pub enum RepoWatchEventConstructionError {
     BranchKindOnPullRequest,
+    HeadChangedCurrentMismatch,
+    BaseAdvancedBranchMismatch,
+    LabeledContextMissingLabel,
+    UnlabeledContextContainsLabel,
 }
 // implements Error.
 
@@ -7643,20 +7648,21 @@ impl RepoWatchLabelMatcher {
 }
 
 pub struct RepoWatchMatcherV1 { /* private */ }
+pub struct RepoWatchMatcherV1Input {
+    pub event_kinds: Vec<RepoWatchEventKindNameV1>,
+    pub repository: Option<RepositorySlug>,
+    pub base_branch: Option<BranchName>,
+    pub head_branch: Option<RepoWatchPattern>,
+    pub title: Option<RepoWatchPattern>,
+    pub body: Option<RepoWatchPattern>,
+    pub labels: RepoWatchLabelMatcher,
+    pub draft: Option<bool>,
+    pub author: Option<RepoWatchAuthorLogin>,
+    pub mergeable_state: Vec<MergeableState>,
+    pub conclusion: Vec<CheckConclusion>,
+}
 impl RepoWatchMatcherV1 {
-    pub fn new(
-        event_kinds: Vec<RepoWatchEventKindNameV1>,
-        repository: Option<RepositorySlug>,
-        base_branch: Option<BranchName>,
-        head_branch: Option<RepoWatchPattern>,
-        title: Option<RepoWatchPattern>,
-        body: Option<RepoWatchPattern>,
-        labels: RepoWatchLabelMatcher,
-        draft: Option<bool>,
-        author: Option<RepoWatchAuthorLogin>,
-        mergeable_state: Vec<MergeableState>,
-        conclusion: Vec<CheckConclusion>,
-    ) -> Self;
+    pub fn new(input: RepoWatchMatcherV1Input) -> Self;
     // accessors: event_kinds(), repository(), base_branch(), head_branch(),
     //   title(), body(), labels(), draft(), author(), mergeable_state(),
     //   conclusion()
@@ -7729,6 +7735,7 @@ pub enum RepoWatchActionV1 {
 
 pub enum RepoWatchRuleValidationError {
     NoActions,
+    BranchEventWithPullRequestSingleton { scope: RepoWatchSingletonScope },
     TemplateNotDeclared { template: SessionTemplateName },
     TemplateRejectsContext {
         template: SessionTemplateName,
@@ -8574,7 +8581,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: user_content                               | 4                    |
 | domain: submit_input                               | 32                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
-| domain: repo_watch                                 | 43                   |
+| domain: repo_watch                                 | 44                   |
 | domain: turn_lifecycle                             | 10                   |
 | domain: turn_eligibility                           | 29                   |
 | domain: turn_attempt                               | 13                   |
@@ -8595,7 +8602,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **693 (+7 free fn)** |
+| **signalbox-domain total**                         | **694 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

@@ -28,7 +28,9 @@ and versioned structured rules. Each repository entry names exactly one
 file. Duplicate repositories, unreadable credential files, unknown keys,
 unsupported versions, zero intervals, malformed values, and invalid rules fail
 configuration before any watch task starts. Other daemon GitHub credentials do
-not substitute for a missing repository-watch credential.
+not substitute for a missing repository-watch credential. Both repository-slug
+segments are nonempty ASCII letters, digits, dots, hyphens, or underscores;
+neither segment is `.` or `..`.
 
 **Foundation contract.** Credential files follow the house credential-file
 pattern: configuration stores paths rather than secrets; request preparation
@@ -68,7 +70,10 @@ label set, draft state, and author needed by the structured matcher. This is
 normalized event context, not a raw API object. The only branch-target event in
 version one is `BranchWorkflowRunCompleted`; its payload supplies the branch,
 workflow, and conclusion. Events append in accepted observation order and are
-never updated or deleted.
+never updated or deleted. Construction rejects a pull-request event when the
+payload's current head, base branch, or label transition contradicts that
+event's complete current pull-request context. Label names admit up to 50
+Unicode scalar values, including their full UTF-8 representation.
 
 **Implemented behavior and foundation contract.** The closed version-one event
 payloads are:
@@ -136,9 +141,12 @@ to which it does not apply. Expressiveness grows only by adding versioned
 fields.
 
 **Implemented behavior.** Regex patterns are nonempty, explicitly anchored by
-`^` and `$`, and at most 1,024 UTF-8 bytes. Construction uses Rust's linear-time
-`regex` crate; backreferences and look-around are therefore not admitted and no
-backtracking engine is present.
+`^` and `$`, and at most 1,024 UTF-8 bytes. Anchoring applies to the complete
+expression, so an alternative cannot escape the whole-candidate boundary.
+Construction uses Rust's linear-time `regex` crate; backreferences and
+look-around are therefore not admitted and no backtracking engine is present.
+Exact branch fields admit Git's complete `refs/heads/<name>` grammar while
+storing the name without that prefix.
 
 ## Actions and dispatch context
 
