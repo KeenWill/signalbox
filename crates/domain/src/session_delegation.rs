@@ -1,5 +1,7 @@
 //! Typed delegated-session relation, messages, outcomes, and wait subject.
 
+use std::num::NonZeroU64;
+
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -426,49 +428,52 @@ impl TerminalChildTurn {
         ))
     }
 
-    pub fn from_scheduling(
-        value: &crate::AcceptedInputTurnSchedulingProjection,
-        reason: DelegationOutcomeReason,
-    ) -> Option<Self> {
-        let (kind, result_digest) = match reason {
-            DelegationOutcomeReason::ChildExecutionFailed => match value.status() {
-                crate::AcceptedInputTurnSchedulingStatus::TerminalFailed
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalRefused => {
-                    (TerminalChildTurnKind::Failed, None)
-                }
-                crate::AcceptedInputTurnSchedulingStatus::Queued
-                | crate::AcceptedInputTurnSchedulingStatus::Active
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalCompleted
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalReconciliationRequired => {
-                    return None;
-                }
-            },
-            DelegationOutcomeReason::ChildCancelled => match value.status() {
-                crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled => {
-                    (TerminalChildTurnKind::Cancelled, None)
-                }
-                crate::AcceptedInputTurnSchedulingStatus::Queued
-                | crate::AcceptedInputTurnSchedulingStatus::Active
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalCompleted
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalFailed
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalRefused
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalReconciliationRequired => {
-                    return None;
-                }
-            },
-            DelegationOutcomeReason::ChildCompleted
-            | DelegationOutcomeReason::ChildResultUnavailable
-            | DelegationOutcomeReason::ParentStopped { .. }
-            | DelegationOutcomeReason::ParentCancelled { .. } => return None,
-        };
-        Some(Self {
+    /// Seals an execution failure from the exact failed-turn commit candidate.
+    /// Unlike an accepted-input scheduling projection, this evidence may name
+    /// any turn origin, including a delegated task.
+    pub const fn from_failed(value: &crate::FailedModelCallTurn) -> Self {
+        Self {
             session: value.session(),
             turn: value.turn(),
-            kind,
-            reason,
-            result_digest,
-        })
+            kind: TerminalChildTurnKind::Failed,
+            reason: DelegationOutcomeReason::ChildExecutionFailed,
+            result_digest: None,
+        }
+    }
+
+    /// Seals cancellation from the exact cancelled-turn commit candidate.
+    /// Unlike an accepted-input scheduling projection, this evidence may name
+    /// any turn origin, including a delegated task.
+    pub const fn from_cancelled(value: &crate::CancelledModelCallTurn) -> Self {
+        Self {
+            session: value.session(),
+            turn: value.turn(),
+            kind: TerminalChildTurnKind::Cancelled,
+            reason: DelegationOutcomeReason::ChildCancelled,
+            result_digest: None,
+        }
+    }
+
+    /// Seals cancellation when an interrupt closed a tool-using response.
+    pub const fn from_cancelled_tool_round(value: &crate::CancelledToolRoundModelCallTurn) -> Self {
+        Self {
+            session: value.session(),
+            turn: value.turn(),
+            kind: TerminalChildTurnKind::Cancelled,
+            reason: DelegationOutcomeReason::ChildCancelled,
+            result_digest: None,
+        }
+    }
+
+    /// Seals a provider refusal from the exact refused-turn commit candidate.
+    pub const fn from_refused(value: &crate::RefusedModelCallTurn) -> Self {
+        Self {
+            session: value.session(),
+            turn: value.turn(),
+            kind: TerminalChildTurnKind::Failed,
+            reason: DelegationOutcomeReason::ChildExecutionFailed,
+            result_digest: None,
+        }
     }
 
     pub const fn session(self) -> SessionId {
@@ -961,13 +966,684 @@ impl DelegationWait {
     }
 }
 
+/// One positive contiguous event position per delegation relation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DelegationEventOrdinal(NonZeroU64);
+
+impl DelegationEventOrdinal {
+    pub const fn new(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    #[cfg(test)]
+    const fn first() -> Self {
+        Self(NonZeroU64::MIN)
+    }
+
+    fn successor(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
+/// One immutable event in a relation's ordered history.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum DelegationEvent {
+    Spawned {
+        ordinal: DelegationEventOrdinal,
+        provenance: DelegationProvenance,
+    },
+    MessageDelivered {
+        ordinal: DelegationEventOrdinal,
+        message: DelegationMessage,
+    },
+    OutcomeRecorded {
+        ordinal: DelegationEventOrdinal,
+        outcome: DelegationOutcome,
+    },
+}
+
+impl DelegationEvent {
+    pub const fn ordinal(&self) -> DelegationEventOrdinal {
+        match self {
+            Self::Spawned { ordinal, .. }
+            | Self::MessageDelivered { ordinal, .. }
+            | Self::OutcomeRecorded { ordinal, .. } => *ordinal,
+        }
+    }
+
+    pub const fn message(&self) -> Option<&DelegationMessage> {
+        match self {
+            Self::MessageDelivered { message, .. } => Some(message),
+            Self::Spawned { .. } | Self::OutcomeRecorded { .. } => None,
+        }
+    }
+
+    pub const fn outcome(&self) -> Option<&DelegationOutcome> {
+        match self {
+            Self::OutcomeRecorded { outcome, .. } => Some(outcome),
+            Self::Spawned { .. } | Self::MessageDelivered { .. } => None,
+        }
+    }
+}
+
+/// Scheduling-visible relation lifecycle.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DelegationLifecycle {
+    Active,
+    Terminal,
+}
+
+/// One exact parent/child relationship keyed by its spawning request.
+///
+/// Construction is intentionally sealed inside this module until the
+/// persistence stack can admit a spawn from the complete, locked parent
+/// relationship inventory. Callers cannot substitute a count or partial slice
+/// for that admission proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionDelegation {
+    spawning_request: ToolRequestId,
+    parent: SessionId,
+    child: SessionId,
+    child_turn: TurnId,
+    task: DelegationContent,
+    policy: ChildRelationshipPolicy,
+    lifecycle: DelegationLifecycle,
+    events: Vec<DelegationEvent>,
+}
+
+impl SessionDelegation {
+    #[cfg(test)]
+    fn spawn_fixture(
+        spawning_request: DelegatedSpawnRequest,
+        child: SessionId,
+        child_turn: TurnId,
+    ) -> Result<Self, DelegationTransitionError> {
+        let parent = spawning_request.request().session();
+        if parent == child {
+            let request_id = spawning_request.request().id();
+            return Err(DelegationTransitionError {
+                spawning_request: request_id,
+                failure: DelegationTransitionFailure::SameSession,
+                rejected: Some(Box::new(RejectedDelegationTransition::Spawn {
+                    request: spawning_request,
+                    child,
+                    child_turn,
+                })),
+            });
+        }
+        let provenance = DelegationProvenance::from_spawn(&spawning_request);
+        Ok(Self {
+            spawning_request: spawning_request.request().id(),
+            parent,
+            child,
+            child_turn,
+            task: spawning_request.task().clone(),
+            policy: spawning_request.policy(),
+            lifecycle: DelegationLifecycle::Active,
+            events: vec![DelegationEvent::Spawned {
+                ordinal: DelegationEventOrdinal::first(),
+                provenance,
+            }],
+        })
+    }
+
+    pub const fn spawning_request(&self) -> ToolRequestId {
+        self.spawning_request
+    }
+
+    pub const fn parent(&self) -> SessionId {
+        self.parent
+    }
+
+    pub const fn child(&self) -> SessionId {
+        self.child
+    }
+
+    pub const fn child_turn(&self) -> TurnId {
+        self.child_turn
+    }
+
+    pub const fn task(&self) -> &DelegationContent {
+        &self.task
+    }
+
+    pub const fn policy(&self) -> ChildRelationshipPolicy {
+        self.policy
+    }
+
+    pub const fn lifecycle(&self) -> DelegationLifecycle {
+        self.lifecycle
+    }
+
+    pub fn events(&self) -> &[DelegationEvent] {
+        &self.events
+    }
+
+    pub fn register_wait(
+        &self,
+        awaiting_request: &DelegationAwaitRequest,
+        dispatch: &crate::ToolDispatchAuthority,
+    ) -> Result<DelegationWait, DelegationTransitionError> {
+        if !dispatch_matches(awaiting_request.request(), dispatch)
+            || awaiting_request.request().session() != self.parent
+            || awaiting_request.request().id() == self.spawning_request
+            || awaiting_request.child() != self.child
+        {
+            return Err(self.fail(DelegationTransitionFailure::InvalidProvenance));
+        }
+        Ok(DelegationWait {
+            awaiting_request: awaiting_request.request().id(),
+            spawning_request: self.spawning_request,
+            parent: self.parent,
+            child: self.child,
+            mode: awaiting_request.mode(),
+        })
+    }
+
+    pub fn deliver_message(
+        mut self,
+        sending_request: DelegationMessageRequest,
+        id: DelegationMessageId,
+        dispatch: &crate::ToolDispatchAuthority,
+    ) -> Result<(Self, DelegationEvent), DelegationTransitionError> {
+        if !dispatch_matches(sending_request.request(), dispatch) {
+            return Err(Self::reject_message(
+                self,
+                sending_request,
+                id,
+                DelegationTransitionFailure::InvalidProvenance,
+            ));
+        }
+        let source = sending_request.request().session();
+        let direction = if source == self.parent && sending_request.peer() == self.child {
+            DelegationMessageDirection::ParentToChild
+        } else if source == self.child && sending_request.peer() == self.parent {
+            DelegationMessageDirection::ChildToParent
+        } else {
+            return Err(Self::reject_message(
+                self,
+                sending_request,
+                id,
+                DelegationTransitionFailure::InvalidProvenance,
+            ));
+        };
+        if sending_request.request().id() == self.spawning_request {
+            return Err(Self::reject_message(
+                self,
+                sending_request,
+                id,
+                DelegationTransitionFailure::InvalidProvenance,
+            ));
+        }
+        let provenance = DelegationProvenance::from_message(&sending_request);
+        if let Some(existing) = self
+            .events
+            .iter()
+            .find(|event| {
+                event.message().is_some_and(|message| {
+                    message
+                        .provenance()
+                        .tool_request()
+                        .is_some_and(|(_, _, request)| request == sending_request.request().id())
+                })
+            })
+            .cloned()
+        {
+            if existing.message().is_some_and(|message| {
+                message.direction() == direction
+                    && message.content() == sending_request.content()
+                    && message.provenance() == provenance
+            }) {
+                return Ok((self, existing));
+            }
+            return Err(Self::reject_message(
+                self,
+                sending_request,
+                id,
+                DelegationTransitionFailure::ConflictingMessageReplay,
+            ));
+        }
+        if self
+            .events
+            .iter()
+            .any(|event| event.message().is_some_and(|message| message.id() == id))
+        {
+            return Err(Self::reject_message(
+                self,
+                sending_request,
+                id,
+                DelegationTransitionFailure::DuplicateMessageIdentity,
+            ));
+        }
+        let ordinal = match self.next_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(failure) => return Err(Self::reject_message(self, sending_request, id, failure)),
+        };
+        let event = DelegationEvent::MessageDelivered {
+            ordinal,
+            message: DelegationMessage {
+                id,
+                direction,
+                content: sending_request.content().clone(),
+                provenance,
+            },
+        };
+        self.events.push(event.clone());
+        Ok((self, event))
+    }
+
+    pub fn record_outcome(
+        mut self,
+        outcome: DelegationOutcome,
+    ) -> Result<Self, DelegationTransitionError> {
+        let provenance = outcome.provenance();
+        if let Some(existing) = self
+            .events
+            .iter()
+            .filter_map(DelegationEvent::outcome)
+            .find(|existing| existing.provenance() == provenance)
+        {
+            if existing == &outcome {
+                return Ok(self);
+            }
+            return Err(Self::reject_outcome(
+                self,
+                outcome,
+                DelegationTransitionFailure::DuplicateOutcomeAuthority,
+            ));
+        }
+        let records_terminal_evaluation = outcome.kind() == DelegationOutcomeKind::AlreadyTerminal;
+        if self.lifecycle != DelegationLifecycle::Active
+            && (!records_terminal_evaluation || !has_child_terminal_outcome(&self))
+        {
+            return Err(Self::reject_outcome(
+                self,
+                outcome,
+                DelegationTransitionFailure::AlreadyTerminal,
+            ));
+        }
+        if self.lifecycle == DelegationLifecycle::Active && records_terminal_evaluation {
+            return Err(Self::reject_outcome(
+                self,
+                outcome,
+                DelegationTransitionFailure::OutcomeReasonMismatch,
+            ));
+        }
+        if !outcome_matches_relation(&self, &outcome) {
+            return Err(Self::reject_outcome(
+                self,
+                outcome,
+                DelegationTransitionFailure::OutcomeReasonMismatch,
+            ));
+        }
+        let remains_active = match outcome.kind() {
+            DelegationOutcomeKind::ContinueRunning => true,
+            DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled
+            | DelegationOutcomeKind::AlreadyTerminal => false,
+        };
+        let ordinal = match self.next_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(failure) => return Err(Self::reject_outcome(self, outcome, failure)),
+        };
+        self.events
+            .push(DelegationEvent::OutcomeRecorded { ordinal, outcome });
+        if !remains_active {
+            self.lifecycle = DelegationLifecycle::Terminal;
+        }
+        Ok(self)
+    }
+
+    /// Applies one descendant-scoped parent termination using the immutable
+    /// relationship policy and current edge lifecycle.
+    pub fn record_parent_termination(
+        self,
+        authority: ParentTerminationAuthority,
+    ) -> Result<Self, DelegationTransitionError> {
+        if authority.parent() != self.parent {
+            return Err(Self::reject_parent_termination(
+                self,
+                authority,
+                DelegationTransitionFailure::InvalidProvenance,
+            ));
+        }
+        if authority.scope() == DescendantTerminationScope::ParentAlone {
+            return Err(Self::reject_parent_termination(
+                self,
+                authority,
+                DelegationTransitionFailure::DescendantsNotSelected,
+            ));
+        }
+        if self
+            .events
+            .iter()
+            .filter_map(DelegationEvent::outcome)
+            .any(|outcome| outcome.provenance().parent_command() == Some(authority))
+        {
+            return Ok(self);
+        }
+        let outcome = if self.lifecycle == DelegationLifecycle::Terminal {
+            DelegationOutcome::from_parent_already_terminal(authority)
+        } else {
+            let action = match self.policy {
+                ChildRelationshipPolicy::Background => BoundChildAction::KeepRunning,
+                ChildRelationshipPolicy::Bound {
+                    on_parent_stopped,
+                    on_parent_cancelled,
+                } => match authority.kind() {
+                    ParentTerminationKind::Stopped => on_parent_stopped,
+                    ParentTerminationKind::Cancelled => on_parent_cancelled,
+                },
+            };
+            DelegationOutcome::from_parent_policy(authority, action)
+        };
+        let Some(outcome) = outcome else {
+            return Err(Self::reject_parent_termination(
+                self,
+                authority,
+                DelegationTransitionFailure::DescendantsNotSelected,
+            ));
+        };
+        self.record_outcome(outcome)
+    }
+
+    fn next_ordinal(&self) -> Result<DelegationEventOrdinal, DelegationTransitionFailure> {
+        let Some(last_event) = self.events.last() else {
+            return Err(DelegationTransitionFailure::MissingSpawnEvent);
+        };
+        last_event
+            .ordinal()
+            .successor()
+            .ok_or(DelegationTransitionFailure::EventOrdinalExhausted)
+    }
+
+    fn fail(&self, failure: DelegationTransitionFailure) -> DelegationTransitionError {
+        DelegationTransitionError {
+            spawning_request: self.spawning_request,
+            failure,
+            rejected: None,
+        }
+    }
+
+    fn reject_message(
+        relation: Self,
+        request: DelegationMessageRequest,
+        id: DelegationMessageId,
+        failure: DelegationTransitionFailure,
+    ) -> DelegationTransitionError {
+        DelegationTransitionError {
+            spawning_request: relation.spawning_request,
+            failure,
+            rejected: Some(Box::new(RejectedDelegationTransition::DeliverMessage {
+                relation,
+                request,
+                id,
+            })),
+        }
+    }
+
+    fn reject_outcome(
+        relation: Self,
+        outcome: DelegationOutcome,
+        failure: DelegationTransitionFailure,
+    ) -> DelegationTransitionError {
+        DelegationTransitionError {
+            spawning_request: relation.spawning_request,
+            failure,
+            rejected: Some(Box::new(RejectedDelegationTransition::RecordOutcome {
+                relation,
+                outcome,
+            })),
+        }
+    }
+
+    fn reject_parent_termination(
+        relation: Self,
+        authority: ParentTerminationAuthority,
+        failure: DelegationTransitionFailure,
+    ) -> DelegationTransitionError {
+        DelegationTransitionError {
+            spawning_request: relation.spawning_request,
+            failure,
+            rejected: Some(Box::new(
+                RejectedDelegationTransition::RecordParentTermination {
+                    relation,
+                    authority,
+                },
+            )),
+        }
+    }
+}
+
+fn dispatch_matches(request: &ToolRequest, dispatch: &crate::ToolDispatchAuthority) -> bool {
+    dispatch.request() == request
+}
+
+fn has_child_terminal_outcome(relation: &SessionDelegation) -> bool {
+    relation
+        .events
+        .iter()
+        .filter_map(DelegationEvent::outcome)
+        .any(|outcome| {
+            matches!(
+                outcome.kind(),
+                DelegationOutcomeKind::ResultReturned
+                    | DelegationOutcomeKind::ChildFailed
+                    | DelegationOutcomeKind::ChildStopped
+                    | DelegationOutcomeKind::ChildCancelled
+            )
+        })
+}
+
+fn outcome_matches_relation(relation: &SessionDelegation, outcome: &DelegationOutcome) -> bool {
+    let reason = outcome.reason();
+    let child_matches = || {
+        outcome
+            .provenance()
+            .child_turn()
+            .is_some_and(|(child, turn)| child == relation.child && turn == relation.child_turn)
+    };
+    match outcome.kind() {
+        DelegationOutcomeKind::ResultReturned => {
+            reason == DelegationOutcomeReason::ChildCompleted && child_matches()
+        }
+        DelegationOutcomeKind::ChildFailed => {
+            matches!(
+                reason,
+                DelegationOutcomeReason::ChildExecutionFailed
+                    | DelegationOutcomeReason::ChildResultUnavailable
+            ) && child_matches()
+        }
+        DelegationOutcomeKind::ChildStopped => {
+            parent_outcome_matches(relation, outcome, reason, BoundChildAction::Stop)
+        }
+        DelegationOutcomeKind::ChildCancelled => {
+            if reason == DelegationOutcomeReason::ChildCancelled {
+                child_matches()
+            } else {
+                parent_outcome_matches(relation, outcome, reason, BoundChildAction::Cancel)
+            }
+        }
+        DelegationOutcomeKind::ContinueRunning => {
+            parent_outcome_matches(relation, outcome, reason, BoundChildAction::KeepRunning)
+        }
+        DelegationOutcomeKind::AlreadyTerminal => {
+            parent_evaluation_matches(relation, outcome, reason)
+        }
+    }
+}
+
+fn parent_outcome_matches(
+    relation: &SessionDelegation,
+    outcome: &DelegationOutcome,
+    reason: DelegationOutcomeReason,
+    expected_action: BoundChildAction,
+) -> bool {
+    parent_evaluation_matches(relation, outcome, reason)
+        && descendant_action(relation.policy, reason) == Some(expected_action)
+}
+
+fn parent_evaluation_matches(
+    relation: &SessionDelegation,
+    outcome: &DelegationOutcome,
+    reason: DelegationOutcomeReason,
+) -> bool {
+    match (outcome.provenance().kind, reason) {
+        (
+            DelegationProvenanceKind::ParentCommand { authority },
+            DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ) => {
+            authority.parent() == relation.parent
+                && authority.kind() == ParentTerminationKind::Stopped
+                && authority.scope() == DescendantTerminationScope::ParentAndDescendants
+        }
+        (
+            DelegationProvenanceKind::ParentCommand { authority },
+            DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ) => {
+            authority.parent() == relation.parent
+                && authority.kind() == ParentTerminationKind::Cancelled
+                && authority.scope() == DescendantTerminationScope::ParentAndDescendants
+        }
+        _ => false,
+    }
+}
+
+fn descendant_action(
+    policy: ChildRelationshipPolicy,
+    reason: DelegationOutcomeReason,
+) -> Option<BoundChildAction> {
+    match (policy, reason) {
+        (
+            ChildRelationshipPolicy::Background,
+            DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            }
+            | DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ) => Some(BoundChildAction::KeepRunning),
+        (
+            ChildRelationshipPolicy::Bound {
+                on_parent_stopped, ..
+            },
+            DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ) => Some(on_parent_stopped),
+        (
+            ChildRelationshipPolicy::Bound {
+                on_parent_cancelled,
+                ..
+            },
+            DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        ) => Some(on_parent_cancelled),
+        (
+            ChildRelationshipPolicy::Background | ChildRelationshipPolicy::Bound { .. },
+            DelegationOutcomeReason::ChildCompleted
+            | DelegationOutcomeReason::ChildExecutionFailed
+            | DelegationOutcomeReason::ChildResultUnavailable
+            | DelegationOutcomeReason::ChildCancelled
+            | DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAlone,
+            }
+            | DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAlone,
+            },
+        ) => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationTransitionFailure {
+    SameSession,
+    AlreadyTerminal,
+    MissingSpawnEvent,
+    InvalidProvenance,
+    DescendantsNotSelected,
+    DuplicateMessageIdentity,
+    ConflictingMessageReplay,
+    DuplicateOutcomeAuthority,
+    OutcomeReasonMismatch,
+    EventOrdinalExhausted,
+}
+
+/// Unchanged aggregate and exact attempted input from a rejected consuming transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RejectedDelegationTransition {
+    Spawn {
+        request: DelegatedSpawnRequest,
+        child: SessionId,
+        child_turn: TurnId,
+    },
+    DeliverMessage {
+        relation: SessionDelegation,
+        request: DelegationMessageRequest,
+        id: DelegationMessageId,
+    },
+    RecordOutcome {
+        relation: SessionDelegation,
+        outcome: DelegationOutcome,
+    },
+    RecordParentTermination {
+        relation: SessionDelegation,
+        authority: ParentTerminationAuthority,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationTransitionError {
+    spawning_request: ToolRequestId,
+    failure: DelegationTransitionFailure,
+    rejected: Option<Box<RejectedDelegationTransition>>,
+}
+
+impl DelegationTransitionError {
+    pub const fn failure(&self) -> DelegationTransitionFailure {
+        self.failure
+    }
+
+    pub const fn spawning_request(&self) -> ToolRequestId {
+        self.spawning_request
+    }
+
+    pub fn into_rejected(self) -> Option<RejectedDelegationTransition> {
+        self.rejected.map(|rejected| *rejected)
+    }
+}
+
+impl std::fmt::Display for DelegationTransitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "delegation {} transition failed: {:?}",
+            self.spawning_request.as_uuid(),
+            self.failure
+        )
+    }
+}
+
+impl std::error::Error for DelegationTransitionError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         InitialToolApproval, NormalizedToolArguments, ToolCallProposal, ToolName,
         ToolRequestOrdinal,
-        model_execution::completed_turn_fixture,
+        model_execution::{cancelled_turn_fixture, completed_turn_fixture, failed_turn_fixture},
         test_support::{command_id, model_call_id, session_id, tool_request_id, turn_id},
     };
     use expect_test::expect;
@@ -1328,6 +2004,32 @@ mod tests {
         );
     }
 
+    /// S18 / INV-010: failure evidence can name a delegated-task-origin turn.
+    #[test]
+    fn s18_inv010_failed_turn_proves_its_exact_origin_agnostic_identity() {
+        let failed = failed_turn_fixture();
+        let expected_identity = (failed.session(), failed.turn());
+        let terminal = TerminalChildTurn::from_failed(&failed);
+        let outcome = DelegationOutcome::from_terminal_child(terminal, None)
+            .expect("sealed failed turn derives a child failure");
+
+        assert_eq!((terminal.session(), terminal.turn()), expected_identity);
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ChildFailed);
+    }
+
+    /// S18 / INV-010: cancellation evidence can name a delegated-task-origin turn.
+    #[test]
+    fn s18_inv010_cancelled_turn_proves_its_exact_origin_agnostic_identity() {
+        let cancelled = cancelled_turn_fixture();
+        let expected_identity = (cancelled.session(), cancelled.turn());
+        let terminal = TerminalChildTurn::from_cancelled(&cancelled);
+        let outcome = DelegationOutcome::from_terminal_child(terminal, None)
+            .expect("sealed cancelled turn derives child cancellation");
+
+        assert_eq!((terminal.session(), terminal.turn()), expected_identity);
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ChildCancelled);
+    }
+
     /// S18 / INV-010: oversized aggregate live completion is typed unavailable.
     #[test]
     fn s18_inv010_oversized_live_completion_produces_unavailable_outcome() {
@@ -1485,5 +2187,1140 @@ mod tests {
         let (rejected_value, failure) = error.into_parts();
         assert_eq!(rejected_value, value);
         assert_eq!(failure, expected_failure);
+    }
+}
+
+#[cfg(test)]
+mod aggregate_tests {
+    use super::*;
+    use crate::{
+        ApprovedToolRequest, InitialToolApproval, ModelCallId, NormalizedToolArguments,
+        ToolApprovalResolutionReconstitutionInput, ToolCallProposal, ToolEffectClass, ToolName,
+        ToolRequestOrdinal,
+        model_execution::completed_turn_fixture,
+        test_support::{
+            command_id, delegation_message_id, model_call_id, session_id, tool_attempt_id,
+            tool_request_id, turn_attempt_id, turn_id,
+        },
+    };
+
+    const TEST_TASK: &str = "inspect aggregate work";
+
+    #[derive(Clone, Copy)]
+    enum RequestFixture {
+        Spawn,
+        Await,
+        ParentMessage,
+        ChildMessage,
+        AnotherParentMessage,
+    }
+
+    impl RequestFixture {
+        /// Canonical request identities are deliberately decorrelated across
+        /// each named fixture. Reusing one fixture is the explicit way a test
+        /// requests the same tool-request authority.
+        fn identities(self) -> (ToolRequestId, TurnId, ModelCallId) {
+            match self {
+                Self::Spawn => (tool_request_id(101), turn_id(43), model_call_id(89)),
+                Self::Await => (tool_request_id(103), turn_id(41), model_call_id(83)),
+                Self::ParentMessage => (tool_request_id(107), turn_id(37), model_call_id(79)),
+                Self::ChildMessage => (tool_request_id(109), turn_id(31), model_call_id(73)),
+                Self::AnotherParentMessage => {
+                    (tool_request_id(113), turn_id(29), model_call_id(71))
+                }
+            }
+        }
+
+        fn source(self) -> SessionId {
+            match self {
+                Self::ChildMessage => session_id(3),
+                Self::Spawn | Self::Await | Self::ParentMessage | Self::AnotherParentMessage => {
+                    session_id(2)
+                }
+            }
+        }
+    }
+
+    /// Canonical aggregate request fixture. Each named logical purpose owns its
+    /// source and fixed, decorrelated identity.
+    fn named_request(
+        fixture: RequestFixture,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> ToolRequest {
+        let (request, turn, call) = fixture.identities();
+        ToolRequest::from_model_proposal(
+            request,
+            fixture.source(),
+            turn,
+            call,
+            ToolRequestOrdinal::from_u32(0),
+            ToolCallProposal::new(
+                ToolName::try_new(name.into()).expect("valid fixture name"),
+                NormalizedToolArguments::try_from_provider_text(arguments.to_string())
+                    .expect("valid fixture arguments"),
+            ),
+            InitialToolApproval::Confirm,
+        )
+    }
+
+    fn dispatch_for(request: &ToolRequest) -> crate::ToolDispatchAuthority {
+        let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
+            .reconstitute()
+            .expect("fixture policy approves its exact request");
+        let approved = ApprovedToolRequest::try_from_resolution(request.clone(), approval)
+            .expect("fixture approval binds its exact request");
+        let authorized = approved
+            .prepare_attempt(
+                tool_attempt_id(127),
+                turn_attempt_id(131),
+                ToolEffectClass::EffectFree,
+            )
+            .authorize()
+            .expect("prepared fixture dispatch authorizes");
+        crate::ToolDispatchAuthority::try_new(request.clone(), &authorized)
+            .expect("fixture dispatch binds its exact request")
+    }
+
+    fn spawn_request(policy: ChildRelationshipPolicy) -> DelegatedSpawnRequest {
+        let relationship = relationship_argument(policy);
+        DelegatedSpawnRequest::parse(
+            named_request(
+                RequestFixture::Spawn,
+                SPAWN_SESSION_TOOL_NAME,
+                serde_json::json!({
+                    "relationship": relationship,
+                    "task": TEST_TASK,
+                }),
+            ),
+            TEST_TASK.into(),
+            policy,
+        )
+        .expect("canonical aggregate spawn request")
+    }
+
+    fn await_request(
+        fixture: RequestFixture,
+        child: SessionId,
+        mode: DelegationWaitMode,
+    ) -> DelegationAwaitRequest {
+        DelegationAwaitRequest::parse(
+            named_request(
+                fixture,
+                AWAIT_SESSION_TOOL_NAME,
+                serde_json::json!({
+                    "child_session_id": child.as_uuid().to_string(),
+                    "mode": wait_mode_argument(mode),
+                }),
+            ),
+            child,
+            mode,
+        )
+        .expect("canonical aggregate await request")
+    }
+
+    fn message_request(
+        fixture: RequestFixture,
+        peer: SessionId,
+        value: &str,
+    ) -> DelegationMessageRequest {
+        DelegationMessageRequest::parse(
+            named_request(
+                fixture,
+                SEND_SESSION_MESSAGE_TOOL_NAME,
+                serde_json::json!({
+                    "content": value,
+                    "peer_session_id": peer.as_uuid().to_string(),
+                }),
+            ),
+            peer,
+            value.into(),
+        )
+        .expect("canonical aggregate message request")
+    }
+
+    fn content(value: &str) -> DelegationContent {
+        DelegationContent::try_new(value.into()).expect("bounded fixture content")
+    }
+
+    fn relation(policy: ChildRelationshipPolicy) -> SessionDelegation {
+        SessionDelegation::spawn_fixture(spawn_request(policy), session_id(3), turn_id(7))
+            .expect("fixture parent and child are distinct")
+    }
+
+    fn completed_child_relation(policy: ChildRelationshipPolicy) -> SessionDelegation {
+        SessionDelegation::spawn_fixture(spawn_request(policy), session_id(1), turn_id(3))
+            .expect("completed-turn fixture child is distinct from parent")
+    }
+
+    #[derive(Clone, Copy)]
+    enum TerminationAuthoritySource {
+        Parent,
+        ForeignParent,
+    }
+
+    impl TerminationAuthoritySource {
+        fn session(self) -> SessionId {
+            match self {
+                Self::Parent => session_id(2),
+                Self::ForeignParent => session_id(9),
+            }
+        }
+    }
+
+    fn parent_authority(
+        authority_source: TerminationAuthoritySource,
+        kind: ParentTerminationKind,
+        scope: DescendantTerminationScope,
+    ) -> ParentTerminationAuthority {
+        let command_source = match kind {
+            ParentTerminationKind::Stopped => ParentTerminationCommandSource::Goal {
+                generation: GoalGeneration::new(NonZeroU64::MIN),
+            },
+            ParentTerminationKind::Cancelled => {
+                ParentTerminationCommandSource::Turn { turn: turn_id(5) }
+            }
+        };
+        ParentTerminationAuthority {
+            parent: authority_source.session(),
+            source: command_source,
+            command: command_id(6),
+            kind,
+            scope,
+        }
+    }
+
+    fn later_parent_authority(
+        kind: ParentTerminationKind,
+        scope: DescendantTerminationScope,
+    ) -> ParentTerminationAuthority {
+        let command_source = match kind {
+            ParentTerminationKind::Stopped => ParentTerminationCommandSource::Goal {
+                generation: GoalGeneration::new(NonZeroU64::new(2).expect("two is positive")),
+            },
+            ParentTerminationKind::Cancelled => {
+                ParentTerminationCommandSource::Turn { turn: turn_id(11) }
+            }
+        };
+        ParentTerminationAuthority {
+            parent: session_id(2),
+            source: command_source,
+            command: command_id(13),
+            kind,
+            scope,
+        }
+    }
+
+    fn returned_outcome(value: &str) -> DelegationOutcome {
+        let content = content(value);
+        let completed = completed_turn_fixture(&[value]);
+        let terminal = TerminalChildTurn::from_completed(&completed)
+            .expect("live completion seals terminal evidence");
+        DelegationOutcome::from_terminal_child(terminal, Some(content))
+            .expect("exact live content authenticates its outcome")
+    }
+
+    fn cancelled_outcome(child: SessionId) -> DelegationOutcome {
+        let terminal = TerminalChildTurn {
+            session: child,
+            turn: turn_id(7),
+            kind: TerminalChildTurnKind::Cancelled,
+            reason: DelegationOutcomeReason::ChildCancelled,
+            result_digest: None,
+        };
+        DelegationOutcome::from_terminal_child(terminal, None)
+            .expect("cancelled terminal evidence seals its outcome")
+    }
+
+    #[track_caller]
+    fn rejected_spawn(
+        error: DelegationTransitionError,
+    ) -> (DelegatedSpawnRequest, SessionId, TurnId) {
+        let Some(RejectedDelegationTransition::Spawn {
+            request,
+            child,
+            child_turn,
+        }) = error.into_rejected()
+        else {
+            panic!("spawn rejection retains typed request, child, and delegated-task turn");
+        };
+        (request, child, child_turn)
+    }
+
+    #[track_caller]
+    fn rejected_message(
+        error: DelegationTransitionError,
+    ) -> (
+        SessionDelegation,
+        DelegationMessageRequest,
+        DelegationMessageId,
+    ) {
+        let Some(RejectedDelegationTransition::DeliverMessage {
+            relation,
+            request,
+            id,
+        }) = error.into_rejected()
+        else {
+            panic!("message rejection retains aggregate and typed request");
+        };
+        (relation, request, id)
+    }
+
+    #[track_caller]
+    fn rejected_outcome(
+        error: DelegationTransitionError,
+    ) -> (SessionDelegation, DelegationOutcome) {
+        let Some(RejectedDelegationTransition::RecordOutcome { relation, outcome }) =
+            error.into_rejected()
+        else {
+            panic!("outcome rejection retains aggregate and opaque outcome");
+        };
+        (relation, outcome)
+    }
+
+    #[track_caller]
+    fn rejected_parent_termination(
+        error: DelegationTransitionError,
+    ) -> (SessionDelegation, ParentTerminationAuthority) {
+        let Some(RejectedDelegationTransition::RecordParentTermination {
+            relation,
+            authority,
+        }) = error.into_rejected()
+        else {
+            panic!("parent-termination rejection retains aggregate and authority");
+        };
+        (relation, authority)
+    }
+
+    fn assert_standard_error<T: std::error::Error>() {}
+
+    #[test]
+    fn delegation_public_errors_implement_standard_error_contract() {
+        assert_standard_error::<DelegationContentError>();
+        assert_standard_error::<DelegationRequestError>();
+        assert_standard_error::<DelegationTransitionError>();
+    }
+
+    /// S18 / INV-010: spawn retains the exact sealed request facts.
+    #[test]
+    fn s18_inv010_aggregate_spawn_retains_policy_task_and_provenance() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let request = spawn_request(policy);
+        let spawning_request = request.request().id();
+        let task = request.task().clone();
+        let child_turn = turn_id(7);
+        let relation = SessionDelegation::spawn_fixture(request, session_id(3), child_turn)
+            .expect("distinct child");
+
+        assert_eq!(relation.spawning_request(), spawning_request);
+        assert_eq!(relation.child_turn(), child_turn);
+        assert_eq!(relation.task(), &task);
+        assert_eq!(relation.policy(), policy);
+        assert_eq!(relation.events()[0].ordinal().get(), 1);
+    }
+
+    /// S18 / INV-010: a session cannot delegate to itself, and rejection is lossless.
+    #[test]
+    fn s18_inv010_same_session_spawn_rejection_returns_exact_inputs() {
+        let request = spawn_request(ChildRelationshipPolicy::Background);
+        let child = session_id(2);
+        let child_turn = turn_id(7);
+        let error = SessionDelegation::spawn_fixture(request.clone(), child, child_turn)
+            .expect_err("a child must be distinct from its parent");
+
+        assert_eq!(error.failure(), DelegationTransitionFailure::SameSession);
+        let (returned_request, returned_child, returned_child_turn) = rejected_spawn(error);
+        assert_eq!(returned_request, request);
+        assert_eq!(returned_child, child);
+        assert_eq!(returned_child_turn, child_turn);
+    }
+
+    /// S18 / INV-010: foreground wait retains the exact child subject.
+    #[test]
+    fn s18_inv010_foreground_registration_yields_exact_child_wait() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Foreground,
+        );
+        let expected_request = awaiting.request().id();
+        let dispatch = dispatch_for(awaiting.request());
+        let wait = relation
+            .register_wait(&awaiting, &dispatch)
+            .expect("parent may await its exact child");
+        let subject = wait
+            .foreground_subject()
+            .expect("foreground wait retains turn subject");
+
+        assert_eq!(subject.awaiting_request(), expected_request);
+        assert_eq!(subject.spawning_request(), relation.spawning_request());
+        assert_eq!(subject.child(), relation.child());
+    }
+
+    /// S18 / INV-010: background wait releases the parent turn subject.
+    #[test]
+    fn s18_inv010_background_registration_has_no_child_wait() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
+        let dispatch = dispatch_for(awaiting.request());
+        let wait = relation
+            .register_wait(&awaiting, &dispatch)
+            .expect("parent may await its exact child");
+
+        assert_eq!(wait.mode(), DelegationWaitMode::Background);
+        assert_eq!(wait.foreground_subject(), None);
+    }
+
+    /// S18 / INV-010: a typed await for another child cannot cross relations.
+    #[test]
+    fn s18_inv010_wait_registration_rejects_relation_child_cross_wiring() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            session_id(9),
+            DelegationWaitMode::Background,
+        );
+        let dispatch = dispatch_for(awaiting.request());
+        let error = relation
+            .register_wait(&awaiting, &dispatch)
+            .expect_err("another child cannot reuse this relation");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidProvenance
+        );
+    }
+
+    /// S18 / INV-010: one request cannot both spawn and await a child.
+    #[test]
+    fn s18_inv010_wait_registration_requires_distinct_parent_work() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Spawn,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
+        let dispatch = dispatch_for(awaiting.request());
+        let error = relation
+            .register_wait(&awaiting, &dispatch)
+            .expect_err("spawn request identity cannot also register a wait");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidProvenance
+        );
+    }
+
+    /// S18 / INV-010: wait registration requires its exact in-flight dispatch.
+    #[test]
+    fn s18_inv010_wait_registration_rejects_foreign_dispatch_authority() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
+        let other_request = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "other dispatched work",
+        );
+        let foreign_dispatch = dispatch_for(other_request.request());
+        let error = relation
+            .register_wait(&awaiting, &foreign_dispatch)
+            .expect_err("another dispatch cannot authorize this wait");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidProvenance
+        );
+    }
+
+    /// S18 / INV-010: dispatch authority binds the complete await request.
+    #[test]
+    fn s18_inv010_wait_registration_rejects_same_identity_argument_drift() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let dispatched = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
+        let drifted = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Foreground,
+        );
+        let dispatch = dispatch_for(dispatched.request());
+        let error = relation
+            .register_wait(&drifted, &dispatch)
+            .expect_err("same identities cannot substitute different await arguments");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidProvenance
+        );
+    }
+
+    /// S18 / INV-010: each relation peer derives one exact message direction.
+    #[test]
+    fn s18_inv010_messages_are_bidirectional() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let parent_message = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "parent update",
+        );
+        let child_message = message_request(
+            RequestFixture::ChildMessage,
+            relation.parent(),
+            "child update",
+        );
+        let parent_dispatch = dispatch_for(parent_message.request());
+        let child_dispatch = dispatch_for(child_message.request());
+        let (relation, first) = relation
+            .deliver_message(parent_message, delegation_message_id(5), &parent_dispatch)
+            .expect("parent message is related");
+        let (_relation, second) = relation
+            .deliver_message(child_message, delegation_message_id(6), &child_dispatch)
+            .expect("child message is related");
+
+        assert_eq!(
+            first.message().expect("message event").direction(),
+            DelegationMessageDirection::ParentToChild
+        );
+        assert_eq!(
+            second.message().expect("message event").direction(),
+            DelegationMessageDirection::ChildToParent
+        );
+    }
+
+    /// S18 / INV-012: distinct message deliveries receive contiguous ordinals.
+    #[test]
+    fn s18_inv012_message_delivery_ordinals_are_contiguous() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let parent_message = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "parent update",
+        );
+        let child_message = message_request(
+            RequestFixture::ChildMessage,
+            relation.parent(),
+            "child update",
+        );
+        let parent_dispatch = dispatch_for(parent_message.request());
+        let child_dispatch = dispatch_for(child_message.request());
+        let (relation, first) = relation
+            .deliver_message(parent_message, delegation_message_id(5), &parent_dispatch)
+            .expect("parent message is related");
+        let (_relation, second) = relation
+            .deliver_message(child_message, delegation_message_id(6), &child_dispatch)
+            .expect("child message is related");
+
+        assert_eq!(first.ordinal().get(), 2);
+        assert_eq!(second.ordinal().get(), 3);
+    }
+
+    /// S18 / INV-010: a typed message for another peer returns exact inputs.
+    #[test]
+    fn s18_inv010_message_rejects_relation_peer_cross_wiring_and_returns_input() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let request = message_request(RequestFixture::ParentMessage, session_id(9), "misdirected");
+        let id = delegation_message_id(5);
+        let dispatch = dispatch_for(request.request());
+        let error = relation
+            .clone()
+            .deliver_message(request.clone(), id, &dispatch)
+            .expect_err("another peer cannot cross this relation");
+        let (returned_relation, returned_request, returned_id) = rejected_message(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_request, request);
+        assert_eq!(returned_id, id);
+    }
+
+    /// S18 / INV-010: message delivery requires its exact in-flight dispatch.
+    #[test]
+    fn s18_inv010_message_rejects_foreign_dispatch_and_returns_input() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let request = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "dispatched message",
+        );
+        let other_request = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
+        let foreign_dispatch = dispatch_for(other_request.request());
+        let id = delegation_message_id(5);
+        let error = relation
+            .clone()
+            .deliver_message(request.clone(), id, &foreign_dispatch)
+            .expect_err("another dispatch cannot authorize this message");
+        let (returned_relation, returned_request, returned_id) = rejected_message(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_request, request);
+        assert_eq!(returned_id, id);
+    }
+
+    /// S18 / INV-010: dispatch authority binds the complete message request.
+    #[test]
+    fn s18_inv010_message_rejects_same_identity_content_drift() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let dispatched = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "authorized content",
+        );
+        let drifted = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "substituted content",
+        );
+        let dispatch = dispatch_for(dispatched.request());
+        let id = delegation_message_id(5);
+        let error = relation
+            .clone()
+            .deliver_message(drifted.clone(), id, &dispatch)
+            .expect_err("same identities cannot substitute different message content");
+        let (returned_relation, returned_request, returned_id) = rejected_message(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_request, drifted);
+        assert_eq!(returned_id, id);
+    }
+
+    /// S18 / INV-012: one logical message request appends at most one event.
+    #[test]
+    fn s18_inv012_message_request_replay_returns_persisted_event() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let request = message_request(RequestFixture::ParentMessage, relation.child(), "once");
+        let dispatch = dispatch_for(request.request());
+        let (relation, first) = relation
+            .deliver_message(request.clone(), delegation_message_id(5), &dispatch)
+            .expect("first delivery appends");
+        let (relation, replay) = relation
+            .deliver_message(request, delegation_message_id(9), &dispatch)
+            .expect("equal request replay returns persisted event");
+
+        assert_eq!(replay, first);
+        assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S18 / INV-012: a message identity cannot name another logical request.
+    #[test]
+    fn s18_inv012_duplicate_message_identity_returns_attempted_request() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let first = message_request(RequestFixture::ParentMessage, relation.child(), "first");
+        let second = message_request(
+            RequestFixture::AnotherParentMessage,
+            relation.child(),
+            "second",
+        );
+        let id = delegation_message_id(5);
+        let first_dispatch = dispatch_for(first.request());
+        let second_dispatch = dispatch_for(second.request());
+        let (relation, _) = relation
+            .deliver_message(first, id, &first_dispatch)
+            .expect("first identity is unused");
+        let error = relation
+            .clone()
+            .deliver_message(second.clone(), id, &second_dispatch)
+            .expect_err("identity reuse is rejected");
+        let (returned_relation, returned_request, returned_id) = rejected_message(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_request, second);
+        assert_eq!(returned_id, id);
+    }
+
+    /// S18 / INV-012: a replay cannot change content under one request authority.
+    #[test]
+    fn s18_inv012_conflicting_message_replay_reports_code_and_returns_inputs() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let first = message_request(RequestFixture::ParentMessage, relation.child(), "first");
+        let conflicting =
+            message_request(RequestFixture::ParentMessage, relation.child(), "changed");
+        let first_dispatch = dispatch_for(first.request());
+        let conflicting_dispatch = dispatch_for(conflicting.request());
+        let conflicting_id = delegation_message_id(6);
+        let (relation, _) = relation
+            .deliver_message(first, delegation_message_id(5), &first_dispatch)
+            .expect("first request authority appends");
+        let error = relation
+            .clone()
+            .deliver_message(conflicting.clone(), conflicting_id, &conflicting_dispatch)
+            .expect_err("one request authority cannot carry changed content");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::ConflictingMessageReplay
+        );
+        let (returned_relation, returned_request, returned_id) = rejected_message(error);
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_request, conflicting);
+        assert_eq!(returned_id, conflicting_id);
+    }
+
+    /// S18 / INV-010: returned child result terminalizes exactly once.
+    #[test]
+    fn s18_inv010_returned_result_terminalizes_and_replays() {
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background);
+        let outcome = returned_outcome("child result");
+        let relation = relation
+            .record_outcome(outcome.clone())
+            .expect("exact child result is related");
+        let replayed = relation
+            .clone()
+            .record_outcome(outcome)
+            .expect("equal outcome replay is idempotent");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(replayed, relation);
+        assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S18 / INV-010: terminal evidence must name this spawn's delegated-task turn.
+    #[test]
+    fn s18_inv010_result_rejects_a_later_child_turn() {
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background);
+        let returned = content("later turn result");
+        let terminal = TerminalChildTurn {
+            session: relation.child(),
+            turn: turn_id(7),
+            kind: TerminalChildTurnKind::Returned,
+            reason: DelegationOutcomeReason::ChildCompleted,
+            result_digest: Some(delegation_content_digest(&returned)),
+        };
+        let outcome = DelegationOutcome::from_terminal_child(terminal, Some(returned))
+            .expect("the later turn has independently valid terminal evidence");
+        let error = relation
+            .clone()
+            .record_outcome(outcome.clone())
+            .expect_err("another child turn cannot satisfy this spawn");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::OutcomeReasonMismatch
+        );
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, outcome);
+    }
+
+    /// S18 / INV-010: later descendant evaluation is explicit on a child-terminal edge.
+    #[test]
+    fn s18_inv010_child_terminal_edge_records_parent_command_disposition() {
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background)
+            .record_outcome(returned_outcome("terminal result"))
+            .expect("returned result terminalizes relation");
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation
+            .record_parent_termination(authority)
+            .expect("a child result authenticates the terminal edge");
+        let recorded = relation.events().last().and_then(DelegationEvent::outcome);
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(
+            recorded.map(DelegationOutcome::kind),
+            Some(DelegationOutcomeKind::AlreadyTerminal)
+        );
+        assert_eq!(
+            recorded.map(DelegationOutcome::provenance),
+            Some(DelegationProvenance::from_parent_termination(authority))
+        );
+        assert_eq!(relation.events().len(), 3);
+    }
+
+    /// S18 / INV-010: a prior policy terminal result remains explicit on re-evaluation.
+    #[test]
+    fn s18_inv010_policy_terminal_edge_records_later_command_disposition() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let first_authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation(policy)
+            .record_parent_termination(first_authority)
+            .expect("the first policy disposition terminalizes the edge");
+        let later_authority = later_parent_authority(
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation
+            .record_parent_termination(later_authority)
+            .expect("a policy terminal result authenticates later evaluation");
+        let recorded = relation.events().last().and_then(DelegationEvent::outcome);
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(
+            recorded.map(DelegationOutcome::kind),
+            Some(DelegationOutcomeKind::AlreadyTerminal)
+        );
+        assert_eq!(
+            recorded.map(DelegationOutcome::provenance),
+            Some(DelegationProvenance::from_parent_termination(
+                later_authority
+            ))
+        );
+        assert_eq!(relation.events().len(), 3);
+    }
+
+    /// S18 / INV-010: parent-alone scope never evaluates a child edge.
+    #[test]
+    fn s18_inv010_parent_alone_transition_returns_exact_unevaluated_inputs() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAlone,
+        );
+        let error = relation
+            .clone()
+            .record_parent_termination(authority)
+            .expect_err("parent-alone scope does not evaluate descendants");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::DescendantsNotSelected
+        );
+        let (returned_relation, returned_authority) = rejected_parent_termination(error);
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_authority, authority);
+    }
+
+    /// S18 / INV-010: a different authority cannot append after terminalization.
+    #[test]
+    fn s18_inv010_already_terminal_rejection_reports_code_and_returns_inputs() {
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background)
+            .record_outcome(returned_outcome("terminal result"))
+            .expect("returned result terminalizes relation");
+        let outcome = cancelled_outcome(relation.child());
+        let error = relation
+            .clone()
+            .record_outcome(outcome.clone())
+            .expect_err("another terminal authority cannot append");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::AlreadyTerminal
+        );
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, outcome);
+    }
+
+    /// S18 / INV-012: one authority cannot replay with a different outcome.
+    #[test]
+    fn s18_inv012_duplicate_outcome_authority_reports_code_and_returns_inputs() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let relation = relation(policy);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let first = DelegationOutcome::from_parent_policy(authority, BoundChildAction::Stop)
+            .expect("descendant authority admits the chosen stop policy");
+        let conflicting =
+            DelegationOutcome::from_parent_policy(authority, BoundChildAction::Cancel)
+                .expect("the same authority can express the conflicting attempted action");
+        let relation = relation
+            .record_outcome(first)
+            .expect("chosen stop policy terminalizes relation");
+        let error = relation
+            .clone()
+            .record_outcome(conflicting.clone())
+            .expect_err("one authority cannot select two outcomes");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::DuplicateOutcomeAuthority
+        );
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, conflicting);
+    }
+
+    /// S18 / INV-010: another child's sealed result returns unchanged.
+    #[test]
+    fn s18_inv010_returned_result_rejects_foreign_child_proof() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let outcome = returned_outcome("foreign child result");
+        let error = relation
+            .clone()
+            .record_outcome(outcome.clone())
+            .expect_err("terminal proof belongs to fixture child one");
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, outcome);
+    }
+
+    /// S18 / INV-010: a terminal result still accepts a late wait registration.
+    #[test]
+    fn s18_inv010_terminal_result_accepts_late_wait() {
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background)
+            .record_outcome(returned_outcome("late result"))
+            .expect("child result terminalizes relation");
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
+        let dispatch = dispatch_for(awaiting.request());
+        let wait = relation
+            .register_wait(&awaiting, &dispatch)
+            .expect("late wait registration remains valid");
+
+        assert_eq!(wait.mode(), DelegationWaitMode::Background);
+        assert_eq!(wait.child(), relation.child());
+    }
+
+    /// S18 / INV-010: messages remain available after child terminalization.
+    #[test]
+    fn s18_inv010_message_is_recorded_after_child_terminalizes() {
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background)
+            .record_outcome(returned_outcome("done"))
+            .expect("child result terminalizes relation");
+        let request = message_request(RequestFixture::ParentMessage, relation.child(), "afterward");
+        let dispatch = dispatch_for(request.request());
+        let (relation, event) = relation
+            .deliver_message(request, delegation_message_id(5), &dispatch)
+            .expect("terminal relation still records messages");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(event.ordinal().get(), 3);
+    }
+
+    /// S19 / INV-010: child cancellation retains child-turn provenance.
+    #[test]
+    fn s19_inv010_child_cancel_records_child_turn_provenance() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let outcome = cancelled_outcome(relation.child());
+        let relation = relation
+            .record_outcome(outcome)
+            .expect("child cancellation belongs to relation");
+        let recorded = relation.events()[1].outcome().expect("outcome event");
+
+        assert_eq!(recorded.kind(), DelegationOutcomeKind::ChildCancelled);
+        assert_eq!(
+            recorded.provenance().child_turn(),
+            Some((relation.child(), relation.child_turn()))
+        );
+    }
+
+    /// S19 / INV-010: a bound keep-running action remains active and explicit.
+    #[test]
+    fn s19_inv010_bound_keep_running_records_no_change() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::KeepRunning,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let relation = relation(policy);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation
+            .record_parent_termination(authority)
+            .expect("bound keep-running policy matches outcome");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
+        assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S19 / INV-012: continue-running replay does not append another event.
+    #[test]
+    fn s19_inv012_continue_running_replay_is_idempotent() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation
+            .record_parent_termination(authority)
+            .expect("first disposition appends");
+        let replayed = relation
+            .clone()
+            .record_parent_termination(authority)
+            .expect("equal disposition replay is idempotent");
+
+        assert_eq!(replayed, relation);
+        assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S19 / INV-010: background child survives parent stop explicitly.
+    #[test]
+    fn s19_inv010_background_child_survives_parent_stop_with_typed_outcome() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation
+            .record_parent_termination(authority)
+            .expect("background policy records survival");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
+        assert_eq!(
+            relation.events()[1]
+                .outcome()
+                .expect("outcome event")
+                .kind(),
+            DelegationOutcomeKind::ContinueRunning
+        );
+    }
+
+    /// S19 / INV-010: background child survives parent cancellation explicitly.
+    #[test]
+    fn s19_inv010_background_child_survives_parent_cancel_with_typed_outcome() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Cancelled,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation
+            .record_parent_termination(authority)
+            .expect("background policy records survival");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Active);
+        assert_eq!(
+            relation.events()[1]
+                .outcome()
+                .expect("outcome event")
+                .reason(),
+            DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            }
+        );
+    }
+
+    /// S19 / INV-010: bound child follows its chosen parent-stop policy.
+    #[test]
+    fn s19_inv010_bound_child_follows_parent_stop_policy() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let relation = relation(policy);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation
+            .record_parent_termination(authority)
+            .expect("bound stop policy matches outcome");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(
+            relation.events()[1]
+                .outcome()
+                .expect("outcome event")
+                .kind(),
+            DelegationOutcomeKind::ChildStopped
+        );
+    }
+
+    /// S19 / INV-010: bound child follows its chosen parent-cancel policy.
+    #[test]
+    fn s19_inv010_bound_child_follows_parent_cancel_policy() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let relation = relation(policy);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Cancelled,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let relation = relation
+            .record_parent_termination(authority)
+            .expect("bound cancel policy matches outcome");
+
+        assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
+        assert_eq!(
+            relation.events()[1]
+                .outcome()
+                .expect("outcome event")
+                .kind(),
+            DelegationOutcomeKind::ChildCancelled
+        );
+    }
+
+    /// S19 / INV-010: parent authority cannot override the chosen edge action.
+    #[test]
+    fn s19_inv010_parent_outcome_rejects_wrong_policy_action() {
+        let policy = ChildRelationshipPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let relation = relation(policy);
+        let authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let outcome = DelegationOutcome::from_parent_policy(authority, BoundChildAction::Cancel)
+            .expect("descendant-scoped parent authority");
+        let error = relation
+            .clone()
+            .record_outcome(outcome.clone())
+            .expect_err("spawn policy rejects a different action");
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, outcome);
+    }
+
+    /// S19 / INV-010: foreign parent authority returns aggregate and outcome.
+    #[test]
+    fn s19_inv010_parent_outcome_rejects_foreign_termination_authority() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let authority = parent_authority(
+            TerminationAuthoritySource::ForeignParent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let outcome =
+            DelegationOutcome::from_parent_policy(authority, BoundChildAction::KeepRunning)
+                .expect("descendant-scoped foreign authority");
+        let error = relation
+            .clone()
+            .record_outcome(outcome.clone())
+            .expect_err("foreign parent cannot disposition relation");
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, outcome);
     }
 }

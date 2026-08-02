@@ -1008,10 +1008,10 @@ impl DelegationMessageRequest {
 pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
 impl TerminalChildTurn {
     pub fn from_completed(value: &CompletedModelCallTurn) -> Option<Self>;
-    pub fn from_scheduling(
-        value: &AcceptedInputTurnSchedulingProjection,
-        reason: DelegationOutcomeReason,
-    ) -> Option<Self>;
+    pub const fn from_failed(value: &FailedModelCallTurn) -> Self;
+    pub const fn from_cancelled(value: &CancelledModelCallTurn) -> Self;
+    pub const fn from_cancelled_tool_round(value: &CancelledToolRoundModelCallTurn) -> Self;
+    pub const fn from_refused(value: &RefusedModelCallTurn) -> Self;
     // accessors: session(), turn(), reason()
 }
 
@@ -1027,7 +1027,7 @@ impl DelegationProvenance {
 
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
-// sealed: relation aggregate producer deferred to the delegation aggregate
+// sealed: SessionDelegation::deliver_message
 impl DelegationMessage {
     // accessors: id(), direction(), content(), provenance()
 }
@@ -1059,9 +1059,93 @@ impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
-// sealed: relation aggregate producer deferred to the delegation aggregate
+// sealed: SessionDelegation::register_wait
 impl DelegationWait {
     // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
+}
+pub struct DelegationEventOrdinal(/* private NonZeroU64 */);
+impl DelegationEventOrdinal {
+    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+pub enum DelegationEvent {
+    Spawned {
+        ordinal: DelegationEventOrdinal,
+        provenance: DelegationProvenance,
+    },
+    MessageDelivered {
+        ordinal: DelegationEventOrdinal,
+        message: DelegationMessage,
+    },
+    OutcomeRecorded {
+        ordinal: DelegationEventOrdinal,
+        outcome: DelegationOutcome,
+    },
+}
+impl DelegationEvent {
+    // accessors: ordinal(), message(), outcome()
+}
+pub enum DelegationLifecycle { Active, Terminal }
+pub struct SessionDelegation { /* private */ }
+impl SessionDelegation {
+    pub fn register_wait(
+        &self,
+        awaiting_request: &DelegationAwaitRequest,
+        dispatch: &ToolDispatchAuthority,
+    ) -> Result<DelegationWait, DelegationTransitionError>;
+    pub fn deliver_message(
+        self,
+        sending_request: DelegationMessageRequest,
+        id: DelegationMessageId,
+        dispatch: &ToolDispatchAuthority,
+    ) -> Result<(Self, DelegationEvent), DelegationTransitionError>;
+    pub fn record_outcome(
+        self,
+        outcome: DelegationOutcome,
+    ) -> Result<Self, DelegationTransitionError>;
+    pub fn record_parent_termination(
+        self,
+        authority: ParentTerminationAuthority,
+    ) -> Result<Self, DelegationTransitionError>;
+    // accessors: spawning_request(), parent(), child(), child_turn(), task(), policy(),
+    //   lifecycle(), events()
+}
+pub enum DelegationTransitionFailure {
+    SameSession,
+    AlreadyTerminal,
+    MissingSpawnEvent,
+    InvalidProvenance,
+    DescendantsNotSelected,
+    DuplicateMessageIdentity,
+    ConflictingMessageReplay,
+    DuplicateOutcomeAuthority,
+    OutcomeReasonMismatch,
+    EventOrdinalExhausted,
+}
+pub enum RejectedDelegationTransition {
+    Spawn {
+        request: DelegatedSpawnRequest,
+        child: SessionId,
+        child_turn: TurnId,
+    },
+    DeliverMessage {
+        relation: SessionDelegation,
+        request: DelegationMessageRequest,
+        id: DelegationMessageId,
+    },
+    RecordOutcome {
+        relation: SessionDelegation,
+        outcome: DelegationOutcome,
+    },
+    RecordParentTermination {
+        relation: SessionDelegation,
+        authority: ParentTerminationAuthority,
+    },
+}
+pub struct DelegationTransitionError { /* private unchanged consuming input */ }
+impl DelegationTransitionError {
+    pub fn into_rejected(self) -> Option<RejectedDelegationTransition>;
+    // accessors: spawning_request(), failure()
 }
 ```
 
@@ -3885,6 +3969,8 @@ impl CurrentToolAttempt {
 }
 pub struct AuthorizedToolAttempt { /* private */ }
 // accessors: attempt(), correlation(), executor_fence(), into_parts()
+pub struct ToolDispatchAuthority { /* private */ }
+// accessors: request(), attempt(), correlation(), executor_fence()
 pub struct EndedToolAttempt { /* private */ }
 // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
 // generation(), end()
@@ -4011,10 +4097,18 @@ impl ToolBatch {
         &self,
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn authorize_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolDispatchAuthority, ToolBatchExecutionError>;
     pub fn resume_in_flight_attempt(
         &self,
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn resume_in_flight_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolDispatchAuthority, ToolBatchExecutionError>;
     pub fn authorize_runner_attempt(
         &self,
         attempt: ToolAttemptId,
@@ -5350,9 +5444,9 @@ pub enum ToolCatalogValidationFailure {
 
 pub struct ToolExecutionInvocation { /* private */ }
 // sealed: ToolExecutionService constructs only from checked request,
-// declaration, and AuthorizedToolAttempt correlations.
+// declaration, and ToolDispatchAuthority.
 impl ToolExecutionInvocation {
-    // accessors: request(), definition(), correlation()
+    // accessors: request(), dispatch_authority(), definition(), correlation()
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
 }
 
@@ -6623,7 +6717,7 @@ pub enum RetainedToolAttemptObservationStatus {
 
 pub enum ToolAttemptAuthorizationStatus {
     Prepared(CurrentToolAttempt),
-    InFlight(AuthorizedToolAttempt),
+    InFlight(ToolDispatchAuthority),
 }
 
 pub trait ToolExecutionTransaction {
@@ -6645,7 +6739,7 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
     fn reread_ambiguous_authorization(
         &mut self,
         session: SessionId,
@@ -8236,7 +8330,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                    |
 | domain: session_placement                          | 13                   |
 | domain: session                                    | 22                   |
-| domain: session_delegation                         | 24                   |
+| domain: session_delegation                         | 31                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8253,7 +8347,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
 | domain: tool                                       | 45                   |
-| domain: tool_attempt                               | 26                   |
+| domain: tool_attempt                               | 27                   |
 | domain: tool_execution                             | 20                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
@@ -8264,7 +8358,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **648 (+7 free fn)** |
+| **signalbox-domain total**                         | **656 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
