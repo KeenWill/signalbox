@@ -121,3 +121,26 @@ fn brave_response_without_result_list_is_invalid() {
         Err(WebSearchTransportFailure::InvalidResponse)
     ));
 }
+
+/// A structurally compatible `web` object with a different discriminator is
+/// not authoritative Brave web-search output.
+#[test]
+fn brave_response_with_unexpected_web_type_is_invalid() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "type": "search",
+        "query": {
+            "original": FIXTURE_QUERY,
+            "more_results_available": false,
+        },
+        "web": {
+            "type": "schema_drift",
+            "results": [],
+        },
+    }))
+    .expect("recorded response fixture encodes");
+
+    assert!(matches!(
+        decode_provider_response(WebSearchProvider::Brave, &body),
+        Err(WebSearchTransportFailure::InvalidResponse)
+    ));
+}
