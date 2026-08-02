@@ -1,16 +1,9 @@
 //! Bounded daemon-local single-URL web fetch.
 
-use std::{
-    collections::BTreeSet,
-    error::Error,
-    fmt,
-    future::Future,
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use std::{collections::BTreeSet, error::Error, fmt, future::Future, time::Duration};
 
 use futures_util::StreamExt;
-use reqwest::{Client, Url, redirect::Policy};
+use reqwest::{Client, Url};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
@@ -24,6 +17,12 @@ use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
 
+use crate::egress_transport::{
+    ReqwestWebFetchConstructionError, WebFetchTransportFailure, build_web_fetch_client,
+    has_more_response_bytes, is_public_destination_address, parse_url_host_ip,
+    public_destination_client,
+};
+
 pub const WEB_FETCH_NAME: &str = "web_fetch";
 const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one absolute HTTP(S) URL without user information or a fragment";
@@ -31,7 +30,6 @@ const REQUEST_FAILED_DETAIL: &str = "web fetch request failed";
 const DEFAULT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
-const MAX_RESOLVED_ADDRESSES: usize = 32;
 const MAX_ALLOWED_ORIGINS: usize = 64;
 pub(crate) const MAX_WEB_FETCH_BODY_BYTES: usize = 64 * 1024;
 
@@ -375,15 +373,6 @@ impl WebFetchResponse {
     }
 }
 
-/// Sanitized result of one physical fetch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WebFetchTransportFailure {
-    /// Destination resolution or client setup failed before dispatch.
-    RequestFailed,
-    /// Dispatch began but no complete bounded response was established.
-    DispatchUnknown,
-}
-
 /// Injectable one-request web transport.
 pub trait WebFetchTransport: Send {
     /// Performs exactly one checked request without credential lookup.
@@ -409,18 +398,6 @@ impl ReqwestWebFetchTransport {
         Ok(Self { exchange_timeout })
     }
 }
-
-/// The fixed production web-fetch client could not be constructed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ReqwestWebFetchConstructionError;
-
-impl fmt::Display for ReqwestWebFetchConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("credential-free web fetch client construction failed")
-    }
-}
-
-impl Error for ReqwestWebFetchConstructionError {}
 
 impl WebFetchTransport for ReqwestWebFetchTransport {
     async fn fetch(
@@ -476,163 +453,12 @@ async fn fetch_with_client(
         .ok_or(WebFetchTransportFailure::DispatchUnknown)
 }
 
-/// Whether a body stream still holds content after an exact-cap read. Empty
-/// trailing frames are legal and are not evidence that bytes were discarded.
-#[doc(hidden)]
-pub async fn has_more_response_bytes<S, B, E>(
-    stream: &mut S,
-) -> Result<bool, WebFetchTransportFailure>
-where
-    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
-    B: AsRef<[u8]>,
-{
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
-        if !chunk.as_ref().is_empty() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 fn classify_send_failure(error: reqwest::Error) -> WebFetchTransportFailure {
     if error.is_connect() {
         WebFetchTransportFailure::RequestFailed
     } else {
         WebFetchTransportFailure::DispatchUnknown
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolvedPublicDestination {
-    host: String,
-    addresses: Vec<SocketAddr>,
-}
-
-/// Builds one credential-free client pinned to a URL's complete admitted
-/// public DNS result.
-#[doc(hidden)]
-pub async fn public_destination_client(
-    url: &Url,
-    exchange_timeout: Duration,
-) -> Result<Client, PublicDestinationClientError> {
-    let started = tokio::time::Instant::now();
-    let destination = resolve_public_destination(url, exchange_timeout).await?;
-    let remaining = exchange_timeout
-        .checked_sub(started.elapsed())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(PublicDestinationClientError::Infrastructure)?;
-    build_web_fetch_client(remaining, Some(&destination))
-        .map_err(|_| PublicDestinationClientError::Infrastructure)
-}
-
-/// A URL could not be resolved and pinned as a public-only destination before
-/// dispatch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[doc(hidden)]
-pub enum PublicDestinationClientError {
-    /// The destination shape or resolved address set was not public-only.
-    DestinationRejected,
-    /// DNS resolution or client construction failed before dispatch.
-    Infrastructure,
-}
-
-async fn resolve_public_destination(
-    url: &Url,
-    exchange_timeout: Duration,
-) -> Result<ResolvedPublicDestination, PublicDestinationClientError> {
-    let host = url
-        .host_str()
-        .ok_or(PublicDestinationClientError::DestinationRejected)?;
-    let port = url
-        .port_or_known_default()
-        .ok_or(PublicDestinationClientError::DestinationRejected)?;
-    let addresses = if let Some(address) = parse_url_host_ip(host) {
-        vec![SocketAddr::new(address, port)]
-    } else {
-        let resolved =
-            tokio::time::timeout(exchange_timeout, tokio::net::lookup_host((host, port)))
-                .await
-                .map_err(|_| PublicDestinationClientError::Infrastructure)?
-                .map_err(|_| PublicDestinationClientError::Infrastructure)?;
-        resolved
-            .take(MAX_RESOLVED_ADDRESSES + 1)
-            .collect::<Vec<_>>()
-    };
-    if addresses.is_empty()
-        || addresses.len() > MAX_RESOLVED_ADDRESSES
-        || addresses
-            .iter()
-            .any(|address| !is_public_destination_address(address.ip()))
-    {
-        return Err(PublicDestinationClientError::DestinationRejected);
-    }
-    Ok(ResolvedPublicDestination {
-        host: host.to_owned(),
-        addresses,
-    })
-}
-
-fn build_web_fetch_client(
-    exchange_timeout: Duration,
-    destination: Option<&ResolvedPublicDestination>,
-) -> Result<Client, ReqwestWebFetchConstructionError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut builder = Client::builder()
-        .tls_backend_rustls()
-        .tls_version_min(reqwest::tls::Version::TLS_1_2)
-        .tls_danger_accept_invalid_certs(false)
-        .tls_danger_accept_invalid_hostnames(false)
-        .no_proxy()
-        .redirect(Policy::none())
-        .retry(reqwest::retry::never())
-        .pool_max_idle_per_host(0)
-        .timeout(exchange_timeout);
-    if let Some(destination) = destination {
-        builder = builder.resolve_to_addrs(&destination.host, &destination.addresses);
-    }
-    builder
-        .build()
-        .map_err(|_| ReqwestWebFetchConstructionError)
-}
-
-fn is_public_destination_address(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            let [first, second, third, _fourth] = address.octets();
-            !(first == 0
-                || first == 10
-                || first == 127
-                || first >= 224
-                || (first == 100 && (64..=127).contains(&second))
-                || (first == 169 && second == 254)
-                || (first == 172 && (16..=31).contains(&second))
-                || (first == 192 && second == 0 && third == 0)
-                || (first == 192 && second == 0 && third == 2)
-                || (first == 192 && second == 88 && third == 99)
-                || (first == 192 && second == 168)
-                || (first == 198 && matches!(second, 18 | 19))
-                || (first == 198 && second == 51 && third == 100)
-                || (first == 203 && second == 0 && third == 113))
-        }
-        IpAddr::V6(address) => {
-            let segments = address.segments();
-            let in_global_unicast = (0x2000..=0x3fff).contains(&segments[0]);
-            let special_2001 =
-                segments[0] == 0x2001 && (segments[1] <= 0x01ff || segments[1] == 0x0db8);
-            let transition_6to4 = segments[0] == 0x2002;
-            let documentation_3fff = segments[0] == 0x3fff && segments[1] <= 0x0fff;
-            in_global_unicast && !special_2001 && !transition_6to4 && !documentation_3fff
-        }
-    }
-}
-
-fn parse_url_host_ip(host: &str) -> Option<IpAddr> {
-    host.strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host)
-        .parse()
-        .ok()
 }
 
 /// Daemon-local bounded web executor.
@@ -761,6 +587,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+    use crate::egress_transport::{PublicDestinationClientError, ResolvedPublicDestination};
 
     const FIXTURE_ORIGIN: &str = "https://example.com";
     const REDIRECT_STATUS: u16 = 302;
@@ -957,32 +784,6 @@ mod tests {
         ));
     }
 
-    /// Public address classification admits ordinary global-unicast
-    /// destinations.
-    #[test]
-    fn web_fetch_public_destination_classification_accepts_global_addresses() {
-        let public_v4 = "93.184.216.34".parse().expect("fixture IPv4 parses");
-        let public_v6 = "2606:2800:220:1:248:1893:25c8:1946"
-            .parse()
-            .expect("fixture IPv6 parses");
-
-        assert!(is_public_destination_address(public_v4));
-        assert!(is_public_destination_address(public_v6));
-    }
-
-    /// Public address classification rejects link-local and documentation
-    /// ranges that must never become fetch destinations.
-    #[test]
-    fn web_fetch_public_destination_classification_rejects_non_public_addresses() {
-        let link_local_v4 = "169.254.169.254".parse().expect("fixture IPv4 parses");
-        let documentation_v4 = "192.0.2.1".parse().expect("fixture IPv4 parses");
-        let documentation_v6 = "2001:db8::1".parse().expect("fixture IPv6 parses");
-
-        assert!(!is_public_destination_address(link_local_v4));
-        assert!(!is_public_destination_address(documentation_v4));
-        assert!(!is_public_destination_address(documentation_v6));
-    }
-
     /// Loss after physical dispatch is classified as commit-ambiguous
     /// infrastructure failure.
     #[test]
@@ -1080,18 +881,6 @@ mod tests {
             WebFetchResponse::new(200, None, oversized, WebFetchBodyCompleteness::Truncated);
 
         assert_eq!(response, None);
-    }
-
-    /// Empty frames after an exact-cap response do not imply retained bytes
-    /// were discarded.
-    #[tokio::test]
-    async fn exact_body_cap_ignores_empty_trailing_chunks() {
-        let mut stream = futures_util::stream::iter([
-            Ok::<Vec<u8>, std::convert::Infallible>(Vec::new()),
-            Ok(Vec::new()),
-        ]);
-
-        assert_eq!(has_more_response_bytes(&mut stream).await, Ok(false));
     }
 
     /// The production transport sends one credential-free request and exposes

@@ -1,14 +1,17 @@
 //! Built-in web egress tools.
 
+mod egress_transport;
 mod web_fetch;
 mod web_search;
 
-pub use web_fetch::{
-    PublicDestinationClientError, ReqwestWebFetchConstructionError, ReqwestWebFetchTransport,
-    WEB_FETCH_NAME, WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchEgressPolicyError,
-    WebFetchExecutor, WebFetchExecutorError, WebFetchRequest, WebFetchResponse, WebFetchTool,
-    WebFetchToolConstructionError, WebFetchTransport, WebFetchTransportFailure,
+pub use egress_transport::{
+    PublicDestinationClientError, ReqwestWebFetchConstructionError, WebFetchTransportFailure,
     has_more_response_bytes, public_destination_client,
+};
+pub use web_fetch::{
+    ReqwestWebFetchTransport, WEB_FETCH_NAME, WebFetchBodyCompleteness, WebFetchEgressPolicy,
+    WebFetchEgressPolicyError, WebFetchExecutor, WebFetchExecutorError, WebFetchRequest,
+    WebFetchResponse, WebFetchTool, WebFetchToolConstructionError, WebFetchTransport,
 };
 pub use web_search::{
     BRAVE_SEARCH_CREDENTIAL_REFERENCE, ReqwestWebSearchConstructionError,
