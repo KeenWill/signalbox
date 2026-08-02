@@ -1103,7 +1103,7 @@ impl SessionDelegation {
         self,
         outcome: DelegationOutcome,
     ) -> Result<Self, DelegationTransitionError>;
-    // accessors: spawning_request(), parent(), child(), task(), policy(),
+    // accessors: spawning_request(), parent(), child(), child_turn(), task(), policy(),
     //   lifecycle(), events()
 }
 pub enum DelegationTransitionFailure {
@@ -1121,6 +1121,7 @@ pub enum RejectedDelegationTransition {
     Spawn {
         request: DelegatedSpawnRequest,
         child: SessionId,
+        child_turn: TurnId,
     },
     DeliverMessage {
         relation: SessionDelegation,

@@ -1045,6 +1045,7 @@ pub struct SessionDelegation {
     spawning_request: ToolRequestId,
     parent: SessionId,
     child: SessionId,
+    child_turn: TurnId,
     task: DelegationContent,
     policy: ChildRelationshipPolicy,
     lifecycle: DelegationLifecycle,
@@ -1056,6 +1057,7 @@ impl SessionDelegation {
     fn spawn_fixture(
         spawning_request: DelegatedSpawnRequest,
         child: SessionId,
+        child_turn: TurnId,
     ) -> Result<Self, DelegationTransitionError> {
         let parent = spawning_request.request().session();
         if parent == child {
@@ -1066,6 +1068,7 @@ impl SessionDelegation {
                 rejected: Some(Box::new(RejectedDelegationTransition::Spawn {
                     request: spawning_request,
                     child,
+                    child_turn,
                 })),
             });
         }
@@ -1074,6 +1077,7 @@ impl SessionDelegation {
             spawning_request: spawning_request.request().id(),
             parent,
             child,
+            child_turn,
             task: spawning_request.task().clone(),
             policy: spawning_request.policy(),
             lifecycle: DelegationLifecycle::Active,
@@ -1094,6 +1098,10 @@ impl SessionDelegation {
 
     pub const fn child(&self) -> SessionId {
         self.child
+    }
+
+    pub const fn child_turn(&self) -> TurnId {
+        self.child_turn
     }
 
     pub const fn task(&self) -> &DelegationContent {
@@ -1366,7 +1374,7 @@ fn outcome_matches_relation(relation: &SessionDelegation, outcome: &DelegationOu
         outcome
             .provenance()
             .child_turn()
-            .is_some_and(|(child, _)| child == relation.child)
+            .is_some_and(|(child, turn)| child == relation.child && turn == relation.child_turn)
     };
     match outcome.kind() {
         DelegationOutcomeKind::ResultReturned => {
@@ -1504,6 +1512,7 @@ pub enum RejectedDelegationTransition {
     Spawn {
         request: DelegatedSpawnRequest,
         child: SessionId,
+        child_turn: TurnId,
     },
     DeliverMessage {
         relation: SessionDelegation,
@@ -2231,12 +2240,12 @@ mod aggregate_tests {
     }
 
     fn relation(policy: ChildRelationshipPolicy) -> SessionDelegation {
-        SessionDelegation::spawn_fixture(spawn_request(policy), session_id(3))
+        SessionDelegation::spawn_fixture(spawn_request(policy), session_id(3), turn_id(7))
             .expect("fixture parent and child are distinct")
     }
 
     fn completed_child_relation(policy: ChildRelationshipPolicy) -> SessionDelegation {
-        SessionDelegation::spawn_fixture(spawn_request(policy), session_id(1))
+        SessionDelegation::spawn_fixture(spawn_request(policy), session_id(1), turn_id(3))
             .expect("completed-turn fixture child is distinct from parent")
     }
 
@@ -2320,12 +2329,18 @@ mod aggregate_tests {
     }
 
     #[track_caller]
-    fn rejected_spawn(error: DelegationTransitionError) -> (DelegatedSpawnRequest, SessionId) {
-        let Some(RejectedDelegationTransition::Spawn { request, child }) = error.into_rejected()
+    fn rejected_spawn(
+        error: DelegationTransitionError,
+    ) -> (DelegatedSpawnRequest, SessionId, TurnId) {
+        let Some(RejectedDelegationTransition::Spawn {
+            request,
+            child,
+            child_turn,
+        }) = error.into_rejected()
         else {
-            panic!("spawn rejection retains typed request and child");
+            panic!("spawn rejection retains typed request, child, and delegated-task turn");
         };
-        (request, child)
+        (request, child, child_turn)
     }
 
     #[track_caller]
@@ -2377,10 +2392,12 @@ mod aggregate_tests {
         };
         let request = spawn_request(policy);
         let spawning_request = request.request().id();
-        let relation =
-            SessionDelegation::spawn_fixture(request, session_id(3)).expect("distinct child");
+        let child_turn = turn_id(7);
+        let relation = SessionDelegation::spawn_fixture(request, session_id(3), child_turn)
+            .expect("distinct child");
 
         assert_eq!(relation.spawning_request(), spawning_request);
+        assert_eq!(relation.child_turn(), child_turn);
         assert_eq!(relation.task(), &content(TEST_TASK));
         assert_eq!(relation.policy(), policy);
         assert_eq!(relation.events()[0].ordinal().get(), 1);
@@ -2391,13 +2408,15 @@ mod aggregate_tests {
     fn s18_inv010_same_session_spawn_rejection_returns_exact_inputs() {
         let request = spawn_request(ChildRelationshipPolicy::Background);
         let child = session_id(2);
-        let error = SessionDelegation::spawn_fixture(request.clone(), child)
+        let child_turn = turn_id(7);
+        let error = SessionDelegation::spawn_fixture(request.clone(), child, child_turn)
             .expect_err("a child must be distinct from its parent");
 
         assert_eq!(error.failure(), DelegationTransitionFailure::SameSession);
-        let (returned_request, returned_child) = rejected_spawn(error);
+        let (returned_request, returned_child, returned_child_turn) = rejected_spawn(error);
         assert_eq!(returned_request, request);
         assert_eq!(returned_child, child);
+        assert_eq!(returned_child_turn, child_turn);
     }
 
     /// S18 / INV-010: foreground wait retains the exact child subject.
@@ -2754,6 +2773,35 @@ mod aggregate_tests {
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
         assert_eq!(replayed, relation);
         assert_eq!(relation.events().len(), 2);
+    }
+
+    /// S18 / INV-010: terminal evidence must name this spawn's delegated-task turn.
+    #[test]
+    fn s18_inv010_result_rejects_a_later_child_turn() {
+        let relation = completed_child_relation(ChildRelationshipPolicy::Background);
+        let returned = content("later turn result");
+        let terminal = TerminalChildTurn {
+            session: relation.child(),
+            turn: turn_id(7),
+            kind: TerminalChildTurnKind::Returned,
+            reason: DelegationOutcomeReason::ChildCompleted,
+            result_digest: Some(delegation_content_digest(&returned)),
+        };
+        let outcome = DelegationOutcome::from_terminal_child(terminal, Some(returned))
+            .expect("the later turn has independently valid terminal evidence");
+        let error = relation
+            .clone()
+            .record_outcome(outcome.clone())
+            .expect_err("another child turn cannot satisfy this spawn");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::OutcomeReasonMismatch
+        );
+        let (returned_relation, returned_outcome) = rejected_outcome(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_outcome, outcome);
     }
 
     /// S18 / INV-010: later descendant evaluation is explicit on a child-terminal edge.
