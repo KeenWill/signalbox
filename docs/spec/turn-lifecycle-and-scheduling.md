@@ -820,10 +820,14 @@ per evaluated edge. `ParentAlone`, background, and bound `KeepRunning` never
 fabricate child stop authority. Parent-driven stop/cancel outcomes carry their
 exact parent turn, spawn request, and user-command provenance; partial or
 unrecorded propagation does not commit. Equal reevaluation of the same edge by
-the same command returns the recorded disposition without appending another.
-Child-originated stop/cancel outcomes instead carry the child's exact terminal
-turn. Detached child work stays independently schedulable after the parent's
-turn or goal has terminalized.
+the same command returns the recorded disposition without appending another. The
+propagation transition receives opaque authority produced only by the exact
+applied parent stop or cancellation result; raw parent, turn, and command
+identities cannot construct it. Each edge verifies that authority's parent,
+command kind, and descendant scope against its typed outcome before applying the
+policy. Child-originated stop/cancel outcomes instead carry the child's exact
+terminal turn. Detached child work stays independently schedulable after the
+parent's turn or goal has terminalized.
 
 Startup and the periodic sweep recognize child waits, pending delegation inbox
 content, and undelivered results from durable rows. They neither infer a result

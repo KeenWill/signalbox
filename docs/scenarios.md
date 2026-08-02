@@ -1141,7 +1141,7 @@ INV-tagged test names and attached doc comments.
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input
-lifecycle. Delegation cancellation, fallback, capability vocabulary, safety
-policy, queue management, archive behavior, and protocol choices remain open. A
-decision that changes a lifecycle should update the affected scenarios and cite
-the invariant changes it requires.
+lifecycle. Fallback, capability vocabulary, safety policy, queue management,
+archive behavior, and protocol choices remain open. A decision that changes a
+lifecycle should update the affected scenarios and cite the invariant changes it
+requires.

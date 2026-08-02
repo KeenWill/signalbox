@@ -781,10 +781,14 @@ cannot duplicate an external effect. The delivered tool result is copied from
 the child's terminal result record. The executor never reads or returns the
 child transcript.
 
-The child's normal terminal completion transaction materializes its definitive
-returned text as `DelegationContent`; `await_session` adapts it to
-`ToolResultContent`, while failed, stopped, and cancelled terminal paths
-materialize their closed outcome instead. This copy is part of the child
+The child's normal terminal completion transaction concatenates the definitive
+ordered `AssistantText` parts without inserting a separator and admits those
+exact bytes as `DelegationContent`; `await_session` adapts that value to
+`ToolResultContent`. Zero parts or a concatenation beyond the delegation-content
+bound has no return value and records the typed `ChildFailed` /
+`ChildResultUnavailable` outcome with the exact completed child turn. Execution
+failure instead records `ChildExecutionFailed`; stopped and cancelled terminal
+paths likewise materialize their closed outcome. This copy is part of the child
 transition, not a later transcript projection. Duplicate observation is
 idempotent by spawning request and cannot attach a late result to another parent
 tool call.
