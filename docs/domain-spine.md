@@ -824,6 +824,7 @@ pub enum DelegationWaitMode { Foreground, Background }
 pub enum DescendantTerminationScope { ParentAlone, ParentAndDescendants }
 pub enum ParentTerminationKind { Stopped, Cancelled }
 pub struct ParentTerminationAuthority { /* private applied command authority */ }
+// sealed: exact applied parent-termination producer deferred to scheduling
 impl ParentTerminationAuthority {
     // accessors: parent(), turn(), command(), scope(), kind()
 }
@@ -894,6 +895,7 @@ impl DelegationProvenance {
 
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
+// sealed: relation aggregate producer deferred to the delegation aggregate
 impl DelegationMessage {
     // accessors: id(), direction(), content(), provenance()
 }
@@ -923,10 +925,12 @@ impl DelegationOutcome {
     // accessors: kind(), content(), reason(), provenance()
 }
 pub struct ChildWait { /* private awaiting request + spawning request + child */ }
+// sealed: DelegationWait::foreground_subject
 impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
+// sealed: relation aggregate producer deferred to the delegation aggregate
 impl DelegationWait {
     // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }

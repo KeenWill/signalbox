@@ -4475,7 +4475,10 @@ fn close_cancelled_turn(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub(crate) use tests::completed_turn_fixture;
+
+#[cfg(test)]
+mod tests {
     use super::*;
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
