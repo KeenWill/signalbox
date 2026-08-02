@@ -181,6 +181,9 @@ where
                     CreateSessionPreparationFailure::TranscriptAncestryUnavailable => {
                         "trusted transcript-ancestry validation is unavailable in this slice"
                     }
+                    CreateSessionPreparationFailure::DelegatedCreationRequiresSpawn => {
+                        "delegated creation requires the session-spawn transaction"
+                    }
                 };
                 write!(formatter, "CreateSession preparation failed: {reason}")
             }

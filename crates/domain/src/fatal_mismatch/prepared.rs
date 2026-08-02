@@ -131,7 +131,6 @@ impl PostEvidenceFatalMismatchFacts {
         let source_attempt = match &source_phase {
             ActiveTurnPhase::Running { current_attempt } => current_attempt.clone(),
             ActiveTurnPhase::AwaitingApproval { .. }
-            | ActiveTurnPhase::AwaitingChild { .. }
             | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
                 return Err(PreparedFatalMismatchBindingError::new(
                     self,
