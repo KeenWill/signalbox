@@ -35,6 +35,8 @@ pub(super) const FIXTURE_LEADING_ZERO_PORT_RESULT_URL: &str = "https://example.c
 
 pub(super) const FIXTURE_IPV6_LEADING_ZERO_PORT_RESULT_URL: &str = "https://[::1]:0800/";
 
+pub(super) const FIXTURE_INTERNAL_ZERO_PORT_RESULT_URL: &str = "https://example.com:0400/";
+
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
 
 pub(super) const FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL: &str = "https://[0db8::1]/";
@@ -112,6 +114,8 @@ pub(super) const URL_DOT_SEGMENT_COLLISION_KEY: &str = "abc/./def";
 
 pub(super) const URL_DOT_SEGMENT_NORMALIZED_VALUE: &str = "abc/def";
 
+pub(super) const URL_PREPROCESSED_DOT_SEGMENT_COLLISION_KEY: &str = "x\t/a/../b";
+
 pub(super) const URL_SCHEME_CASE_COLLISION_KEY: &str = "HTTPS";
 
 pub(super) const URL_ENCODED_COLLISION_KEY: &str = "secret/key";
@@ -153,6 +157,8 @@ pub(super) const URL_IPV4_TRAILING_DOT_COLLISION_KEY: &str = ".1.";
 pub(super) const URL_DISCARDED_PORT_ZERO_COLLISION_KEY: &str = ":0";
 
 pub(super) const URL_IPV6_AUTHORITY_PORT_ZERO_COLLISION_KEY: &str = "]:0";
+
+pub(super) const URL_INTERNAL_PORT_ZERO_COLLISION_KEY: &str = "m:04";
 
 pub(super) const URL_AUTHORITY_WITH_PORT_NON_COLLISION_KEY: &str = "com:1";
 
@@ -230,6 +236,10 @@ pub(super) const SEMICOLONLESS_NAMED_HTML_COLLISION_KEY: &str = "<";
 
 pub(super) const SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE: &str = "&lt";
 
+pub(super) const PREFIXED_LEGACY_NAMED_HTML_COLLISION_VALUE: &str = "&GTfoo;";
+
+pub(super) const PREFIXED_LEGACY_NAMED_HTML_COLLISION_KEY: &str = ">";
+
 pub(super) const NESTED_NAMED_HTML_COLLISION_VALUE: &str = "&junk&lt;";
 
 pub(super) const RUST_DEBUG_UNICODE_COLLISION_KEY: &str = r"\u{85}";
@@ -269,6 +279,10 @@ pub(super) const PROVIDER_REJECTION_STATUS: u16 = 429;
 pub(super) const PROVIDER_ERROR_DEBUG_COLLISION_KEY: &str = "WebSearchProviderError";
 
 pub(super) const PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY: &str = "[provider-controlled]";
+
+pub(super) const COMPLETED_EVIDENCE_DEBUG_COLLISION_KEY: &str = "CompletedText";
+
+pub(super) const KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY: &str = "KnownFailed";
 
 pub(super) const DEBUG_RESULT_COUNT_COLLISION_COUNT: usize = 1;
 
@@ -343,4 +357,8 @@ pub(super) fn content_over_tool_result_bound() -> String {
             * (MAX_RESULT_TITLE_BYTES + MAX_RESULT_SNIPPET_BYTES)
             * "\\u0001".len(),
     )
+}
+
+pub(super) fn oversized_entity_escaped_error_detail() -> String {
+    "&amp;é".repeat(MAX_PROVIDER_RESPONSE_BYTES / 2)
 }

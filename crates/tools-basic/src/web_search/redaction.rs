@@ -1,4 +1,5 @@
 use reqwest::{Url, header::HeaderValue};
+use signalbox_application::ToolExecutorEvidence;
 use signalbox_model_runtime::{CredentialValue, redact_text};
 
 use super::{canonicalization::*, result::fixed_result_diagnostic_outputs, text_decoding::*};
@@ -95,6 +96,10 @@ impl CredentialScrubber {
             url_preprocessed_credential_variant(variant).is_some_and(|normalized| {
                 unicode_case_insensitive_contains(text, &normalized)
                     || encoded_contains_credential(text, &normalized)
+                    || normalize_url_path_dot_segments(&normalized).is_some_and(|composed| {
+                        unicode_case_insensitive_contains(text, &composed)
+                            || encoded_contains_credential(text, &composed)
+                    })
             })
         }) {
             return true;
@@ -109,6 +114,14 @@ impl CredentialScrubber {
         }
         if self.reversible_variants().any(|variant| {
             canonicalized_url_port_fragment(variant).is_some_and(|normalized| {
+                unicode_case_insensitive_contains(text, &normalized)
+                    || encoded_contains_credential(text, &normalized)
+            })
+        }) {
+            return true;
+        }
+        if self.reversible_variants().any(|variant| {
+            canonicalized_authority_port_zero_fragment(variant).is_some_and(|normalized| {
                 unicode_case_insensitive_contains(text, &normalized)
                     || encoded_contains_credential(text, &normalized)
             })
@@ -296,4 +309,15 @@ pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
         || fixed_result_diagnostic_outputs()
             .iter()
             .any(|output| text_contains_credential_variant(output, credential))
+        || fixed_evidence_diagnostic_outputs()
+            .iter()
+            .any(|output| text_contains_credential_variant(output, credential))
+}
+
+fn fixed_evidence_diagnostic_outputs() -> [String; 3] {
+    [
+        format!("{:?}", ToolExecutorEvidence::CompletedText(String::new())),
+        format!("{:?}", ToolExecutorEvidence::KnownFailed { detail: None }),
+        format!("{:?}", ToolExecutorEvidence::Ambiguous),
+    ]
 }

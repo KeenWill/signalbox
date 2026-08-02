@@ -56,6 +56,23 @@ fn web_search_rejects_credentials_colliding_with_fixed_result_diagnostics() {
     assert!(placeholder_collision.is_none());
 }
 
+/// INV-035: credentials colliding with fixed executor-evidence Debug labels
+/// are rejected before any terminal evidence can be formatted.
+#[test]
+fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
+    let completed_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        COMPLETED_EVIDENCE_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
+    let known_failure_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
+
+    assert!(completed_collision.is_none());
+    assert!(known_failure_collision.is_none());
+}
+
 /// INV-035: JSON Unicode escapes in provider text are decoded within the
 /// bounded scrubber before completed evidence is formed.
 #[test]
@@ -321,6 +338,29 @@ fn web_search_redacts_recognized_reference_after_nested_ampersand() {
 
     assert!(!content.contains(SEMICOLONLESS_NAMED_HTML_COLLISION_KEY));
     assert!(!content.contains(NESTED_NAMED_HTML_COLLISION_VALUE));
+}
+
+/// INV-035: an unknown named reference beginning with a semicolonless legacy
+/// name fails closed before reversible parsing can reveal a credential.
+#[test]
+fn web_search_redacts_prefixed_legacy_named_reference_in_result_text() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(PREFIXED_LEGACY_NAMED_HTML_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("prefixed legacy named-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        PREFIXED_LEGACY_NAMED_HTML_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(PREFIXED_LEGACY_NAMED_HTML_COLLISION_VALUE));
 }
 
 /// INV-035: credential scrubbing cannot turn a checked result title into
