@@ -113,6 +113,10 @@ impl CredentialScrubber {
         let Some(url_variants) = self.url_collision_variants() else {
             return true;
         };
+        self.url_contains_collision_variants(text, &url_variants)
+    }
+
+    fn url_contains_collision_variants(&self, text: &str, url_variants: &[String]) -> bool {
         if url_variants.iter().any(|variant| {
             unicode_case_insensitive_contains(text, variant)
                 || encoded_contains_credential(text, variant)
@@ -178,7 +182,7 @@ impl CredentialScrubber {
             _ => return true,
         };
         if url_variants.iter().any(|variant| {
-            removed_default_port_path_fragment(variant, default_port).is_some_and(|fragment| {
+            removed_default_port_fragment(variant, default_port).is_some_and(|fragment| {
                 unicode_case_insensitive_contains(text, &fragment)
                     || encoded_contains_credential(text, &fragment)
             })
@@ -321,13 +325,7 @@ impl CredentialScrubber {
                 }
                 inspected += 1;
             }
-            variants
-                .iter()
-                .skip(original_variant_count)
-                .any(|retained| {
-                    unicode_case_insensitive_contains(text, retained)
-                        || encoded_contains_credential(text, retained)
-                })
+            self.url_contains_collision_variants(text, &variants[original_variant_count..])
         })
     }
 }
@@ -395,6 +393,7 @@ pub(super) fn text_contains_credential_variant(text: &str, credential: &str) -> 
 
 pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
     text_contains_credential_variant("Err()", credential)
+        || text_contains_credential_variant("Ok()", credential)
         || fixed_egress_diagnostic_outputs()
             .iter()
             .any(|output| text_contains_credential_variant(output, credential))

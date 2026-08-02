@@ -636,6 +636,31 @@ fn web_search_rejects_separator_bound_zero_hextet_run_compression() {
     );
 }
 
+/// INV-035: a zero run within a larger separator-bound fragment accounts for
+/// the compressed spelling produced by typed IPv6 serialization.
+#[test]
+fn web_search_rejects_separator_bound_zero_run_with_retained_suffix() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_COMPRESSED_ZERO_HEXTET_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("compressed zero-run suffix fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV6_COMPRESSED_ZERO_RUN_SUFFIX_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-hextet credential fragment is canonicalized as one
 /// contiguous sequence before comparison with an IPv6 result host.
 #[test]
@@ -1350,6 +1375,29 @@ fn web_search_rejects_bare_removed_default_port_path_credential() {
     );
 }
 
+/// INV-035: removal of a scheme-default port cannot conceal a credential
+/// ending at the removed port when the retained authority has no path suffix.
+#[test]
+fn web_search_rejects_removed_default_port_credential_without_path_suffix() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_DEFAULT_PORT_ONLY_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("default-port-only fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_REMOVED_DEFAULT_PORT_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: removing an empty query delimiter records a typed collision fact
 /// before the source URL is discarded.
 #[test]
@@ -1387,6 +1435,31 @@ fn web_search_rejects_credential_spanning_removed_user_information() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_USER_INFORMATION_BOUNDARY_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential variant retained after user-information removal is
+/// passed through host canonicalization before typed evidence is rendered.
+#[test]
+fn web_search_rejects_removed_user_information_before_ipv4_canonicalization() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_USER_INFORMATION_LEGACY_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("userinfo and legacy-IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_USER_INFORMATION_LEGACY_IPV4_COLLISION_KEY
             .as_bytes()
             .to_vec(),
     ))

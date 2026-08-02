@@ -97,6 +97,9 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
             .as_bytes()
             .to_vec(),
     ));
+    let success_result_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        SUCCESS_RESULT_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
     let populated_option_collision = CredentialScrubber::try_new(&CredentialValue::new(
         POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY
             .as_bytes()
@@ -125,15 +128,20 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
     let empty_page_evidence =
         success_evidence(empty_response, &scrubber()).expect("empty response encodes");
     let rendered_empty_page = format!("{empty_page_evidence:?}");
+    let result_response = WebSearchResponse::new(Vec::new(), WebSearchPageCompleteness::Complete)
+        .expect("empty result-wrapper fixture response is admitted");
+    let rendered_result = format!("{:?}", success_evidence(result_response, &scrubber()));
 
     assert!(completed_collision.is_none());
     assert!(known_failure_collision.is_none());
+    assert!(success_result_collision.is_none());
     assert!(populated_option_collision.is_none());
     assert!(populated_detail_collision.is_none());
     assert!(populated_success_escape_collision.is_none());
     assert!(populated.contains(POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY));
     assert!(populated.contains(POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY));
     assert!(rendered_empty_page.contains(POPULATED_SUCCESS_DEBUG_ESCAPE_COLLISION_KEY));
+    assert!(rendered_result.contains(SUCCESS_RESULT_DEBUG_COLLISION_KEY));
 }
 
 /// Removing the arbitrary detail probe payload from the fixed Debug inventory
