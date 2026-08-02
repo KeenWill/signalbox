@@ -40,9 +40,14 @@ pub(super) fn canonicalized_url_port_fragment(value: &str) -> Option<String> {
     Some(format!("{retained_prefix}{port}"))
 }
 
-pub(super) fn is_discardable_port_zero_prefix(value: &str) -> bool {
-    let digits = value.strip_prefix(':').unwrap_or(value);
-    !digits.is_empty() && digits.bytes().all(|byte| byte == b'0')
+pub(super) fn discarded_port_zero_prefix_context(value: &str) -> Option<&str> {
+    let retained_context = value.trim_end_matches('0');
+    if retained_context.len() == value.len()
+        || (!retained_context.is_empty() && !retained_context.ends_with(':'))
+    {
+        return None;
+    }
+    Some(retained_context)
 }
 
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
@@ -52,8 +57,19 @@ pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
         && url.password().is_none()
         && url.path() == "/"
         && url.query().is_none()
-        && url.fragment().is_none())
+        && url.fragment().is_none()
+        && !has_explicit_authority_port(value))
     .then(|| url.host_str().map(str::to_owned))?
+}
+
+fn has_explicit_authority_port(value: &str) -> bool {
+    if let Some(suffix) = value
+        .strip_prefix('[')
+        .and_then(|remainder| remainder.split_once(']').map(|(_, suffix)| suffix))
+    {
+        return suffix.starts_with(':');
+    }
+    value.contains(':')
 }
 
 pub(super) fn canonicalized_complete_url(value: &str) -> Option<String> {
@@ -130,11 +146,10 @@ pub(super) fn legacy_ipv4_component_contains(value: &str, address: std::net::Ipv
         u32::from(octets[3]),
     ];
     let lowercase = value.to_ascii_lowercase();
-    component_values.iter().any(|component| {
-        component.to_string().contains(&lowercase)
-            || format!("0{component:o}").contains(&lowercase)
-            || format!("0x{component:x}").contains(&lowercase)
-    }) || ipv4_radix_padding_may_contain(value)
+    legacy_ipv4_address_spellings(address)
+        .iter()
+        .any(|spelling| spelling.contains(&lowercase))
+        || ipv4_radix_padding_may_contain(value)
         || normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
             component_values
                 .iter()
@@ -159,6 +174,43 @@ pub(super) fn legacy_ipv4_component_contains(value: &str, address: std::net::Ipv
                     .iter()
                     .any(|component| format!("{component:x}").contains(&fragment))
             })
+}
+
+fn legacy_ipv4_address_spellings(address: std::net::Ipv4Addr) -> Vec<String> {
+    let octets = address.octets();
+    let whole_address = u32::from_be_bytes(octets);
+    let final_three = u32::from_be_bytes([0, octets[1], octets[2], octets[3]]);
+    let final_two = u32::from_be_bytes([0, 0, octets[2], octets[3]]);
+    let component_layouts = [
+        vec![whole_address],
+        vec![u32::from(octets[0]), final_three],
+        vec![u32::from(octets[0]), u32::from(octets[1]), final_two],
+        octets.into_iter().map(u32::from).collect(),
+    ];
+    let mut addresses = Vec::new();
+    for layout in component_layouts {
+        let mut spellings = vec![String::new()];
+        for component in layout {
+            let representations = [
+                component.to_string(),
+                format!("0{component:o}"),
+                format!("0x{component:x}"),
+            ];
+            let mut expanded = Vec::with_capacity(spellings.len() * representations.len());
+            for prefix in spellings {
+                for representation in &representations {
+                    expanded.push(if prefix.is_empty() {
+                        representation.clone()
+                    } else {
+                        format!("{prefix}.{representation}")
+                    });
+                }
+            }
+            spellings = expanded;
+        }
+        addresses.extend(spellings);
+    }
+    addresses
 }
 
 pub(super) fn ipv4_radix_padding_may_contain(value: &str) -> bool {

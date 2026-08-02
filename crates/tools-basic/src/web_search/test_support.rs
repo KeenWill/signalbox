@@ -21,6 +21,8 @@ pub(super) const FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL: &str = "http://127
 
 pub(super) const FIXTURE_HEX_AFFIX_IPV4_RESULT_URL: &str = "http://0x7f.0.0.1/";
 
+pub(super) const FIXTURE_SEPARATOR_SPANNING_HEX_IPV4_RESULT_URL: &str = "http://1.0x7f.0.1/";
+
 pub(super) const FIXTURE_OCTAL_AFFIX_IPV4_RESULT_URL: &str = "http://0177.0.0.1/";
 
 pub(super) const FIXTURE_HEX_SUBSTRING_IPV4_RESULT_URL: &str = "http://0x7f000001/";
@@ -28,6 +30,8 @@ pub(super) const FIXTURE_HEX_SUBSTRING_IPV4_RESULT_URL: &str = "http://0x7f00000
 pub(super) const FIXTURE_OCTAL_SUBSTRING_IPV4_RESULT_URL: &str = "http://017700000001/";
 
 pub(super) const FIXTURE_LEADING_ZERO_PORT_RESULT_URL: &str = "https://example.com:0800/";
+
+pub(super) const FIXTURE_IPV6_LEADING_ZERO_PORT_RESULT_URL: &str = "https://[::1]:0800/";
 
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
 
@@ -138,7 +142,13 @@ pub(super) const URL_OCTAL_DIGIT_SUBSTRING_COLLISION_KEY: &str = "700";
 
 pub(super) const URL_HEX_PREFIX_SPANNING_COLLISION_KEY: &str = "x7";
 
+pub(super) const URL_IPV4_SEPARATOR_SPANNING_COLLISION_KEY: &str = ".0x7";
+
 pub(super) const URL_DISCARDED_PORT_ZERO_COLLISION_KEY: &str = ":0";
+
+pub(super) const URL_IPV6_AUTHORITY_PORT_ZERO_COLLISION_KEY: &str = "]:0";
+
+pub(super) const URL_AUTHORITY_WITH_PORT_NON_COLLISION_KEY: &str = "com:1";
 
 pub(super) const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
 

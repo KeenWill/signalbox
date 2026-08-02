@@ -787,6 +787,31 @@ fn web_search_rejects_credential_spanning_hexadecimal_ipv4_prefix() {
     );
 }
 
+/// INV-035: a credential spanning an IPv4 component separator, hexadecimal
+/// radix marker, and first digit cannot survive canonical host serialization.
+#[test]
+fn web_search_rejects_credential_spanning_ipv4_separator_and_hexadecimal_prefix() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_SEPARATOR_SPANNING_HEX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("separator-spanning IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV4_SEPARATOR_SPANNING_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-octet final IPv4 component is preserved as one
 /// credential-derived fragment when compared with a canonical result host.
 #[test]
@@ -902,6 +927,53 @@ fn web_search_rejects_discarded_leading_zero_port_credential() {
         success_evidence(response, &scrubber),
         Err(WebSearchExecutorError::EvidenceEncoding)
     );
+}
+
+/// INV-035: a credential spanning an IPv6 authority boundary and a discarded
+/// leading port zero cannot survive typed URL canonicalization.
+#[test]
+fn web_search_rejects_discarded_port_zero_with_ipv6_authority_context() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_IPV6_LEADING_ZERO_PORT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("IPv6 leading-zero port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV6_AUTHORITY_PORT_ZERO_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// A credential that parses as a host plus explicit port does not turn the
+/// host alone into a collision with an unrelated provider result.
+#[test]
+fn web_search_preserves_unrelated_host_for_credential_with_explicit_port() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_AUTHORITY_WITH_PORT_NON_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert!(success_evidence(response, &scrubber).is_ok());
 }
 
 /// INV-035: complete URL credential variants are canonicalized before

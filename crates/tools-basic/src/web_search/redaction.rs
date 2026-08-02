@@ -127,9 +127,12 @@ impl CredentialScrubber {
             return true;
         };
         if url.port().is_some()
-            && self
-                .reversible_variants()
-                .any(is_discardable_port_zero_prefix)
+            && self.reversible_variants().any(|variant| {
+                discarded_port_zero_prefix_context(variant).is_some_and(|retained_context| {
+                    retained_context.is_empty()
+                        || unicode_case_insensitive_contains(text, retained_context)
+                })
+            })
         {
             return true;
         }
