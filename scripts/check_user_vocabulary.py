@@ -19,7 +19,7 @@ OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
 CROSS_FRAGMENT_OWNER = re.compile(r"(?:Unknown|Known)(?:Error|Rejection)")
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 REVIEWED_ALLOWLIST_SHA256 = (
-    "ae06f235900cba084dfd59d92a1766cf44f2ff9b2dcfdd9e6baa72a80c60e7c1"
+    "7495abebc9899694e27405e961b9fafe65612dd787c81f61b4f69b6cd63c922a"
 )
 
 
