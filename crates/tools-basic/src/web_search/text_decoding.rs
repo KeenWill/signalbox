@@ -15,7 +15,7 @@ pub(super) struct DecodedText {
 }
 
 pub(super) fn decode_reversible_text_once(text: &str) -> Option<DecodedText> {
-    let form_decoded = String::from_utf8(form_decode_once(text.as_bytes())).ok()?;
+    let form_decoded = String::from_utf8_lossy(&form_decode_once(text.as_bytes())).into_owned();
     let form_changed = form_decoded != text;
     let html_decoded = decode_html_character_references(&form_decoded)?;
     let json_decoded = decode_json_string_escapes(&html_decoded.text);

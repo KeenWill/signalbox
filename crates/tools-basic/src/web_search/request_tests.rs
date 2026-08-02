@@ -220,3 +220,18 @@ fn brave_request_rejects_leading_header_whitespace_in_credential() {
         WebSearchTransportFailureClass::InvalidCredential
     );
 }
+
+/// INV-035: a credential beyond the scrubber's inspection bound cannot enter
+/// the provider header before dispatch.
+#[test]
+fn brave_request_rejects_credential_beyond_scrubber_bound() {
+    let credential = oversized_provider_credential();
+
+    let failure = build_brave_request(FIXTURE_QUERY, &credential)
+        .expect_err("oversized provider credential is rejected");
+
+    assert_eq!(
+        failure.class(),
+        WebSearchTransportFailureClass::InvalidCredential
+    );
+}

@@ -104,6 +104,7 @@ pub(super) async fn collect_complete_body(
                     return Err(WebSearchTransportFailure::ResponseTooLarge);
                 }
             }
+            break;
         }
     }
     Ok(body)

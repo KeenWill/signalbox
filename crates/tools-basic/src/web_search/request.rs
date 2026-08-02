@@ -33,7 +33,9 @@ pub(super) fn build_provider_request(
     credential: &CredentialValue,
 ) -> Result<reqwest::Request, WebSearchTransportFailure> {
     let endpoint = request.provider.endpoint();
-    if has_http_header_boundary_whitespace(credential.expose_bytes()) {
+    if credential.expose_bytes().len() > MAX_CREDENTIAL_BYTES
+        || has_http_header_boundary_whitespace(credential.expose_bytes())
+    {
         return Err(WebSearchTransportFailure::InvalidCredential);
     }
     let credential_text = std::str::from_utf8(credential.expose_bytes())

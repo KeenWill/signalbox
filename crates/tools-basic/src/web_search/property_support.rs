@@ -460,6 +460,47 @@ fn typed_percent_escape_decoder_reverses_url_serialization_layer() {
     assert_eq!(decoded, GRAMMAR_PERCENT_REFLECTION);
 }
 
+#[test]
+fn typed_entity_escape_decoder_reverses_ampersand() {
+    assert_eq!(independently_decode_typed_entity_escape("&amp;"), "&");
+}
+
+#[test]
+fn typed_entity_escape_decoder_reverses_less_than() {
+    assert_eq!(independently_decode_typed_entity_escape("&lt;"), "<");
+}
+
+#[test]
+fn typed_entity_escape_decoder_reverses_greater_than() {
+    assert_eq!(independently_decode_typed_entity_escape("&gt;"), ">");
+}
+
+#[test]
+fn typed_entity_escape_decoder_reverses_double_quote() {
+    assert_eq!(independently_decode_typed_entity_escape("&quot;"), "\"");
+}
+
+#[test]
+fn typed_entity_escape_decoder_reverses_apostrophe() {
+    assert_eq!(independently_decode_typed_entity_escape("&#39;"), "'");
+}
+
+#[test]
+fn typed_entity_escape_decoder_handles_mixed_escapes_and_plain_text() {
+    assert_eq!(
+        independently_decode_typed_entity_escape("a&amp;&lt;&gt;&quot;&#39;z"),
+        "a&<>\"'z"
+    );
+}
+
+#[test]
+fn typed_entity_escape_decoder_preserves_unknown_reference() {
+    assert_eq!(
+        independently_decode_typed_entity_escape("before&copy;after"),
+        "before&copy;after"
+    );
+}
+
 /// The credential grammar's JSON branch emits four-digit escapes that match
 /// the scrubber's JSON-escaped credential variant.
 #[test]

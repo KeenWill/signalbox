@@ -77,6 +77,24 @@ fn web_search_rejects_credential_colliding_with_response_option() {
     assert!(rendered.contains(POPULATED_RESPONSE_OPTION_DEBUG_COLLISION_KEY));
 }
 
+/// INV-035: credentials spanning the populated partial-response `Option`
+/// wrapper are rejected before a constructor result can be rendered.
+#[test]
+fn web_search_rejects_credential_colliding_with_partial_response_option() {
+    let collision = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_PARTIAL_RESPONSE_OPTION_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
+    let rendered = format!(
+        "{:?}",
+        WebSearchResponse::new(Vec::new(), WebSearchPageCompleteness::MoreAvailable)
+    );
+
+    assert!(collision.is_none());
+    assert!(rendered.contains(POPULATED_PARTIAL_RESPONSE_OPTION_DEBUG_COLLISION_KEY));
+}
+
 /// INV-035: credentials spanning the populated provider-error `Option`
 /// wrapper and its opaque diagnostic are rejected before public formatting.
 #[test]
@@ -226,6 +244,47 @@ fn web_search_rejects_credential_colliding_with_known_failure_result() {
 
     assert!(collision.is_none());
     assert!(rendered.contains(KNOWN_FAILURE_RESULT_BOUNDARY_DEBUG_COLLISION_KEY));
+}
+
+/// INV-035: a credential spanning the successful `Result` wrapper and a
+/// populated `KnownFailed` detail is rejected before it can be rendered.
+#[test]
+fn web_search_rejects_credential_colliding_with_populated_known_failure_result() {
+    let collision = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_FAILURE_RESULT_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
+    let detail = ToolExecutionErrorDetail::try_new(String::from(FIXTURE_PROVIDER_ERROR_DETAIL))
+        .expect("fixture error detail is admitted");
+    let rendered = format!(
+        "{:?}",
+        Ok::<ToolExecutorEvidence, WebSearchExecutorError>(ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail)
+        })
+    );
+
+    assert!(collision.is_none());
+    assert!(rendered.contains(POPULATED_FAILURE_RESULT_DEBUG_COLLISION_KEY));
+}
+
+/// Legacy percent-encoded URL bytes that are not UTF-8 remain usable because
+/// comparison-only decoding is lossy while credential checks stay fail-closed.
+#[test]
+fn web_search_retains_legacy_non_utf8_percent_encoded_result_url() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_LEGACY_PERCENT_ENCODED_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("legacy percent-encoded fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+
+    let evidence = success_evidence(response, &scrubber()).expect("response encodes");
+    let content = completed_text(evidence);
+
+    assert!(content.contains(FIXTURE_LEGACY_PERCENT_ENCODED_RESULT_URL));
 }
 
 /// Removing the arbitrary detail probe payload from the fixed Debug inventory

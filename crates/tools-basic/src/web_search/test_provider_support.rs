@@ -1,10 +1,13 @@
 use signalbox_model_runtime::CredentialValue;
 
 use super::{
-    egress::*, request::*, result::*, test_support::*, transport::*, transport_failure::*,
+    egress::*, redaction::*, request::*, result::*, test_support::*, transport::*,
+    transport_failure::*,
 };
 
 pub(super) const FIXTURE_QUERY: &str = "bounded rust search";
+
+pub(super) const FIXTURE_MORE_RESULTS_AVAILABLE: bool = false;
 
 pub(super) const ACCEPT_HEADER_COLLISION_KEY: &str = "application/json";
 
@@ -27,11 +30,16 @@ pub(super) fn request() -> WebSearchRequest {
     }
 }
 
+#[track_caller]
 pub(super) fn provider_rejection(failure: WebSearchTransportFailure) -> WebSearchProviderError {
     match failure {
         WebSearchTransportFailure::ProviderRejected(error) => error,
         other => panic!("expected provider rejection, got {other:?}"),
     }
+}
+
+pub(super) fn oversized_provider_credential() -> String {
+    "x".repeat(MAX_CREDENTIAL_BYTES + 1)
 }
 
 pub(super) fn build_brave_request(

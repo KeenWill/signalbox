@@ -211,7 +211,12 @@ pub(super) fn transport_failure_source_class(
         WebSearchTransportFailure::CredentialDiagnosticCollision(diagnostic) => {
             diagnostic.transport_failure_class
         }
-        other => Some(other.class()),
+        WebSearchTransportFailure::InvalidCredential
+        | WebSearchTransportFailure::RequestFailed
+        | WebSearchTransportFailure::ProviderRejected(_)
+        | WebSearchTransportFailure::InvalidResponse
+        | WebSearchTransportFailure::ResponseTooLarge
+        | WebSearchTransportFailure::DispatchUnknown => Some(failure.class()),
     }
 }
 

@@ -401,7 +401,7 @@ pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
         })
 }
 
-fn fixed_evidence_diagnostic_outputs() -> Option<[String; 8]> {
+fn fixed_evidence_diagnostic_outputs() -> Option<[String; 9]> {
     const DETAIL_SHAPE_PROBE: &str = "diagnostic probe";
     let populated_detail =
         ToolExecutionErrorDetail::try_new(String::from(DETAIL_SHAPE_PROBE)).ok()?;
@@ -414,7 +414,14 @@ fn fixed_evidence_diagnostic_outputs() -> Option<[String; 8]> {
     let probe_debug = format!("{:?}", String::from(DETAIL_SHAPE_PROBE));
     let empty_debug = format!("{:?}", String::new());
     let populated_failure_shape = populated_failure.replace(&probe_debug, &empty_debug);
-    if populated_failure_shape == populated_failure {
+    let populated_result = format!(
+        "{:?}",
+        Ok::<ToolExecutorEvidence, WebSearchExecutorError>(ToolExecutorEvidence::KnownFailed {
+            detail: Some(ToolExecutionErrorDetail::try_new(String::from(DETAIL_SHAPE_PROBE)).ok()?)
+        })
+    );
+    let populated_result_shape = populated_result.replace(&probe_debug, &empty_debug);
+    if populated_failure_shape == populated_failure || populated_result_shape == populated_result {
         return None;
     }
     Some([
@@ -441,6 +448,7 @@ fn fixed_evidence_diagnostic_outputs() -> Option<[String; 8]> {
         ),
         format!("{:?}", ToolExecutorEvidence::KnownFailed { detail: None }),
         populated_failure_shape,
+        populated_result_shape,
         format!("{:?}", ToolExecutorEvidence::Ambiguous),
     ])
 }
