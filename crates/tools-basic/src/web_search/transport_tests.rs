@@ -196,15 +196,16 @@ fn web_search_transport_diagnostic_redaction_overlap_fails_closed() {
 /// response body stream subsequently fails; no partial body is retained.
 #[test]
 fn provider_rejection_survives_incomplete_error_body() {
+    let status = StatusCode::TOO_MANY_REQUESTS;
     let failure = finish_provider_response(
         WebSearchProvider::Brave,
-        StatusCode::TOO_MANY_REQUESTS,
+        status,
         Err(WebSearchTransportFailure::DispatchUnknown),
     )
     .expect_err("received rejection status is conclusive");
     let error = provider_rejection(failure);
 
-    assert_eq!(error.status, PROVIDER_REJECTION_STATUS);
+    assert_eq!(error.status, status.as_u16());
     assert!(error.detail.is_none());
     assert_eq!(
         error.body_failure_class,

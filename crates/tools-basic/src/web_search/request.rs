@@ -6,8 +6,6 @@ use signalbox_model_runtime::CredentialValue;
 
 use super::{egress::*, redaction::*, result::*, transport_failure::*};
 
-pub(super) const BRAVE_RESULT_COUNT_QUERY: &str = "20";
-
 /// One typed query pinned to the configured provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebSearchRequest {
@@ -74,12 +72,17 @@ pub(super) fn query_contains_credential(query: &str, credential: &str) -> bool {
 
 pub(super) fn provider_request_url(request: &WebSearchRequest) -> Option<Url> {
     let mut url = Url::parse(request.provider.endpoint().url).ok()?;
+    let result_count = provider_result_count_query();
     url.query_pairs_mut()
         .append_pair("q", request.query())
-        .append_pair("count", BRAVE_RESULT_COUNT_QUERY)
+        .append_pair("count", &result_count)
         .append_pair("result_filter", "web")
         .append_pair("text_decorations", "false");
     Some(url)
+}
+
+pub(super) fn provider_result_count_query() -> String {
+    MAX_PROVIDER_RESULTS.to_string()
 }
 
 pub(super) fn serialized_request_url_contains_credential(
@@ -135,6 +138,7 @@ pub(super) fn fixed_request_metadata_contains_credential(
     credential: &str,
 ) -> bool {
     let endpoint = request.provider.endpoint();
+    let result_count = provider_result_count_query();
     [
         endpoint.url,
         endpoint.credential_header,
@@ -143,7 +147,7 @@ pub(super) fn fixed_request_metadata_contains_credential(
         "application/json",
         "q",
         "count",
-        BRAVE_RESULT_COUNT_QUERY,
+        result_count.as_str(),
         "result_filter",
         "web",
         "text_decorations",

@@ -27,6 +27,7 @@ fn web_search_supported_named_html_reference_does_not_create_credential_collisio
 fn brave_request_uses_the_mapped_endpoint_and_parameters() {
     let built = brave_request();
     let endpoint = Url::parse(BRAVE_SEARCH_ENDPOINT).expect("provider endpoint is valid");
+    let result_count = provider_result_count_query();
     let parameters = built
         .url()
         .query_pairs()
@@ -43,7 +44,7 @@ fn brave_request_uses_the_mapped_endpoint_and_parameters() {
     assert_eq!(parameters.get("q").map(String::as_str), Some(FIXTURE_QUERY));
     assert_eq!(
         parameters.get("count").map(String::as_str),
-        Some(BRAVE_RESULT_COUNT_QUERY)
+        Some(result_count.as_str())
     );
     assert_eq!(
         parameters.get("result_filter").map(String::as_str),
