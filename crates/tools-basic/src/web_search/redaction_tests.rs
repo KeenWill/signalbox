@@ -100,6 +100,11 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
     let success_result_collision = CredentialScrubber::try_new(&CredentialValue::new(
         SUCCESS_RESULT_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
     ));
+    let success_result_boundary_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
     let populated_option_collision = CredentialScrubber::try_new(&CredentialValue::new(
         POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY
             .as_bytes()
@@ -135,6 +140,7 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
     assert!(completed_collision.is_none());
     assert!(known_failure_collision.is_none());
     assert!(success_result_collision.is_none());
+    assert!(success_result_boundary_collision.is_none());
     assert!(populated_option_collision.is_none());
     assert!(populated_detail_collision.is_none());
     assert!(populated_success_escape_collision.is_none());
@@ -142,6 +148,7 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
     assert!(populated.contains(POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY));
     assert!(rendered_empty_page.contains(POPULATED_SUCCESS_DEBUG_ESCAPE_COLLISION_KEY));
     assert!(rendered_result.contains(SUCCESS_RESULT_DEBUG_COLLISION_KEY));
+    assert!(rendered_result.contains(SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY));
 }
 
 /// Removing the arbitrary detail probe payload from the fixed Debug inventory
@@ -286,10 +293,10 @@ fn web_search_success_evidence_redacts_text_matching_decoded_credential() {
     assert!(!content.contains(REVERSE_ENCODED_COLLISION_VALUE));
 }
 
-/// INV-035: an unimplemented standard named HTML reference remains literal
-/// and is entity-escaped before provider-controlled text enters evidence.
+/// INV-035: a terminated standard named HTML reference not implemented by the
+/// local decoder fails closed before reversible output can expose a credential.
 #[test]
-fn web_search_preserves_escaped_unsupported_named_html_reference_in_result_text() {
+fn web_search_redacts_terminated_standard_named_reference_in_result_text() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE),
         url: String::from(FIXTURE_RESULT_URL),
@@ -308,13 +315,13 @@ fn web_search_preserves_escaped_unsupported_named_html_reference_in_result_text(
 
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY));
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE));
-    assert!(content.contains(UNSUPPORTED_NAMED_ENTITY_ESCAPED_VALUE));
+    assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_ESCAPED_VALUE));
 }
 
-/// INV-035: unknown terminated named references remain literal and are
-/// entity-escaped rather than causing all provider text to fail closed.
+/// INV-035: a syntactically plausible but unimplemented terminated named
+/// reference fails closed instead of being treated as irreversibly literal.
 #[test]
-fn web_search_preserves_entity_escaped_unknown_named_references() {
+fn web_search_redacts_entity_escaped_unknown_named_references() {
     let result = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(FIXTURE_UNKNOWN_NAMED_REFERENCE_TITLE),
         url: String::from(FIXTURE_RESULT_URL),
@@ -327,8 +334,8 @@ fn web_search_preserves_entity_escaped_unknown_named_references() {
     let evidence = success_evidence(response, &scrubber()).expect("response encodes safely");
     let content = completed_text(evidence);
 
-    assert!(content.contains(FIXTURE_ESCAPED_UNKNOWN_NAMED_REFERENCE_TITLE));
-    assert!(content.contains(FIXTURE_ESCAPED_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET));
+    assert!(!content.contains(FIXTURE_ESCAPED_UNKNOWN_NAMED_REFERENCE_TITLE));
+    assert!(!content.contains(FIXTURE_ESCAPED_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET));
 }
 
 /// INV-035: credential removal cannot turn an entity-escaped literal into
