@@ -4,9 +4,10 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, DangerousToolAutoApproval, DurableCommandId,
+    AcceptedInputId, DangerousToolAutoApproval, DurableCommandId, GoalBlockedReasonKind,
+    GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, ToolAttemptId,
-    ToolRequestId, TurnId,
+    ToolPermissionDefault, ToolRequestId, TurnId,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -32,6 +33,8 @@ pub(crate) enum DurableCommandKind {
     ReviewOrchestration,
     /// Session context compaction.
     CompactSession,
+    /// Session goal command.
+    Goal,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -48,6 +51,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReviewWorkflow => "review_workflow",
         DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
+        DurableCommandKind::Goal => "goal",
     }
 }
 
@@ -65,10 +69,131 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "review_workflow" => Some(DurableCommandKind::ReviewWorkflow),
         "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),
+        "goal" => Some(DurableCommandKind::Goal),
         _ => None,
     }
 }
 
+/// Closed stored operation kinds for goal user commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GoalOperationKind {
+    Attach,
+    Resume,
+    Stop,
+    Supersede,
+}
+
+pub(crate) const fn goal_operation_to_str(value: &GoalUserAction) -> &'static str {
+    match value {
+        GoalUserAction::Attach(_) => "attach",
+        GoalUserAction::Resume(_) => "resume",
+        GoalUserAction::Stop => "stop",
+        GoalUserAction::Supersede(_) => "supersede",
+    }
+}
+
+pub(crate) fn goal_operation_from_str(value: &str) -> Option<GoalOperationKind> {
+    match value {
+        "attach" => Some(GoalOperationKind::Attach),
+        "resume" => Some(GoalOperationKind::Resume),
+        "stop" => Some(GoalOperationKind::Stop),
+        "supersede" => Some(GoalOperationKind::Supersede),
+        _ => None,
+    }
+}
+
+/// Closed stored event kinds for goal lineage events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GoalEventDiscriminator {
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+
+pub(crate) const fn goal_event_kind_to_str(value: &GoalEventKind) -> &'static str {
+    match value {
+        GoalEventKind::Commissioned { .. } => "commissioned",
+        GoalEventKind::Blocked { .. } => "blocked",
+        GoalEventKind::Resumed { .. } => "resumed",
+        GoalEventKind::Achieved { .. } => "achieved",
+        GoalEventKind::UserStopped { .. } => "user_stopped",
+        GoalEventKind::Superseded { .. } => "superseded",
+    }
+}
+
+pub(crate) fn goal_event_kind_from_str(value: &str) -> Option<GoalEventDiscriminator> {
+    match value {
+        "commissioned" => Some(GoalEventDiscriminator::Commissioned),
+        "blocked" => Some(GoalEventDiscriminator::Blocked),
+        "resumed" => Some(GoalEventDiscriminator::Resumed),
+        "achieved" => Some(GoalEventDiscriminator::Achieved),
+        "user_stopped" => Some(GoalEventDiscriminator::UserStopped),
+        "superseded" => Some(GoalEventDiscriminator::Superseded),
+        _ => None,
+    }
+}
+
+pub(crate) const fn goal_blocked_reason_to_str(value: GoalBlockedReasonKind) -> &'static str {
+    match value {
+        GoalBlockedReasonKind::UserInputRequired => "user_input_required",
+        GoalBlockedReasonKind::ExternalChangeRequired => "external_change_required",
+        GoalBlockedReasonKind::AuthorizationRequired => "authorization_required",
+        GoalBlockedReasonKind::ExecutionFailure => "execution_failure",
+    }
+}
+
+pub(crate) fn goal_blocked_reason_from_str(value: &str) -> Option<GoalBlockedReasonKind> {
+    match value {
+        "user_input_required" => Some(GoalBlockedReasonKind::UserInputRequired),
+        "external_change_required" => Some(GoalBlockedReasonKind::ExternalChangeRequired),
+        "authorization_required" => Some(GoalBlockedReasonKind::AuthorizationRequired),
+        "execution_failure" => Some(GoalBlockedReasonKind::ExecutionFailure),
+        _ => None,
+    }
+}
+
+pub(crate) fn goal_model_blocked_reason_from_str(
+    value: &str,
+) -> Option<GoalModelBlockedReasonKind> {
+    match value {
+        "user_input_required" => Some(GoalModelBlockedReasonKind::UserInputRequired),
+        "external_change_required" => Some(GoalModelBlockedReasonKind::ExternalChangeRequired),
+        "authorization_required" => Some(GoalModelBlockedReasonKind::AuthorizationRequired),
+        _ => None,
+    }
+}
+
+pub(crate) const fn goal_command_rejection_to_str(value: GoalCommandRejection) -> &'static str {
+    match value {
+        GoalCommandRejection::SessionNotFound => "session_not_found",
+        GoalCommandRejection::GoalAlreadyAttached => "goal_already_attached",
+        GoalCommandRejection::GoalNotAttached => "goal_not_attached",
+        GoalCommandRejection::UnknownModelAlias => "unknown_model_alias",
+        GoalCommandRejection::AcceptancePositionExhausted => "acceptance_position_exhausted",
+        GoalCommandRejection::RequiresBlocked => "requires_blocked",
+        GoalCommandRejection::RequiresPursuingOrBlocked => "requires_pursuing_or_blocked",
+        GoalCommandRejection::GenerationExhausted => "generation_exhausted",
+        GoalCommandRejection::EventOrdinalExhausted => "event_ordinal_exhausted",
+    }
+}
+
+pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommandRejection> {
+    match value {
+        "session_not_found" => Some(GoalCommandRejection::SessionNotFound),
+        "goal_already_attached" => Some(GoalCommandRejection::GoalAlreadyAttached),
+        "goal_not_attached" => Some(GoalCommandRejection::GoalNotAttached),
+        "unknown_model_alias" => Some(GoalCommandRejection::UnknownModelAlias),
+        "acceptance_position_exhausted" => Some(GoalCommandRejection::AcceptancePositionExhausted),
+        "requires_blocked" => Some(GoalCommandRejection::RequiresBlocked),
+        "requires_pursuing_or_blocked" => Some(GoalCommandRejection::RequiresPursuingOrBlocked),
+        "generation_exhausted" => Some(GoalCommandRejection::GenerationExhausted),
+        "event_ordinal_exhausted" => Some(GoalCommandRejection::EventOrdinalExhausted),
+        _ => None,
+    }
+}
 /// Why a PostgreSQL `numeric(20, 0)` value is not a positive domain ordinal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PositiveOrdinalMappingError {
@@ -133,6 +258,25 @@ pub fn dangerous_tool_auto_approval_from_str(value: &str) -> Option<DangerousToo
     match value {
         "disabled" => Some(DangerousToolAutoApproval::Disabled),
         "approve_all" => Some(DangerousToolAutoApproval::ApproveAll),
+        _ => None,
+    }
+}
+
+/// Encodes a tool permission default as its closed PostgreSQL spelling.
+pub(crate) const fn tool_permission_default_to_str(value: ToolPermissionDefault) -> &'static str {
+    match value {
+        ToolPermissionDefault::Auto => "auto",
+        ToolPermissionDefault::Confirm => "confirm",
+        ToolPermissionDefault::AlwaysConfirm => "always_confirm",
+    }
+}
+
+/// Decodes a tool permission default from its closed PostgreSQL spelling.
+pub(crate) fn tool_permission_default_from_str(value: &str) -> Option<ToolPermissionDefault> {
+    match value {
+        "auto" => Some(ToolPermissionDefault::Auto),
+        "confirm" => Some(ToolPermissionDefault::Confirm),
+        "always_confirm" => Some(ToolPermissionDefault::AlwaysConfirm),
         _ => None,
     }
 }
@@ -296,7 +440,7 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_domain::{
         AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, TurnId,
+        SessionInputPosition, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -306,7 +450,8 @@ mod tests {
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
         input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
-        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
+        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
+        tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
 
@@ -340,6 +485,17 @@ mod tests {
             Some(DurableCommandKind::CompactSession)
         );
         assert_eq!(durable_command_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn always_confirm_permission_mapping_is_closed() {
+        let encoded = tool_permission_default_to_str(ToolPermissionDefault::AlwaysConfirm);
+        let decoded = tool_permission_default_from_str(encoded)
+            .expect("the additive permission encoding is canonical");
+
+        assert_eq!(encoded, "always_confirm");
+        assert_eq!(decoded, ToolPermissionDefault::AlwaysConfirm);
+        assert_eq!(tool_permission_default_from_str("unknown"), None);
     }
 
     /// INV-002: PostgreSQL numeric values are decoded and checked before a

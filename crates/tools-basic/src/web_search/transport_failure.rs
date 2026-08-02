@@ -120,7 +120,8 @@ impl WebSearchTransportOutcome {
         credential_safe_transport_outcome(Err(failure), credential)
     }
 
-    pub(super) fn into_result(self) -> Result<WebSearchResponse, WebSearchTransportFailure> {
+    /// Consumes the sanitized transport outcome.
+    pub fn into_result(self) -> Result<WebSearchResponse, WebSearchTransportFailure> {
         self.result
     }
 }
@@ -219,34 +220,44 @@ pub(super) fn credential_safe_transport_failure(
     credential: &CredentialValue,
 ) -> WebSearchTransportFailure {
     let credential_text = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-    let (source_contains_credential, executor_contains_credential) = match &failure {
-        WebSearchTransportFailure::ProviderRejected(error) => (
-            text_contains_credential_variant(&format!("{error:?}"), credential_text)
-                || text_contains_credential_variant(&error.to_string(), credential_text),
-            false,
-        ),
+    let collision_facts = match &failure {
+        WebSearchTransportFailure::ProviderRejected(error) => TransportDiagnosticCollisionFacts {
+            source_contains_credential: text_contains_credential_variant(
+                &format!("{error:?}"),
+                credential_text,
+            ) || text_contains_credential_variant(
+                &error.to_string(),
+                credential_text,
+            ),
+            executor_contains_credential: false,
+        },
         WebSearchTransportFailure::InvalidCredential
         | WebSearchTransportFailure::CredentialDiagnosticCollision(_)
         | WebSearchTransportFailure::RequestFailed
         | WebSearchTransportFailure::InvalidResponse
-        | WebSearchTransportFailure::ResponseTooLarge => (false, false),
+        | WebSearchTransportFailure::ResponseTooLarge => TransportDiagnosticCollisionFacts {
+            source_contains_credential: false,
+            executor_contains_credential: false,
+        },
         WebSearchTransportFailure::DispatchUnknown => {
             let executor_error = WebSearchExecutorError::DispatchUnknown;
-            (
-                false,
-                text_contains_credential_variant(&format!("{executor_error:?}"), credential_text)
-                    || text_contains_credential_variant(
-                        &executor_error.to_string(),
-                        credential_text,
-                    ),
-            )
+            TransportDiagnosticCollisionFacts {
+                source_contains_credential: false,
+                executor_contains_credential: text_contains_credential_variant(
+                    &format!("{executor_error:?}"),
+                    credential_text,
+                ) || text_contains_credential_variant(
+                    &executor_error.to_string(),
+                    credential_text,
+                ),
+            }
         }
     };
     if credential_text.is_empty()
         || text_contains_credential_variant(&format!("{failure:?}"), credential_text)
         || text_contains_credential_variant(&failure.to_string(), credential_text)
-        || source_contains_credential
-        || executor_contains_credential
+        || collision_facts.source_contains_credential
+        || collision_facts.executor_contains_credential
     {
         let transport_failure_class = transport_failure_source_class(&failure);
         WebSearchTransportFailure::CredentialDiagnosticCollision(WebSearchCredentialDiagnostic {
@@ -257,4 +268,9 @@ pub(super) fn credential_safe_transport_failure(
     } else {
         failure
     }
+}
+
+struct TransportDiagnosticCollisionFacts {
+    source_contains_credential: bool,
+    executor_contains_credential: bool,
 }

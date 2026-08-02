@@ -332,9 +332,8 @@ where
         &self,
         scrubber: &CredentialScrubber,
     ) -> ToolExecutorEvidence {
-        let detail = (!scrubber
-            .contains_case_normalized_credential(self.invalid_response_detail.as_str()))
-        .then(|| self.invalid_response_detail.clone());
+        let detail = (!scrubber.contains_credential(self.invalid_response_detail.as_str()))
+            .then(|| self.invalid_response_detail.clone());
         ToolExecutorEvidence::KnownFailed { detail }
     }
 }

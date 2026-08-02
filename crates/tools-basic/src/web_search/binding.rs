@@ -5,9 +5,9 @@ use signalbox_domain::{ToolAttemptDispatchCorrelation, ToolExecutionErrorDetail}
 use signalbox_model_runtime::CredentialValue;
 use std::fmt;
 
-use super::{diagnostic::*, evidence::*, executor::*, redaction::*, request::*, text_decoding::*};
+use super::{diagnostic::*, executor::*, redaction::*, request::*, text_decoding::*};
 
-pub(super) const MAX_BOUND_EVIDENCE_DEBUG_BYTES: usize = MAX_ERROR_DETAIL_BYTES * 2;
+pub(super) const MAX_BOUND_EVIDENCE_DEBUG_BYTES: usize = MAX_CREDENTIAL_BYTES * 2;
 
 pub(super) const MAX_OVERSIZED_CREDENTIAL_INSPECTION_BYTES: usize = MAX_BOUND_EVIDENCE_DEBUG_BYTES;
 
@@ -23,36 +23,38 @@ impl BoundedCredentialVariants {
         }
         let mut variants = Vec::new();
         retain_bounded_credential_variant(&mut variants, credential);
-        let Some((mut decoded, changed)) = decode_reversible_text_once(credential) else {
+        let Some(first_decoded) = decode_reversible_text_once(credential) else {
             return Some(Self {
                 variants,
                 complete: false,
             });
         };
-        if !changed {
+        if first_decoded.change == ReversibleTextChange::Unchanged {
             return Some(Self {
                 variants,
                 complete: true,
             });
         }
+        let mut decoded = first_decoded.text;
         retain_bounded_credential_variant(&mut variants, &decoded);
         for _ in 1..MAX_REVERSIBLE_DECODE_PASSES {
-            let Some((next, changed)) = decode_reversible_text_once(&decoded) else {
+            let Some(next) = decode_reversible_text_once(&decoded) else {
                 return Some(Self {
                     variants,
                     complete: false,
                 });
             };
-            if !changed {
+            if next.change == ReversibleTextChange::Unchanged {
                 return Some(Self {
                     variants,
                     complete: true,
                 });
             }
-            retain_bounded_credential_variant(&mut variants, &next);
-            decoded = next;
+            retain_bounded_credential_variant(&mut variants, &next.text);
+            decoded = next.text;
         }
-        let complete = decode_reversible_text_once(&decoded).is_some_and(|(_, changed)| !changed);
+        let complete = decode_reversible_text_once(&decoded)
+            .is_some_and(|decoded| decoded.change == ReversibleTextChange::Unchanged);
         Some(Self { variants, complete })
     }
 
@@ -156,10 +158,10 @@ pub(super) fn bind_request_outcome(
         } => (evidence, BoundCredentialCheck::BoundedVariants(credential)),
     };
     let bound_diagnostic_check = bound_diagnostic_check(&evidence);
-    let has_dynamic_known_failure_detail = matches!(
-        &evidence,
-        ToolExecutorEvidence::KnownFailed { detail: Some(_) }
-    );
+    let has_dynamic_known_failure_detail = match &evidence {
+        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => false,
+        ToolExecutorEvidence::KnownFailed { detail } => detail.is_some(),
+    };
     let fallback_invocation = has_dynamic_known_failure_detail.then(|| invocation.clone());
     let bound = invocation.bind(evidence);
     let rendered_result = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&bound));
@@ -264,10 +266,10 @@ pub(super) fn fixed_bound_evidence_token_collides(scrubber: &CredentialScrubber)
         let check_collision = match bound_diagnostic_check(&probe) {
             BoundDiagnosticCheck::AllCredentialVariants => true,
             BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-                !scrubber.contains_case_normalized_credential("Failed")
+                !scrubber.contains_credential("Failed")
             }
         };
-        if check_collision && scrubber.contains_case_normalized_credential(&rendered) {
+        if check_collision && scrubber.contains_credential(&rendered) {
             return true;
         }
         let Some(next) = next_fixed_bound_evidence_probe(&probe) else {
@@ -295,7 +297,7 @@ pub(super) fn fixed_bound_wrapper_token_collides(
     correlation: &ToolAttemptDispatchCorrelation,
 ) -> bool {
     if fixed_success_payloads().any(|payload| {
-        if scrubber.contains_case_normalized_credential(&payload) {
+        if scrubber.contains_credential(&payload) {
             return false;
         }
         let evidence = ToolExecutorEvidence::CompletedText(payload);
@@ -328,10 +330,10 @@ pub(super) fn bound_wrapper_evidence_collides(
     let check_collision = match bound_diagnostic_check(evidence) {
         BoundDiagnosticCheck::AllCredentialVariants => true,
         BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-            !scrubber.contains_case_normalized_credential("Failed")
+            !scrubber.contains_credential("Failed")
         }
     };
-    check_collision && scrubber.contains_case_normalized_credential(&rendered)
+    check_collision && scrubber.contains_credential(&rendered)
 }
 
 pub(super) struct CorrelatedToolExecutorEvidenceDebugProbe<'a> {

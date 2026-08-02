@@ -47,6 +47,7 @@ uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 expect-test = "1.5.1"
+proptest = "1.11.0"
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt"] }
 
 [lints]

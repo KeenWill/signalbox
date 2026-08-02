@@ -258,7 +258,7 @@ async fn web_search_rejects_fixed_result_debug_before_injected_transport() {
 
     assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
     assert_eq!(searches.load(Ordering::Relaxed), 0);
-    assert!(output.text().is_empty());
+    assert!(!output.text().contains(RESULT_DEBUG_COLLISION_KEY));
 }
 
 /// INV-035: diagnostic framing that combines the request and credential
@@ -294,13 +294,13 @@ async fn web_search_rejects_combined_request_credential_debug_before_transport()
     assert!(output.text().is_empty());
 }
 
-/// INV-035: every bounded response Debug representation is checked before
-/// the injected transport boundary.
+/// A field removed from the credential-opaque response Debug representation
+/// does not cause an unrelated credential collision.
 #[tokio::test]
-async fn web_search_rejects_fixed_response_debug_before_injected_transport() {
+async fn web_search_removed_response_debug_field_does_not_block_transport() {
     let searches = Arc::new(AtomicUsize::new(0));
     let credentials = StaticCredentials {
-        value: RESPONSE_DEBUG_COLLISION_KEY,
+        value: REMOVED_RESPONSE_DEBUG_FIELD_KEY,
     };
     let transport = CountingTransport {
         searches: Arc::clone(&searches),
@@ -318,10 +318,10 @@ async fn web_search_rejects_fixed_response_debug_before_injected_transport() {
         .execute_request(request, &correlation)
         .await
         .into_result()
-        .expect("fixed response Debug collision is definitive evidence");
+        .expect("removed response Debug field does not create a collision");
 
-    assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
-    assert_eq!(searches.load(Ordering::Relaxed), 0);
+    assert!(matches!(evidence, ToolExecutorEvidence::CompletedText(_)));
+    assert_eq!(searches.load(Ordering::Relaxed), 1);
 }
 
 /// INV-035: fixed successful-payload member names are checked before the
@@ -632,10 +632,10 @@ async fn web_search_rejects_c1_numeric_reference_credential_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: an unimplemented standard named HTML reference fails closed
-/// before query text reaches the injected transport boundary.
+/// An unsupported named HTML reference remains literal and does not create a
+/// collision with the character it could name in a broader entity table.
 #[tokio::test]
-async fn web_search_rejects_unsupported_named_html_reference_before_transport() {
+async fn web_search_unsupported_named_html_reference_remains_literal() {
     let searches = Arc::new(AtomicUsize::new(0));
     let credentials = StaticCredentials {
         value: UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY,
@@ -656,10 +656,10 @@ async fn web_search_rejects_unsupported_named_html_reference_before_transport() 
         .execute_request(request, &correlation)
         .await
         .into_result()
-        .expect("unsupported named-reference syntax is definitive evidence");
+        .expect("unsupported named-reference syntax remains literal");
 
-    assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
-    assert_eq!(searches.load(Ordering::Relaxed), 0);
+    assert!(matches!(evidence, ToolExecutorEvidence::CompletedText(_)));
+    assert_eq!(searches.load(Ordering::Relaxed), 1);
 }
 
 /// INV-035: semicolonless numeric HTML references fail closed before query

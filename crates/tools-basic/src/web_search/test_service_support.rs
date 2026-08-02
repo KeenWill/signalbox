@@ -39,7 +39,7 @@ pub(super) const CREDENTIAL_DEBUG_COLLISION_KEY: &str = "REDACTED";
 
 pub(super) const REQUEST_CREDENTIAL_DEBUG_COLLISION_KEY: &str = "} CredentialValue";
 
-pub(super) const RESPONSE_DEBUG_COLLISION_KEY: &str = "result_count";
+pub(super) const REMOVED_RESPONSE_DEBUG_FIELD_KEY: &str = "result_count";
 
 pub(super) const SUCCESS_PAYLOAD_DELIMITER_COLLISION_KEY: &str = "[";
 

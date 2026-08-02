@@ -25,12 +25,14 @@ storage version four were verified through PR #311
 lock inventory were verified against PR #314
 (`agent/context-compaction-protocol`). The crate-shared commit-ambiguity helper
 was verified against this PR (`agent/domain-cleanup`); the session-plan event
-sequence was verified against this PR (`agent/plan-tool`). This page covers the
-Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
+sequence was verified against this PR (`agent/plan-tool`); and the goal event
+transaction, trigger lock, and goal-turn outbox provenance were verified through
+PR #384 (`agent/goal-mode-runtime`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -113,13 +115,16 @@ triggers, locks, and races described below against a pinned Postgres image.
 
 Storage is a normalized, purpose-specific relational schema of current-state
 rows and append-only immutable facts. There is no general-purpose event store:
-outside session plans, the guarded row is the durable statement of record and
-current state is not rebuilt by replaying events (INV-005). Session plans are
-the deliberate exception verified against this PR (`agent/plan-tool`): their
-durable statement of record is the session-local append-only event sequence, and
-the current plan is its checked fold. Why: database-level invariants (INV-009,
-INV-012) stay declarative over current-state rows, while plan history is itself
-retained product evidence rather than an implementation log.
+outside session plans and commissioned goals, the guarded row is the durable
+statement of record and current state is not rebuilt by replaying events
+(INV-005). Session plans and commissioned goals are deliberate exceptions: each
+has a session-local append-only event sequence as its durable statement of
+record, and its current state is the checked fold of that complete history. The
+plan exception was verified against this PR (`agent/plan-tool`), and the goal
+exception through PR #384 (`agent/goal-mode-runtime`). Why: database-level
+invariants (INV-009, INV-012) stay declarative over current-state rows, while
+plan and goal history is retained product evidence rather than an implementation
+log.
 
 Implemented table families (across the forward-only migrations):
 
@@ -128,7 +133,8 @@ Implemented table families (across the forward-only migrations):
   `replace_session_defaults_command`, `replace_session_metadata_command`,
   `submit_input_command`, `decide_tool_request_command`,
   `replace_lost_runner_command`, `replace_lost_runner_result`,
-  `abandon_lost_runner_command`, and `promote_pending_runner_command`);
+  `abandon_lost_runner_command`, `promote_pending_runner_command`, and
+  `goal_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
 - `session_metadata` plus its current tag and attribute satellites,
@@ -160,6 +166,10 @@ Implemented table families (across the forward-only migrations):
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   daemon-owned session advisory pool fences;
+- `goal_event`, whose session-local positive ordinal sequence retains the
+  complete commissioned-goal lineage and state-transition provenance, plus
+  `goal_turn`, which correlates each pursuit-starting event or successful
+  predecessor with its accepted input and turn;
 - `session_plan_event`, whose session-local positive ordinal sequence retains
   entry creation, text revision, and status change with exact trusted
   tool-dispatch provenance, plus trigger-maintained `session_plan_head`, which
@@ -464,21 +474,30 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Five explicit lock statements live
+`crates/persistence/src/lock_inventory.rs`. Seven explicit lock statements live
 in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
-  `accepted_input` insert reaches commit; and
+  `accepted_input` insert reaches commit;
 - the metadata receipt-satellite insert trigger (migration `202607260101`) takes
   `FOR UPDATE` on the already-claimed `durable_command` row before it checks
   whether the typed receipt parent has sealed the command;
 - `next_session_plan_event_ordinal` (migration `202608020011`) takes
   `FOR NO KEY UPDATE` on the plan's session before reading its certified head;
-  and
 - the session-plan append trigger in that migration reacquires the session
   `FOR NO KEY UPDATE`, then takes `FOR SHARE` on the exact active `plan_write`
-  attempt while authenticating its request payload.
+  attempt while authenticating its request payload;
+- the goal-event current-turn helper (migration `202608020013`) takes
+  `FOR NO KEY UPDATE` on the event's session row before reading the latest goal
+  turn;
+- the scheduler-failure correlation trigger in that migration takes `FOR SHARE`
+  on the named `turn_lifecycle` row while checking its unsuccessful terminal
+  disposition; and
+- the goal-event continuity trigger in that migration takes `FOR NO KEY UPDATE`
+  on the event's session row before reading the preceding event, serializing
+  ordinal and generation assignment even when the Rust transaction reached that
+  row first with `FOR NO KEY UPDATE`.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -516,6 +535,19 @@ Locks per transaction, in acquisition order:
   pending-steering acceptance additionally locks the named active
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
+- **Goal commands and transitions**: an unseen user command first claims the
+  user-global registry, then every user, model, scheduler, and continuation
+  transaction locks the session row `FOR NO KEY UPDATE` before reading the event
+  stream. An applied user transition next locks `session_scheduler` `FOR UPDATE`
+  before recording its receipt or event, so stop and queued-turn activation
+  share one serialization point. Deferred provenance correlation first
+  reacquires the session-row lock before checking the current goal turn and, for
+  scheduler failure, holds the named lifecycle row `FOR SHARE` while checking
+  its unsuccessful terminal disposition. The continuity trigger reacquires the
+  session-row lock before validating the predecessor. Pursuing user transitions
+  then read current defaults and insert their queued goal turn; rejected
+  commands commit without firing the trigger, and exact user-command replay
+  takes no row lock.
 - **StartEligibleTurn**, **startup recovery**, and the **model-call execution
   transactions** (prepare, authorize, observation commit, restart recovery — all
   in `model_execution.rs`, reusing the same inventory statement): the
@@ -803,6 +835,8 @@ Each adapter has a purpose-specific corruption enum with a shared vocabulary:
 - `Unsupported { field, value }` — a closed discriminator or storage version has
   no admitted mapping (unknown values fail; they are never coerced);
 - `Inconsistent(relationship)` — correlated durable records disagree;
+- `Column(field)` — a declared SQL field failed decoding, classified by a static
+  field label rather than driver prose;
 - `InvalidOrdinal` / `InvalidContent` — checked scalar decoding failed;
 - nested `CurrentSession(...)`, `Domain(...)`, `Scheduling(...)` — a subordinate
   projection failed its own boundary or domain validation.
@@ -866,12 +900,12 @@ protocol scope). Implemented storage:
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
   `session_created_outbox_event`, `input_accepted_outbox_event`,
-  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
-  `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
-  `context_compacted_outbox_event`, `turn_completed_outbox_event`,
-  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
-  `turn_reconciliation_required_outbox_event`, and
-  `runner_state_transition_outbox_event` — with a deferred trigger requiring
+  `goal_turn_retired_outbox_event`, `turn_activated_outbox_event`,
+  `turn_failed_outbox_event`, `model_call_transition_outbox_event`,
+  `tool_batch_transition_outbox_event`, `context_compacted_outbox_event`,
+  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
+  `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
+  and `runner_state_transition_outbox_event` — with a deferred trigger requiring
   exactly one typed record per header. A runner-transition record carries the
   affected runner, the positive placement revision, the sandbox profile, one
   closed transition state, and the relocation facts that state requires, so a
@@ -917,12 +951,18 @@ successor turn and appends that correlated `input_accepted`; an applied
 `StartEligibleTurn` appends `turn_activated`. Startup recovery appends
 `turn_failed` for a failed lost turn and `turn_reconciliation_required` when
 stopped issued work becomes ambiguous; terminal reclassification of pending
-steering appends its correlated `input_accepted`. Model-call state transitions
-append `model_call_transition`, tool-round creation appends
-`tool_batch_transition { proposed }`, all-resolved result projection appends
-`tool_batch_transition { results_projected }`, and an external-effect ambiguity
-appends `tool_batch_transition { recovery_required }`. Completion closure
-appends `turn_completed`, refusal closure appends `turn_refused`, and
+steering appends its correlated `input_accepted`. Goal-owned turn creation
+appends the same correlated `input_accepted`; dispatch authenticates its exact
+`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command. A
+stop or supersede that makes a queued goal turn ineligible appends
+`goal_turn_retired` in the same transaction; supersede appends retirement before
+the replacement `input_accepted`. The typed record names the exact queued,
+now-ineligible `goal_turn`, and dispatch rechecks that durable correlation.
+Model-call state transitions append `model_call_transition`, tool-round creation
+appends `tool_batch_transition { proposed }`, all-resolved result projection
+appends `tool_batch_transition { results_projected }`, and an external-effect
+ambiguity appends `tool_batch_transition { recovery_required }`. Completion
+closure appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
 appends `turn_cancelled`, and live stopped ambiguity appends
 `turn_reconciliation_required`; completion of a context compaction appends

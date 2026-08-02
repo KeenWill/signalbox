@@ -32,9 +32,15 @@ mod evidence_tests;
 #[cfg(test)]
 mod executor_tests;
 #[cfg(test)]
+mod property_support;
+#[cfg(test)]
+mod redaction_property_tests;
+#[cfg(test)]
 mod redaction_tests;
 #[cfg(test)]
 mod request_tests;
+#[cfg(test)]
+mod result_property_tests;
 #[cfg(test)]
 mod result_tests;
 #[cfg(test)]

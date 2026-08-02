@@ -1,7 +1,7 @@
 use reqwest::{Url, header::HeaderValue};
 use signalbox_model_runtime::{CredentialValue, redact_text};
 
-use super::{canonicalization::*, text_decoding::*};
+use super::{canonicalization::*, result::fixed_result_diagnostic_outputs, text_decoding::*};
 
 pub(super) const MAX_CREDENTIAL_BYTES: usize = 4 * 1024;
 
@@ -23,7 +23,7 @@ impl CredentialScrubber {
         let exact = std::str::from_utf8(credential.expose_bytes())
             .ok()?
             .to_owned();
-        if exact.is_empty() || fixed_outer_error_debug_may_contain(&exact) {
+        if exact.is_empty() || fixed_diagnostic_output_may_contain(&exact) {
             return None;
         }
         let decoded_variants = decoded_credential_variants(&exact)?;
@@ -66,10 +66,6 @@ impl CredentialScrubber {
             || encoded_contains_credential(text, &self.json_escaped)
     }
 
-    pub(super) fn contains_case_normalized_credential(&self, text: &str) -> bool {
-        self.contains_credential(text)
-    }
-
     pub(super) fn reversible_variants(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.exact.as_str()).chain(self.decoded_variants.iter().map(String::as_str))
     }
@@ -81,12 +77,10 @@ impl CredentialScrubber {
     }
 
     pub(super) fn url_contains_encoded_credential(&self, text: &str) -> bool {
-        if self.contains_encoded_credential(text)
-            || self.decoded_variants.iter().any(|variant| {
-                unicode_case_insensitive_contains(text, variant)
-                    || encoded_contains_credential(text, variant)
-            })
-        {
+        if self.output_collision_variants().any(|variant| {
+            unicode_case_insensitive_contains(text, variant)
+                || encoded_contains_credential(text, variant)
+        }) {
             return true;
         }
         if self.reversible_variants().any(|variant| {
@@ -132,6 +126,16 @@ impl CredentialScrubber {
         let Ok(url) = Url::parse(text) else {
             return true;
         };
+        if url.port().is_some()
+            && self.reversible_variants().any(|variant| {
+                discarded_port_zero_prefix_context(variant).is_some_and(|retained_context| {
+                    retained_context.is_empty()
+                        || unicode_case_insensitive_contains(text, retained_context)
+                })
+            })
+        {
+            return true;
+        }
         if self
             .reversible_variants()
             .any(|variant| url.scheme().eq_ignore_ascii_case(variant))
@@ -159,20 +163,27 @@ impl CredentialScrubber {
                 std::net::IpAddr::V4(result_ipv4) => {
                     let result_components = result_ipv4.octets();
                     return self.reversible_variants().any(|variant| {
-                        canonicalized_ipv4_component_fragments(variant).any(|fragment| {
-                            result_components
-                                .windows(fragment.len())
-                                .any(|window| window == fragment)
-                        })
+                        legacy_ipv4_component_contains(variant, result_ipv4)
+                            || canonicalized_ipv4_component_fragments(variant).any(|fragment| {
+                                result_components
+                                    .windows(fragment.len())
+                                    .any(|window| window == fragment)
+                            })
                     });
                 }
                 std::net::IpAddr::V6(result_ipv6) => {
                     let result_components = result_ipv6.segments();
                     let result_octets = result_ipv6.octets();
+                    let result_hextets =
+                        result_components.map(|component| format!("{component:x}"));
                     return self.reversible_variants().any(|variant| {
                         let (mixed_components, mixed_octets) =
                             canonicalized_mixed_ipv6_ipv4_tail_fragments(variant);
-                        canonicalized_ipv6_fragments(variant)
+                        canonicalized_ipv6_hextet_text_fragment(variant).is_some_and(|fragment| {
+                            result_hextets
+                                .iter()
+                                .any(|component| component.contains(&fragment))
+                        }) || canonicalized_ipv6_fragments(variant)
                             .into_iter()
                             .any(|fragment| {
                                 result_components
@@ -201,30 +212,23 @@ impl CredentialScrubber {
             }
         }
         if self.reversible_variants().any(|variant| {
-            idna::domain_to_ascii(variant)
-                .is_ok_and(|credential_host| credential_host.eq_ignore_ascii_case(host))
+            idna::domain_to_ascii(variant).is_ok_and(|credential_host| {
+                unicode_case_insensitive_contains(host, &credential_host)
+            })
         }) {
             return true;
         }
         let (unicode_host, decoding) = idna::domain_to_unicode(host);
-        decoding.is_err()
-            || unicode_case_insensitive_contains(&unicode_host, &self.exact)
+        if decoding.is_err() {
+            return true;
+        }
+        unicode_case_insensitive_contains(&unicode_host, &self.exact)
             || unicode_case_insensitive_contains(&unicode_host, &self.json_escaped)
             || self.contains_credential(&unicode_host)
-    }
-
-    pub(super) fn redact_body(&self, body: &[u8]) -> String {
-        let text = String::from_utf8_lossy(body);
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-            let Ok(canonical) = serde_json::to_string(&value) else {
-                return String::from("[redacted]");
-            };
-            return self.redact_text(&canonical);
-        }
-        if text.contains('\\') {
-            return String::from("[redacted]");
-        }
-        self.redact_text(&text)
+            || self.reversible_variants().any(|variant| {
+                idna_mapped_unicode_variant(variant)
+                    .is_some_and(|mapped| unicode_case_insensitive_contains(&unicode_host, &mapped))
+            })
     }
 }
 
@@ -240,33 +244,36 @@ pub(super) fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {
 pub(super) fn encoded_contains_credential(text: &str, credential: &str) -> bool {
     let mut decoded = String::from(text);
     for _ in 0..MAX_REVERSIBLE_DECODE_PASSES {
-        let Some((next, changed)) = decode_reversible_text_once(&decoded) else {
+        let Some(next) = decode_reversible_text_once(&decoded) else {
             return true;
         };
-        if changed && unicode_case_insensitive_contains(&next, credential) {
+        if next.change == ReversibleTextChange::Changed
+            && unicode_case_insensitive_contains(&next.text, credential)
+        {
             return true;
         }
-        if !changed {
+        if next.change == ReversibleTextChange::Unchanged {
             return false;
         }
-        decoded = next;
+        decoded = next.text;
     }
-    decode_reversible_text_once(&decoded).is_none_or(|(_, changed)| changed)
+    decode_reversible_text_once(&decoded)
+        .is_none_or(|decoded| decoded.change == ReversibleTextChange::Changed)
 }
 
 pub(super) fn decoded_credential_variants(credential: &str) -> Option<Vec<String>> {
     let mut decoded = String::from(credential);
     let mut variants = Vec::new();
     for _ in 0..MAX_REVERSIBLE_DECODE_PASSES {
-        let (next, changed) = decode_reversible_text_once(&decoded)?;
-        if !changed {
+        let next = decode_reversible_text_once(&decoded)?;
+        if next.change == ReversibleTextChange::Unchanged {
             return Some(variants);
         }
-        variants.push(next.clone());
-        decoded = next;
+        variants.push(next.text.clone());
+        decoded = next.text;
     }
-    let (_, changed) = decode_reversible_text_once(&decoded)?;
-    (!changed).then_some(variants)
+    let decoded = decode_reversible_text_once(&decoded)?;
+    (decoded.change == ReversibleTextChange::Unchanged).then_some(variants)
 }
 
 pub(super) fn text_contains_credential_variant(text: &str, credential: &str) -> bool {
@@ -282,4 +289,11 @@ pub(super) fn text_contains_credential_variant(text: &str, credential: &str) -> 
 
 pub(super) fn fixed_outer_error_debug_may_contain(credential: &str) -> bool {
     text_contains_credential_variant("Err()", credential)
+}
+
+pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
+    text_contains_credential_variant("Err()", credential)
+        || fixed_result_diagnostic_outputs()
+            .iter()
+            .any(|output| text_contains_credential_variant(output, credential))
 }
