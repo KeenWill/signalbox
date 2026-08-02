@@ -112,16 +112,19 @@ impl WebSearchResult {
     }
 
     /// Entity-escaped provider result title.
+    #[cfg(test)]
     pub(super) fn title(&self) -> &str {
         self.title.as_str()
     }
 
     /// Parsed HTTP(S) result URL with unsafe components discarded.
+    #[cfg(test)]
     pub(super) fn url(&self) -> &str {
         self.url.as_str()
     }
 
     /// Entity-escaped provider result snippet.
+    #[cfg(test)]
     pub(super) fn snippet(&self) -> &str {
         self.snippet.as_str()
     }
