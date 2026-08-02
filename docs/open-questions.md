@@ -75,7 +75,7 @@ specification diff. Accepted cross-component and wire contracts live in the
   discovery of unimported sources beyond the explicit directory scan is not.
   (S28)
 
-## Delegation
+## Transcript ancestry
 
 - **Multi-source or merged transcript ancestry.** Accepted baseline is none or
   one immutable source frontier with an explicit extension boundary. Deferrable.

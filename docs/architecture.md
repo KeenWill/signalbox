@@ -166,18 +166,16 @@ regardless of placement.
 ### Delegation and ancestry
 
 Session creation cause and transcript ancestry are independent immutable facts.
-[sessions-and-transcript](spec/sessions-and-transcript.md) limits the first
-implementable cause to user initiation and represents ancestry as none or one
-exact source frontier. Session configuration defaults are a separate versioned
-value: creation establishes the first version, while later updates affect only
-future input acceptance. The open
-[delegation decision](open-questions.md#delegation) must add a delegated-cause
-variant with an exact parent-work identity before delegation creates related
-sessions; its parent-side wait, result, and cancellation transitions likewise
-remain reserved and are not variants in the first implementable turn state
-machine. Forking initializes a user-created session from a selected transcript
-frontier without claiming that the new session was delegated. Future merging
-remains open.
+[sessions-and-transcript](spec/sessions-and-transcript.md) defines user
+initiation and an exact spawning tool request as the two session-creation
+causes, while ancestry remains none or one exact source frontier. Session
+configuration defaults are a separate versioned value: creation establishes the
+first version, while later updates affect only future input acceptance. The
+owning [turn-lifecycle contract](spec/turn-lifecycle-and-scheduling.md) defines
+delegated wait, result, and parent-termination transitions. Forking initializes
+a user-created session from a selected transcript frontier without claiming that
+the new session was delegated. Future merging remains an open
+[transcript-ancestry question](open-questions.md#transcript-ancestry).
 
 ## Dependency direction
 

@@ -27,18 +27,11 @@ enum SessionCreationDefaults {
 
 /// Why one session exists.
 ///
-/// The first implementable cause is user-initiated. Application-initiated,
-/// scheduled, delegated, and any other causes are reserved extension examples
-/// rather than valid baseline values: the spec revision that enables one
+/// User-initiated and delegated causes are implemented. Application-initiated,
+/// scheduled, and any other causes remain reserved extension examples rather
+/// than valid baseline values: the specification revision that enables one
 /// must add a typed variant carrying the exact durable initiating domain
-/// identity, so this type contains no uninhabitable placeholders. S18 /
-/// INV-003: a reserved example is not constructible:
-///
-/// ```compile_fail
-/// use signalbox_domain::SessionCreationCause;
-///
-/// let _ = SessionCreationCause::Delegated;
-/// ```
+/// identity, so this type contains no uninhabitable placeholders.
 ///
 /// and an unstructured string is not a substitute for a typed variant:
 ///
