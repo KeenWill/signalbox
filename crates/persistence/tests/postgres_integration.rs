@@ -3485,6 +3485,44 @@ async fn approval_posture_migration_backfills_human_posture() -> Result<(), Box<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_posture_migration_backfills_auto_posture_for_prior_automatic_decision()
+-> Result<(), Box<dyn Error>> {
+    const SUBJECT_REQUEST_SEED: u128 = 0x7e33;
+    let (container, pool, _database_url) = postgres_before_approval_migration().await?;
+    let request = insert_pre_approval_tool_request(&pool, SUBJECT_REQUEST_SEED).await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source)
+         VALUES ($1, 'approve', 'policy_auto')",
+    )
+    .bind(request)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
+
+    migrate(&pool).await?;
+    let posture: String =
+        sqlx::query_scalar("SELECT approval_posture FROM tool_request WHERE request_id = $1")
+            .bind(request)
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(posture, "auto");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_posture_migration_restores_append_only_requests() -> Result<(), Box<dyn Error>> {
     const SUBJECT_REQUEST_SEED: u128 = 0x7e35;
     let (container, pool, _database_url) = postgres_before_approval_migration().await?;

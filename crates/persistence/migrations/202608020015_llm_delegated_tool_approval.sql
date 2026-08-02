@@ -1,21 +1,20 @@
 -- Freeze per-request approval authority and record delegate calls as dedicated
 -- model calls with decision provenance.
 
-ALTER TABLE tool_request ADD COLUMN approval_posture text;
+ALTER TABLE tool_request
+    ADD COLUMN approval_posture text NOT NULL DEFAULT 'human';
 
 ALTER TABLE tool_request
     DISABLE TRIGGER tool_request_is_append_only;
 
 UPDATE tool_request AS request
-   SET approval_posture = CASE
-       WHEN EXISTS (
-           SELECT 1
-             FROM tool_approval_decision AS approval
-            WHERE approval.request_id = request.request_id
-              AND approval.decision_source IN ('policy_auto', 'session_blanket')
-       ) THEN 'auto'
-       ELSE 'human'
-   END;
+   SET approval_posture = 'auto'
+ WHERE EXISTS (
+     SELECT 1
+       FROM tool_approval_decision AS approval
+      WHERE approval.request_id = request.request_id
+        AND approval.decision_source IN ('policy_auto', 'session_blanket')
+ );
 
 SET CONSTRAINTS ALL IMMEDIATE;
 
@@ -23,8 +22,6 @@ ALTER TABLE tool_request
     ENABLE TRIGGER tool_request_is_append_only;
 
 ALTER TABLE tool_request
-    ALTER COLUMN approval_posture SET NOT NULL,
-    ALTER COLUMN approval_posture SET DEFAULT 'human',
     ADD CONSTRAINT tool_request_approval_posture_closed
         CHECK (approval_posture IN ('auto', 'delegated', 'human'));
 
