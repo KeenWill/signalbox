@@ -889,7 +889,8 @@ impl DelegationWait {
 mod tests {
     use super::*;
     use crate::{
-        NormalizedToolArguments, ToolCallProposal, ToolName, ToolRequestOrdinal,
+        InitialToolApproval, NormalizedToolArguments, ToolCallProposal, ToolName,
+        ToolRequestOrdinal,
         model_execution::completed_turn_fixture,
         test_support::{command_id, model_call_id, session_id, tool_request_id, turn_id},
     };
@@ -911,6 +912,7 @@ mod tests {
                 NormalizedToolArguments::try_from_provider_text(arguments.to_string())
                     .expect("valid arguments"),
             ),
+            InitialToolApproval::Confirm,
         )
     }
 

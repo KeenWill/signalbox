@@ -382,10 +382,6 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Model-declared approval expiry.** Pending user approval currently waits
   indefinitely. Whether a model may request an expiry, how it is frozen, and
   what durable resolution expiry creates remain undecided.
-- **LLM-judge approval mechanics.** `JudgeRecommendation` is typed but has no
-  producer or storage. Prompt storage, provenance/session tagging, and the
-  boundary between recommendation and policy remain undecided; a judge can never
-  claim user agency (INV-020).
 - **Additional high-risk guardrails.** Operations that a future policy must
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
