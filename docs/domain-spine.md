@@ -1008,10 +1008,10 @@ impl DelegationMessageRequest {
 pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
 impl TerminalChildTurn {
     pub fn from_completed(value: &CompletedModelCallTurn) -> Option<Self>;
-    pub fn from_scheduling(
-        value: &AcceptedInputTurnSchedulingProjection,
-        reason: DelegationOutcomeReason,
-    ) -> Option<Self>;
+    pub const fn from_failed(value: &FailedModelCallTurn) -> Self;
+    pub const fn from_cancelled(value: &CancelledModelCallTurn) -> Self;
+    pub const fn from_cancelled_tool_round(value: &CancelledToolRoundModelCallTurn) -> Self;
+    pub const fn from_refused(value: &RefusedModelCallTurn) -> Self;
     // accessors: session(), turn(), reason()
 }
 
@@ -1103,6 +1103,10 @@ impl SessionDelegation {
         self,
         outcome: DelegationOutcome,
     ) -> Result<Self, DelegationTransitionError>;
+    pub fn record_parent_termination(
+        self,
+        authority: ParentTerminationAuthority,
+    ) -> Result<Self, DelegationTransitionError>;
     // accessors: spawning_request(), parent(), child(), child_turn(), task(), policy(),
     //   lifecycle(), events()
 }
@@ -1111,6 +1115,7 @@ pub enum DelegationTransitionFailure {
     AlreadyTerminal,
     MissingSpawnEvent,
     InvalidProvenance,
+    DescendantsNotSelected,
     DuplicateMessageIdentity,
     ConflictingMessageReplay,
     DuplicateOutcomeAuthority,
@@ -1131,6 +1136,10 @@ pub enum RejectedDelegationTransition {
     RecordOutcome {
         relation: SessionDelegation,
         outcome: DelegationOutcome,
+    },
+    RecordParentTermination {
+        relation: SessionDelegation,
+        authority: ParentTerminationAuthority,
     },
 }
 pub struct DelegationTransitionError { /* private unchanged consuming input */ }
