@@ -2,8 +2,12 @@ use reqwest::Url;
 
 pub(super) fn normalize_url_path_dot_segments(path: &str) -> Option<String> {
     let slash_normalized = path.replace('\\', "/");
-    let retain_trailing_separator =
-        slash_normalized.ends_with("/.") || slash_normalized.ends_with("/..");
+    let terminal_segment = slash_normalized
+        .strip_suffix('/')
+        .and_then(|without_trailing_slash| without_trailing_slash.rsplit('/').next());
+    let retain_trailing_separator = slash_normalized.ends_with("/.")
+        || slash_normalized.ends_with("/..")
+        || terminal_segment.is_some_and(|segment| matches!(segment, "." | ".."));
     let mut normalized_segments: Vec<&str> = Vec::new();
     let mut changed = slash_normalized != path;
     for segment in slash_normalized.split('/') {
