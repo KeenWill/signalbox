@@ -944,12 +944,30 @@ bytes, parent, turn, child relationship, and entry to agree before the task
 becomes model-visible.
 
 Each spawning request creates at most one immutable parent/child relationship.
-The relationship records the exact parent session and turn, child session, and
-one parent-chosen policy:
+The public domain surface accepts neither a caller-supplied relationship count
+nor an unsealed relationship slice as evidence of that uniqueness. Aggregate
+construction remains sealed in the foundation slice; the persistence slice in
+this stack admits a spawn only from the complete parent relationship inventory
+held under the spawn transaction's lock, together with the child-session
+uniqueness check. The relationship records the exact parent session and turn,
+child session and delegated-task turn, and one parent-chosen policy:
 
 - `Background` never derives a child stop or cancellation from a parent state;
 - `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
   each exactly `KeepRunning`, `Stop`, or `Cancel`.
+
+The `SessionDelegation` aggregate records an admitted sealed
+`DelegatedSpawnRequest`'s parent, bounded task, policy, child, and spawn
+provenance as the first event in one contiguous history. Typed await and message
+requests may act only on their exact relationship and only under sealed
+in-flight dispatch authority carrying that complete immutable request; matching
+identities cannot substitute a different producing call, ordinal, tool name,
+arguments, or approval posture. Consuming transition failures return the
+unchanged aggregate and attempted input. Message delivery remains available
+after a terminal outcome. Outcome authority is checked against the relationship
+before recording, including an exact match to this spawn's delegated-task turn:
+an equal authority-and-outcome replay is idempotent, `ContinueRunning` preserves
+the active lifecycle, and every other outcome terminalizes it.
 
 A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
 `ParentAlone` does not evaluate descendants. The descendant form walks the
@@ -998,7 +1016,8 @@ names the exact goal generation and carries no turn. Raw identities cannot
 construct that authority, `parent_alone` authority cannot produce a child
 disposition, and the recorded outcome reason must match its command kind and
 scope. `ChildStopped` is produced only by a parent-policy stop; the existing
-child scheduling projection proves cancellation but does not fabricate a
+proof-bearing failed, refused, and cancelled model-call turn candidates can name
+any turn origin, including the delegated-task origin, but do not fabricate a
 distinct stopped outcome from that evidence. Delivery appends a
 `DelegationResult` semantic entry only to the target parent, names the exact
 awaiting request that receives the result, and is idempotent by that awaiting
