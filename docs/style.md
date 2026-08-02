@@ -228,24 +228,8 @@ Clippy denies panicking convenience paths (`expect`, `panic`, `unwrap`, `todo`,
 gates: CI promotes every warning to an error, so a lint is configured only when
 the whole workspace passes it at `deny`.
 
-`missing_docs` is not configured yet. A whole-workspace probe reports 425
-remaining violations:
-
-- `signalbox-domain`: 291; `signalbox-process-protocol`: 48; `signalboxd`: 26;
-  `signalbox-application`: 24; `signalbox-tools-code-host`: 14;
-  `signalbox-persistence`: 8; `signalbox-tools-basic`: 4; `signalbox-client`: 3;
-  `signalbox-model-runtime-claude-cli` and `signalbox-tool-schema-derive`: 2
-  each; `signalbox-conversation-import-claude-code`,
-  `signalbox-conversation-import-codex`, and
-  `signalbox-model-runtime-codex-cli`: 1 each.
-
-The largest block is `crates/domain/src/runner.rs`, owned by the concurrent
-runner-domain follow-up; audit-fixes also owns outstanding items in
-`apps/signalboxd/`, `apps/client/src/`, the model-runtime crates, and the tool
-crates. The persistence remainder is crate-level and integration-test
-documentation outside the hardened `runner_protocol.rs` surface. A follow-up
-enables `missing_docs` at `deny` only after those efforts clear the complete
-inventory.
+`missing_docs` is not configured yet. A follow-up enables it at `deny` only
+after the outstanding undocumented items across the workspace are cleared.
 
 `clippy::wildcard_enum_match_arm` is also not configured. A whole-workspace
 probe reports 211 remaining violations:
