@@ -770,7 +770,54 @@ fn conversation_import_request_requires_permit(
             declared_size_bytes,
             ..
         } => usize::try_from(declared_size_bytes.value()).is_ok_and(|size| size <= limit),
-        _ => false,
+        ClientRequest::CreateSession { .. }
+        | ClientRequest::CreateSessionFromTemplate { .. }
+        | ClientRequest::ListTemplates {}
+        | ClientRequest::ListSessions {}
+        | ClientRequest::AttachGoal { .. }
+        | ClientRequest::ReadGoal { .. }
+        | ClientRequest::ResumeGoal { .. }
+        | ClientRequest::StopGoal { .. }
+        | ClientRequest::SupersedeGoal { .. }
+        | ClientRequest::SubmitInput { .. }
+        | ClientRequest::CompactSession { .. }
+        | ClientRequest::ReadTranscript { .. }
+        | ClientRequest::FollowSession { .. }
+        | ClientRequest::ListSessionMetadata { .. }
+        | ClientRequest::ListConversations { .. }
+        | ClientRequest::ListModelAliases {}
+        | ClientRequest::ReadSessionMetadata { .. }
+        | ClientRequest::ReplaceSessionMetadata { .. }
+        | ClientRequest::ReplaceSessionDefaults { .. }
+        | ClientRequest::ReadSessionDefaults { .. }
+        | ClientRequest::AppendConversationImport { .. }
+        | ClientRequest::CommitConversationImport {}
+        | ClientRequest::AbortConversationImport {}
+        | ClientRequest::ReadImportedConversation { .. }
+        | ClientRequest::CreateSessionFromImportedFrontier { .. }
+        | ClientRequest::ReconcileTurn { .. }
+        | ClientRequest::CreateReviewTarget { .. }
+        | ClientRequest::StartReviewRun { .. }
+        | ClientRequest::ActivateReviewPass { .. }
+        | ClientRequest::CompleteReviewPass { .. }
+        | ClientRequest::RecordReviewFindings { .. }
+        | ClientRequest::RecordReviewFindingEvent { .. }
+        | ClientRequest::ReserveReviewExternalLink { .. }
+        | ClientRequest::AttachReviewExternalLink { .. }
+        | ClientRequest::ReadReviewTarget { .. }
+        | ClientRequest::ReadReviewRun { .. }
+        | ClientRequest::ReadReviewFinding { .. }
+        | ClientRequest::ListReviewFindings { .. }
+        | ClientRequest::StartReviewOrchestration { .. }
+        | ClientRequest::RecordReviewImportOutcome { .. }
+        | ClientRequest::RecordReviewConcernOutcome { .. }
+        | ClientRequest::RecordReviewJudgmentPlan { .. }
+        | ClientRequest::RecordReviewJudgmentEffect { .. }
+        | ClientRequest::RecordReviewRepairOutcomes { .. }
+        | ClientRequest::RecordReviewPublicationOutcomes { .. }
+        | ClientRequest::ReadReviewOrchestration { .. }
+        | ClientRequest::StopTurn { .. }
+        | ClientRequest::DecideToolRequest { .. } => false,
     }
 }
 fn retain_inbound_frame_permit_during_import_admission(
@@ -12316,18 +12363,22 @@ context_window_tokens = 200000
     #[tokio::test]
     async fn begin_rejects_a_declared_size_above_the_configured_bound() -> Result<(), Box<dyn Error>>
     {
-        let budget = Arc::new(Semaphore::new(1));
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
         let permit = budget.clone().acquire_owned().await?;
+        let request_id = RequestId::try_new(1)?;
+        let limit = 8;
+        let declared_size_bytes = CanonicalU64::new(9);
         let mut pending = None;
         let (mut writer, mut reader) = duplex(1_024);
 
         handle_begin_conversation_import(
             &mut writer,
             ProtocolVersion::One,
-            RequestId::try_new(1)?,
+            request_id,
             signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            CanonicalU64::new(9),
-            8,
+            declared_size_bytes,
+            limit,
             Some(permit),
             &mut pending,
         )
@@ -12338,14 +12389,14 @@ context_window_tokens = 200000
         let observed = decode_server_line(&encoded)?;
         let expected = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
-            RequestId::try_new(1)?,
+            request_id,
             ServerMessage::Error {
                 code: ErrorCode::InvalidRequest,
                 message: String::from("conversation import was rejected"),
                 detail: ErrorDetail::invalid_request(
                     RejectionDetail::ConversationImportSourceTooLarge {
-                        limit_bytes: CanonicalU64::new(8),
-                        declared_size_bytes: CanonicalU64::new(9),
+                        limit_bytes: CanonicalU64::new(u64::try_from(limit)?),
+                        declared_size_bytes,
                         actual_size_bytes: None,
                     },
                 ),
@@ -12354,6 +12405,7 @@ context_window_tokens = 200000
 
         assert_eq!(observed, expected);
         assert!(pending.is_none());
+        assert_eq!(budget.available_permits(), capacity);
         Ok(())
     }
 
@@ -12529,7 +12581,8 @@ context_window_tokens = 200000
     #[tokio::test]
     async fn disconnect_drop_discards_partial_import_and_releases_its_permit()
     -> Result<(), Box<dyn Error>> {
-        let budget = Arc::new(Semaphore::new(1));
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
         let permit = budget.clone().acquire_owned().await?;
         let pending = PendingConversationImport {
             format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
@@ -12542,7 +12595,7 @@ context_window_tokens = 200000
         drop(pending);
         let reacquired = timeout(Duration::from_secs(1), budget.acquire_owned()).await??;
 
-        assert_eq!(reacquired.num_permits(), 1);
+        assert_eq!(reacquired.num_permits(), capacity);
         Ok(())
     }
 
