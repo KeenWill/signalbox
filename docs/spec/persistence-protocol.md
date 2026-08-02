@@ -29,7 +29,7 @@ sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
 extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
-posture storage were verified through this PR (`agent/approval-judge-storage`);
+posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 and the session-placement event, current head, and creation transaction were
 verified through PR #415 (`agent/scoped-visibility-creation`). This page covers
 the Postgres representation in `crates/persistence` (source and migrations),
