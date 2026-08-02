@@ -513,7 +513,7 @@ async fn s36_inv012_update_handle_replays_equal_command() -> Result<(), Box<dyn 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_update_replay_authenticates_the_applied_predecessor_chain()
+async fn s36_inv012_update_replay_authenticates_the_applied_predecessor_chain()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, update) = placement_update_fixture().await?;
     repository.handle(update.clone()).await?;
@@ -528,7 +528,8 @@ async fn s36_update_replay_authenticates_the_applied_predecessor_chain()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_current_placement_rejects_an_incomplete_applied_receipt() -> Result<(), Box<dyn Error>>
+async fn s36_inv012_current_placement_rejects_an_incomplete_applied_receipt()
+-> Result<(), Box<dyn Error>>
 {
     let (container, pool, repository, update) = placement_update_fixture().await?;
     repository.handle(update.clone()).await?;
@@ -667,7 +668,7 @@ async fn append_paged_history_fixture(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_ordinary_session_load_authenticates_complete_placement_history()
+async fn s36_inv002_inv012_ordinary_session_load_authenticates_complete_placement_history()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(UPDATE_FIXTURE_SESSION_ID_SEED);
