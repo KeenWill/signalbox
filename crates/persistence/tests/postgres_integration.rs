@@ -23644,17 +23644,14 @@ async fn session_plan_projection_rejects_reachable_over_limit_node() -> Result<(
     Ok(())
 }
 
-/// Graph loading rejects duplicate physical rows even when projection and head
-/// constraints have been deliberately bypassed together.
+/// Complete dependency-prefix certification rejects a duplicate identity even
+/// when both rows name valid dependency events in one predecessor chain.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_append_rejects_duplicate_physical_dependency_edge()
+async fn session_plan_append_certification_rejects_duplicate_dependency_identity()
 -> Result<(), Box<dyn Error>> {
     const DUPLICATE_EVENT_ORDINAL: u64 = 4;
-    const OUTSIDE_ENTRY_ORDINAL: u64 = 5;
-    const OUTSIDE_ENTRY_TEXT: &str = "append through duplicate physical edges";
-    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
-        .expect("the outside fixture identity is positive");
+    const LATER_ENTRY_TEXT: &str = "must not extend duplicate dependency identities";
     let dependent =
         PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
     let prerequisite =
@@ -23664,8 +23661,7 @@ async fn session_plan_append_rejects_duplicate_physical_dependency_edge()
         &pool,
         vec![
             depends_plan_arguments(dependent, prerequisite),
-            create_plan_arguments(OUTSIDE_ENTRY_TEXT),
-            depends_plan_arguments(outside, dependent),
+            create_plan_arguments(LATER_ENTRY_TEXT),
         ],
     )
     .await?;
@@ -23678,14 +23674,6 @@ async fn session_plan_append_rejects_duplicate_physical_dependency_edge()
         },
     )
     .await?;
-    append_plan_write(
-        &mut fixture.batch,
-        &fixture.repository,
-        PlanEventDraft::Create {
-            text: plan_text(OUTSIDE_ENTRY_TEXT),
-        },
-    )
-    .await?;
     let (inserted, certified) =
         install_duplicate_dependency_projection(&pool, &fixture, DUPLICATE_EVENT_ORDINAL).await?;
     let append_attempt = fixture.batch.authorize_next().await?;
@@ -23694,13 +23682,12 @@ async fn session_plan_append_rejects_duplicate_physical_dependency_edge()
         .repository
         .append(PlanAppendRequest::new(
             PlanEventProvenance::from_invocation(append_attempt.correlation()),
-            PlanEventDraft::DependsOn {
-                entry: outside,
-                dependency: fixture.dependent,
+            PlanEventDraft::Create {
+                text: plan_text(LATER_ENTRY_TEXT),
             },
         ))
         .await
-        .expect_err("graph loading rejects duplicate physical dependency rows");
+        .expect_err("a later append cannot extend duplicate dependency identities");
 
     assert_eq!(inserted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
     assert_eq!(certified, EXPECTED_PLAN_MUTATED_ROW_COUNT);

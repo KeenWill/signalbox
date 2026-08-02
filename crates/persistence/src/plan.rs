@@ -240,6 +240,8 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
 ), dependency_inventory AS (
     SELECT count(*) AS edge_count,
            count(DISTINCT first_event_ordinal) AS distinct_first_event_count,
+           count(DISTINCT (entry_ordinal, dependency_ordinal)) AS
+               distinct_edge_count,
            count(*) FILTER (WHERE prior_first_event_ordinal IS NULL) AS root_count
       FROM session_plan_current_dependency
      WHERE session_id = $1
@@ -249,10 +251,19 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
             dependency_inventory.edge_count
         AND dependency_inventory.edge_count =
             dependency_inventory.distinct_first_event_count
+        AND dependency_inventory.edge_count =
+            dependency_inventory.distinct_edge_count
         AND dependency_inventory.root_count =
             CASE dependency_inventory.edge_count
                 WHEN 0 THEN 0 ELSE 1
             END
+        AND NOT EXISTS (
+            SELECT 1
+              FROM session_plan_current_dependency AS edge
+             WHERE edge.session_id = $1
+             GROUP BY edge.entry_ordinal
+            HAVING count(*) > $2
+        )
         AND NOT EXISTS (
             SELECT 1
               FROM dependency_chain AS edge
@@ -622,6 +633,7 @@ impl SessionPlanRepository {
             ))?;
         let invalid_sequence: bool = sqlx::query_scalar(INVALID_APPEND_EVENT_SEQUENCE_SQL)
             .bind(request.session().into_uuid())
+            .bind(dependency_capacity()?)
             .fetch_one(&mut *transaction)
             .await?;
         if invalid_sequence {
@@ -1656,7 +1668,9 @@ mod tests {
         assert!(!INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("UNION ALL"));
         assert!(!INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("ARRAY["));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("distinct_first_event_count"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("distinct_edge_count"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("root_count"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("HAVING count(*) > $2"));
         assert!(
             INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority(entry)")
         );
