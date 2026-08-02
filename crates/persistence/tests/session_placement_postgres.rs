@@ -20,7 +20,10 @@ use signalbox_persistence::{
     },
     local_test_connection_options, migrate,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
-    session_placement::{SessionPlacementRepository, SessionPlacementRepositoryOutcome},
+    session_placement::{
+        SessionPlacementRepository, SessionPlacementRepositoryError,
+        SessionPlacementRepositoryOutcome,
+    },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -42,6 +45,7 @@ const PAGED_HISTORY_SESSION_ID_SEED: u128 = 0x20f;
 const PAGED_HISTORY_CREATION_COMMAND_ID_SEED: u128 = 0x10f;
 const PAGED_HISTORY_UPDATE_COMMAND_ID_SEED: u128 = 0x300;
 const PAGED_HISTORY_UPDATE_COUNT: u64 = 65;
+const PAGED_HISTORY_EXPECTED_VERSION: u64 = 66;
 const PAGED_HISTORY_PATH_PREFIX: &str = "projects.history.revision";
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -133,6 +137,37 @@ fn assert_placement_provenance_corruption(
         panic!("corrupt placement provenance must fail the ordinary session load")
     };
     assert_eq!(reason, "session placement provenance receipt");
+}
+
+#[track_caller]
+fn assert_placement_repository_corruption<T>(result: Result<T, SessionPlacementRepositoryError>) {
+    let Err(SessionPlacementRepositoryError::Corruption(reason)) = result else {
+        panic!("corrupt placement history must fail with typed corruption")
+    };
+    assert_eq!(reason, "session placement provenance receipt");
+}
+
+async fn cross_wire_initial_placement_provenance(
+    pool: &PgPool,
+    session_id: SessionId,
+    update_command_id: DurableCommandId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE session_placement_event DISABLE TRIGGER USER")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_placement_event
+            SET provenance_command_id = $2
+          WHERE session_id = $1 AND version = 1",
+    )
+    .bind(*session_id.as_uuid())
+    .bind(*update_command_id.as_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_placement_event ENABLE TRIGGER USER")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -478,6 +513,55 @@ async fn s36_inv012_update_handle_replays_equal_command() -> Result<(), Box<dyn 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_update_replay_authenticates_the_applied_predecessor_chain()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, update) = placement_update_fixture().await?;
+    repository.handle(update.clone()).await?;
+    cross_wire_initial_placement_provenance(&pool, update.session(), update.command_id()).await?;
+
+    assert_placement_repository_corruption(repository.handle(update).await);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_current_placement_rejects_an_incomplete_applied_receipt() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, repository, update) = placement_update_fixture().await?;
+    repository.handle(update.clone()).await?;
+    sqlx::query(
+        "ALTER TABLE update_session_placement_command
+            DROP CONSTRAINT update_session_placement_command_result_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE update_session_placement_command DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE update_session_placement_command
+            SET rejection_kind = 'session_not_found'
+          WHERE command_id = $1",
+    )
+    .bind(*update.command_id().as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE update_session_placement_command ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert_placement_repository_corruption(repository.load_current(update.session()).await);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_update_handle_rejects_conflicting_reuse() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, update) = placement_update_fixture().await?;
     repository.handle(update).await?;
@@ -544,7 +628,10 @@ async fn s36_complete_history_authentication_crosses_bounded_pages() -> Result<(
         .await?;
     let repository = SessionPlacementRepository::new(pool.clone());
     let expected = append_paged_history_fixture(&repository, session_id).await?;
+    let expected_version = SessionPlacementVersion::try_from_u64(PAGED_HISTORY_EXPECTED_VERSION)
+        .expect("the fixture's pinned final version is positive");
 
+    assert_eq!(expected.version(), expected_version);
     assert_eq!(
         repository.load_current(session_id).await?.unwrap(),
         expected
@@ -600,21 +687,7 @@ async fn s36_inv002_ordinary_session_load_authenticates_complete_placement_histo
             scoped(UPDATE_FIXTURE_REPLACEMENT_PATH),
         ))
         .await?;
-    sqlx::query("ALTER TABLE session_placement_event DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    sqlx::query(
-        "UPDATE session_placement_event
-            SET provenance_command_id = $2
-          WHERE session_id = $1 AND version = 1",
-    )
-    .bind(*session_id.as_uuid())
-    .bind(*update_command_id.as_uuid())
-    .execute(&pool)
-    .await?;
-    sqlx::query("ALTER TABLE session_placement_event ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
+    cross_wire_initial_placement_provenance(&pool, session_id, update_command_id).await?;
 
     assert_placement_provenance_corruption(
         SessionRepository::new(pool.clone())

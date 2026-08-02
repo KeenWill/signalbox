@@ -305,7 +305,9 @@ pub(crate) async fn load_current(
             AND placement_update.command_kind = 'update_session_placement'
             AND placement_update.storage_version = 1
             AND placement_update.result_kind = 'applied'
+            AND placement_update.rejection_kind IS NULL
             AND placement_update.result_version = event.version
+            AND placement_update.result_current_version IS NULL
             AND placement_update.expected_version = event.prior_version
             AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
             AND placement_update.root_global_read_intent = event.root_global_read_intent
@@ -394,7 +396,9 @@ pub(crate) async fn load_authenticated_version(
             AND placement_update.command_kind = 'update_session_placement'
             AND placement_update.storage_version = 1
             AND placement_update.result_kind = 'applied'
+            AND placement_update.rejection_kind IS NULL
             AND placement_update.result_version = event.version
+            AND placement_update.result_current_version IS NULL
             AND placement_update.expected_version = event.prior_version
             AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
             AND placement_update.root_global_read_intent = event.root_global_read_intent
@@ -680,10 +684,19 @@ async fn load_record(
     let Some(row) = row else {
         return Ok(None);
     };
+    let session = session_id_from_uuid(row.try_get("session_id")?);
+    let authenticated_result_version = match row.try_get::<Option<Decimal>, _>("result_version")? {
+        Some(version) => {
+            let version = decode_version(version)?;
+            load_authenticated_version(connection, session, version)
+                .await?
+                .map(|placement| placement.version())
+        }
+        None => None,
+    };
     let authenticated_rejection_version =
         match row.try_get::<Option<Decimal>, _>("result_current_version")? {
             Some(version) => {
-                let session = session_id_from_uuid(row.try_get("session_id")?);
                 let version = decode_version(version)?;
                 load_authenticated_version(connection, session, version)
                     .await?
@@ -691,12 +704,19 @@ async fn load_record(
             }
             None => None,
         };
-    decode_record(row, command_id, authenticated_rejection_version).map(Some)
+    decode_record(
+        row,
+        command_id,
+        authenticated_result_version,
+        authenticated_rejection_version,
+    )
+    .map(Some)
 }
 
 fn decode_record(
     row: PgRow,
     command_id: DurableCommandId,
+    authenticated_result_version: Option<SessionPlacementVersion>,
     authenticated_rejection_version: Option<SessionPlacementVersion>,
 ) -> Result<(UpdateSessionPlacement, UpdateSessionPlacementResult), SessionPlacementRepositoryError>
 {
@@ -779,6 +799,11 @@ fn decode_record(
             if recorded_result_version != event_result_version {
                 return Err(SessionPlacementRepositoryError::Corruption(
                     "applied result version",
+                ));
+            }
+            if authenticated_result_version != Some(recorded_result_version) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied placement event",
                 ));
             }
             let event = SessionPlacementEvent::updated(session, prior, placement, command_id)

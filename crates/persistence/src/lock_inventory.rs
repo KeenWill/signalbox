@@ -115,7 +115,9 @@ pub(crate) const UPDATE_SESSION_PLACEMENT_HEAD: &str = "SELECT session_row.ances
         AND placement_update.command_kind = 'update_session_placement'
         AND placement_update.storage_version = 1
         AND placement_update.result_kind = 'applied'
+        AND placement_update.rejection_kind IS NULL
         AND placement_update.result_version = event.version
+        AND placement_update.result_current_version IS NULL
         AND placement_update.expected_version = event.prior_version
         AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
         AND placement_update.root_global_read_intent = event.root_global_read_intent

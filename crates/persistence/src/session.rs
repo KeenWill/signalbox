@@ -241,7 +241,9 @@ pub(crate) async fn load_session_from_connection(
            ON placement_update.command_id = placement.provenance_command_id
           AND placement_update.session_id = placement.session_id
           AND placement_update.result_kind = 'applied'
+          AND placement_update.rejection_kind IS NULL
           AND placement_update.result_version = placement.version
+          AND placement_update.result_current_version IS NULL
           AND placement_update.expected_version = placement.prior_version
           AND placement_update.replacement_path
                 IS NOT DISTINCT FROM placement.placement_path
