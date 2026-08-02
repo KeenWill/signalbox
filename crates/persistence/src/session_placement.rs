@@ -1135,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_terminal_shapes_reject_every_stray_result_field() {
+    fn inv012_replay_terminal_shapes_reject_every_stray_result_field() {
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Applied,
             None,
