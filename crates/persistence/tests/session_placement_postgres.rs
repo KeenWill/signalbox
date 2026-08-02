@@ -38,6 +38,9 @@ const DATABASE_NAME: &str = "signalbox_placement";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const RESULT_SHAPE_CONSTRAINT: &str = "update_session_placement_command_result_shape";
+const ARBITRARY_PLACEMENT_UPDATE_SESSION_ID_SEED: u128 = 0x203;
+const ARBITRARY_PLACEMENT_UPDATE_CREATION_COMMAND_ID_SEED: u128 = 0x103;
+const ARBITRARY_PLACEMENT_UPDATE_COMMAND_ID_SEED: u128 = 0x104;
 const UPDATE_FIXTURE_SESSION_ID_SEED: u128 = 0x20c;
 const UPDATE_FIXTURE_CREATION_COMMAND_ID_SEED: u128 = 0x10c;
 const UPDATE_FIXTURE_COMMAND_ID_SEED: u128 = 0x10d;
@@ -307,19 +310,19 @@ struct PlacementUpdateFixture {
 
 async fn placement_update_fixture() -> Result<PlacementUpdateFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session = session(0x203);
+    let session = session(ARBITRARY_PLACEMENT_UPDATE_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x103),
+            command(ARBITRARY_PLACEMENT_UPDATE_CREATION_COMMAND_ID_SEED),
             session,
             SessionPlacement::pathless(),
         ))
         .await?;
     let update = UpdateSessionPlacement::new(
-        command(0x104),
+        command(ARBITRARY_PLACEMENT_UPDATE_COMMAND_ID_SEED),
         session,
         SessionPlacementVersion::INITIAL,
-        scoped("projects.foo.session"),
+        scoped(UPDATE_FIXTURE_REPLACEMENT_PATH),
     );
     let repository = SessionPlacementRepository::new(pool.clone());
     Ok(PlacementUpdateFixture {
