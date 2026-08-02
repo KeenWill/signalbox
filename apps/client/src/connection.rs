@@ -185,7 +185,11 @@ fn encode_request(
         .map_err(FrameEncodeError::Validation)?;
     encode_client_line(&frame).map_err(|error| match error {
         FrameEncodeError::OversizedFrame if import_request => ClientError::SourceExceedsFrame,
-        error => ClientError::Encode(error),
+        FrameEncodeError::OversizedFrame => ClientError::Encode(FrameEncodeError::OversizedFrame),
+        FrameEncodeError::Validation(error) => {
+            ClientError::Encode(FrameEncodeError::Validation(error))
+        }
+        FrameEncodeError::Json(error) => ClientError::Encode(FrameEncodeError::Json(error)),
     })
 }
 
