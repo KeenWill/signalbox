@@ -170,9 +170,9 @@ async fn wrapper_spanning_provider_detail_collision_commits_known_failure() {
 /// response evidence rather than a dispatch-ambiguous executor error.
 #[tokio::test]
 async fn web_search_post_response_sanitization_failure_is_known_failed() {
-    const EVIDENCE_ERROR_COLLISION_KEY: &str = "encoding";
+    const REFLECTED_TITLE_COLLISION_KEY: &str = "reflected-title-secret";
     let credentials = StaticCredentials {
-        value: EVIDENCE_ERROR_COLLISION_KEY,
+        value: REFLECTED_TITLE_COLLISION_KEY,
     };
     let (_catalog, mut executor) =
         WebSearchTool::try_new(credentials, ReflectedTitleTransport, configuration())
@@ -186,7 +186,7 @@ async fn web_search_post_response_sanitization_failure_is_known_failed() {
         .expect("completed response sanitization has a definitive outcome");
     let detail = known_failure_detail(evidence).expect("invalid response detail is safe");
 
-    assert!(!detail.contains(EVIDENCE_ERROR_COLLISION_KEY));
+    assert!(!detail.contains(REFLECTED_TITLE_COLLISION_KEY));
     assert_eq!(detail, INVALID_RESPONSE_DETAIL);
 }
 

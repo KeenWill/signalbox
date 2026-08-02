@@ -58,19 +58,13 @@ impl BoundedCredentialVariants {
         Some(Self { variants, complete })
     }
 
-    pub(super) fn collides(&self, rendered: &str, check: BoundDiagnosticCheck) -> bool {
+    pub(super) fn collides(&self, rendered: &str) -> bool {
         if !self.complete || rendered.len() > MAX_BOUND_EVIDENCE_DEBUG_BYTES {
             return true;
         }
-        self.variants.iter().any(|credential| {
-            let check_variant = match check {
-                BoundDiagnosticCheck::AllCredentialVariants => true,
-                BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-                    !unicode_case_insensitive_contains("Failed", credential)
-                }
-            };
-            check_variant && bound_diagnostic_contains_credential(rendered, credential)
-        })
+        self.variants
+            .iter()
+            .any(|credential| bound_diagnostic_contains_credential(rendered, credential))
     }
 }
 
@@ -157,7 +151,6 @@ pub(super) fn bind_request_outcome(
             credential,
         } => (evidence, BoundCredentialCheck::BoundedVariants(credential)),
     };
-    let bound_diagnostic_check = bound_diagnostic_check(&evidence);
     let has_dynamic_known_failure_detail = match &evidence {
         ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => false,
         ToolExecutorEvidence::KnownFailed { detail } => detail.is_some(),
@@ -168,16 +161,13 @@ pub(super) fn bind_request_outcome(
     match credential {
         BoundCredentialCheck::None => Ok(bound),
         BoundCredentialCheck::BoundedVariants(credential) => {
-            if credential.collides(&rendered_result, bound_diagnostic_check) {
+            if credential.collides(&rendered_result) {
                 if let Some(fallback_invocation) = fallback_invocation {
                     let fallback = fallback_invocation
                         .bind(ToolExecutorEvidence::KnownFailed { detail: None });
                     let rendered_fallback =
                         format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&fallback));
-                    if !credential.collides(
-                        &rendered_fallback,
-                        BoundDiagnosticCheck::PreserveDefinitiveFailureWord,
-                    ) {
+                    if !credential.collides(&rendered_fallback) {
                         return Ok(fallback);
                     }
                 }
@@ -194,21 +184,13 @@ pub(super) fn bind_request_outcome(
         BoundCredentialCheck::Exact(credential) => {
             let credential_text =
                 std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-            if exact_bound_diagnostic_collides(
-                &rendered_result,
-                credential_text,
-                bound_diagnostic_check,
-            ) {
+            if exact_bound_diagnostic_collides(&rendered_result, credential_text) {
                 if let Some(fallback_invocation) = fallback_invocation {
                     let fallback = fallback_invocation
                         .bind(ToolExecutorEvidence::KnownFailed { detail: None });
                     let rendered_fallback =
                         format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&fallback));
-                    if !exact_bound_diagnostic_collides(
-                        &rendered_fallback,
-                        credential_text,
-                        BoundDiagnosticCheck::PreserveDefinitiveFailureWord,
-                    ) {
+                    if !exact_bound_diagnostic_collides(&rendered_fallback, credential_text) {
                         return Ok(fallback);
                     }
                 }
@@ -225,51 +207,18 @@ pub(super) fn bind_request_outcome(
     }
 }
 
-pub(super) fn bound_diagnostic_check(evidence: &ToolExecutorEvidence) -> BoundDiagnosticCheck {
-    match evidence {
-        ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous => {
-            BoundDiagnosticCheck::AllCredentialVariants
-        }
-        ToolExecutorEvidence::KnownFailed { .. } => {
-            BoundDiagnosticCheck::PreserveDefinitiveFailureWord
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum BoundDiagnosticCheck {
-    AllCredentialVariants,
-    PreserveDefinitiveFailureWord,
-}
-
-pub(super) fn exact_bound_diagnostic_collides(
-    rendered: &str,
-    credential: &str,
-    check: BoundDiagnosticCheck,
-) -> bool {
+pub(super) fn exact_bound_diagnostic_collides(rendered: &str, credential: &str) -> bool {
     if credential.is_empty() {
         return true;
     }
-    let check_credential = match check {
-        BoundDiagnosticCheck::AllCredentialVariants => true,
-        BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-            !unicode_case_insensitive_contains("Failed", credential)
-        }
-    };
-    check_credential && bound_diagnostic_contains_credential(rendered, credential)
+    bound_diagnostic_contains_credential(rendered, credential)
 }
 
 pub(super) fn fixed_bound_evidence_token_collides(scrubber: &CredentialScrubber) -> bool {
     let mut probe = ToolExecutorEvidence::CompletedText(String::new());
     loop {
         let rendered = format!("{probe:?}");
-        let check_collision = match bound_diagnostic_check(&probe) {
-            BoundDiagnosticCheck::AllCredentialVariants => true,
-            BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-                !scrubber.contains_credential("Failed")
-            }
-        };
-        if check_collision && scrubber.contains_credential(&rendered) {
+        if scrubber.contains_credential(&rendered) {
             return true;
         }
         let Some(next) = next_fixed_bound_evidence_probe(&probe) else {
@@ -327,13 +276,7 @@ pub(super) fn bound_wrapper_evidence_collides(
         evidence,
     };
     let rendered = format!("{:?}", Result::<_, &WebSearchExecutorError>::Ok(&probe));
-    let check_collision = match bound_diagnostic_check(evidence) {
-        BoundDiagnosticCheck::AllCredentialVariants => true,
-        BoundDiagnosticCheck::PreserveDefinitiveFailureWord => {
-            !scrubber.contains_credential("Failed")
-        }
-    };
-    check_collision && scrubber.contains_credential(&rendered)
+    scrubber.contains_credential(&rendered)
 }
 
 pub(super) struct CorrelatedToolExecutorEvidenceDebugProbe<'a> {

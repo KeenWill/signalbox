@@ -119,6 +119,13 @@ impl<Credentials, Transport> fmt::Debug for WebSearchExecutor<Credentials, Trans
     }
 }
 
+pub(super) fn executor_debug_contains_credential<Credentials, Transport>(
+    executor: &WebSearchExecutor<Credentials, Transport>,
+    credential: &str,
+) -> bool {
+    text_contains_credential_variant(&format!("{executor:?}"), credential)
+}
+
 impl<Credentials, Transport> WebSearchExecutor<Credentials, Transport>
 where
     Credentials: CredentialAccess,
@@ -224,6 +231,7 @@ where
             || serialized_request_url_contains_credential(&request, credential_text)
             || credential_debug_contains_credential(&credential, credential_text)
             || request_credential_debug_contains_credential(&request, &credential, credential_text)
+            || executor_debug_contains_credential(self, credential_text)
         {
             let outcome = known_failure_evidence(self.request_failed_detail.clone(), &scrubber);
             return match outcome {

@@ -162,6 +162,23 @@ async fn web_search_bound_result_checks_trimmed_unusable_credential() {
     assert_eq!(searches, 0);
 }
 
+/// INV-035: the definitive `KnownFailed` vocabulary never exempts a matching
+/// request credential from the final correlated evidence check.
+#[tokio::test]
+async fn web_search_bound_failure_word_collision_fails_before_dispatch() {
+    let (failed, searches, rendered) = execute_formatted_raw_credential_through_service(
+        EXECUTOR_KNOWN_FAILURE_WORD_COLLISION_KEY.as_bytes(),
+    )
+    .await;
+
+    assert!(failed);
+    assert!(!unicode_case_insensitive_contains(
+        &rendered,
+        EXECUTOR_KNOWN_FAILURE_WORD_COLLISION_KEY,
+    ));
+    assert_eq!(searches, 0);
+}
+
 /// INV-035: a credential matching the fixed `KnownFailed` Debug token is
 /// rejected before dispatch and omitted from the public executor result.
 #[tokio::test]

@@ -191,6 +191,36 @@ async fn web_search_rejects_fixed_request_debug_before_injected_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
+/// INV-035: the executor's own fixed Debug placeholders are checked against
+/// the resolved credential before the injected transport boundary.
+#[tokio::test]
+async fn web_search_rejects_executor_debug_before_injected_transport() {
+    let searches = Arc::new(AtomicUsize::new(0));
+    let credentials = StaticCredentials {
+        value: EXECUTOR_INJECTED_DEBUG_COLLISION_KEY,
+    };
+    let transport = CountingTransport {
+        searches: Arc::clone(&searches),
+    };
+    let (_catalog, mut executor) = WebSearchTool::try_new(credentials, transport, configuration())
+        .expect("static web_search tool compiles")
+        .into_parts();
+    let request = WebSearchRequest {
+        provider: WebSearchProvider::Brave,
+        query: String::from(FIXTURE_QUERY),
+    };
+    let correlation = dispatch_correlation();
+
+    let evidence = executor
+        .execute_request(request, &correlation)
+        .await
+        .into_result()
+        .expect("executor Debug collision is definitive evidence");
+    let _detail = known_failure_detail(evidence);
+
+    assert_eq!(searches.load(Ordering::Relaxed), 0);
+}
+
 /// INV-035: the credential value's fixed redacted Debug representation is
 /// checked before the injected transport boundary.
 #[tokio::test]
@@ -632,10 +662,10 @@ async fn web_search_rejects_c1_numeric_reference_credential_before_transport() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// An unsupported named HTML reference remains literal and does not create a
-/// collision with the character it could name in a broader entity table.
+/// INV-035: a terminated standard named reference outside the locally decoded
+/// table fails closed before reaching the injected transport boundary.
 #[tokio::test]
-async fn web_search_unsupported_named_html_reference_remains_literal() {
+async fn web_search_rejects_unsupported_named_html_reference_before_transport() {
     let searches = Arc::new(AtomicUsize::new(0));
     let credentials = StaticCredentials {
         value: UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY,
@@ -656,10 +686,10 @@ async fn web_search_unsupported_named_html_reference_remains_literal() {
         .execute_request(request, &correlation)
         .await
         .into_result()
-        .expect("unsupported named-reference syntax remains literal");
+        .expect("unsupported named-reference syntax is definitive evidence");
+    let _detail = known_failure_detail(evidence);
 
-    assert!(matches!(evidence, ToolExecutorEvidence::CompletedText(_)));
-    assert_eq!(searches.load(Ordering::Relaxed), 1);
+    assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
 /// INV-035: semicolonless numeric HTML references fail closed before query

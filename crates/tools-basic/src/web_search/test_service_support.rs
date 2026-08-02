@@ -11,7 +11,7 @@ use signalbox_domain::{
     ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId, SessionId,
     ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolExecutionError, ToolName, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
@@ -109,6 +109,8 @@ pub(super) const EXECUTOR_KNOWN_FAILURE_TOKEN_COLLISION_KEY: &str = "knownfailed
 
 pub(super) const EXECUTOR_KNOWN_FAILURE_SUBSTRING_COLLISION_KEY: &str = "known";
 
+pub(super) const EXECUTOR_KNOWN_FAILURE_WORD_COLLISION_KEY: &str = "failed";
+
 pub(super) const EXECUTOR_POPULATED_FAILURE_COLLISION_KEY: &str = "Some";
 
 pub(super) const EXECUTOR_INVALID_RESPONSE_POPULATED_COLLISION_KEY: &str =
@@ -117,6 +119,8 @@ pub(super) const EXECUTOR_INVALID_RESPONSE_POPULATED_COLLISION_KEY: &str =
 pub(super) const EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY: &str = "completedtext(";
 
 pub(super) const EXECUTOR_ERROR_COLLISION_KEY: &str = "Err";
+
+pub(super) const EXECUTOR_INJECTED_DEBUG_COLLISION_KEY: &str = "[injected]";
 
 pub(super) const EXECUTOR_OK_WRAPPER_COLLISION_KEY: &str = "ok";
 
@@ -670,36 +674,43 @@ where
 }
 
 pub(super) fn is_committed_known_failure(outcome: &ToolExecutionServiceOutcome) -> bool {
-    matches!(
-        outcome,
-        ToolExecutionServiceOutcome::ObservationCommitted(ended)
-            if matches!(
-                ended.end(),
-                signalbox_domain::ToolAttemptEnd::KnownFailed { .. }
-            )
-    )
+    match committed_tool_attempt_end(outcome) {
+        Some(ToolAttemptEnd::KnownFailed { .. }) => true,
+        Some(ToolAttemptEnd::Completed { .. } | ToolAttemptEnd::Ambiguous) | None => false,
+    }
 }
 
 pub(super) fn is_committed_completed(outcome: &ToolExecutionServiceOutcome) -> bool {
-    matches!(
-        outcome,
-        ToolExecutionServiceOutcome::ObservationCommitted(ended)
-            if matches!(ended.end(), signalbox_domain::ToolAttemptEnd::Completed { .. })
-    )
+    match committed_tool_attempt_end(outcome) {
+        Some(ToolAttemptEnd::Completed { .. }) => true,
+        Some(ToolAttemptEnd::KnownFailed { .. } | ToolAttemptEnd::Ambiguous) | None => false,
+    }
 }
 
 pub(super) fn is_committed_known_failure_without_detail(
     outcome: &ToolExecutionServiceOutcome,
 ) -> bool {
-    matches!(
-        outcome,
-        ToolExecutionServiceOutcome::ObservationCommitted(ended)
-            if matches!(
-                ended.end(),
-                signalbox_domain::ToolAttemptEnd::KnownFailed { error }
-                    if error.detail().is_none()
-            )
-    )
+    match committed_tool_attempt_end(outcome) {
+        Some(ToolAttemptEnd::KnownFailed { error }) => error.detail().is_none(),
+        Some(ToolAttemptEnd::Completed { .. } | ToolAttemptEnd::Ambiguous) | None => false,
+    }
+}
+
+pub(super) fn committed_tool_attempt_end(
+    outcome: &ToolExecutionServiceOutcome,
+) -> Option<&ToolAttemptEnd> {
+    match outcome {
+        ToolExecutionServiceOutcome::ObservationCommitted(ended) => Some(ended.end()),
+        ToolExecutionServiceOutcome::NoWork
+        | ToolExecutionServiceOutcome::AwaitingApproval(_)
+        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
+        | ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+        | ToolExecutionServiceOutcome::PreflightFailed(_)
+        | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)
+        | ToolExecutionServiceOutcome::CrashClassified(_)
+        | ToolExecutionServiceOutcome::ContinuationCheckpointed(_)
+        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => None,
+    }
 }
 
 pub(super) fn arguments(value: &str) -> NormalizedToolArguments {
@@ -727,7 +738,9 @@ pub(super) fn known_failure_detail(evidence: ToolExecutorEvidence) -> Option<Str
         ToolExecutorEvidence::KnownFailed { detail } => {
             detail.map(|detail| String::from(detail.as_str()))
         }
-        other => panic!("expected known failure, got {other:?}"),
+        other @ (ToolExecutorEvidence::CompletedText(_) | ToolExecutorEvidence::Ambiguous) => {
+            panic!("expected known failure, got {other:?}")
+        }
     }
 }
 
@@ -758,6 +771,10 @@ pub(super) fn colliding_failure_detail(
         ToolExecutorEvidence::KnownFailed {
             detail: Some(detail),
         } => String::from(detail.as_str()),
-        other => panic!("expected detailed known failure, got {other:?}"),
+        other @ (ToolExecutorEvidence::KnownFailed { detail: None }
+        | ToolExecutorEvidence::CompletedText(_)
+        | ToolExecutorEvidence::Ambiguous) => {
+            panic!("expected detailed known failure, got {other:?}")
+        }
     }
 }
