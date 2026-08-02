@@ -1051,6 +1051,7 @@ async fn inspect_registry(
 mod tests {
     use super::*;
 
+    #[track_caller]
     fn assert_terminal_field_corruption(result: Result<(), SessionPlacementRepositoryError>) {
         let Err(SessionPlacementRepositoryError::Corruption(reason)) = result else {
             panic!("fixture shape must fail with typed corruption")
@@ -1058,6 +1059,7 @@ mod tests {
         assert_eq!(reason, "terminal result fields");
     }
 
+    #[track_caller]
     fn assert_header_corruption(
         result: Result<(), SessionPlacementRepositoryError>,
         expected_reason: &'static str,
@@ -1079,6 +1081,16 @@ mod tests {
             SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::SessionNotFound),
             TerminalFieldShape::ResultVersion,
+        ));
+        assert_terminal_field_corruption(validate_terminal_field_shape(
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+            TerminalFieldShape::CurrentVersion,
+        ));
+        assert_terminal_field_corruption(validate_terminal_field_shape(
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+            TerminalFieldShape::Both,
         ));
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Rejected,

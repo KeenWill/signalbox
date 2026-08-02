@@ -683,6 +683,10 @@ mod tests {
         assert_eq!(event.command_id(), command);
     }
 
+    const PLACEMENT_UPDATE_SESSION_SEED: u128 = 3;
+    const PLACEMENT_UPDATE_COMMAND_SEED: u128 = 4;
+    const FOREIGN_PLACEMENT_UPDATE_COMMAND_SEED: u128 = 5;
+
     struct PlacementUpdateFixture {
         session: SessionId,
         command_id: DurableCommandId,
@@ -691,8 +695,9 @@ mod tests {
     }
 
     fn placement_update_fixture() -> PlacementUpdateFixture {
-        let session = SessionId::from_uuid(uuid::Uuid::from_u128(3));
-        let command_id = DurableCommandId::from_uuid(uuid::Uuid::from_u128(4));
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(PLACEMENT_UPDATE_SESSION_SEED));
+        let command_id =
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(PLACEMENT_UPDATE_COMMAND_SEED));
         let replacement = scoped("projects.foo.session");
         let command = UpdateSessionPlacement::new(
             command_id,
@@ -724,13 +729,15 @@ mod tests {
     }
 
     #[test]
-    fn placement_update_applied_evidence_rejects_foreign_command_provenance() {
+    fn inv012_placement_update_applied_evidence_rejects_foreign_command_provenance() {
         let fixture = placement_update_fixture();
         let foreign = SessionPlacementEvent::updated(
             fixture.session,
             SessionPlacementVersion::INITIAL,
             fixture.replacement,
-            DurableCommandId::from_uuid(uuid::Uuid::from_u128(5)),
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(
+                FOREIGN_PLACEMENT_UPDATE_COMMAND_SEED,
+            )),
         )
         .expect("fixture prior version has a successor");
 
