@@ -5388,6 +5388,7 @@ mod tests {
         );
     }
 
+    #[track_caller]
     fn assert_append_request(frame: &ClientFrame, expected_chunk: &[u8]) {
         assert_eq!(
             frame.request(),
