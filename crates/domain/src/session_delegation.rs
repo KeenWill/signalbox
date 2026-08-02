@@ -409,26 +409,37 @@ impl TerminalChildTurn {
         value: &crate::AcceptedInputTurnSchedulingProjection,
         reason: DelegationOutcomeReason,
     ) -> Option<Self> {
-        let (kind, result_digest) = match (value.status(), reason) {
-            (
+        let (kind, result_digest) = match reason {
+            DelegationOutcomeReason::ChildExecutionFailed => match value.status() {
                 crate::AcceptedInputTurnSchedulingStatus::TerminalFailed
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalRefused,
-                DelegationOutcomeReason::ChildExecutionFailed,
-            ) => (TerminalChildTurnKind::Failed, None),
-            (
-                crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled,
-                DelegationOutcomeReason::ChildCancelled,
-            ) => (TerminalChildTurnKind::Cancelled, None),
-            (
+                | crate::AcceptedInputTurnSchedulingStatus::TerminalRefused => {
+                    (TerminalChildTurnKind::Failed, None)
+                }
+                crate::AcceptedInputTurnSchedulingStatus::Queued
+                | crate::AcceptedInputTurnSchedulingStatus::Active
+                | crate::AcceptedInputTurnSchedulingStatus::TerminalCompleted
+                | crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled
+                | crate::AcceptedInputTurnSchedulingStatus::TerminalReconciliationRequired => {
+                    return None;
+                }
+            },
+            DelegationOutcomeReason::ChildCancelled => match value.status() {
+                crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled => {
+                    (TerminalChildTurnKind::Cancelled, None)
+                }
                 crate::AcceptedInputTurnSchedulingStatus::Queued
                 | crate::AcceptedInputTurnSchedulingStatus::Active
                 | crate::AcceptedInputTurnSchedulingStatus::TerminalCompleted
                 | crate::AcceptedInputTurnSchedulingStatus::TerminalFailed
                 | crate::AcceptedInputTurnSchedulingStatus::TerminalRefused
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled
-                | crate::AcceptedInputTurnSchedulingStatus::TerminalReconciliationRequired,
-                _,
-            ) => return None,
+                | crate::AcceptedInputTurnSchedulingStatus::TerminalReconciliationRequired => {
+                    return None;
+                }
+            },
+            DelegationOutcomeReason::ChildCompleted
+            | DelegationOutcomeReason::ChildResultUnavailable
+            | DelegationOutcomeReason::ParentStopped { .. }
+            | DelegationOutcomeReason::ParentCancelled { .. } => return None,
         };
         Some(Self {
             session: value.session(),
