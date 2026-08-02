@@ -220,6 +220,104 @@ const UNSUPPORTED_EVENT_KIND_SQL: &str = "SELECT event_kind
    )
  LIMIT 1";
 
+const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain AS (
+    SELECT edge.session_id, edge.entry_ordinal, edge.dependency_ordinal,
+           edge.first_event_ordinal, edge.prior_first_event_ordinal
+      FROM session_plan_head AS chain_head
+      JOIN session_plan_current_dependency AS edge
+        ON edge.session_id = chain_head.session_id
+       AND edge.first_event_ordinal = chain_head.dependency_event_ordinal
+     WHERE chain_head.session_id = $1
+    UNION ALL
+    SELECT predecessor.session_id, predecessor.entry_ordinal,
+           predecessor.dependency_ordinal, predecessor.first_event_ordinal,
+           predecessor.prior_first_event_ordinal
+      FROM dependency_chain AS successor
+      JOIN session_plan_current_dependency AS predecessor
+        ON predecessor.session_id = successor.session_id
+       AND predecessor.first_event_ordinal =
+            successor.prior_first_event_ordinal
+), dependency_certification AS (
+    SELECT (
+        (
+            SELECT count(*)
+              FROM dependency_chain
+        ) = (
+            SELECT count(*)
+              FROM session_plan_current_dependency
+             WHERE session_id = $1
+        )
+        AND NOT EXISTS (
+            SELECT 1
+              FROM dependency_chain AS edge
+              LEFT JOIN session_plan_event AS first_event
+                ON first_event.session_id = edge.session_id
+               AND first_event.event_ordinal = edge.first_event_ordinal
+             WHERE first_event.event_ordinal IS NULL
+                OR first_event.event_kind IS DISTINCT FROM 'depends_on'
+                OR first_event.entry_ordinal IS DISTINCT FROM edge.entry_ordinal
+                OR first_event.dependency_ordinal IS DISTINCT FROM
+                    edge.dependency_ordinal
+                OR NOT session_plan_event_has_valid_shape(first_event)
+                OR NOT session_plan_event_has_authority(first_event)
+        )
+    ) AS valid
+)
+SELECT CASE
+           WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL
+           ELSE head.event_ordinal IS NULL
+                OR latest.event_ordinal IS DISTINCT FROM head.event_ordinal
+                OR latest_dependency.first_event_ordinal IS DISTINCT FROM
+                    head.dependency_event_ordinal
+                OR NOT dependency_certification.valid
+                OR certified.event_ordinal IS NULL
+                OR NOT session_plan_event_has_valid_shape(certified)
+                OR NOT session_plan_event_has_authority(certified)
+                OR (
+                    head.dependency_event_ordinal IS NOT NULL
+                    AND (
+                        certified_dependency.event_ordinal IS NULL
+                        OR certified_dependency.event_kind IS DISTINCT FROM 'depends_on'
+                        OR certified_dependency.entry_ordinal IS DISTINCT FROM
+                            latest_dependency.entry_ordinal
+                        OR certified_dependency.dependency_ordinal IS DISTINCT FROM
+                            latest_dependency.dependency_ordinal
+                        OR certified_dependency.event_ordinal IS DISTINCT FROM
+                            latest_dependency.first_event_ordinal
+                        OR NOT session_plan_event_has_valid_shape(certified_dependency)
+                        OR NOT session_plan_event_has_authority(certified_dependency)
+                    )
+                )
+       END
+  FROM dependency_certification
+ CROSS JOIN (VALUES (1)) AS singleton(marker)
+  LEFT JOIN LATERAL (
+      SELECT session_id, event_ordinal, dependency_event_ordinal,
+             TRUE AS row_present
+        FROM session_plan_head
+       WHERE session_id = $1
+  ) AS head ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT event_ordinal, TRUE AS row_present
+        FROM session_plan_event
+       WHERE session_id = $1
+       ORDER BY event_ordinal DESC
+       LIMIT 1
+  ) AS latest ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT entry_ordinal, dependency_ordinal, first_event_ordinal
+        FROM session_plan_current_dependency
+       WHERE session_id = $1
+       ORDER BY first_event_ordinal DESC
+       LIMIT 1
+  ) AS latest_dependency ON TRUE
+  LEFT JOIN session_plan_event AS certified
+    ON certified.session_id = head.session_id
+   AND certified.event_ordinal = head.event_ordinal
+  LEFT JOIN session_plan_event AS certified_dependency
+    ON certified_dependency.session_id = head.session_id
+   AND certified_dependency.event_ordinal = head.dependency_event_ordinal";
+
 const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
            WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL
            ELSE head.event_ordinal IS NULL
@@ -499,7 +597,7 @@ impl SessionPlanRepository {
             .ok_or(SessionPlanCorruption::InvalidPositiveInteger(
                 "next event ordinal",
             ))?;
-        let invalid_sequence: bool = sqlx::query_scalar(INVALID_EVENT_SEQUENCE_SQL)
+        let invalid_sequence: bool = sqlx::query_scalar(INVALID_APPEND_EVENT_SEQUENCE_SQL)
             .bind(request.session().into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
@@ -1495,7 +1593,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        APPEND_TARGET_SQL, CURRENT_DEPENDENCIES_SQL, CURRENT_PLAN_SQL, INVALID_EVENT_SEQUENCE_SQL,
+        APPEND_TARGET_SQL, CURRENT_DEPENDENCIES_SQL, CURRENT_PLAN_SQL,
+        INVALID_APPEND_EVENT_SEQUENCE_SQL, INVALID_EVENT_SEQUENCE_SQL,
         MAX_PLAN_DEPENDENCIES_PER_ENTRY, RELEVANT_DEPENDENCY_GRAPH_SQL, SessionPlanCorruption,
         validate_dependency_graph_acyclic,
     };
@@ -1511,6 +1610,7 @@ mod tests {
         assert!(CURRENT_DEPENDENCIES_SQL.contains("AS shape_valid"));
         assert!(CURRENT_PLAN_SQL.contains("session_plan_event_has_valid_shape(created)"));
         assert!(!CURRENT_DEPENDENCIES_SQL.contains("WITH RECURSIVE"));
+        assert!(!INVALID_EVENT_SEQUENCE_SQL.contains("WITH RECURSIVE"));
     }
 
     #[test]
@@ -1521,6 +1621,14 @@ mod tests {
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("certified_dependency.dependency_ordinal"));
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_valid_shape"));
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority"));
+    }
+
+    #[test]
+    fn append_authenticates_the_complete_projected_dependency_chain() {
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("WITH RECURSIVE dependency_chain"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("FROM dependency_chain AS edge"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("dependency_certification.valid"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority"));
     }
 
     #[test]

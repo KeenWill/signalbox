@@ -1054,6 +1054,8 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     expected_predecessor numeric(20, 0);
+    successor_first_event_ordinal numeric(20, 0);
+    successor_predecessor numeric(20, 0);
 BEGIN
     IF TG_OP = 'UPDATE' THEN
         SELECT max(edge.first_event_ordinal)
@@ -1066,18 +1068,44 @@ BEGIN
                AND edge.entry_ordinal = OLD.entry_ordinal
                AND edge.dependency_ordinal = OLD.dependency_ordinal
            );
+        SELECT edge.first_event_ordinal, edge.prior_first_event_ordinal
+          INTO successor_first_event_ordinal, successor_predecessor
+          FROM session_plan_current_dependency AS edge
+         WHERE edge.session_id = NEW.session_id
+           AND edge.first_event_ordinal > NEW.first_event_ordinal
+           AND NOT (
+               edge.session_id = OLD.session_id
+               AND edge.entry_ordinal = OLD.entry_ordinal
+               AND edge.dependency_ordinal = OLD.dependency_ordinal
+           )
+         ORDER BY edge.first_event_ordinal
+         LIMIT 1;
     ELSE
         SELECT max(edge.first_event_ordinal)
           INTO expected_predecessor
           FROM session_plan_current_dependency AS edge
          WHERE edge.session_id = NEW.session_id
            AND edge.first_event_ordinal < NEW.first_event_ordinal;
+        SELECT edge.first_event_ordinal, edge.prior_first_event_ordinal
+          INTO successor_first_event_ordinal, successor_predecessor
+          FROM session_plan_current_dependency AS edge
+         WHERE edge.session_id = NEW.session_id
+           AND edge.first_event_ordinal > NEW.first_event_ordinal
+         ORDER BY edge.first_event_ordinal
+         LIMIT 1;
     END IF;
     IF NEW.prior_first_event_ordinal IS DISTINCT FROM expected_predecessor THEN
         RAISE EXCEPTION
             'session plan dependency predecessor must be immediate'
             USING ERRCODE = '23514',
                 CONSTRAINT = 'session_plan_dependency_predecessor';
+    END IF;
+    IF successor_first_event_ordinal IS NOT NULL
+       AND successor_predecessor IS DISTINCT FROM NEW.first_event_ordinal THEN
+        RAISE EXCEPTION
+            'session plan dependency successor must be immediate'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_plan_dependency_successor';
     END IF;
     RETURN NEW;
 END;

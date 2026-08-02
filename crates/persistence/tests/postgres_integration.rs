@@ -22052,6 +22052,144 @@ async fn session_plan_dependency_predecessor_cannot_skip_an_edge() -> Result<(),
     Ok(())
 }
 
+/// Reintroducing a missing middle projection edge cannot leave its existing
+/// immediate successor pointing past it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_dependency_middle_insert_requires_immediate_successor()
+-> Result<(), Box<dyn Error>> {
+    const THIRD_ENTRY_TEXT: &str = "insert the missing middle dependency";
+    const FOURTH_ENTRY_TEXT: &str = "retain the later dependency successor";
+    const THIRD_ENTRY_ORDINAL: u64 = 4;
+    const FOURTH_ENTRY_ORDINAL: u64 = 5;
+    const FIRST_DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const MIDDLE_DEPENDENCY_EVENT_ORDINAL: u64 = 6;
+    const SUCCESSOR_DEPENDENCY_EVENT_ORDINAL: u64 = 7;
+    let third_entry = PlanEntryId::try_from_u64(THIRD_ENTRY_ORDINAL)
+        .expect("the third entry fixture identity is positive");
+    let fourth_entry = PlanEntryId::try_from_u64(FOURTH_ENTRY_ORDINAL)
+        .expect("the fourth entry fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(THIRD_ENTRY_TEXT),
+            create_plan_arguments(FOURTH_ENTRY_TEXT),
+            depends_plan_arguments(third_entry, prerequisite),
+            depends_plan_arguments(fourth_entry, prerequisite),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(THIRD_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(FOURTH_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: third_entry,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: fourth_entry,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_predecessor_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let skipped = sqlx::query(
+        "UPDATE session_plan_current_dependency
+            SET prior_first_event_ordinal = $1
+          WHERE session_id = $2
+            AND first_event_ordinal = $3",
+    )
+    .bind(Decimal::from(FIRST_DEPENDENCY_EVENT_ORDINAL))
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(SUCCESSOR_DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    let removed = sqlx::query(
+        "DELETE FROM session_plan_current_dependency
+          WHERE session_id = $1
+            AND first_event_ordinal = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(MIDDLE_DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_predecessor_guard",
+    )
+    .execute(&pool)
+    .await?;
+
+    let insertion = sqlx::query(
+        "INSERT INTO session_plan_current_dependency
+            (session_id, entry_ordinal, dependency_ordinal,
+             first_event_ordinal, prior_first_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(third_entry.as_u64()))
+    .bind(Decimal::from(fixture.prerequisite.as_u64()))
+    .bind(Decimal::from(MIDDLE_DEPENDENCY_EVENT_ORDINAL))
+    .bind(Decimal::from(FIRST_DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await
+    .expect_err("a middle edge cannot be inserted beneath a skipping successor");
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(skipped.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(removed.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        insertion
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_successor")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Only the event append projection trigger may populate the current dependency
 /// table, even when a direct row satisfies every relational constraint.
 #[tokio::test(flavor = "multi_thread")]
@@ -24264,6 +24402,101 @@ async fn session_plan_append_rejects_malformed_distinct_dependency_head()
         ))
         .await
         .expect_err("a later event cannot hide a malformed dependency tip");
+
+    assert_eq!(corrupted.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(append_error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Complete dependency-prefix certification rejects malformed non-tip edges
+/// before a later non-dependency append can extend the event history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_malformed_non_tip_dependency_edge()
+-> Result<(), Box<dyn Error>> {
+    const SECOND_DEPENDENT_TEXT: &str = "create a later dependency edge";
+    const LATER_ENTRY_TEXT: &str = "must not extend a malformed older edge";
+    const SECOND_DEPENDENT_ORDINAL: u64 = 4;
+    const OLDER_DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const MALFORMED_EDGE_TEXT: &str = "older dependency event must remain valid";
+    let second_dependent = PlanEntryId::try_from_u64(SECOND_DEPENDENT_ORDINAL)
+        .expect("the second dependent fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(SECOND_DEPENDENT_TEXT),
+            depends_plan_arguments(second_dependent, prerequisite),
+            create_plan_arguments(LATER_ENTRY_TEXT),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(SECOND_DEPENDENT_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: second_dependent,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DROP CONSTRAINT session_plan_event_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = sqlx::query(
+        "UPDATE session_plan_event
+            SET entry_text = $1
+          WHERE session_id = $2
+            AND event_ordinal = $3",
+    )
+    .bind(MALFORMED_EDGE_TEXT)
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(OLDER_DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let append_error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::Create {
+                text: plan_text(LATER_ENTRY_TEXT),
+            },
+        ))
+        .await
+        .expect_err("a later append cannot hide a malformed non-tip dependency edge");
 
     assert_eq!(corrupted.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
     assert_eq!(
