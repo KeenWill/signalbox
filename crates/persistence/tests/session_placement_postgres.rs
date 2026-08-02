@@ -7,6 +7,7 @@
 
 use std::error::Error;
 
+use expect_test::expect;
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults, SessionCreationCause,
@@ -14,6 +15,7 @@ use signalbox_domain::{
     SessionPlacementPath, SessionPlacementVersion, TranscriptAncestry, UpdateSessionPlacement,
     UpdateSessionPlacementResult,
 };
+use signalbox_expect_table::table;
 use signalbox_persistence::{
     create_session::{
         CreateSessionCorruption, CreateSessionRepository, CreateSessionRepositoryError,
@@ -299,6 +301,7 @@ struct PlacementUpdateFixture {
     pool: PgPool,
     repository: SessionPlacementRepository,
     update: UpdateSessionPlacement,
+    expected_result_version: SessionPlacementVersion,
     session: SessionId,
 }
 
@@ -324,6 +327,10 @@ async fn placement_update_fixture() -> Result<PlacementUpdateFixture, Box<dyn Er
         pool,
         repository,
         update,
+        expected_result_version: SessionPlacementVersion::try_from_u64(
+            UPDATE_FIXTURE_RESULT_VERSION,
+        )
+        .expect("fixture result version is positive"),
         session,
     })
 }
@@ -333,9 +340,7 @@ async fn placement_update_fixture() -> Result<PlacementUpdateFixture, Box<dyn Er
 async fn s36_placement_update_returns_successor_event_shape() -> Result<(), Box<dyn Error>> {
     let fixture = placement_update_fixture().await?;
     let expected_prior = fixture.update.expected_version();
-    let expected_version = expected_prior
-        .next()
-        .expect("fixture expected version has a successor");
+    let expected_version = fixture.expected_result_version;
     let result = fixture.repository.handle(fixture.update).await?;
     let SessionPlacementRepositoryOutcome::Recorded(UpdateSessionPlacementResult::Applied(applied)) =
         result
@@ -367,19 +372,15 @@ async fn s36_placement_update_appends_created_and_updated_history() -> Result<()
     .fetch_all(&fixture.pool)
     .await?;
 
-    assert_eq!(
-        history,
-        vec![
-            PlacementHistoryRow {
-                version: 1,
-                event_kind: "created".to_owned(),
-            },
-            PlacementHistoryRow {
-                version: 2,
-                event_kind: "updated".to_owned(),
-            },
-        ]
-    );
+    expect![[r#"
+        ┌─────────┬────────────┐
+        │ version │ event_kind │
+        ├─────────┼────────────┤
+        │       1 │ created    │
+        │       2 │ updated    │
+        └─────────┴────────────┘
+    "#]]
+    .assert_eq(&table(history));
 
     fixture.pool.close().await;
     drop(fixture.container);
@@ -1074,7 +1075,7 @@ async fn s36_applied_update_replay_requires_the_event_to_reach_the_current_head(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_rejected_update_replay_requires_the_reported_version_to_reach_the_current_head()
+async fn s36_inv012_rejected_update_replay_requires_the_reported_version_to_reach_the_current_head()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(0x226);

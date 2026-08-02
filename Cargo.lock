@@ -3330,6 +3330,7 @@ dependencies = [
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
  "signalbox-domain",
+ "signalbox-expect-table",
  "signalbox-tools-plan",
  "sqlx",
  "testcontainers-modules",
