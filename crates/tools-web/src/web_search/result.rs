@@ -44,15 +44,15 @@ pub(super) struct EscapedSnippet(String);
 /// only request-scoped evidence construction may render them.
 ///
 /// ```compile_fail
-/// fn render_provider_components(result: &signalbox_tools_basic::WebSearchResult) {
+/// fn render_provider_components(result: &signalbox_tools_web::WebSearchResult) {
 ///     let _ = (result.title(), result.url(), result.snippet());
 /// }
 /// ```
 ///
 /// ```compile_fail
 /// fn compare_provider_components(
-///     response: &signalbox_tools_basic::WebSearchResponse,
-///     candidate: &signalbox_tools_basic::WebSearchResult,
+///     response: &signalbox_tools_web::WebSearchResponse,
+///     candidate: &signalbox_tools_web::WebSearchResult,
 /// ) {
 ///     let _ = &response.results()[0] == candidate;
 /// }
