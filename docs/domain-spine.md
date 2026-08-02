@@ -5395,6 +5395,8 @@ impl ToolDefinition {
         permission_default: ToolPermissionDefault,
         effect_class: ToolEffectClass,
     ) -> Self;
+    pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
+    pub const fn approval_posture(&self) -> Option<ToolApprovalPosture>;
     // accessors: name(), description(), input_schema(), permission_default(), effect_class()
 }
 
