@@ -153,6 +153,10 @@ hyphen, and underscore; each segment is at most 64 bytes and a path is at most
 `UpdateSessionPlacement` durable command changes it, appending a versioned
 `Updated` event that names its predecessor and command identity; creation itself
 appends version-one `Created`, so no update rewrites history.
+Every current-placement load authenticates the contiguous history from version
+one through the selected head against each event's typed receipt and
+durable-command registry claim; a missing, cross-wired, or invalid command fact
+fails closed as typed storage corruption.
 
 A placed requester's readable scope is its parent directory's subtree. The
 decision computes the requesting path's parent prefix once and performs one

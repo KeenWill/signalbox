@@ -17,8 +17,8 @@ use crate::command_registry::{
 use crate::lock_inventory;
 use crate::mapping::{
     SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-    durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
-    session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+    durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
+    session_id_to_uuid, session_placement_event_kind_from_str, session_placement_event_kind_to_str,
     session_placement_rejection_from_str, session_placement_rejection_to_str,
     session_placement_result_kind_from_str, session_placement_result_kind_to_str,
 };
@@ -488,10 +488,11 @@ fn decode_authenticated_placement(
             ));
         }
     };
-    let native_creation: Option<sqlx::types::Uuid> = row.try_get("native_creation_command_id")?;
-    let imported_creation: Option<sqlx::types::Uuid> =
-        row.try_get("imported_creation_command_id")?;
-    let update: Option<sqlx::types::Uuid> = row.try_get("placement_update_command_id")?;
+    let native_creation =
+        decode_receipt_command_identity(row.try_get("native_creation_command_id")?)?;
+    let imported_creation =
+        decode_receipt_command_identity(row.try_get("imported_creation_command_id")?)?;
+    let update = decode_receipt_command_identity(row.try_get("placement_update_command_id")?)?;
     let receipt_is_valid = match event_kind {
         SessionPlacementEventKind::Created => {
             version == SessionPlacementVersion::INITIAL
@@ -523,6 +524,20 @@ fn decode_authenticated_placement(
         row.try_get("root_global_read_intent")?,
     )?;
     Ok(VersionedSessionPlacement::reconstitute(version, placement))
+}
+
+fn decode_receipt_command_identity(
+    stored: Option<sqlx::types::Uuid>,
+) -> Result<Option<DurableCommandId>, SessionPlacementRepositoryError> {
+    stored
+        .map(|command| {
+            durable_command_id_from_uuid(command).map_err(|_| {
+                SessionPlacementRepositoryError::Corruption(
+                    "session placement provenance command identity",
+                )
+            })
+        })
+        .transpose()
 }
 
 async fn missing_head_result(
@@ -1070,6 +1085,16 @@ mod tests {
         assert_eq!(reason, expected_reason);
     }
 
+    #[track_caller]
+    fn assert_provenance_command_identity_corruption(stored: sqlx::types::Uuid) {
+        let Err(SessionPlacementRepositoryError::Corruption(reason)) =
+            decode_receipt_command_identity(Some(stored))
+        else {
+            panic!("sentinel provenance must fail with typed corruption")
+        };
+        assert_eq!(reason, "session placement provenance command identity");
+    }
+
     #[test]
     fn replay_terminal_shapes_reject_every_stray_result_field() {
         assert_terminal_field_corruption(validate_terminal_field_shape(
@@ -1114,5 +1139,11 @@ mod tests {
             validate_typed_header(UPDATE_SESSION_PLACEMENT_KIND, STORAGE_VERSION + 1),
             "typed command storage version",
         );
+    }
+
+    #[test]
+    fn inv002_placement_history_rejects_each_sentinel_command_provenance() {
+        assert_provenance_command_identity_corruption(sqlx::types::Uuid::nil());
+        assert_provenance_command_identity_corruption(sqlx::types::Uuid::max());
     }
 }

@@ -19,7 +19,7 @@ use signalbox_persistence::{
         CreateSessionCorruption, CreateSessionRepository, CreateSessionRepositoryError,
     },
     local_test_connection_options, migrate,
-    session::SessionRepository,
+    session::{SessionCorruption, SessionRepository, SessionRepositoryError},
     session_placement::{SessionPlacementRepository, SessionPlacementRepositoryOutcome},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -36,6 +36,8 @@ const UPDATE_FIXTURE_SESSION_ID_SEED: u128 = 0x20c;
 const UPDATE_FIXTURE_CREATION_COMMAND_ID_SEED: u128 = 0x10c;
 const UPDATE_FIXTURE_COMMAND_ID_SEED: u128 = 0x10d;
 const UPDATE_FIXTURE_RESULT_VERSION: u64 = 2;
+const UPDATE_FIXTURE_REPLACEMENT_PATH: &str = "projects.foo.session";
+const UPDATE_FIXTURE_CONFLICTING_REPLACEMENT_PATH: &str = "projects.foo.conflict";
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -115,6 +117,17 @@ fn recorded_applied_update(
         panic!("the placement update fixture must record an applied result")
     };
     applied
+}
+
+#[track_caller]
+fn assert_placement_provenance_corruption(
+    result: Result<Option<signalbox_domain::Session>, SessionRepositoryError>,
+) {
+    let Err(SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(reason))) = result
+    else {
+        panic!("corrupt placement provenance must fail the ordinary session load")
+    };
+    assert_eq!(reason, "session placement provenance receipt");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -443,7 +456,7 @@ async fn s36_inv012_update_handle_applies_replays_and_rejects_conflicting_reuse(
         command_id,
         session_id,
         SessionPlacementVersion::INITIAL,
-        scoped("projects.foo.session"),
+        scoped(UPDATE_FIXTURE_REPLACEMENT_PATH),
     );
     let repository = SessionPlacementRepository::new(pool.clone());
     let first = repository.handle(update.clone()).await?;
@@ -463,10 +476,59 @@ async fn s36_inv012_update_handle_applies_replays_and_rejects_conflicting_reuse(
                 command_id,
                 session_id,
                 SessionPlacementVersion::INITIAL,
-                scoped("projects.foo.conflict"),
+                scoped(UPDATE_FIXTURE_CONFLICTING_REPLACEMENT_PATH),
             ))
             .await?,
         SessionPlacementRepositoryOutcome::ConflictingReuse { command_id }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_ordinary_session_load_authenticates_complete_placement_history()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(UPDATE_FIXTURE_SESSION_ID_SEED);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(UPDATE_FIXTURE_CREATION_COMMAND_ID_SEED),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    let update_command_id = command(UPDATE_FIXTURE_COMMAND_ID_SEED);
+    SessionPlacementRepository::new(pool.clone())
+        .handle(UpdateSessionPlacement::new(
+            update_command_id,
+            session_id,
+            SessionPlacementVersion::INITIAL,
+            scoped(UPDATE_FIXTURE_REPLACEMENT_PATH),
+        ))
+        .await?;
+    sqlx::query("ALTER TABLE session_placement_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_placement_event
+            SET provenance_command_id = $2
+          WHERE session_id = $1 AND version = 1",
+    )
+    .bind(*session_id.as_uuid())
+    .bind(*update_command_id.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_placement_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert_placement_provenance_corruption(
+        SessionRepository::new(pool.clone())
+            .load_session(session_id)
+            .await,
     );
 
     pool.close().await;
