@@ -695,8 +695,6 @@ mod tests {
         let wait = registration
             .foreground_subject()
             .expect("foreground wait exists");
-        let phase = crate::ActiveTurnPhase::AwaitingChild { wait };
-        assert!(phase.retains_progressing_slot());
         assert_eq!(wait.awaiting_request(), registration.awaiting_request());
         assert_eq!(wait.spawning_request(), relation.spawning_request());
         assert_eq!(wait.child(), relation.child());

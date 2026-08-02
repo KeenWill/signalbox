@@ -1899,7 +1899,6 @@ impl ReconciliationMarker {
 pub enum ActiveTurnPhase {
     Running { current_attempt: CurrentTurnAttempt },
     AwaitingApproval { request: ToolRequestId },
-    AwaitingChild { wait: ChildWait },
     AwaitingRecoveryDecision {
         ambiguous_operations: NonEmptyIssuedOperationRefs,
         applied_interrupt: Option<AppliedInterruptProof>,

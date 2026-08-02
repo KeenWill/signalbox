@@ -330,11 +330,6 @@ pub enum ActiveTurnPhase {
         /// The request whose approval dependency remains durable.
         request: ToolRequestId,
     },
-    /// Orchestration waits for one exact delegated child result.
-    AwaitingChild {
-        /// The spawning request and child relation that retain the slot.
-        wait: crate::ChildWait,
-    },
     /// Orchestration waits on an exact nonempty ambiguity set.
     AwaitingRecoveryDecision {
         /// The operations still blocking turn-level disposition.
