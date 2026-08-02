@@ -4021,7 +4021,24 @@ where
         drop(pending.take());
         return write_import_rejection(writer, version, request_id, detail).await;
     }
-    if active_import.source.try_reserve_exact(chunk.len()).is_err() {
+    let required_capacity = usize::try_from(active_import.actual_size_bytes)
+        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    let declared_capacity = usize::try_from(active_import.declared_size_bytes)
+        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    let target_capacity = conversation_import_capacity_target(
+        active_import.source.capacity(),
+        required_capacity,
+        declared_capacity,
+        limit,
+    );
+    let additional_capacity = target_capacity
+        .checked_sub(active_import.source.len())
+        .ok_or(ProcessConnectionError::EncodeInvariant)?;
+    if active_import
+        .source
+        .try_reserve_exact(additional_capacity)
+        .is_err()
+    {
         drop(chunk);
         drop(pending.take());
         return write_error(
@@ -4043,6 +4060,26 @@ where
         },
     )
     .await
+}
+
+fn conversation_import_capacity_target(
+    current_capacity: usize,
+    required_capacity: usize,
+    declared_capacity: usize,
+    limit: usize,
+) -> usize {
+    let growth_ceiling = if required_capacity <= declared_capacity {
+        declared_capacity
+    } else {
+        limit
+    };
+    if required_capacity <= current_capacity {
+        return current_capacity;
+    }
+    current_capacity
+        .saturating_mul(2)
+        .max(required_capacity)
+        .min(growth_ceiling)
 }
 
 async fn handle_commit_conversation_import<Writer>(
@@ -12488,6 +12525,56 @@ context_window_tokens = 200000
                 commit_ambiguous: false,
             }
         );
+    }
+
+    #[test]
+    fn conversation_import_capacity_grows_geometrically_within_declared_and_configured_bounds() {
+        let chunk_capacity = 4;
+        let declared_capacity = chunk_capacity * 4;
+        let configured_capacity = declared_capacity * 2;
+        let first_capacity = super::conversation_import_capacity_target(
+            0,
+            chunk_capacity,
+            declared_capacity,
+            configured_capacity,
+        );
+        let second_capacity = super::conversation_import_capacity_target(
+            first_capacity,
+            chunk_capacity * 2,
+            declared_capacity,
+            configured_capacity,
+        );
+        let retained_capacity = super::conversation_import_capacity_target(
+            second_capacity,
+            chunk_capacity * 2 - 1,
+            declared_capacity,
+            configured_capacity,
+        );
+        let third_capacity = super::conversation_import_capacity_target(
+            retained_capacity,
+            chunk_capacity * 2 + 1,
+            declared_capacity,
+            configured_capacity,
+        );
+        let declared_bound = super::conversation_import_capacity_target(
+            third_capacity,
+            declared_capacity,
+            declared_capacity,
+            configured_capacity,
+        );
+        let configured_bound = super::conversation_import_capacity_target(
+            declared_bound,
+            declared_capacity + 1,
+            declared_capacity,
+            configured_capacity,
+        );
+
+        assert_eq!(first_capacity, chunk_capacity);
+        assert_eq!(second_capacity, chunk_capacity * 2);
+        assert_eq!(retained_capacity, second_capacity);
+        assert_eq!(third_capacity, declared_capacity);
+        assert_eq!(declared_bound, declared_capacity);
+        assert_eq!(configured_bound, configured_capacity);
     }
 
     #[tokio::test]
