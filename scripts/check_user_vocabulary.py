@@ -19,7 +19,7 @@ OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
 CROSS_FRAGMENT_OWNER = re.compile(r"(?:Unknown|Known)(?:Error|Rejection)")
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 REVIEWED_ALLOWLIST_SHA256 = (
-    "7495abebc9899694e27405e961b9fafe65612dd787c81f61b4f69b6cd63c922a"
+    "21f22ef1aeadcefb6e99940ebb2d9f1395f5e1538ab315bd3063996b21da4a09"
 )
 
 
@@ -423,6 +423,7 @@ ALLOWLIST = (
         "legacy PostgreSQL user encodings",
         re.compile(
             r"^(?:apps/signalboxd/tests/offline_tool_loop[.]rs|"
+            r"crates/persistence/migrations/202608020018_session_delegation[.]sql|"
             r"crates/persistence/src/(?:create_session|"
             r"create_session_from_imported_frontier|model_execution|session|"
             r"session_metadata|submit_input|tool_loop)[.]rs|"
