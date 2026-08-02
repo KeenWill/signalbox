@@ -183,13 +183,17 @@ impl CredentialScrubber {
                             result_hextets
                                 .iter()
                                 .any(|component| component.contains(&fragment))
-                        }) || canonicalized_ipv6_fragments(variant)
-                            .into_iter()
-                            .any(|fragment| {
-                                result_components
-                                    .windows(fragment.len())
-                                    .any(|window| window == fragment)
+                        }) || canonicalized_ipv6_separator_bound_hextet_text_fragment(variant)
+                            .is_some_and(|fragment| {
+                                unicode_case_insensitive_contains(host, &fragment)
                             })
+                            || canonicalized_ipv6_fragments(variant)
+                                .into_iter()
+                                .any(|fragment| {
+                                    result_components
+                                        .windows(fragment.len())
+                                        .any(|window| window == fragment)
+                                })
                             || canonicalized_ipv4_tail_fragments(variant).into_iter().any(
                                 |fragment| {
                                     result_octets
