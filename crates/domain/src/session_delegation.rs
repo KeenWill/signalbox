@@ -5,8 +5,8 @@ use std::num::NonZeroU64;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DelegationMessageId, DurableCommandId, GoalGeneration, NonEmptyUnicodeText, SessionId,
-    ToolRequest, ToolRequestId, TurnId,
+    DelegationMessageId, DurableCommandId, GoalGeneration, NonEmptyUnicodeText,
+    SessionCreationProvenance, SessionId, ToolRequest, ToolRequestId, TurnId,
 };
 
 const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
@@ -1118,6 +1118,11 @@ impl SessionDelegation {
 
     pub fn events(&self) -> &[DelegationEvent] {
         &self.events
+    }
+
+    /// Returns the child session's immutable delegated/no-ancestry provenance.
+    pub const fn child_creation_provenance(&self) -> SessionCreationProvenance {
+        SessionCreationProvenance::delegated(self.spawning_request)
     }
 
     pub fn register_wait(
@@ -2383,9 +2388,10 @@ mod aggregate_tests {
         assert_standard_error::<DelegationTransitionError>();
     }
 
-    /// S18 / INV-010: spawn retains the exact sealed request facts.
+    /// S18 / INV-003 / INV-010: spawn retains the exact sealed request facts
+    /// and derives delegated creation without ancestry.
     #[test]
-    fn s18_inv010_aggregate_spawn_retains_policy_task_and_provenance() {
+    fn s18_inv003_inv010_aggregate_spawn_retains_policy_task_and_provenance() {
         let policy = ChildRelationshipPolicy::Bound {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
@@ -2401,6 +2407,14 @@ mod aggregate_tests {
         assert_eq!(relation.task(), &content(TEST_TASK));
         assert_eq!(relation.policy(), policy);
         assert_eq!(relation.events()[0].ordinal().get(), 1);
+        assert_eq!(
+            relation.child_creation_provenance().cause(),
+            crate::SessionCreationCause::Delegated { spawning_request }
+        );
+        assert_eq!(
+            relation.child_creation_provenance().ancestry(),
+            crate::TranscriptAncestry::None
+        );
     }
 
     /// S18 / INV-010: a session cannot delegate to itself, and rejection is lossless.

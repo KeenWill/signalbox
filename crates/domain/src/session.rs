@@ -28,18 +28,11 @@ enum SessionCreationDefaults {
 
 /// Why one session exists.
 ///
-/// The first implementable cause is user-initiated. Application-initiated,
-/// scheduled, delegated, and any other causes are reserved extension examples
-/// rather than valid baseline values: the spec revision that enables one
+/// User-initiated and delegated causes are implemented. Application-initiated,
+/// scheduled, and any other causes remain reserved extension examples rather
+/// than valid baseline values: the specification revision that enables one
 /// must add a typed variant carrying the exact durable initiating domain
-/// identity, so this type contains no uninhabitable placeholders. S18 /
-/// INV-003: a reserved example is not constructible:
-///
-/// ```compile_fail
-/// use signalbox_domain::SessionCreationCause;
-///
-/// let _ = SessionCreationCause::Delegated;
-/// ```
+/// identity, so this type contains no uninhabitable placeholders.
 ///
 /// and an unstructured string is not a substitute for a typed variant:
 ///
@@ -62,6 +55,11 @@ enum SessionCreationDefaults {
 pub enum SessionCreationCause {
     /// The user started this conversation.
     UserInitiated,
+    /// One exact logical tool request spawned this delegated child.
+    Delegated {
+        /// The parent work to which the child must return its result.
+        spawning_request: crate::ToolRequestId,
+    },
 }
 
 /// Identifies one exact immutable source boundary in semantic history.
@@ -181,6 +179,14 @@ impl SessionCreationProvenance {
     /// Pairs the two required independent creation facts.
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self {
         Self { cause, ancestry }
+    }
+
+    /// Creates delegated provenance without inferring transcript ancestry.
+    pub const fn delegated(spawning_request: crate::ToolRequestId) -> Self {
+        Self {
+            cause: SessionCreationCause::Delegated { spawning_request },
+            ancestry: TranscriptAncestry::None,
+        }
     }
 
     /// Returns why this session exists.
@@ -914,7 +920,7 @@ impl SessionReconstitutionInput {
         ) {
             Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
         } else {
-            None
+            session_provenance_failure(self.provenance)
         };
         if let Some(failure) = failure {
             return Err(SessionReconstitutionError {
@@ -933,6 +939,26 @@ impl SessionReconstitutionInput {
             ),
             current_placement: self.current_placement,
         })
+    }
+}
+
+const fn session_provenance_failure(
+    provenance: SessionCreationProvenance,
+) -> Option<SessionReconstitutionFailure> {
+    match (provenance.cause(), provenance.ancestry()) {
+        (
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None | TranscriptAncestry::SingleSource { .. },
+        )
+        | (SessionCreationCause::Delegated { .. }, TranscriptAncestry::None) => None,
+        (SessionCreationCause::UserInitiated, TranscriptAncestry::ImportedConversation { .. }) => {
+            Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
+        }
+        (
+            SessionCreationCause::Delegated { .. },
+            TranscriptAncestry::SingleSource { .. }
+            | TranscriptAncestry::ImportedConversation { .. },
+        ) => Some(SessionReconstitutionFailure::DelegatedAncestryMismatch),
     }
 }
 
@@ -956,6 +982,8 @@ pub enum SessionReconstitutionFailure {
     /// Imported ancestry requires the separate exact-prefix seed
     /// reconstitution seam.
     ImportedSessionSeedUnavailable,
+    /// Delegated creation is independently constrained to no ancestry.
+    DelegatedAncestryMismatch,
 }
 
 /// A failed current-session reconstitution retaining every typed input
@@ -1050,6 +1078,8 @@ pub enum CreateSessionPreparationFailure {
     /// Trusted production and validation of a source transcript frontier is
     /// not available in this slice.
     TranscriptAncestryUnavailable,
+    /// Delegated creation belongs to the spawning-request transaction family.
+    DelegatedCreationRequiresSpawn,
 }
 
 /// A failed pre-commit preparation retaining every supplied input unchanged.
@@ -1107,6 +1137,13 @@ impl CreateSession {
                     session,
                     command: Box::new(self),
                     failure: CreateSessionPreparationFailure::TranscriptAncestryUnavailable,
+                });
+            }
+            (SessionCreationCause::Delegated { .. }, _) => {
+                return Err(CreateSessionPreparationError {
+                    session,
+                    command: Box::new(self),
+                    failure: CreateSessionPreparationFailure::DelegatedCreationRequiresSpawn,
                 });
             }
         }
@@ -1324,6 +1361,12 @@ impl CreateSessionReconstitutionInput {
                     CreateSessionReconstitutionFailure::TranscriptAncestryUnavailable,
                 ));
             }
+            (SessionCreationCause::Delegated { .. }, _) => {
+                return Err(fail(
+                    self,
+                    CreateSessionReconstitutionFailure::DelegatedCreationRequiresSpawn,
+                ));
+            }
         }
         if self.defaults_version != crate::SessionConfigurationDefaultsVersion::first() {
             return Err(fail(
@@ -1371,6 +1414,8 @@ pub enum CreateSessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// Trusted source-frontier production is unavailable for this slice.
     TranscriptAncestryUnavailable,
+    /// Delegated creation belongs to its distinct spawning-request family.
+    DelegatedCreationRequiresSpawn,
     /// Session creation did not establish defaults version one.
     DefaultsVersionIsNotFirst,
     /// The stored initial defaults differ from the canonical command payload.
@@ -1456,7 +1501,7 @@ mod tests {
     use crate::imported_conversation::test_imported_frontier;
     use crate::test_support::{
         command_id, context_frontier_id, direct, imported_conversation_id,
-        imported_transcript_entry_id, session_id,
+        imported_transcript_entry_id, session_id, tool_request_id,
     };
     use crate::{
         ImportedTranscriptPosition, ModelSelectionRequest, SessionConfigurationDefaults,
@@ -1474,6 +1519,11 @@ mod tests {
             SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         )
+    }
+
+    /// Canonical spawning-request identity for delegated-session fixtures.
+    fn delegated_spawning_request() -> crate::ToolRequestId {
+        tool_request_id(2)
     }
 
     fn template_provenance(name: &str, digest_byte: u8) -> SessionTemplateProvenance {
@@ -1834,8 +1884,70 @@ mod tests {
         failure
     }
 
-    /// S01 / INV-002 / INV-008: every requested/stored identity, defaults pointer/record identity, placement
-    /// pointer/event identity, or selected-version mismatch fails closed and
+    /// S18 / INV-003: delegated construction fixes exact cause and no ancestry.
+    #[test]
+    fn s18_inv003_delegated_helper_constructs_no_ancestry() {
+        let spawning_request = delegated_spawning_request();
+        let provenance = SessionCreationProvenance::delegated(spawning_request);
+
+        assert_eq!(
+            provenance.cause(),
+            SessionCreationCause::Delegated { spawning_request }
+        );
+        assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
+    }
+
+    /// S18 / INV-003: delegated current sessions reject native ancestry.
+    #[test]
+    fn s18_inv003_current_session_rejects_delegated_native_ancestry() {
+        let spawning_request = delegated_spawning_request();
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated { spawning_request },
+            TranscriptAncestry::SingleSource {
+                source_session: session_id(3),
+                source_frontier: test_frontier(4),
+            },
+        );
+        let failure = current_session_reconstitution_failure(CurrentSessionFacts {
+            provenance,
+            ..CurrentSessionFacts::matching(session_id(1))
+        });
+
+        assert_eq!(
+            failure,
+            SessionReconstitutionFailure::DelegatedAncestryMismatch
+        );
+    }
+
+    /// S18 / INV-003: delegated current sessions reject imported ancestry.
+    #[test]
+    fn s18_inv003_current_session_rejects_delegated_imported_ancestry() {
+        let spawning_request = delegated_spawning_request();
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated { spawning_request },
+            TranscriptAncestry::ImportedConversation {
+                source_frontier: test_imported_frontier(
+                    imported_conversation_id(3),
+                    imported_transcript_entry_id(4),
+                    ImportedTranscriptPosition::first(),
+                ),
+                relationship: ImportedSessionRelationship::Fork,
+            },
+        );
+        let failure = current_session_reconstitution_failure(CurrentSessionFacts {
+            provenance,
+            ..CurrentSessionFacts::matching(session_id(1))
+        });
+
+        assert_eq!(
+            failure,
+            SessionReconstitutionFailure::DelegatedAncestryMismatch
+        );
+    }
+
+    /// S01 / INV-002 / INV-008: every requested/stored identity, defaults
+    /// pointer/record identity, placement pointer/event identity, or
+    /// selected-version mismatch fails closed and
     /// returns the complete unchanged typed projection.
     #[test]
     fn s01_inv002_inv008_current_session_rejects_cross_wired_facts() {
@@ -2248,6 +2360,26 @@ mod tests {
             failure,
             CreateSessionPreparationFailure::TranscriptAncestryUnavailable
         );
+    }
+
+    /// S18 / INV-003: ordinary CreateSession cannot forge the delegated
+    /// creation family owned by the spawning-request transaction.
+    #[test]
+    fn s18_inv003_create_session_rejects_delegated_creation() {
+        let provenance = SessionCreationProvenance::delegated(delegated_spawning_request());
+        let create = CreateSession::new(command_id(3), provenance, defaults(4));
+
+        let error = create
+            .prepare(session_id(5))
+            .expect_err("ordinary creation cannot claim delegated provenance");
+
+        assert_eq!(
+            error.failure(),
+            CreateSessionPreparationFailure::DelegatedCreationRequiresSpawn
+        );
+        assert_eq!(error.session(), session_id(5));
+        assert_eq!(error.command().command_id(), command_id(3));
+        assert_eq!(error.command().provenance(), provenance);
     }
 
     /// S01 / INV-003 / INV-008 / INV-012: complete matching durable facts

@@ -19,11 +19,12 @@ use crate::create_session_from_imported_frontier::{
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     defaults_version_from_numeric, session_id_from_uuid, session_id_to_uuid,
-    session_placement_event_kind_from_str,
+    session_placement_event_kind_from_str, tool_request_id_from_uuid,
 };
 
 // Applied migrations freeze this legacy storage spelling.
 const USER_INITIATED: &str = "owner_initiated";
+const DELEGATED: &str = "delegated";
 const NO_ANCESTRY: &str = "none";
 
 /// A durable shape that cannot reconstruct one complete current session.
@@ -170,6 +171,7 @@ pub(crate) async fn load_session_from_connection(
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
+            s.spawning_tool_request_id AS stored_spawning_request_id,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             creation.storage_version AS create_storage_version,
@@ -301,7 +303,11 @@ fn decode_complete(
         );
     }
     let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);
-    let provenance = decode_provenance(required(&row, "stored_cause")?, ancestry)?;
+    let provenance = decode_provenance(
+        required(&row, "stored_cause")?,
+        ancestry,
+        row.try_get("stored_spawning_request_id")?,
+    )?;
     let template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
         row.try_get("stored_template_digest")?,
@@ -500,18 +506,8 @@ fn decode_ordinal(
 fn decode_provenance(
     cause: String,
     ancestry: String,
+    spawning_request: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, SessionRepositoryError> {
-    // The current migration admits only the baseline storage spellings. This
-    // adapter-level representation check does not narrow the domain seam:
-    // `SessionReconstitutionInput` continues to accept any future provenance
-    // variant once its owning migration supplies a checked mapping.
-    if cause != USER_INITIATED {
-        return Err(SessionCorruption::Unsupported {
-            field: "creation cause",
-            value: cause,
-        }
-        .into());
-    }
     if ancestry != NO_ANCESTRY {
         return Err(SessionCorruption::Unsupported {
             field: "ancestry kind",
@@ -519,10 +515,23 @@ fn decode_provenance(
         }
         .into());
     }
-    Ok(SessionCreationProvenance::new(
-        SessionCreationCause::UserInitiated,
-        TranscriptAncestry::None,
-    ))
+    match (cause.as_str(), spawning_request) {
+        (USER_INITIATED, None) => Ok(SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        )),
+        (DELEGATED, Some(request)) => Ok(SessionCreationProvenance::delegated(
+            tool_request_id_from_uuid(request),
+        )),
+        (USER_INITIATED | DELEGATED, _) => {
+            Err(SessionCorruption::Inconsistent("creation cause provenance").into())
+        }
+        _ => Err(SessionCorruption::Unsupported {
+            field: "creation cause",
+            value: cause,
+        }
+        .into()),
+    }
 }
 
 fn decode_selection(
