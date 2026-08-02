@@ -67,6 +67,24 @@ fn web_search_error_body_reads_nested_typed_detail() {
     assert!(!detail.as_str().contains(SYNTHETIC_KEY));
 }
 
+/// INV-035: credential removal cannot turn an entity-escaped provider
+/// rejection detail into markup-bearing failure evidence.
+#[test]
+fn web_search_rejects_error_detail_collision_with_entity_escape_syntax() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": {"detail": FIXTURE_LITERAL_ENTITY_TITLE},
+    }))
+    .expect("fixture provider error encodes");
+    let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
+        .expect("fixture error body is bounded");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        ENTITY_ESCAPE_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(provider_error_detail(error, &scrubber), Ok(None));
+}
+
 /// INV-035: an unparsed provider error body contributes no text to failure
 /// evidence, independently of whether it collides with the credential.
 #[test]

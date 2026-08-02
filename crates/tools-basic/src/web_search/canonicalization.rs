@@ -107,6 +107,61 @@ pub(super) fn canonicalized_ipv4_component_fragments(value: &str) -> impl Iterat
     fragments.into_iter()
 }
 
+pub(super) fn legacy_ipv4_component_contains(value: &str, address: std::net::Ipv4Addr) -> bool {
+    let octets = address.octets();
+    let whole_address = u32::from_be_bytes(octets);
+    let final_three = u32::from_be_bytes([0, octets[1], octets[2], octets[3]]);
+    let final_two = u32::from_be_bytes([0, 0, octets[2], octets[3]]);
+    let component_values = [
+        whole_address,
+        u32::from(octets[0]),
+        final_three,
+        u32::from(octets[0]),
+        u32::from(octets[1]),
+        final_two,
+        u32::from(octets[0]),
+        u32::from(octets[1]),
+        u32::from(octets[2]),
+        u32::from(octets[3]),
+    ];
+    normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
+        component_values
+            .iter()
+            .any(|component| component.to_string().contains(&fragment))
+    }) || normalized_radix_fragment(value, 8, None).is_some_and(|fragment| {
+        component_values
+            .iter()
+            .any(|component| format!("{component:o}").contains(&fragment))
+    }) || normalized_radix_fragment(value, 16, Some("0x")).is_some_and(|fragment| {
+        component_values
+            .iter()
+            .any(|component| format!("{component:x}").contains(&fragment))
+    })
+}
+
+pub(super) fn normalized_radix_fragment(
+    value: &str,
+    radix: u32,
+    prefix: Option<&str>,
+) -> Option<String> {
+    let digits = prefix
+        .and_then(|prefix| {
+            value
+                .strip_prefix(prefix)
+                .or_else(|| value.strip_prefix(&prefix.to_ascii_uppercase()))
+        })
+        .unwrap_or(value);
+    if digits.is_empty() || !digits.chars().all(|character| character.is_digit(radix)) {
+        return None;
+    }
+    let normalized = digits.trim_start_matches('0');
+    Some(if normalized.is_empty() {
+        String::from("0")
+    } else {
+        normalized.to_ascii_lowercase()
+    })
+}
+
 pub(super) fn canonicalized_ipv4_fragment(
     host: &str,
     positions: std::ops::Range<usize>,

@@ -339,12 +339,43 @@ fn assert_independent_component_absence(
     component: &str,
     credential: &CredentialReflection,
 ) -> TestCaseResult {
-    let component = component.to_ascii_lowercase();
+    let component = independently_decode_typed_entity_escape(component).to_ascii_lowercase();
     let credential_spelling = credential.credential.to_ascii_lowercase();
     let reflected_spelling = credential.reflection.to_ascii_lowercase();
     prop_assert!(!component.contains(&credential_spelling));
     prop_assert!(!component.contains(&reflected_spelling));
     Ok(())
+}
+
+fn independently_decode_typed_entity_escape(component: &str) -> String {
+    let mut decoded = String::with_capacity(component.len());
+    let mut remaining = component;
+    while !remaining.is_empty() {
+        if let Some(suffix) = remaining.strip_prefix("&amp;") {
+            decoded.push('&');
+            remaining = suffix;
+        } else if let Some(suffix) = remaining.strip_prefix("&lt;") {
+            decoded.push('<');
+            remaining = suffix;
+        } else if let Some(suffix) = remaining.strip_prefix("&gt;") {
+            decoded.push('>');
+            remaining = suffix;
+        } else if let Some(suffix) = remaining.strip_prefix("&quot;") {
+            decoded.push('"');
+            remaining = suffix;
+        } else if let Some(suffix) = remaining.strip_prefix("&#39;") {
+            decoded.push('\'');
+            remaining = suffix;
+        } else {
+            let character = remaining
+                .chars()
+                .next()
+                .expect("non-empty component has a first character");
+            decoded.push(character);
+            remaining = &remaining[character.len_utf8()..];
+        }
+    }
+    decoded
 }
 
 fn percent_encode(value: &str) -> String {

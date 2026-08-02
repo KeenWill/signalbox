@@ -153,11 +153,12 @@ impl CredentialScrubber {
                 std::net::IpAddr::V4(result_ipv4) => {
                     let result_components = result_ipv4.octets();
                     return self.reversible_variants().any(|variant| {
-                        canonicalized_ipv4_component_fragments(variant).any(|fragment| {
-                            result_components
-                                .windows(fragment.len())
-                                .any(|window| window == fragment)
-                        })
+                        legacy_ipv4_component_contains(variant, result_ipv4)
+                            || canonicalized_ipv4_component_fragments(variant).any(|fragment| {
+                                result_components
+                                    .windows(fragment.len())
+                                    .any(|window| window == fragment)
+                            })
                     });
                 }
                 std::net::IpAddr::V6(result_ipv6) => {

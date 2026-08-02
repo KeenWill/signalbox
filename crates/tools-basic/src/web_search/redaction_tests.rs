@@ -299,6 +299,30 @@ fn web_search_redacts_semicolonless_named_reference_in_result_text() {
     assert!(!content.contains(SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE));
 }
 
+/// INV-035: an unknown named-reference prefix cannot hide a later recognized
+/// reference from credential decoding at a nested ampersand.
+#[test]
+fn web_search_redacts_recognized_reference_after_nested_ampersand() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(NESTED_NAMED_HTML_COLLISION_VALUE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("nested named-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        SEMICOLONLESS_NAMED_HTML_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    let evidence = success_evidence(response, &scrubber).expect("response is safely redacted");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(SEMICOLONLESS_NAMED_HTML_COLLISION_KEY));
+    assert!(!content.contains(NESTED_NAMED_HTML_COLLISION_VALUE));
+}
+
 /// INV-035: credential scrubbing cannot turn a checked result title into
 /// an empty title in completed evidence.
 #[test]

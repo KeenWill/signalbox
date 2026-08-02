@@ -23,6 +23,10 @@ pub(super) const FIXTURE_HEX_AFFIX_IPV4_RESULT_URL: &str = "http://0x7f.0.0.1/";
 
 pub(super) const FIXTURE_OCTAL_AFFIX_IPV4_RESULT_URL: &str = "http://0177.0.0.1/";
 
+pub(super) const FIXTURE_HEX_SUBSTRING_IPV4_RESULT_URL: &str = "http://0x7f000001/";
+
+pub(super) const FIXTURE_OCTAL_SUBSTRING_IPV4_RESULT_URL: &str = "http://017700000001/";
+
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
 
 pub(super) const FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL: &str = "https://[0db8::1]/";
@@ -126,6 +130,10 @@ pub(super) const URL_EMBEDDED_HEX_IPV4_COLLISION_KEY: &str = "7f";
 
 pub(super) const URL_EMBEDDED_OCTAL_IPV4_COLLISION_KEY: &str = "177";
 
+pub(super) const URL_HEX_DIGIT_SUBSTRING_COLLISION_KEY: &str = "f00";
+
+pub(super) const URL_OCTAL_DIGIT_SUBSTRING_COLLISION_KEY: &str = "700";
+
 pub(super) const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
 
 pub(super) const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
@@ -197,6 +205,8 @@ pub(super) const SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE: &str = "&#62";
 pub(super) const SEMICOLONLESS_NAMED_HTML_COLLISION_KEY: &str = "<";
 
 pub(super) const SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE: &str = "&lt";
+
+pub(super) const NESTED_NAMED_HTML_COLLISION_VALUE: &str = "&junk&lt;";
 
 pub(super) const RUST_DEBUG_UNICODE_COLLISION_KEY: &str = r"\u{85}";
 

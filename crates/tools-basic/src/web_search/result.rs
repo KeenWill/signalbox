@@ -10,6 +10,9 @@ pub(super) const MAX_RETURNED_RESULTS: usize = 10;
 
 pub(super) const MAX_PROVIDER_RESPONSE_BYTES: usize = 512 * 1024;
 
+pub(super) const MAX_ESCAPED_PROVIDER_ERROR_DETAIL_BYTES: usize =
+    MAX_PROVIDER_RESPONSE_BYTES * "&quot;".len();
+
 pub(super) const MAX_RESULT_TITLE_BYTES: usize = 2 * 1024;
 
 pub(super) const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
@@ -345,6 +348,8 @@ struct ProviderErrorDetail {
 
 fn parsed_provider_error_detail(body: &[u8]) -> Option<String> {
     let envelope = serde_json::from_slice::<ProviderErrorEnvelope>(body).ok()?;
-    let maximum_escaped_bytes = MAX_PROVIDER_RESPONSE_BYTES.checked_mul("&quot;".len())?;
-    entity_escape(&envelope.error.detail, maximum_escaped_bytes)
+    entity_escape(
+        &envelope.error.detail,
+        MAX_ESCAPED_PROVIDER_ERROR_DETAIL_BYTES,
+    )
 }

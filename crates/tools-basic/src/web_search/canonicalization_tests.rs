@@ -718,6 +718,52 @@ fn web_search_rejects_credential_inside_octal_ipv4_component() {
     );
 }
 
+/// INV-035: a credential embedded inside the hexadecimal digits of a legacy
+/// IPv4 component cannot survive canonical host serialization.
+#[test]
+fn web_search_rejects_credential_substring_inside_hexadecimal_ipv4_digits() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_HEX_SUBSTRING_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("hexadecimal-substring IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_HEX_DIGIT_SUBSTRING_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential embedded inside the octal digits of a legacy IPv4
+/// component cannot survive canonical host serialization.
+#[test]
+fn web_search_rejects_credential_substring_inside_octal_ipv4_digits() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_OCTAL_SUBSTRING_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("octal-substring IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_OCTAL_DIGIT_SUBSTRING_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-octet final IPv4 component is preserved as one
 /// credential-derived fragment when compared with a canonical result host.
 #[test]

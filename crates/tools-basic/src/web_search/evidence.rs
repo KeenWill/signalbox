@@ -93,11 +93,14 @@ pub(super) fn provider_error_detail(
     error: WebSearchProviderError,
     scrubber: &CredentialScrubber,
 ) -> Result<Option<ToolExecutionErrorDetail>, WebSearchExecutorError> {
-    let redacted = error
-        .detail
-        .as_deref()
-        .map(|detail| scrubber.redact_text(detail))
-        .unwrap_or_default();
+    let redacted = match error.detail.as_deref() {
+        Some(detail) => redact_entity_escaped_component(
+            detail,
+            MAX_ESCAPED_PROVIDER_ERROR_DETAIL_BYTES,
+            scrubber,
+        )?,
+        None => String::new(),
+    };
     let normalized = redacted
         .chars()
         .map(|character| {

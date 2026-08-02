@@ -58,11 +58,30 @@ pub(super) fn decode_html_character_references(text: &str) -> Option<DecodedText
     while let Some(reference_start) = remaining.find('&') {
         decoded.push_str(&remaining[..reference_start]);
         let reference = &remaining[reference_start..];
-        let Some(relative_end) = reference
+        let relative_end = reference
             .bytes()
             .take(MAX_CHARACTER_REFERENCE_BYTES)
-            .position(|byte| byte == b';')
-        else {
+            .position(|byte| byte == b';');
+        let nested_reference = reference
+            .bytes()
+            .take(MAX_CHARACTER_REFERENCE_BYTES)
+            .skip(1)
+            .position(|byte| byte == b'&')
+            .map(|index| index + 1);
+        if let Some(nested) =
+            nested_reference.filter(|nested| relative_end.is_none_or(|end| *nested < end))
+        {
+            let candidate = &reference[..nested];
+            if numeric_character_reference_prefix(candidate)
+                || legacy_named_character_reference_prefix(candidate)
+            {
+                return None;
+            }
+            decoded.push_str(candidate);
+            remaining = &reference[nested..];
+            continue;
+        }
+        let Some(relative_end) = relative_end else {
             if numeric_character_reference_prefix(reference)
                 || legacy_named_character_reference_prefix(reference)
             {
