@@ -117,62 +117,6 @@ impl CredentialScrubber {
     }
 
     fn url_contains_collision_variants(&self, text: &str, url_variants: &[String]) -> bool {
-        if url_variants.iter().any(|variant| {
-            unicode_case_insensitive_contains(text, variant)
-                || encoded_contains_credential(text, variant)
-        }) {
-            return true;
-        }
-        if url_variants.iter().any(|variant| {
-            let slash_normalized = variant.replace('\\', "/");
-            slash_normalized != variant.as_str()
-                && (unicode_case_insensitive_contains(text, &slash_normalized)
-                    || encoded_contains_credential(text, &slash_normalized))
-        }) {
-            return true;
-        }
-        if url_variants.iter().any(|variant| {
-            normalize_url_path_dot_segments(variant).is_some_and(|normalized| {
-                unicode_case_insensitive_contains(text, &normalized)
-                    || encoded_contains_credential(text, &normalized)
-            })
-        }) {
-            return true;
-        }
-        if url_variants.iter().any(|variant| {
-            canonicalized_url_port_fragment(variant).is_some_and(|normalized| {
-                unicode_case_insensitive_contains(text, &normalized)
-                    || encoded_contains_credential(text, &normalized)
-            })
-        }) {
-            return true;
-        }
-        if url_variants.iter().any(|variant| {
-            canonicalized_authority_port_zero_fragment(variant).is_some_and(|normalized| {
-                unicode_case_insensitive_contains(text, &normalized)
-                    || encoded_contains_credential(text, &normalized)
-            })
-        }) {
-            return true;
-        }
-        if url_variants.iter().any(|variant| {
-            canonicalized_port_path_zero_fragments(variant)
-                .iter()
-                .any(|normalized| {
-                    unicode_case_insensitive_contains(text, normalized)
-                        || encoded_contains_credential(text, normalized)
-                })
-        }) {
-            return true;
-        }
-        if url_variants.iter().any(|variant| {
-            canonicalized_complete_url(variant).is_some_and(|normalized| {
-                unicode_case_insensitive_contains(text, &normalized)
-                    || encoded_contains_credential(text, &normalized)
-            })
-        }) {
-            return true;
-        }
         let Ok(url) = Url::parse(text) else {
             return true;
         };
@@ -181,22 +125,15 @@ impl CredentialScrubber {
             "https" => 443,
             _ => return true,
         };
-        if url_variants.iter().any(|variant| {
-            removed_default_port_fragment(variant, default_port).is_some_and(|fragment| {
-                unicode_case_insensitive_contains(text, &fragment)
-                    || encoded_contains_credential(text, &fragment)
-            })
-        }) {
+        let mut url_variants = url_variants.to_vec();
+        if extend_url_collision_variants(&mut url_variants, default_port, url.port().is_some()) {
             return true;
         }
-        if url.port().is_some()
-            && url_variants.iter().any(|variant| {
-                discarded_port_zero_prefix_context(variant).is_some_and(|retained_context| {
-                    retained_context.is_empty()
-                        || unicode_case_insensitive_contains(text, retained_context)
-                })
-            })
-        {
+        let url_variants = url_variants.as_slice();
+        if url_variants.iter().any(|variant| {
+            unicode_case_insensitive_contains(text, variant)
+                || encoded_contains_credential(text, variant)
+        }) {
             return true;
         }
         if url_variants
@@ -313,6 +250,11 @@ impl CredentialScrubber {
                 {
                     retain_url_collision_variant(&mut variants, retained);
                 }
+                if removal_facts.empty_port
+                    && let Some(retained) = removed_empty_port_delimiter_fragment(&variant)
+                {
+                    retain_url_collision_variant(&mut variants, &retained);
+                }
                 if removal_facts.query
                     && let Some((retained, _)) = variant.split_once('?')
                 {
@@ -334,6 +276,45 @@ fn retain_url_collision_variant(variants: &mut Vec<String>, candidate: &str) {
     if !candidate.is_empty() && !variants.iter().any(|retained| retained == candidate) {
         variants.push(String::from(candidate));
     }
+}
+
+fn extend_url_collision_variants(
+    variants: &mut Vec<String>,
+    default_port: u16,
+    result_has_port: bool,
+) -> bool {
+    let mut inspected = 0;
+    while inspected < variants.len() {
+        let variant = variants[inspected].clone();
+        let slash_normalized = variant.replace('\\', "/");
+        retain_url_collision_variant(variants, &slash_normalized);
+        if let Some(normalized) = normalize_url_path_dot_segments(&variant) {
+            retain_url_collision_variant(variants, &normalized);
+        }
+        if let Some(normalized) = canonicalized_url_port_fragment(&variant) {
+            retain_url_collision_variant(variants, &normalized);
+        }
+        if let Some(normalized) = canonicalized_authority_port_zero_fragment(&variant) {
+            retain_url_collision_variant(variants, &normalized);
+        }
+        for normalized in canonicalized_port_path_zero_fragments(&variant) {
+            retain_url_collision_variant(variants, &normalized);
+        }
+        if let Some(normalized) = canonicalized_complete_url(&variant) {
+            retain_url_collision_variant(variants, &normalized);
+        }
+        if let Some(normalized) = removed_default_port_fragment(&variant, default_port) {
+            retain_url_collision_variant(variants, &normalized);
+        }
+        if result_has_port && let Some(retained) = discarded_port_zero_prefix_context(&variant) {
+            if retained.is_empty() {
+                return true;
+            }
+            retain_url_collision_variant(variants, retained);
+        }
+        inspected += 1;
+    }
+    false
 }
 
 pub(super) fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {

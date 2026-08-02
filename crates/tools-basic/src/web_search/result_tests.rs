@@ -79,6 +79,20 @@ fn web_search_result_preserves_canonicalizable_origin_url() {
     assert_eq!(result.url(), FIXTURE_CANONICAL_ORIGIN_RESULT_URL);
 }
 
+/// Source-authority fact extraction admits the parser's scheme-relative
+/// Unicode URL without slicing through a multibyte character.
+#[test]
+fn web_search_result_preprocesses_scheme_relative_unicode_url() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_SCHEME_RELATIVE_UNICODE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("scheme-relative Unicode fixture URL is admitted");
+
+    assert_eq!(result.url(), FIXTURE_CANONICAL_UNICODE_RESULT_URL);
+}
+
 /// INV-035: result URL user information is discarded by the typed parser and
 /// cannot reach tool evidence.
 #[test]
