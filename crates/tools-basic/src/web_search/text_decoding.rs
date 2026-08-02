@@ -98,6 +98,9 @@ pub(super) fn decode_html_character_references(text: &str) -> Option<DecodedText
                 changed = true;
             }
             None if entity.starts_with('#') => return None,
+            None if prefixed_legacy_named_character_reference(&reference[..relative_end + 1]) => {
+                return None;
+            }
             None => decoded.push_str(&reference[..relative_end + 1]),
         }
         remaining = &reference[relative_end + 1..];
@@ -139,6 +142,18 @@ pub(super) fn legacy_named_character_reference_prefix(reference: &str) -> bool {
     LEGACY_SEMICOLONLESS_HTML_REFERENCES
         .iter()
         .any(|legacy| named.starts_with(legacy))
+}
+
+fn prefixed_legacy_named_character_reference(reference: &str) -> bool {
+    let Some(named) = reference
+        .strip_prefix('&')
+        .and_then(|named| named.strip_suffix(';'))
+    else {
+        return false;
+    };
+    LEGACY_SEMICOLONLESS_HTML_REFERENCES
+        .iter()
+        .any(|legacy| named.starts_with(legacy) && named.len() > legacy.len())
 }
 
 pub(super) fn unicode_case_insensitive_contains(haystack: &str, needle: &str) -> bool {

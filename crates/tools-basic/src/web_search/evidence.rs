@@ -147,20 +147,13 @@ pub(super) fn detail_after_redaction(
         }
     }
 
-    let boundaries = detail
-        .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(detail.len()))
-        .collect::<Vec<_>>();
     let mut first_candidate = 1;
-    let mut last_candidate = boundaries.len().saturating_sub(1);
+    let mut last_candidate = detail.len().saturating_sub(1);
     let mut admitted = None;
     while first_candidate <= last_candidate {
         let candidate_index = first_candidate + (last_candidate - first_candidate) / 2;
-        let candidate = format!(
-            "{}{TRUNCATION_SUFFIX}",
-            &detail[..boundaries[candidate_index]]
-        );
+        let candidate_boundary = prior_char_boundary(&detail, candidate_index);
+        let candidate = format!("{}{TRUNCATION_SUFFIX}", &detail[..candidate_boundary]);
         match ToolExecutionErrorDetail::try_new(candidate) {
             Ok(detail) => {
                 admitted = Some(detail);
@@ -179,4 +172,12 @@ pub(super) fn detail_after_redaction(
         }
     }
     admitted.ok_or(WebSearchExecutorError::EvidenceEncoding)
+}
+
+fn prior_char_boundary(text: &str, candidate: usize) -> usize {
+    let mut boundary = candidate.min(text.len());
+    while !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
 }
