@@ -281,6 +281,42 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
     );
 
     transaction.rollback().await?;
+
+    let command_id = command(0x117);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, $2, $3, transaction_timestamp())",
+    )
+    .bind(*command_id.as_uuid())
+    .bind("update_session_placement")
+    .bind(1_i16)
+    .execute(&mut *transaction)
+    .await?;
+    let malformed = sqlx::query(
+        "INSERT INTO update_session_placement_command
+            (command_id, command_kind, storage_version, session_id,
+             expected_version, replacement_path, root_global_read_intent,
+             result_kind, rejection_kind, result_version, result_current_version)
+         VALUES ($1, 'update_session_placement', 1, $2,
+                 1, NULL, FALSE, 'applied', NULL, NULL, NULL)",
+    )
+    .bind(*command_id.as_uuid())
+    .bind(*session(0x20b).as_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("an applied update receipt must name its resulting version");
+    let database_error = malformed
+        .as_database_error()
+        .expect("PostgreSQL reports the applied-result shape constraint");
+
+    assert_eq!(
+        database_error.constraint(),
+        Some("update_session_placement_command_result_shape")
+    );
+
+    transaction.rollback().await?;
     pool.close().await;
     drop(container);
     Ok(())
