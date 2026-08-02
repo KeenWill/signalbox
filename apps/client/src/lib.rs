@@ -4363,16 +4363,16 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationImportFormat, ConversationOriginFilter, ConversationSummary, FrameEncodeError,
-        GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedSessionRelationship,
-        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
-        MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
-        RequestId, ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
-        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
-        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
+        ConversationSummary, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState,
+        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
+        InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
+        ModelCallState, ModelSelection, ProtocolVersion, RequestId, ReviewConcernTerminalOutcome,
+        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
+        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
+        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
         encode_server_line,
     };
     use tokio::{
@@ -5388,6 +5388,15 @@ mod tests {
         );
     }
 
+    fn assert_append_request(frame: &ClientFrame, expected_chunk: &[u8]) {
+        assert_eq!(
+            frame.request(),
+            &ClientRequest::AppendConversationImport {
+                chunk: ConversationImportSource::new(expected_chunk.to_vec()),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn large_file_import_streams_exact_bounded_assembly_and_commits()
     -> Result<(), Box<dyn Error>> {
@@ -5436,10 +5445,10 @@ mod tests {
             reader.read_until(b'\n', &mut line).await?;
             assert!(line.len() <= MAX_FRAME_BYTES);
             let first_append = decode_client_line(&line).map_err(io::Error::other)?;
-            let ClientRequest::AppendConversationImport { chunk } = first_append.request() else {
-                panic!("the first source frame is an append");
-            };
-            assert!(chunk.as_bytes() == &expected_source[..MAX_CONVERSATION_IMPORT_CHUNK_BYTES]);
+            assert_append_request(
+                &first_append,
+                &expected_source[..MAX_CONVERSATION_IMPORT_CHUNK_BYTES],
+            );
             let first_appended = ServerFrame::try_new_for_version(
                 first_append.version(),
                 first_append.request_id(),
@@ -5459,10 +5468,10 @@ mod tests {
             reader.read_until(b'\n', &mut line).await?;
             assert!(line.len() <= MAX_FRAME_BYTES);
             let second_append = decode_client_line(&line).map_err(io::Error::other)?;
-            let ClientRequest::AppendConversationImport { chunk } = second_append.request() else {
-                panic!("the second source frame is an append");
-            };
-            assert!(chunk.as_bytes() == &expected_source[MAX_CONVERSATION_IMPORT_CHUNK_BYTES..]);
+            assert_append_request(
+                &second_append,
+                &expected_source[MAX_CONVERSATION_IMPORT_CHUNK_BYTES..],
+            );
             let second_appended = ServerFrame::try_new_for_version(
                 second_append.version(),
                 second_append.request_id(),
