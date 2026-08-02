@@ -1298,7 +1298,7 @@ mod tests {
     use crate::imported_conversation::test_imported_frontier;
     use crate::test_support::{
         command_id, context_frontier_id, direct, imported_conversation_id,
-        imported_transcript_entry_id, session_id,
+        imported_transcript_entry_id, session_id, tool_request_id,
     };
     use crate::{
         ImportedTranscriptPosition, ModelSelectionRequest, SessionConfigurationDefaults,
@@ -1315,6 +1315,11 @@ mod tests {
             SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         )
+    }
+
+    /// Canonical spawning-request identity for delegated-session fixtures.
+    fn delegated_spawning_request() -> crate::ToolRequestId {
+        tool_request_id(2)
     }
 
     fn template_provenance(name: &str, digest_byte: u8) -> SessionTemplateProvenance {
@@ -1647,15 +1652,54 @@ mod tests {
         failure
     }
 
-    /// S18 / INV-003: delegated current sessions reject independently stored ancestry.
+    /// S18 / INV-003: delegated construction fixes exact cause and no ancestry.
     #[test]
-    fn s18_inv003_current_session_rejects_delegated_ancestry() {
-        let spawning_request = crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(2));
+    fn s18_inv003_delegated_helper_constructs_no_ancestry() {
+        let spawning_request = delegated_spawning_request();
+        let provenance = SessionCreationProvenance::delegated(spawning_request);
+
+        assert_eq!(
+            provenance.cause(),
+            SessionCreationCause::Delegated { spawning_request }
+        );
+        assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
+    }
+
+    /// S18 / INV-003: delegated current sessions reject native ancestry.
+    #[test]
+    fn s18_inv003_current_session_rejects_delegated_native_ancestry() {
+        let spawning_request = delegated_spawning_request();
         let provenance = SessionCreationProvenance::new(
             SessionCreationCause::Delegated { spawning_request },
             TranscriptAncestry::SingleSource {
                 source_session: session_id(3),
                 source_frontier: test_frontier(4),
+            },
+        );
+        let failure = current_session_reconstitution_failure(CurrentSessionFacts {
+            provenance,
+            ..CurrentSessionFacts::matching(session_id(1))
+        });
+
+        assert_eq!(
+            failure,
+            SessionReconstitutionFailure::DelegatedAncestryMismatch
+        );
+    }
+
+    /// S18 / INV-003: delegated current sessions reject imported ancestry.
+    #[test]
+    fn s18_inv003_current_session_rejects_delegated_imported_ancestry() {
+        let spawning_request = delegated_spawning_request();
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated { spawning_request },
+            TranscriptAncestry::ImportedConversation {
+                source_frontier: test_imported_frontier(
+                    imported_conversation_id(3),
+                    imported_transcript_entry_id(4),
+                    ImportedTranscriptPosition::first(),
+                ),
+                relationship: ImportedSessionRelationship::Fork,
             },
         );
         let failure = current_session_reconstitution_failure(CurrentSessionFacts {
