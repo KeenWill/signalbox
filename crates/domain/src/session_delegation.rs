@@ -467,9 +467,19 @@ fn delegation_content_from_live_completed(
         if entry.source_session() != value.session() || *producing_call != value.call().id() {
             return None;
         }
-        assistant_text.push(text.clone());
+        assistant_text.push(text);
     }
-    DelegationContent::from_assistant_text(&assistant_text).ok()
+    let utf8_byte_length = assistant_text.iter().try_fold(0_usize, |total, text| {
+        total.checked_add(text.as_str().len())
+    })?;
+    if utf8_byte_length > DelegationContent::MAX_UTF8_BYTES {
+        return None;
+    }
+    let mut content = String::with_capacity(utf8_byte_length);
+    for text in assistant_text {
+        content.push_str(text.as_str());
+    }
+    DelegationContent::try_new(content).ok()
 }
 
 fn terminal_from_completed_content(
@@ -724,24 +734,44 @@ impl DelegationOutcome {
         terminal: TerminalChildTurn,
         content: Option<DelegationContent>,
     ) -> Option<Self> {
-        let kind = match (terminal.kind, terminal.reason, content.as_ref()) {
-            (
-                TerminalChildTurnKind::Returned,
-                DelegationOutcomeReason::ChildCompleted,
-                Some(content),
-            ) if terminal.result_digest == Some(delegation_content_digest(content)) => {
-                DelegationOutcomeKind::ResultReturned
-            }
-            (
-                TerminalChildTurnKind::Failed,
+        let kind = match terminal.kind {
+            TerminalChildTurnKind::Returned => match terminal.reason {
+                DelegationOutcomeReason::ChildCompleted => match content.as_ref() {
+                    Some(content)
+                        if terminal.result_digest == Some(delegation_content_digest(content)) =>
+                    {
+                        DelegationOutcomeKind::ResultReturned
+                    }
+                    Some(_) | None => return None,
+                },
                 DelegationOutcomeReason::ChildExecutionFailed
-                | DelegationOutcomeReason::ChildResultUnavailable,
-                None,
-            ) => DelegationOutcomeKind::ChildFailed,
-            (TerminalChildTurnKind::Cancelled, DelegationOutcomeReason::ChildCancelled, None) => {
-                DelegationOutcomeKind::ChildCancelled
-            }
-            _ => return None,
+                | DelegationOutcomeReason::ChildResultUnavailable
+                | DelegationOutcomeReason::ChildCancelled
+                | DelegationOutcomeReason::ParentStopped { .. }
+                | DelegationOutcomeReason::ParentCancelled { .. } => return None,
+            },
+            TerminalChildTurnKind::Failed => match terminal.reason {
+                DelegationOutcomeReason::ChildExecutionFailed
+                | DelegationOutcomeReason::ChildResultUnavailable => match content.as_ref() {
+                    None => DelegationOutcomeKind::ChildFailed,
+                    Some(_) => return None,
+                },
+                DelegationOutcomeReason::ChildCompleted
+                | DelegationOutcomeReason::ChildCancelled
+                | DelegationOutcomeReason::ParentStopped { .. }
+                | DelegationOutcomeReason::ParentCancelled { .. } => return None,
+            },
+            TerminalChildTurnKind::Cancelled => match terminal.reason {
+                DelegationOutcomeReason::ChildCancelled => match content.as_ref() {
+                    None => DelegationOutcomeKind::ChildCancelled,
+                    Some(_) => return None,
+                },
+                DelegationOutcomeReason::ChildCompleted
+                | DelegationOutcomeReason::ChildExecutionFailed
+                | DelegationOutcomeReason::ChildResultUnavailable
+                | DelegationOutcomeReason::ParentStopped { .. }
+                | DelegationOutcomeReason::ParentCancelled { .. } => return None,
+            },
         };
         Some(Self {
             kind,
@@ -1395,7 +1425,8 @@ impl std::error::Error for DelegationTransitionError {}
 mod tests {
     use super::*;
     use crate::{
-        NormalizedToolArguments, ToolCallProposal, ToolName, ToolRequestOrdinal,
+        InitialToolApproval, NormalizedToolArguments, ToolCallProposal, ToolName,
+        ToolRequestOrdinal,
         model_execution::completed_turn_fixture,
         test_support::{command_id, model_call_id, session_id, tool_request_id, turn_id},
     };
@@ -1417,6 +1448,7 @@ mod tests {
                 NormalizedToolArguments::try_from_provider_text(arguments.to_string())
                     .expect("valid arguments"),
             ),
+            InitialToolApproval::Confirm,
         )
     }
 
@@ -1884,7 +1916,8 @@ mod tests {
 mod aggregate_tests {
     use super::*;
     use crate::{
-        ModelCallId, NormalizedToolArguments, ToolCallProposal, ToolName, ToolRequestOrdinal,
+        InitialToolApproval, ModelCallId, NormalizedToolArguments, ToolCallProposal, ToolName,
+        ToolRequestOrdinal,
         model_execution::completed_turn_fixture,
         test_support::{
             command_id, delegation_message_id, model_call_id, session_id, tool_request_id, turn_id,
@@ -1947,6 +1980,7 @@ mod aggregate_tests {
                 NormalizedToolArguments::try_from_provider_text(arguments.to_string())
                     .expect("valid fixture arguments"),
             ),
+            InitialToolApproval::Confirm,
         )
     }
 
