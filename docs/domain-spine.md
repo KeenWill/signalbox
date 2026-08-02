@@ -5020,8 +5020,7 @@ impl ToolDefinition {
         permission_default: ToolPermissionDefault,
         effect_class: ToolEffectClass,
     ) -> Self;
-    pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
-    // accessors: name(), description(), input_schema(), permission_default(), effect_class(), approval_posture()
+    // accessors: name(), description(), input_schema(), permission_default(), effect_class()
 }
 
 pub trait ToolArgumentValidator: Send + Sync {

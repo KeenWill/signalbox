@@ -1079,6 +1079,14 @@ impl ToolApprovalResolutionReconstitutionError {
     }
 }
 
+impl std::fmt::Display for ToolApprovalResolutionReconstitutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("stored tool approval evidence cannot be reconstituted")
+    }
+}
+
+impl std::error::Error for ToolApprovalResolutionReconstitutionError {}
+
 /// One initial policy outcome for a newly proposed request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum InitialToolApproval {
@@ -1602,7 +1610,7 @@ mod tests {
         assert_eq!(normalized.as_str(), value);
     }
 
-    /// INV-049: delegated approval narrows authority and can never approve a
+    /// INV-049: delegated approval narrows authority and can never approve or deny a
     /// request frozen as human-only.
     #[test]
     fn inv049_delegate_narrows_and_never_widens_human_authority() {
@@ -1618,10 +1626,18 @@ mod tests {
             rationale.clone(),
         )
         .expect_err("a delegate cannot approve a human-only request");
-        let escalated = DelegateToolApproval::try_new(
+        let rejected_denial = DelegateToolApproval::try_new(
             &request,
             model,
             model_call_id(43),
+            DelegateApprovalRecommendation::Deny,
+            rationale.clone(),
+        )
+        .expect_err("a delegate cannot deny a human-only request");
+        let escalated = DelegateToolApproval::try_new(
+            &request,
+            model,
+            model_call_id(44),
             DelegateApprovalRecommendation::EscalateToHuman,
             rationale,
         )
@@ -1631,6 +1647,11 @@ mod tests {
         assert_eq!(
             rejected.recommendation(),
             DelegateApprovalRecommendation::Approve
+        );
+        assert_eq!(rejected_denial.posture(), ToolApprovalPosture::Human);
+        assert_eq!(
+            rejected_denial.recommendation(),
+            DelegateApprovalRecommendation::Deny
         );
         assert_eq!(
             escalated.recommendation(),
