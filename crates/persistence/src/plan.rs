@@ -245,6 +245,16 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
            count(*) FILTER (WHERE prior_first_event_ordinal IS NULL) AS root_count
       FROM session_plan_current_dependency
      WHERE session_id = $1
+), dependency_reach(origin, node) AS (
+    SELECT edge.entry_ordinal, edge.dependency_ordinal
+      FROM session_plan_current_dependency AS edge
+     WHERE edge.session_id = $1
+    UNION
+    SELECT reach.origin, edge.dependency_ordinal
+      FROM dependency_reach AS reach
+      JOIN session_plan_current_dependency AS edge
+        ON edge.session_id = $1
+       AND edge.entry_ordinal = reach.node
 ), dependency_certification AS (
     SELECT (
         (SELECT count(*) FROM dependency_chain) =
@@ -257,6 +267,26 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
             CASE dependency_inventory.edge_count
                 WHEN 0 THEN 0 ELSE 1
             END
+        AND NOT EXISTS (
+            SELECT 1
+              FROM dependency_reach
+             WHERE origin = node
+        )
+        AND NOT EXISTS (
+            SELECT 1
+              FROM session_plan_current_dependency AS edge
+              LEFT JOIN LATERAL (
+                  SELECT predecessor.first_event_ordinal
+                    FROM session_plan_current_dependency AS predecessor
+                   WHERE predecessor.session_id = edge.session_id
+                     AND predecessor.first_event_ordinal < edge.first_event_ordinal
+                   ORDER BY predecessor.first_event_ordinal DESC
+                   LIMIT 1
+              ) AS expected_predecessor ON TRUE
+             WHERE edge.session_id = $1
+               AND edge.prior_first_event_ordinal IS DISTINCT FROM
+                   expected_predecessor.first_event_ordinal
+        )
         AND NOT EXISTS (
             SELECT 1
               FROM session_plan_current_dependency AS edge
@@ -299,6 +329,7 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
 )
 SELECT CASE
            WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL
+                OR NOT dependency_certification.valid
            ELSE head.event_ordinal IS NULL
                 OR latest.event_ordinal IS DISTINCT FROM head.event_ordinal
                 OR latest_dependency.first_event_ordinal IS DISTINCT FROM
@@ -1670,6 +1701,14 @@ mod tests {
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("distinct_first_event_count"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("distinct_edge_count"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("root_count"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("dependency_reach(origin, node)"));
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("WHERE origin = node"));
+        assert!(
+            INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("expected_predecessor.first_event_ordinal")
+        );
+        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains(
+            "WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL\n                OR NOT dependency_certification.valid"
+        ));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("HAVING count(*) > $2"));
         assert!(
             INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority(entry)")

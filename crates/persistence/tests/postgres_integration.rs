@@ -21692,6 +21692,120 @@ async fn install_duplicate_dependency_projection(
     Ok((inserted.rows_affected(), certified.rows_affected()))
 }
 
+async fn reorder_dependency_projection_chain(
+    pool: &PgPool,
+    session: SessionId,
+    oldest_event_ordinal: u64,
+    middle_event_ordinal: u64,
+    newest_event_ordinal: u64,
+) -> Result<u64, sqlx::Error> {
+    let predecessor_order_constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT quote_ident(conname)
+           FROM pg_constraint
+          WHERE conrelid = 'session_plan_current_dependency'::regclass
+            AND contype = 'c'
+            AND pg_get_constraintdef(oid) LIKE
+                '%prior_first_event_ordinal < first_event_ordinal%'
+          ORDER BY conname",
+    )
+    .fetch_all(pool)
+    .await?;
+    for constraint in predecessor_order_constraints {
+        let statement =
+            format!("ALTER TABLE session_plan_current_dependency DROP CONSTRAINT {constraint}");
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_predecessor_guard",
+    )
+    .execute(pool)
+    .await?;
+    let reordered = sqlx::query(
+        "UPDATE session_plan_current_dependency
+            SET prior_first_event_ordinal =
+                CASE first_event_ordinal
+                    WHEN $1 THEN $2
+                    WHEN $2 THEN NULL
+                    WHEN $3 THEN $1
+                END
+          WHERE session_id = $4
+            AND first_event_ordinal IN ($1, $2, $3)",
+    )
+    .bind(Decimal::from(oldest_event_ordinal))
+    .bind(Decimal::from(middle_event_ordinal))
+    .bind(Decimal::from(newest_event_ordinal))
+    .bind(session.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_predecessor_guard",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    Ok(reordered.rows_affected())
+}
+
+async fn insert_orphan_dependency_projection(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<u64, sqlx::Error> {
+    let event_constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT quote_ident(conname)
+           FROM pg_constraint
+          WHERE conrelid = 'session_plan_current_dependency'::regclass
+            AND contype = 'f'
+            AND confrelid = 'session_plan_event'::regclass
+          ORDER BY conname",
+    )
+    .fetch_all(pool)
+    .await?;
+    for constraint in event_constraints {
+        let statement =
+            format!("ALTER TABLE session_plan_current_dependency DROP CONSTRAINT {constraint}");
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO session_plan_current_dependency
+            (session_id, entry_ordinal, dependency_ordinal,
+             first_event_ordinal, prior_first_event_ordinal)
+         VALUES ($1, 1, 2, 3, NULL)",
+    )
+    .bind(session.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    Ok(inserted.rows_affected())
+}
+
 async fn insert_direct_malformed_status_event(
     pool: &PgPool,
     fixture: &DependencyPlanFixture,
@@ -23691,6 +23805,270 @@ async fn session_plan_append_certification_rejects_duplicate_dependency_identity
 
     assert_eq!(inserted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
     assert_eq!(certified, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Complete dependency-prefix certification rejects a pre-existing cycle
+/// before a non-dependency append can advance the certified head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_certification_rejects_preexisting_dependency_cycle()
+-> Result<(), Box<dyn Error>> {
+    const FIRST_DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const CYCLE_EVENT_ORDINAL: u64 = 4;
+    const LATER_ENTRY_TEXT: &str = "must not extend a cyclic dependency graph";
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            depends_plan_arguments(prerequisite, dependent),
+            create_plan_arguments(LATER_ENTRY_TEXT),
+        ],
+    )
+    .await?;
+    let corrupt_attempt = fixture.batch.authorize_next().await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_advances_projection",
+    )
+    .execute(&pool)
+    .await?;
+    insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &corrupt_attempt,
+        FIRST_DEPENDENCY_EVENT_ORDINAL,
+        CYCLE_EVENT_ORDINAL,
+        prerequisite,
+        dependent,
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_advances_projection",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let projected = sqlx::query(
+        "INSERT INTO session_plan_current_dependency
+            (session_id, entry_ordinal, dependency_ordinal,
+             first_event_ordinal, prior_first_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(prerequisite.as_u64()))
+    .bind(Decimal::from(dependent.as_u64()))
+    .bind(Decimal::from(CYCLE_EVENT_ORDINAL))
+    .bind(Decimal::from(FIRST_DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_head
+         DISABLE TRIGGER session_plan_head_maintenance_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let certified = sqlx::query(
+        "UPDATE session_plan_head
+            SET event_ordinal = $1,
+                dependency_event_ordinal = $1
+          WHERE session_id = $2",
+    )
+    .bind(Decimal::from(CYCLE_EVENT_ORDINAL))
+    .bind(fixture.session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_head
+         ENABLE TRIGGER session_plan_head_maintenance_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(corrupt_attempt).await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::Create {
+                text: plan_text(LATER_ENTRY_TEXT),
+            },
+        ))
+        .await
+        .expect_err("a later append cannot certify a cyclic dependency graph");
+
+    assert_eq!(projected.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(certified.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Complete dependency-prefix certification requires each edge to point to
+/// its immediate chronological predecessor, not merely a covering chain.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_certification_rejects_reordered_dependency_chain()
+-> Result<(), Box<dyn Error>> {
+    const THIRD_ENTRY_ORDINAL: u64 = 4;
+    const FOURTH_ENTRY_ORDINAL: u64 = 6;
+    const OLDEST_DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const MIDDLE_DEPENDENCY_EVENT_ORDINAL: u64 = 5;
+    const NEWEST_DEPENDENCY_EVENT_ORDINAL: u64 = 7;
+    const EXPECTED_REORDERED_EDGE_COUNT: u64 = 3;
+    const THIRD_ENTRY_TEXT: &str = "third entry in predecessor certification";
+    const FOURTH_ENTRY_TEXT: &str = "fourth entry in predecessor certification";
+    const LATER_ENTRY_TEXT: &str = "must not extend reordered dependencies";
+    let third_entry = PlanEntryId::try_from_u64(THIRD_ENTRY_ORDINAL)
+        .expect("the third fixture entry identity is positive");
+    let fourth_entry = PlanEntryId::try_from_u64(FOURTH_ENTRY_ORDINAL)
+        .expect("the fourth fixture entry identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(THIRD_ENTRY_TEXT),
+            depends_plan_arguments(third_entry, prerequisite),
+            create_plan_arguments(FOURTH_ENTRY_TEXT),
+            depends_plan_arguments(fourth_entry, prerequisite),
+            create_plan_arguments(LATER_ENTRY_TEXT),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(THIRD_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: third_entry,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(FOURTH_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: fourth_entry,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    let reordered = reorder_dependency_projection_chain(
+        &pool,
+        fixture.session,
+        OLDEST_DEPENDENCY_EVENT_ORDINAL,
+        MIDDLE_DEPENDENCY_EVENT_ORDINAL,
+        NEWEST_DEPENDENCY_EVENT_ORDINAL,
+    )
+    .await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::Create {
+                text: plan_text(LATER_ENTRY_TEXT),
+            },
+        ))
+        .await
+        .expect_err("a later append cannot certify a reordered dependency chain");
+
+    assert_eq!(reordered, EXPECTED_REORDERED_EDGE_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A first append fails closed when an orphan dependency projection already
+/// exists without either durable events or a certifying plan head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_first_append_rejects_orphan_dependency_projection()
+-> Result<(), Box<dyn Error>> {
+    const CREATED_TEXT: &str = "must not adopt an orphan dependency projection";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, mut batch) =
+        authorize_plan_writes(&pool, &[create_plan_arguments(CREATED_TEXT)]).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    let inserted = insert_orphan_dependency_projection(&pool, session).await?;
+    let append_attempt = batch.authorize_next().await?;
+
+    let error = repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::Create {
+                text: plan_text(CREATED_TEXT),
+            },
+        ))
+        .await
+        .expect_err("the first append cannot certify an orphan dependency projection");
+
+    assert_eq!(inserted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
     assert_eq!(
         plan_repository_error_kind(error),
         PlanRepositoryErrorKind::EventSequence
