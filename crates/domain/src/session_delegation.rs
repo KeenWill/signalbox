@@ -747,28 +747,30 @@ impl DelegationOutcome {
         authority: ParentTerminationAuthority,
         action: BoundChildAction,
     ) -> Option<Self> {
-        if matches!(authority.scope, DescendantTerminationScope::ParentAlone) {
-            return None;
+        match authority.scope {
+            DescendantTerminationScope::ParentAlone => None,
+            DescendantTerminationScope::ParentAndDescendants => {
+                let reason = match authority.kind {
+                    ParentTerminationKind::Stopped => DelegationOutcomeReason::ParentStopped {
+                        scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                    ParentTerminationKind::Cancelled => DelegationOutcomeReason::ParentCancelled {
+                        scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                };
+                let kind = match action {
+                    BoundChildAction::KeepRunning => DelegationOutcomeKind::ContinueRunning,
+                    BoundChildAction::Stop => DelegationOutcomeKind::ChildStopped,
+                    BoundChildAction::Cancel => DelegationOutcomeKind::ChildCancelled,
+                };
+                Some(Self {
+                    kind,
+                    content: None,
+                    reason,
+                    provenance: DelegationProvenance::from_parent_termination(authority),
+                })
+            }
         }
-        let reason = match authority.kind {
-            ParentTerminationKind::Stopped => DelegationOutcomeReason::ParentStopped {
-                scope: authority.scope,
-            },
-            ParentTerminationKind::Cancelled => DelegationOutcomeReason::ParentCancelled {
-                scope: authority.scope,
-            },
-        };
-        let kind = match action {
-            BoundChildAction::KeepRunning => DelegationOutcomeKind::ContinueRunning,
-            BoundChildAction::Stop => DelegationOutcomeKind::ChildStopped,
-            BoundChildAction::Cancel => DelegationOutcomeKind::ChildCancelled,
-        };
-        Some(Self {
-            kind,
-            content: None,
-            reason,
-            provenance: DelegationProvenance::from_parent_termination(authority),
-        })
     }
 
     pub const fn kind(&self) -> DelegationOutcomeKind {
@@ -1367,7 +1369,7 @@ mod tests {
     use super::*;
     use crate::{
         NormalizedToolArguments, ToolCallProposal, ToolName, ToolRequestOrdinal,
-        model_execution::tests::completed_turn_fixture,
+        model_execution::completed_turn_fixture,
         test_support::{command_id, model_call_id, session_id, tool_request_id, turn_id},
     };
     use expect_test::expect;
@@ -1760,6 +1762,28 @@ mod tests {
         assert_eq!(
             outcome.reason(),
             DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            }
+        );
+    }
+
+    /// S18 / INV-010: descendant-scoped cancellation selects its exact reason.
+    #[test]
+    fn s18_inv010_parent_and_descendants_cancel_constructs_policy_outcome() {
+        let authority = ParentTerminationAuthority {
+            parent: session_id(1),
+            turn: turn_id(2),
+            command: command_id(3),
+            kind: ParentTerminationKind::Cancelled,
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        };
+        let outcome = DelegationOutcome::from_parent_policy(authority, BoundChildAction::Cancel)
+            .expect("descendant-scoped cancellation may apply bound policy");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ChildCancelled);
+        assert_eq!(
+            outcome.reason(),
+            DelegationOutcomeReason::ParentCancelled {
                 scope: DescendantTerminationScope::ParentAndDescendants,
             }
         );
