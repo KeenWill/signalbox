@@ -218,6 +218,8 @@ pub(super) const URL_IPV6_COMPRESSED_ZERO_SEPARATOR_COLLISION_KEY: &str = ":0000
 
 pub(super) const URL_IPV6_COMPRESSED_ZERO_RUN_COLLISION_KEY: &str = ":0000:0000:";
 
+pub(super) const URL_IPV6_COMPRESSED_ZERO_RUN_SUFFIX_COLLISION_KEY: &str = ":0000:0000:2:";
+
 pub(super) const URL_EMBEDDED_IPV6_HEXTET_COLLISION_KEY: &str = "0db";
 
 pub(super) const URL_IPV6_MULTI_HEXTET_COLLISION_KEY: &str = "0db8:0000";
@@ -345,6 +347,8 @@ pub(super) const PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY: &str = "[provider-con
 pub(super) const COMPLETED_EVIDENCE_DEBUG_COLLISION_KEY: &str = "CompletedText";
 
 pub(super) const KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY: &str = "KnownFailed";
+
+pub(super) const SUCCESS_RESULT_DEBUG_COLLISION_KEY: &str = "Ok";
 
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 

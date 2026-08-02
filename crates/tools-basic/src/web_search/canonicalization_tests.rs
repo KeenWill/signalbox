@@ -636,6 +636,31 @@ fn web_search_rejects_separator_bound_zero_hextet_run_compression() {
     );
 }
 
+/// INV-035: a zero run within a larger separator-bound fragment accounts for
+/// the compressed spelling produced by typed IPv6 serialization.
+#[test]
+fn web_search_rejects_separator_bound_zero_run_with_retained_suffix() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_COMPRESSED_ZERO_HEXTET_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("compressed zero-run suffix fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV6_COMPRESSED_ZERO_RUN_SUFFIX_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-hextet credential fragment is canonicalized as one
 /// contiguous sequence before comparison with an IPv6 result host.
 #[test]

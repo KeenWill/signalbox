@@ -428,11 +428,42 @@ pub(super) fn canonicalized_ipv6_separator_bound_hextet_text_fragments(value: &s
         canonical,
         if trailing_separator { ":" } else { "" }
     );
-    if leading_separator && trailing_separator && hextets.iter().all(|hextet| hextet == "0") {
-        vec![separator_bound, String::from("::")]
-    } else {
-        vec![separator_bound]
+    let mut variants = vec![separator_bound];
+    let mut run_start = 0;
+    while run_start < hextets.len() {
+        if hextets[run_start] != "0" {
+            run_start += 1;
+            continue;
+        }
+        let mut run_end = run_start + 1;
+        while run_end < hextets.len() && hextets[run_end] == "0" {
+            run_end += 1;
+        }
+        if (run_start > 0 || leading_separator) && (run_end < hextets.len() || trailing_separator) {
+            let prefix = hextets[..run_start].join(":");
+            let suffix = hextets[run_end..].join(":");
+            let compressed = format!(
+                "{}{}::{}{}",
+                if leading_separator && run_start > 0 {
+                    ":"
+                } else {
+                    ""
+                },
+                prefix,
+                suffix,
+                if trailing_separator && run_end < hextets.len() {
+                    ":"
+                } else {
+                    ""
+                }
+            );
+            if !variants.contains(&compressed) {
+                variants.push(compressed);
+            }
+        }
+        run_start = run_end;
     }
+    variants
 }
 
 pub(super) fn embedded_ipv6_fragment_candidate(

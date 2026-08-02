@@ -393,6 +393,7 @@ pub(super) fn text_contains_credential_variant(text: &str, credential: &str) -> 
 
 pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
     text_contains_credential_variant("Err()", credential)
+        || text_contains_credential_variant("Ok()", credential)
         || fixed_egress_diagnostic_outputs()
             .iter()
             .any(|output| text_contains_credential_variant(output, credential))
