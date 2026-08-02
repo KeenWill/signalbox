@@ -146,9 +146,13 @@ pub(super) fn legacy_ipv4_component_contains(value: &str, address: std::net::Ipv
         u32::from(octets[3]),
     ];
     let lowercase = value.to_ascii_lowercase();
+    let trailing_dot_fragment = lowercase.strip_suffix('.');
     legacy_ipv4_address_spellings(address)
         .iter()
-        .any(|spelling| spelling.contains(&lowercase))
+        .any(|spelling| {
+            spelling.contains(&lowercase)
+                || trailing_dot_fragment.is_some_and(|fragment| spelling.ends_with(fragment))
+        })
         || ipv4_radix_padding_may_contain(value)
         || normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
             component_values
@@ -313,6 +317,29 @@ pub(super) fn canonicalized_ipv6_hextet_text_fragment(value: &str) -> Option<Str
     }
     let hextet = u16::from_str_radix(value, 16).ok()?;
     Some(format!("{hextet:x}"))
+}
+
+pub(super) fn canonicalized_ipv6_separator_bound_hextet_text_fragment(
+    value: &str,
+) -> Option<String> {
+    let (leading_separator, value) = match value.strip_prefix(':') {
+        Some(value) => (true, value),
+        None => (false, value),
+    };
+    let (trailing_separator, value) = match value.strip_suffix(':') {
+        Some(value) => (true, value),
+        None => (false, value),
+    };
+    if !leading_separator && !trailing_separator {
+        return None;
+    }
+    let hextet = canonicalized_ipv6_hextet_text_fragment(value)?;
+    Some(format!(
+        "{}{}{}",
+        if leading_separator { ":" } else { "" },
+        hextet,
+        if trailing_separator { ":" } else { "" }
+    ))
 }
 
 pub(super) fn embedded_ipv6_fragment_candidate(
