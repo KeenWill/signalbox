@@ -2820,7 +2820,6 @@ fn terminal_event_state(
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
-        | SessionEvent::ToolApprovalDecided { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -2967,7 +2966,6 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
             tool_attempt_id: *tool_attempt_id,
             terminal_frontier_id: *terminal_frontier_id,
         }),
-        SessionEvent::ToolApprovalDecided { .. } => Some(SnapshotSelection::All),
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
@@ -4096,8 +4094,8 @@ mod tests {
         ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
         ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
         ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState,
-        ToolDecision, TurnState, decode_client_line, encode_server_line,
+        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -4937,27 +4935,6 @@ mod tests {
                 turn_id: turn,
                 model_call_id: call,
             })
-        );
-    }
-
-    #[test]
-    fn approval_decision_event_requests_authoritative_snapshot_refresh() {
-        const SUBJECT_TURN_SEED: u128 = 1;
-        const SUBJECT_REQUEST_SEED: u128 = 2;
-        const SUBJECT_COMMAND_SEED: u128 = 3;
-        let event = SessionEvent::ToolApprovalDecided {
-            turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(SUBJECT_TURN_SEED)),
-            tool_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(SUBJECT_REQUEST_SEED)),
-            decision: ToolApprovalEventDecision::Approve {},
-            decider: ToolApprovalEventDecider::User {
-                command_id: CanonicalUuid::from_uuid(Uuid::from_u128(SUBJECT_COMMAND_SEED)),
-            },
-            rationale: None,
-        };
-
-        assert_eq!(
-            terminal_snapshot_selection(&event),
-            Some(SnapshotSelection::All)
         );
     }
 

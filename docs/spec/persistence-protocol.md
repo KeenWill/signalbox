@@ -27,17 +27,16 @@ lock inventory were verified against PR #314
 was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified against this PR (`agent/plan-tool`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision,
-posture, and outbox storage were verified through this PR
-(`agent/approval-judge-storage`). This page covers the Postgres representation
-in `crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
+posture storage were verified through this PR (`agent/approval-judge-storage`).
+This page covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -179,10 +178,9 @@ Implemented table families (across the forward-only migrations):
   certifies the complete validated prefix for bounded current reads; and
 - migration `202608020015` freezes `approval_posture` on each tool request,
   records dedicated approval-judge calls in the global model-call identity
-  namespace only while their request is the current active approval wait,
+  namespace only while their request is the current active approval wait, and
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale, and adds the typed
-  `tool_approval_decided_outbox_event` family;
+  recommendation, and rationale;
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:

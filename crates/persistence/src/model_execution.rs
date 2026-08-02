@@ -2810,7 +2810,9 @@ async fn load_tool_denial_correlations(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id
+                approval.owner_command_id,
+                approval.delegate_model_selection_id,
+                approval.delegate_model_call_id, approval.rationale
            FROM tool_approval_decision AS approval
           WHERE approval.request_id = ANY($1)",
     )

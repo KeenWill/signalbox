@@ -69,12 +69,6 @@ pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 /// Maximum UTF-8 bytes in one transcript content fragment.
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 
-/// Maximum UTF-8 bytes in one delegate approval rationale.
-pub const MAX_TOOL_DECISION_RATIONALE_BYTES: usize = 4_096;
-
-/// Maximum UTF-8 bytes in one user-authored tool denial reason.
-pub const MAX_TOOL_DENIAL_REASON_BYTES: usize = 1_024;
-
 /// Maximum total UTF-8 bytes in one complete metadata object or filter.
 pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
 
@@ -1816,59 +1810,6 @@ impl ConversationSummary {
             }
         }
     }
-}
-
-fn validate_tool_approval_event_shape(
-    decision: &ToolApprovalEventDecision,
-    decider: &ToolApprovalEventDecider,
-    rationale: &Option<String>,
-) -> Result<(), FrameValidationError> {
-    let shape_matches = match (decision, decider, rationale) {
-        (
-            ToolApprovalEventDecision::Approve {}
-            | ToolApprovalEventDecision::Deny { reason: None },
-            ToolApprovalEventDecider::User { .. },
-            None,
-        ) => true,
-        (
-            ToolApprovalEventDecision::Deny {
-                reason: Some(reason),
-            },
-            ToolApprovalEventDecider::User { .. },
-            None,
-        ) => {
-            !reason.is_empty()
-                && reason.len() <= MAX_TOOL_DENIAL_REASON_BYTES
-                && !has_surrounding_posix_whitespace(reason)
-                && !reason.chars().any(char::is_control)
-        }
-        (
-            ToolApprovalEventDecision::Approve {}
-            | ToolApprovalEventDecision::Deny { reason: None },
-            ToolApprovalEventDecider::Delegate { .. },
-            Some(rationale),
-        ) => {
-            !rationale.is_empty()
-                && rationale.len() <= MAX_TOOL_DECISION_RATIONALE_BYTES
-                && !rationale.contains("\0")
-        }
-        _ => false,
-    };
-    if !shape_matches {
-        return Err(FrameValidationError::ToolApprovalShape);
-    }
-    Ok(())
-}
-
-fn has_surrounding_posix_whitespace(value: &str) -> bool {
-    value
-        .as_bytes()
-        .first()
-        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
-        || value
-            .as_bytes()
-            .last()
-            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
 }
 
 /// Validates the wire restatement of the derived display-title shape:
@@ -4059,38 +4000,6 @@ pub enum ToolBatchState {
     },
 }
 
-/// Exact decision recorded for one explicit tool approval.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ToolApprovalEventDecision {
-    /// Execution is permitted subject to current aggregate guards.
-    Approve {},
-    /// Execution is permanently prohibited for this request.
-    Deny {
-        /// Exact user explanation, absent for a delegate denial.
-        #[serde(deserialize_with = "deserialize_required_nullable")]
-        reason: Option<String>,
-    },
-}
-
-/// Exact actor provenance for one explicit tool approval decision.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ToolApprovalEventDecider {
-    /// The user acted through the named durable command.
-    User {
-        /// Exact durable command provenance.
-        command_id: CanonicalUuid,
-    },
-    /// A configured model acted through the named dedicated judge call.
-    Delegate {
-        /// Exact direct model selection used by the judge.
-        model_selection_id: CanonicalUuid,
-        /// Exact recorded judge model call.
-        model_call_id: CanonicalUuid,
-    },
-}
-
 /// Closed durable update event family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -4137,20 +4046,6 @@ pub enum SessionEvent {
         model_call_id: CanonicalUuid,
         /// Exact committed batch state.
         state: ToolBatchState,
-    },
-    /// One explicit tool approval decision committed with full provenance.
-    ToolApprovalDecided {
-        /// Owning turn.
-        turn_id: CanonicalUuid,
-        /// Exact logical tool request.
-        tool_request_id: CanonicalUuid,
-        /// Exact recorded decision.
-        decision: ToolApprovalEventDecision,
-        /// Exact user or delegate decider.
-        decider: ToolApprovalEventDecider,
-        /// Exact judge rationale, absent for a user decision.
-        #[serde(deserialize_with = "deserialize_required_nullable")]
-        rationale: Option<String>,
     },
     /// One append-only context compaction committed.
     ContextCompacted {
@@ -4710,16 +4605,6 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
-            Self::SessionEvent {
-                event:
-                    SessionEvent::ToolApprovalDecided {
-                        decision,
-                        decider,
-                        rationale,
-                        ..
-                    },
-                ..
-            } => validate_tool_approval_event_shape(decision, decider, rationale)?,
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -5022,8 +4907,6 @@ pub enum FrameValidationError {
     ModelCallUsageShape,
     /// A goal request, state, or event carried an invalid shape.
     GoalShape,
-    /// A tool approval event mismatched its decider and rationale.
-    ToolApprovalShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -5052,7 +4935,6 @@ impl fmt::Display for FrameValidationError {
             Self::ReviewShape => "review workflow frame shape is inconsistent",
             Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
             Self::GoalShape => "commissioned-goal frame shape is inconsistent",
-            Self::ToolApprovalShape => "tool approval event shape is inconsistent",
         })
     }
 }
@@ -5472,8 +5354,7 @@ mod tests {
         MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
         MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
         MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
-        MAX_SYSTEM_PROMPT_UTF8_BYTES, MAX_TOOL_DECISION_RATIONALE_BYTES,
-        MAX_TOOL_DENIAL_REASON_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
         ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
         ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
         ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
@@ -5484,9 +5365,9 @@ mod tests {
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
         ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance, decode_client_line,
-        decode_server_line, encode_client_line, encode_server_line,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+        UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line,
     };
     use uuid::Uuid;
 
@@ -8513,158 +8394,6 @@ mod tests {
             r#"{"version":1,"request_id":"4","request":{"type":"decide_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"deny"}}}"#,
         );
         Ok(())
-    }
-
-    #[test]
-    fn tool_approval_user_approve_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
-        assert_server_message_round_trip(
-            request(3)?,
-            ServerMessage::SessionEvent {
-                cursor: CanonicalU64::new(8),
-                session_id: uuid(6),
-                event: SessionEvent::ToolApprovalDecided {
-                    turn_id: uuid(7),
-                    tool_request_id: uuid(8),
-                    decision: ToolApprovalEventDecision::Approve {},
-                    decider: ToolApprovalEventDecider::User {
-                        command_id: uuid(9),
-                    },
-                    rationale: None,
-                },
-            },
-            r#"{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}"#,
-        )
-    }
-
-    #[test]
-    fn tool_approval_user_deny_event_round_trips_with_reason()
-    -> Result<(), Box<dyn std::error::Error>> {
-        assert_server_message_round_trip(
-            request(15)?,
-            ServerMessage::SessionEvent {
-                cursor: CanonicalU64::new(9),
-                session_id: uuid(6),
-                event: SessionEvent::ToolApprovalDecided {
-                    turn_id: uuid(7),
-                    tool_request_id: uuid(8),
-                    decision: ToolApprovalEventDecision::Deny {
-                        reason: Some(String::from("user declined")),
-                    },
-                    decider: ToolApprovalEventDecider::User {
-                        command_id: uuid(9),
-                    },
-                    rationale: None,
-                },
-            },
-            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"user declined"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}"#,
-        )
-    }
-
-    #[test]
-    fn tool_approval_delegate_deny_event_round_trips_with_rationale()
-    -> Result<(), Box<dyn std::error::Error>> {
-        assert_server_message_round_trip(
-            request(4)?,
-            ServerMessage::SessionEvent {
-                cursor: CanonicalU64::new(9),
-                session_id: uuid(6),
-                event: SessionEvent::ToolApprovalDecided {
-                    turn_id: uuid(7),
-                    tool_request_id: uuid(8),
-                    decision: ToolApprovalEventDecision::Deny { reason: None },
-                    decider: ToolApprovalEventDecider::Delegate {
-                        model_selection_id: uuid(10),
-                        model_call_id: uuid(11),
-                    },
-                    rationale: Some(String::from("request exceeds the stated scope")),
-                },
-            },
-            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
-        )
-    }
-
-    #[test]
-    fn tool_approval_user_decider_rejects_delegate_rationale() {
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
-        );
-    }
-
-    #[test]
-    fn tool_approval_delegate_decider_requires_rationale() {
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
-        );
-    }
-
-    #[test]
-    fn tool_approval_delegate_denial_rejects_user_reason() {
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
-        );
-    }
-
-    #[test]
-    fn tool_approval_delegate_rationale_rejects_empty_text() {
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"8","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""}}}"#,
-        );
-    }
-
-    #[test]
-    fn tool_approval_delegate_rationale_rejects_nul() {
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"9","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"unsafe\u0000rationale"}}}"#,
-        );
-    }
-
-    #[test]
-    fn tool_approval_delegate_rationale_rejects_oversize() {
-        const RATIONALE_FILLER: &str = "x";
-        let oversized_rationale = RATIONALE_FILLER.repeat(MAX_TOOL_DECISION_RATIONALE_BYTES + 1);
-        let oversized_frame = [
-            r#"{"version":1,"request_id":"10","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""#,
-            oversized_rationale.as_str(),
-            r#""}}}"#,
-        ]
-        .concat();
-
-        assert_server_malformed(&oversized_frame);
-    }
-
-    #[test]
-    fn tool_approval_user_denial_reason_rejects_empty_text() {
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"11","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":""},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
-        );
-    }
-
-    #[test]
-    fn tool_approval_user_denial_reason_rejects_surrounding_whitespace() {
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"12","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":" surrounding whitespace"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
-        );
-    }
-
-    #[test]
-    fn tool_approval_user_denial_reason_rejects_control_scalar() {
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"13","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"unsafe\u0000reason"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
-        );
-    }
-
-    #[test]
-    fn tool_approval_user_denial_reason_rejects_oversize() {
-        const REASON_FILLER: &str = "x";
-        let oversized_reason = REASON_FILLER.repeat(MAX_TOOL_DENIAL_REASON_BYTES + 1);
-        let oversized_frame = [
-            r#"{"version":1,"request_id":"14","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":""#,
-            oversized_reason.as_str(),
-            r#""},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
-        ]
-        .concat();
-
-        assert_server_malformed(&oversized_frame);
     }
 
     /// INV-033: every stop rejection carries its exact closed wire shape.

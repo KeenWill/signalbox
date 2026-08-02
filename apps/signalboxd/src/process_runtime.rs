@@ -126,11 +126,9 @@ use signalbox_process_protocol::{
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
-    SystemPromptMember, SystemPromptText, ToolApprovalEventDecider as WireToolApprovalEventDecider,
-    ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance, content_fragments,
-    decode_client_line, encode_server_line, recover_bounded_client_protocol_version,
-    recover_bounded_client_request_id,
+    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
+    TranscriptTextEntry, TurnState, UsageProvenance, content_fragments, decode_client_line,
+    encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -428,7 +426,6 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         | DispatchedOutboxEventKind::InputAccepted { .. }
         | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
-        | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. } => {}
     }
 }
@@ -9941,11 +9938,6 @@ enum ProcessUpdateEvent {
         producing_call: signalbox_domain::ModelCallId,
         state: DispatchedToolBatchState,
     },
-    ToolApprovalDecided {
-        turn: signalbox_domain::TurnId,
-        approval: signalbox_domain::ToolApprovalResolution,
-        decider: signalbox_domain::ToolApprovalDecider,
-    },
     ContextCompacted {
         compaction: signalbox_domain::ContextCompactionId,
         call: signalbox_domain::ModelCallId,
@@ -10030,15 +10022,6 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 turn: *turn,
                 producing_call: *producing_call,
                 state: *state,
-            },
-            DispatchedOutboxEventKind::ToolApprovalDecided {
-                turn,
-                approval,
-                decider,
-            } => Self::ToolApprovalDecided {
-                turn: *turn,
-                approval: approval.clone(),
-                decider: *decider,
             },
             DispatchedOutboxEventKind::ContextCompacted {
                 compaction,
@@ -10148,38 +10131,6 @@ impl ProcessUpdateEvent {
                     }
                 },
             },
-            Self::ToolApprovalDecided {
-                turn,
-                approval,
-                decider,
-            } => {
-                let decision = match approval.decision() {
-                    ToolApprovalDecision::Approve => WireToolApprovalEventDecision::Approve {},
-                    ToolApprovalDecision::Deny { reason } => WireToolApprovalEventDecision::Deny {
-                        reason: reason.as_ref().map(|value| value.as_str().to_owned()),
-                    },
-                };
-                let decider = match decider {
-                    signalbox_domain::ToolApprovalDecider::User { command } => {
-                        WireToolApprovalEventDecider::User {
-                            command_id: wire_uuid(command.into_uuid()),
-                        }
-                    }
-                    signalbox_domain::ToolApprovalDecider::Delegate { model, call } => {
-                        WireToolApprovalEventDecider::Delegate {
-                            model_selection_id: wire_uuid(model.into_uuid()),
-                            model_call_id: wire_uuid(call.into_uuid()),
-                        }
-                    }
-                };
-                SessionEvent::ToolApprovalDecided {
-                    turn_id: wire_uuid(turn.into_uuid()),
-                    tool_request_id: wire_uuid(approval.request().into_uuid()),
-                    decision,
-                    decider,
-                    rationale: approval.rationale().map(|value| value.as_str().to_owned()),
-                }
-            }
             Self::ContextCompacted {
                 compaction,
                 call,
