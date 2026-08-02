@@ -171,14 +171,10 @@ Implemented table families (across the forward-only migrations):
   complete commissioned-goal lineage and state-transition provenance, plus
   `goal_turn`, which correlates each pursuit-starting event or successful
   predecessor with its accepted input and turn;
-- `session_plan_event` retains exact-provenance creation, revision, status, and
-  dependency events, including duplicates. `session_plan_current_dependency` is
-  trigger-only and stores each first distinct edge (max 32 per entry) after
-  authenticating both roots. Before every append, the repository certifies that
-  the complete projection is acyclic, has unique edge and first-event
-  identities, stays within the per-entry limit, and forms one exact
-  chronological predecessor chain; a projection without any event head is
-  invalid. `session_plan_head` certifies both tips; and
+- `session_plan_event` retains every exact-provenance event. Before append, the
+  trigger-only first-distinct-edge projection (max 32/entry) rejects headless,
+  duplicate, nonchronological, over-limit, or cyclic state; `session_plan_head`
+  certifies both tips; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
