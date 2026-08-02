@@ -38,6 +38,11 @@ const UPDATE_FIXTURE_COMMAND_ID_SEED: u128 = 0x10d;
 const UPDATE_FIXTURE_RESULT_VERSION: u64 = 2;
 const UPDATE_FIXTURE_REPLACEMENT_PATH: &str = "projects.foo.session";
 const UPDATE_FIXTURE_CONFLICTING_REPLACEMENT_PATH: &str = "projects.foo.conflict";
+const PAGED_HISTORY_SESSION_ID_SEED: u128 = 0x20f;
+const PAGED_HISTORY_CREATION_COMMAND_ID_SEED: u128 = 0x10f;
+const PAGED_HISTORY_UPDATE_COMMAND_ID_SEED: u128 = 0x300;
+const PAGED_HISTORY_UPDATE_COUNT: u64 = 65;
+const PAGED_HISTORY_PATH_PREFIX: &str = "projects.history.revision";
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -440,8 +445,71 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv012_update_handle_applies_replays_and_rejects_conflicting_reuse()
--> Result<(), Box<dyn Error>> {
+async fn s36_inv012_update_handle_applies_first_command() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, update) = placement_update_fixture().await?;
+    let first = repository.handle(update).await?;
+    let applied = recorded_applied_update(&first);
+    let expected_version = SessionPlacementVersion::try_from_u64(UPDATE_FIXTURE_RESULT_VERSION)
+        .expect("the fixture result version is positive");
+
+    assert_eq!(
+        applied.event().prior_version(),
+        Some(SessionPlacementVersion::INITIAL)
+    );
+    assert_eq!(applied.event().placement().version(), expected_version);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv012_update_handle_replays_equal_command() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, update) = placement_update_fixture().await?;
+    let first = repository.handle(update.clone()).await?;
+
+    assert_eq!(repository.handle(update).await?, first);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv012_update_handle_rejects_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, update) = placement_update_fixture().await?;
+    repository.handle(update).await?;
+    let command_id = command(UPDATE_FIXTURE_COMMAND_ID_SEED);
+    let session_id = session(UPDATE_FIXTURE_SESSION_ID_SEED);
+
+    assert_eq!(
+        repository
+            .handle(UpdateSessionPlacement::new(
+                command_id,
+                session_id,
+                SessionPlacementVersion::INITIAL,
+                scoped(UPDATE_FIXTURE_CONFLICTING_REPLACEMENT_PATH),
+            ))
+            .await?,
+        SessionPlacementRepositoryOutcome::ConflictingReuse { command_id }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn placement_update_fixture() -> Result<
+    (
+        ContainerAsync<Postgres>,
+        PgPool,
+        SessionPlacementRepository,
+        UpdateSessionPlacement,
+    ),
+    Box<dyn Error>,
+> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(UPDATE_FIXTURE_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -459,32 +527,55 @@ async fn s36_inv012_update_handle_applies_replays_and_rejects_conflicting_reuse(
         scoped(UPDATE_FIXTURE_REPLACEMENT_PATH),
     );
     let repository = SessionPlacementRepository::new(pool.clone());
-    let first = repository.handle(update.clone()).await?;
-    let applied = recorded_applied_update(&first);
-    let expected_version = SessionPlacementVersion::try_from_u64(UPDATE_FIXTURE_RESULT_VERSION)
-        .expect("the fixture result version is positive");
+    Ok((container, pool, repository, update))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_complete_history_authentication_crosses_bounded_pages() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(PAGED_HISTORY_SESSION_ID_SEED);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(PAGED_HISTORY_CREATION_COMMAND_ID_SEED),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    let repository = SessionPlacementRepository::new(pool.clone());
+    let expected = append_paged_history_fixture(&repository, session_id).await?;
 
     assert_eq!(
-        applied.event().prior_version(),
-        Some(SessionPlacementVersion::INITIAL)
-    );
-    assert_eq!(applied.event().placement().version(), expected_version);
-    assert_eq!(repository.handle(update).await?, first);
-    assert_eq!(
-        repository
-            .handle(UpdateSessionPlacement::new(
-                command_id,
-                session_id,
-                SessionPlacementVersion::INITIAL,
-                scoped(UPDATE_FIXTURE_CONFLICTING_REPLACEMENT_PATH),
-            ))
-            .await?,
-        SessionPlacementRepositoryOutcome::ConflictingReuse { command_id }
+        repository.load_current(session_id).await?.unwrap(),
+        expected
     );
 
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+async fn append_paged_history_fixture(
+    repository: &SessionPlacementRepository,
+    session_id: SessionId,
+) -> Result<signalbox_domain::VersionedSessionPlacement, Box<dyn Error>> {
+    let mut prior_version = SessionPlacementVersion::INITIAL;
+    let mut current = None;
+    for update_index in 1..=PAGED_HISTORY_UPDATE_COUNT {
+        let replacement = scoped(format!("{PAGED_HISTORY_PATH_PREFIX}{update_index}").as_str());
+        let outcome = repository
+            .handle(UpdateSessionPlacement::new(
+                command(PAGED_HISTORY_UPDATE_COMMAND_ID_SEED + u128::from(update_index)),
+                session_id,
+                prior_version,
+                replacement,
+            ))
+            .await?;
+        let applied = recorded_applied_update(&outcome);
+        prior_version = applied.event().placement().version();
+        current = Some(applied.event().placement().clone());
+    }
+    Ok(current.expect("the fixture appends at least one placement update"))
 }
 
 #[tokio::test(flavor = "multi_thread")]

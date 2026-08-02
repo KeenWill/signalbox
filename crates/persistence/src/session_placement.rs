@@ -24,6 +24,7 @@ use crate::mapping::{
 };
 
 const STORAGE_VERSION: i16 = 1;
+const AUTHENTICATION_PAGE_SIZE: i64 = 64;
 
 /// First handling/equal replay or conflicting durable-command reuse.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -338,13 +339,18 @@ pub(crate) async fn load_current(
         .map(Some)
 }
 
-async fn load_authenticated_version(
+pub(crate) async fn load_authenticated_version(
     connection: &mut PgConnection,
     session: SessionId,
     version: SessionPlacementVersion,
 ) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
-    let rows = sqlx::query(
-        "SELECT session_row.ancestry_kind,
+    let mut authenticated: Option<VersionedSessionPlacement> = None;
+    loop {
+        let after_version = authenticated.as_ref().map_or(Decimal::ZERO, |placement| {
+            version_to_numeric(placement.version())
+        });
+        let rows = sqlx::query(
+            "SELECT session_row.ancestry_kind,
                 event.version, event.prior_version, event.event_kind,
                 event.placement_path, event.root_global_read_intent,
                 native_registry.command_id AS native_creation_command_id,
@@ -397,26 +403,34 @@ async fn load_authenticated_version(
             AND placement_update_registry.command_kind = placement_update.command_kind
             AND placement_update_registry.storage_version = placement_update.storage_version
           WHERE session_row.session_id = $1
-          ORDER BY event.version",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(version_to_numeric(version))
-    .fetch_all(&mut *connection)
-    .await?;
-    let mut authenticated: Option<VersionedSessionPlacement> = None;
-    for row in rows {
-        let placement = decode_authenticated_placement(row)?;
-        let expected_version = authenticated
-            .as_ref()
-            .map_or(Some(SessionPlacementVersion::INITIAL), |predecessor| {
-                predecessor.version().next()
-            });
-        if expected_version != Some(placement.version()) {
-            return Err(SessionPlacementRepositoryError::Corruption(
-                "session placement predecessor chain",
-            ));
+            AND event.version <= $2
+            AND event.version > $3
+          ORDER BY event.version
+          LIMIT $4",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(version_to_numeric(version))
+        .bind(after_version)
+        .bind(AUTHENTICATION_PAGE_SIZE)
+        .fetch_all(&mut *connection)
+        .await?;
+        if rows.is_empty() {
+            break;
         }
-        authenticated = Some(placement);
+        for row in rows {
+            let placement = decode_authenticated_placement(row)?;
+            let expected_version = authenticated
+                .as_ref()
+                .map_or(Some(SessionPlacementVersion::INITIAL), |predecessor| {
+                    predecessor.version().next()
+                });
+            if expected_version != Some(placement.version()) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "session placement predecessor chain",
+                ));
+            }
+            authenticated = Some(placement);
+        }
     }
     match authenticated {
         Some(placement) if placement.version() == version => Ok(Some(placement)),

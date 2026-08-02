@@ -264,13 +264,16 @@ pub(crate) async fn load_session_from_connection(
     }
 
     let session = decode_complete(row, requested_session)?;
-    let authenticated_placement =
-        crate::session_placement::load_current(connection, requested_session)
-            .await
-            .map_err(map_placement_error)?
-            .ok_or(SessionCorruption::Inconsistent(
-                "current placement authentication",
-            ))?;
+    let authenticated_placement = crate::session_placement::load_authenticated_version(
+        connection,
+        requested_session,
+        session.current_placement().version(),
+    )
+    .await
+    .map_err(map_placement_error)?
+    .ok_or(SessionCorruption::Inconsistent(
+        "current placement authentication",
+    ))?;
     if session.current_placement() != &authenticated_placement {
         return Err(SessionCorruption::Inconsistent("current placement authentication").into());
     }
