@@ -1,5 +1,24 @@
 import Foundation
 
+public enum SignalboxProcessPresentation {
+  public static let maximumLabelUTF8Bytes = 4 * 1_024
+
+  public static func retainedLabel(_ label: String) -> String {
+    let scalars = label.unicodeScalars
+    var retainedEnd = scalars.startIndex
+    var retainedBytes = 0
+    while retainedEnd != scalars.endIndex {
+      let scalarBytes = scalars[retainedEnd].utf8.count
+      guard retainedBytes + scalarBytes <= maximumLabelUTF8Bytes else {
+        break
+      }
+      retainedBytes += scalarBytes
+      retainedEnd = scalars.index(after: retainedEnd)
+    }
+    return String(scalars[..<retainedEnd])
+  }
+}
+
 public struct SignalboxProcessSession: Identifiable, Equatable, Sendable {
   public let id: SignalboxCanonicalUUID
   public let defaultsVersion: SignalboxCanonicalUInt64
@@ -167,9 +186,13 @@ extension SignalboxImportedConversationEntry: Identifiable {
     case .attested(speaker: .assistant):
       return "Assistant"
     case .attested(speaker: .unknown(let value)):
-      return "Unrecognized speaker (\(value))"
+      return SignalboxProcessPresentation.retainedLabel(
+        "Unrecognized speaker (\(value))"
+      )
     case .unknown(let kind, _):
-      return "Unknown speaker (\(kind))"
+      return SignalboxProcessPresentation.retainedLabel(
+        "Unknown speaker (\(kind))"
+      )
     }
   }
 
@@ -194,7 +217,9 @@ extension SignalboxImportedConversationEntry: Identifiable {
     case .messageContentAbsent:
       return "Message content absent"
     case .unknown(let value):
-      return "Unrecognized content (\(value))"
+      return SignalboxProcessPresentation.retainedLabel(
+        "Unrecognized content (\(value))"
+      )
     }
   }
 }

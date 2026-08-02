@@ -137,6 +137,25 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testUnknownImportedEntryPresentationLabelsAreBounded() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.importedEntryWithUnknownSourceSpeakerFrame(
+        sourceSpeakerKind: ProcessProtocolFixture.oversizedUnknownPresentationToken,
+        contentKind: ProcessProtocolFixture.oversizedUnknownPresentationToken
+      )
+    )
+    let entry = try ProcessProtocolFixture.importedEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.sourceSpeakerLabel.utf8.count,
+      SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+    XCTAssertEqual(
+      entry.contentKindLabel.utf8.count,
+      SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+  }
+
   /// INV-033: explicit null preview admission stays distinct from an omitted member.
   func testImportedConversationEntryAcceptsAttestedSpeakerWithoutTextPreview() throws {
     let frame = try SignalboxProcessServerFrame.decode(
@@ -739,6 +758,10 @@ private enum ProcessProtocolFixture {
     message: "Missing required field at message.conversation.title."
   )
   static let unknownImportedSourceSpeakerKind = "future_speaker"
+  static let oversizedUnknownPresentationToken = String(
+    repeating: "x",
+    count: SignalboxProcessPresentation.maximumLabelUTF8Bytes + 1
+  )
 
   static func frameWithAddedMember() -> Data {
     Data(
@@ -1027,7 +1050,10 @@ private enum ProcessProtocolFixture {
     )
   }
 
-  static func importedEntryWithUnknownSourceSpeakerFrame() -> Data {
+  static func importedEntryWithUnknownSourceSpeakerFrame(
+    sourceSpeakerKind: String = unknownImportedSourceSpeakerKind,
+    contentKind: String = "source_event"
+  ) -> Data {
     Data(
       """
       {
@@ -1037,8 +1063,8 @@ private enum ProcessProtocolFixture {
           "type":"imported_conversation_entry",
           "position":"1",
           "imported_entry_id":"33333333-3333-4333-8333-333333333333",
-          "source_speaker":{"type":"\(unknownImportedSourceSpeakerKind)"},
-          "content_kind":"source_event",
+          "source_speaker":{"type":"\(sourceSpeakerKind)"},
+          "content_kind":"\(contentKind)",
           "text_preview":null
         }
       }

@@ -1151,7 +1151,9 @@ private struct ProcessImportedConversationScreen: View {
     case .codexRolloutJSONLV1:
       "Codex rollout JSONL v1"
     case .unknown(let value):
-      "Unrecognized format (\(value))"
+      SignalboxProcessPresentation.retainedLabel(
+        "Unrecognized format (\(value))"
+      )
     case nil:
       "Unknown"
     }

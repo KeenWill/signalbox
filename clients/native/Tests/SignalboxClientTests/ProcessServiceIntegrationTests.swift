@@ -517,6 +517,20 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(projection.activity, ProcessProjectionFixture.quotaExhaustedActivity)
   }
 
+  func testUnknownFailedProviderCauseActivityIsBounded() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownFailedProviderCause(
+      ProcessProjectionFixture.oversizedUnknownState
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(
+      projection.activity.label.utf8.count,
+      SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+  }
+
   func testUnknownFailedDispositionAppearsInNativeActivity() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithUnknownFailedDisposition()
     var projector = SignalboxProcessTranscriptProjector()
@@ -4217,6 +4231,15 @@ private enum ProcessProjectionFixture {
     try snapshotWithFailedModelCall(
       disposition: "known_failed",
       causeMember: ",\"cause\":\"quota_exhausted\""
+    )
+  }
+
+  static func snapshotWithUnknownFailedProviderCause(
+    _ cause: String
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithFailedModelCall(
+      disposition: "known_failed",
+      causeMember: ",\"cause\":\"\(cause)\""
     )
   }
 
