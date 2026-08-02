@@ -94,8 +94,8 @@ adapter = "application"
 # existing permission default and session-blanket behavior.
 [tool_approval_postures]
 web_fetch = "human"
-# Committed but unimplemented: `delegated` is accepted and frozen, but no
-# present runtime dispatches its judge, so such a request remains parked.
+# Committed but unimplemented: the parser accepts and freezes `delegated`, but
+# daemon startup rejects it until judge dispatch is wired.
 # github_pull_request_publish_review = "delegated"
 # write_file = "delegated"
 

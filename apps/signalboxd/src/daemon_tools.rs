@@ -528,15 +528,18 @@ impl DaemonToolCatalog {
         }
         Ok(Self { entries })
     }
-    /// Applies explicit deployment postures and rejects unknown tool names.
+    /// Applies explicit deployment postures that the current runtime can enforce.
     pub fn with_approval_postures(
         mut self,
         postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
-    ) -> Result<Self, UnknownConfiguredApprovalTool> {
+    ) -> Result<Self, ConfiguredApprovalPostureError> {
         for (name, posture) in postures {
             let Some(entry) = self.entries.get_mut(&name) else {
-                return Err(UnknownConfiguredApprovalTool { name });
+                return Err(ConfiguredApprovalPostureError::UnknownTool { name });
             };
+            if posture == ToolApprovalPosture::Delegated {
+                return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+            }
             entry.definition = entry.definition.clone().with_approval_posture(posture);
         }
         Ok(self)
@@ -546,16 +549,21 @@ impl DaemonToolCatalog {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DuplicateDaemonTool;
 
-/// A configured posture named no tool in the composed catalog.
+/// A configured approval posture cannot be enforced by this daemon runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UnknownConfiguredApprovalTool {
-    name: ToolName,
+pub enum ConfiguredApprovalPostureError {
+    /// The configured name is absent from the composed catalog.
+    UnknownTool { name: ToolName },
+    /// Delegated judging is not wired into this runtime yet.
+    DelegatedJudgeUnavailable { name: ToolName },
 }
 
-impl UnknownConfiguredApprovalTool {
-    /// Borrows the unknown configured tool name.
+impl ConfiguredApprovalPostureError {
+    /// Borrows the configured tool name without exposing it to startup telemetry.
     pub const fn name(&self) -> &ToolName {
-        &self.name
+        match self {
+            Self::UnknownTool { name } | Self::DelegatedJudgeUnavailable { name } => name,
+        }
     }
 }
 
@@ -959,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn composed_catalog_applies_postures_and_rejects_unknown_names() {
+    fn composed_catalog_applies_enforceable_postures_and_rejects_unknown_names() {
         let (echo_catalog, _executor) = EchoTool::try_new()
             .expect("echo fixture compiles")
             .into_parts();
@@ -968,7 +976,7 @@ mod tests {
         let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
         let configured = catalog
             .clone()
-            .with_approval_postures([(echo.clone(), ToolApprovalPosture::Delegated)])
+            .with_approval_postures([(echo.clone(), ToolApprovalPosture::Human)])
             .expect("known tool posture is applied");
         let unknown = ToolName::try_new(String::from("unknown_tool"))
             .expect("unknown fixture name is structurally valid");
@@ -981,9 +989,28 @@ mod tests {
                 .definition(&echo)
                 .expect("configured tool remains present")
                 .approval_posture(),
-            Some(ToolApprovalPosture::Delegated)
+            Some(ToolApprovalPosture::Human)
         );
         assert_eq!(rejected.name(), &unknown);
+    }
+
+    #[test]
+    fn composed_catalog_rejects_delegated_posture_without_judge_wiring() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+
+        let rejected = catalog
+            .with_approval_postures([(echo.clone(), ToolApprovalPosture::Delegated)])
+            .expect_err("delegated posture fails closed without judge dispatch");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
+        );
     }
 
     #[test]

@@ -477,10 +477,12 @@ unknown posture values, and startup rejects a structurally valid name that is
 absent from the actually composed catalog. An absent table or omitted tool name
 preserves that declaration's legacy permission-default and session-blanket
 behavior exactly. An explicit posture supersedes that legacy result for the
-request: `auto` records policy automation, `delegated` parks with delegated
-authority for the committed approval-judge wiring, and `human` parks for a user
-even when the session blanket is enabled. Until that wiring lands, a delegated
-request remains parked because no present runtime dispatches its judge.
+request: `auto` records policy automation and `human` parks for a user even when
+the session blanket is enabled. Committed unimplemented functionality:
+`delegated` will park with delegated authority for the approval-judge wiring.
+Until that wiring lands, daemon startup rejects a configured `delegated`
+override, so this partial configuration slice cannot create a delegated request
+that the ordinary user-decision path could approve.
 
 Committed unimplemented functionality: the optional `[approval_judge]` table has
 exactly one `selection_id`, and the configuration parser requires it to name a

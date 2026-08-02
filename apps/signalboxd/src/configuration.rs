@@ -1546,6 +1546,10 @@ cache_read_input_usd_per_million_tokens = "4"
         format!("{}{}", &CONFIGURATION[..start], &CONFIGURATION[end..])
     }
 
+    fn judged_direct_selection_fixture() -> DirectModelSelection {
+        DirectModelSelection::from_uuid(Uuid::from_u128(2))
+    }
+
     #[test]
     fn configured_tool_postures_and_judge_selection_are_typed() {
         let configured = HubModelConfiguration::parse(&format!(
@@ -1570,7 +1574,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             .next()
             .expect("fixture has one alias")
             .1;
-        let judged = DirectModelSelection::from_uuid(Uuid::from_u128(2));
+        let judged = judged_direct_selection_fixture();
 
         assert_eq!(postures[0].0.as_str(), CURRENT_TIME_NAME);
         assert_eq!(postures[0].1, ToolApprovalPosture::Delegated);
@@ -1585,7 +1589,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     fn absent_approval_settings_preserve_legacy_policy_and_reserved_same_model_selection() {
         let configured =
             HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
-        let judged = DirectModelSelection::from_uuid(Uuid::from_u128(2));
+        let judged = judged_direct_selection_fixture();
         assert_eq!(configured.tool_approval_postures().count(), 0);
         assert_eq!(configured.approval_judge_selection(judged), judged);
     }

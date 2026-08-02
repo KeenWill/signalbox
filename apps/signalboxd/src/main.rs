@@ -45,15 +45,16 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE, DaemonTools,
-    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
-    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
-    HubModelConfigurationError, LocalProcessListener, LocalSocketError, OtlpRuntime,
-    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
-    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE,
+    ConfiguredApprovalPostureError, DaemonTools, DaemonToolsConstructionError,
+    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
+    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
+    LocalProcessListener, LocalSocketError, OtlpRuntime, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -1007,10 +1008,18 @@ async fn run_hub(
     let tool_catalog =
         match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
             Ok(catalog) => catalog,
-            Err(_error) => {
+            Err(error) => {
+                let cause = match error {
+                    ConfiguredApprovalPostureError::UnknownTool { .. } => {
+                        "tool_approval_posture_names_unknown_tool"
+                    }
+                    ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { .. } => {
+                        "delegated_tool_approval_requires_judge_wiring"
+                    }
+                };
                 let failure = erase_startup_cause(
                     RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("tool_approval_posture_names_unknown_tool"),
+                    SanitizedStartupCause::Static(cause),
                 );
                 let _ = database.close().await;
                 return Err(failure);
