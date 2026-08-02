@@ -22,8 +22,8 @@ use crate::descriptor::{
 };
 use crate::failure::LocalGitFailure;
 use crate::limits::{
-    MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
-    MAX_REVISION_BYTES, MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES,
+    MAX_BRANCH_BYTES, MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES,
+    MAX_REPOSITORY_INSPECTIONS, MAX_REVISION_BYTES, MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES,
 };
 
 pub(super) struct RepositoryConfig {
@@ -163,7 +163,9 @@ fn valid_head_record(bytes: &[u8], object_format: ObjectFormat) -> bool {
     }
     if let Some(target) = record.strip_prefix(b"ref: ") {
         return std::str::from_utf8(target).is_ok_and(|target| {
-            target.starts_with("refs/") && git2::Reference::is_valid_name(target)
+            target.len() <= MAX_BRANCH_BYTES
+                && target.starts_with("refs/")
+                && git2::Reference::is_valid_name(target)
         });
     }
     std::str::from_utf8(record)

@@ -24,7 +24,7 @@ use crate::descriptor::{
 };
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_BRANCH_BYTES, MAX_REVISION_BYTES};
-use crate::packed_reference::packed_reference_state;
+use crate::packed_reference::{PackedReferenceNamespace, packed_reference_state};
 use crate::pinning::PinnedRepository;
 use crate::reference_read::{open_git_directory_path, read_reference_leaf};
 
@@ -279,9 +279,8 @@ impl ReferenceLock {
         {
             return Err(LocalGitFailure::Operation);
         }
-        let (expected_packed, packed_namespace_conflicts) =
-            packed_reference_state(authority, &self.name)?;
-        if packed_namespace_conflicts {
+        let expected_packed = packed_reference_state(authority, &self.name)?;
+        if expected_packed.namespace == PackedReferenceNamespace::Conflicts {
             return Err(LocalGitFailure::Operation);
         }
         if !descriptor_entry_exists(&self.parent, &self.leaf)? {
@@ -302,7 +301,7 @@ impl ReferenceLock {
             .map_err(|_| LocalGitFailure::Operation)?;
             after_publish();
             let packed_state_is_current = packed_reference_state(authority, &self.name)
-                .is_ok_and(|current| current == (expected_packed, false));
+                .is_ok_and(|current| current == expected_packed);
             let layout_is_current = authority.validate_supported_layout().is_ok();
             let hierarchy_is_current = self.hierarchy_is_current(authority);
             before_cleanup();
@@ -340,7 +339,7 @@ impl ReferenceLock {
         after_publish();
         let displaced = read_reference_leaf(&self.parent, &self.lock_name, authority, &self.name);
         let packed_state_is_current = packed_reference_state(authority, &self.name)
-            .is_ok_and(|current| current == (expected_packed, false));
+            .is_ok_and(|current| current == expected_packed);
         let displaced_value_is_expected = displaced.as_ref() == Ok(expected);
         let displaced_snapshot_is_current =
             reference_snapshot_identity_at(&self.parent, &self.lock_name)
@@ -368,7 +367,7 @@ impl ReferenceLock {
         }
         before_cleanup();
         let final_postconditions_hold = packed_reference_state(authority, &self.name)
-            .is_ok_and(|current| current == (expected_packed, false))
+            .is_ok_and(|current| current == expected_packed)
             && authority.validate_supported_layout().is_ok()
             && self.hierarchy_is_current(authority);
         if !final_postconditions_hold {
@@ -982,10 +981,10 @@ pub(super) fn open_reference_parent(
         };
         let next_directory = match mode {
             ReferenceParentMode::CreateMissing => match creation_modes {
-                Some((directory_mode, _)) => open_or_create_ref_directory_with_mode_tracked(
+                Some(creation_modes) => open_or_create_ref_directory_with_mode_tracked(
                     &directory,
                     component,
-                    directory_mode,
+                    creation_modes.directory,
                 )?,
                 None => open_or_create_ref_directory(&directory, component)?,
             },
@@ -1010,7 +1009,7 @@ pub(super) fn open_reference_parent(
         directory,
         leaf,
         hierarchy,
-        creation_file_mode: creation_modes.map(|(_, file_mode)| file_mode),
+        creation_file_mode: creation_modes.map(|modes| modes.file),
     })
 }
 
@@ -1024,9 +1023,15 @@ pub(super) fn validate_reference_name(name: &str) -> Result<(), LocalGitFailure>
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ReferenceInstallationModes {
+    pub(super) directory: Mode,
+    pub(super) file: Mode,
+}
+
 pub(super) fn reference_creation_modes(
     authority: &PinnedRepository,
-) -> Result<(Mode, Mode), LocalGitFailure> {
+) -> Result<ReferenceInstallationModes, LocalGitFailure> {
     let refs = openat(
         &authority.git_directory,
         "refs",
@@ -1039,16 +1044,16 @@ pub(super) fn reference_creation_modes(
 
 pub(super) fn reference_installation_modes(
     refs: &OwnedFd,
-) -> Result<(Mode, Mode), LocalGitFailure> {
+) -> Result<ReferenceInstallationModes, LocalGitFailure> {
     let metadata = fs::File::from(dup(refs).map_err(|_| LocalGitFailure::Operation)?)
         .metadata()
         .map_err(|_| LocalGitFailure::Operation)?;
     let directory_mode = (metadata.mode() & 0o2777) | 0o700;
     let file_mode = (metadata.mode() & 0o666) | 0o600;
-    Ok((
-        Mode::from_raw_mode(directory_mode),
-        Mode::from_raw_mode(file_mode),
-    ))
+    Ok(ReferenceInstallationModes {
+        directory: Mode::from_raw_mode(directory_mode),
+        file: Mode::from_raw_mode(file_mode),
+    })
 }
 
 pub(super) fn open_or_create_ref_directory(

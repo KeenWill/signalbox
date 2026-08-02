@@ -8,6 +8,18 @@ use crate::layout::parse_full_object_id;
 use crate::limits::MAX_PACKED_REFS_BYTES;
 use crate::pinning::PinnedRepository;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PackedReferenceState {
+    pub(super) target: Option<git2::Oid>,
+    pub(super) namespace: PackedReferenceNamespace,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PackedReferenceNamespace {
+    Clear,
+    Conflicts,
+}
+
 pub(super) fn packed_reference_exists(
     authority: &PinnedRepository,
     reference_name: &str,
@@ -43,20 +55,20 @@ pub(super) fn packed_reference_namespace_conflicts(
 pub(super) fn packed_reference_state(
     authority: &PinnedRepository,
     reference_name: &str,
-) -> Result<(Option<git2::Oid>, bool), LocalGitFailure> {
+) -> Result<PackedReferenceState, LocalGitFailure> {
     let requested = reference_name.as_bytes();
     let mut target = None;
-    let mut namespace_conflicts = false;
+    let mut namespace = PackedReferenceNamespace::Clear;
     for (oid, existing) in read_packed_references(authority)? {
         if existing == requested {
             target = Some(oid);
         } else if is_namespaced_under(&existing, requested)
             || is_namespaced_under(requested, &existing)
         {
-            namespace_conflicts = true;
+            namespace = PackedReferenceNamespace::Conflicts;
         }
     }
-    Ok((target, namespace_conflicts))
+    Ok(PackedReferenceState { target, namespace })
 }
 
 fn is_namespaced_under(candidate: &[u8], namespace: &[u8]) -> bool {

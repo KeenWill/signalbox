@@ -21,7 +21,14 @@ pub enum LocalGitToolsConstructionError {
 
 impl fmt::Display for LocalGitToolsConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("local Git tool construction failed")
+        formatter.write_str(match self {
+            Self::Name => "local Git tool static name is invalid",
+            Self::Schema => "local Git tool static schema is invalid",
+            Self::ErrorDetail => "local Git tool static error detail is invalid",
+            Self::Duplicate => "local Git tool catalog is duplicated",
+            Self::Root(_) => "local Git tool root is invalid",
+            Self::Repository => "local Git tool repository layout is invalid",
+        })
     }
 }
 

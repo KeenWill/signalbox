@@ -977,6 +977,10 @@ fn validate_loose_object(
     directory_prefix: [u8; 2],
     filename: &OsStr,
 ) -> Result<(), LocalGitFailure> {
+    let compressed_length = file
+        .metadata()
+        .map_err(|_| LocalGitFailure::Repository)?
+        .len();
     let decoded_limit = MAX_LOOSE_OBJECT_HEADER_BYTES
         .saturating_add(MAX_OBJECT_BYTES)
         .saturating_add(1);
@@ -986,9 +990,10 @@ fn validate_loose_object(
         .take((decoded_limit + 1) as u64)
         .read_to_end(&mut decoded)
         .map_err(|_| LocalGitFailure::Repository)?;
+    let consumed = decoder.total_in();
     drop(decoder);
     file.rewind().map_err(|_| LocalGitFailure::Repository)?;
-    if decoded.len() > decoded_limit {
+    if decoded.len() > decoded_limit || consumed != compressed_length {
         return Err(LocalGitFailure::Repository);
     }
     let header_end = decoded

@@ -7,7 +7,8 @@ use git2::Repository;
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_repository_layout;
 use crate::packed_reference::{
-    packed_reference_state, packed_reference_target, read_packed_references_with_test_hook,
+    PackedReferenceNamespace, PackedReferenceState, packed_reference_state,
+    packed_reference_target, read_packed_references_with_test_hook,
 };
 use crate::pinning::PinnedRepository;
 use crate::tests::support::{Fixture, TRACKED_PATH, commit_all};
@@ -174,7 +175,13 @@ fn packed_reference_state_combines_target_and_namespace_from_one_snapshot() {
     let state =
         packed_reference_state(&authority, name).expect("packed reference state reads once");
 
-    assert_eq!(state, (Some(fixture.initial), true));
+    assert_eq!(
+        state,
+        PackedReferenceState {
+            target: Some(fixture.initial),
+            namespace: PackedReferenceNamespace::Conflicts,
+        }
+    );
 }
 
 #[test]

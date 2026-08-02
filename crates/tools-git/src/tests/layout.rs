@@ -16,7 +16,7 @@ use crate::layout::{
     reject_administrative_symlinks, validate_repository_layout,
     validate_shallow_file_at_with_test_hook,
 };
-use crate::limits::MAX_OBJECT_BYTES;
+use crate::limits::{MAX_BRANCH_BYTES, MAX_OBJECT_BYTES};
 use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
@@ -62,6 +62,19 @@ fn repository_layout_rejects_an_abbreviated_detached_head() {
 
     let failure = validate_repository_layout(fixture.root())
         .expect_err("abbreviated detached HEAD rejects admission");
+
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn repository_layout_rejects_an_oversized_symbolic_head_target() {
+    let fixture = Fixture::new();
+    let target = format!("refs/heads/{}", "x".repeat(MAX_BRANCH_BYTES));
+    fs::write(fixture.root().join(".git/HEAD"), format!("ref: {target}\n"))
+        .expect("oversized symbolic HEAD writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("oversized symbolic HEAD rejects admission");
 
     assert_repository_construction_failure(failure);
 }
@@ -844,6 +857,25 @@ fn object_capture_rejects_a_compressed_loose_object_above_the_decoded_limit() {
         .expect("oversized decoded loose object rejects capture");
 
     assert!(compressed_bytes < content.len() as u64);
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_capture_rejects_trailing_bytes_after_a_loose_object_stream() {
+    let fixture = Fixture::new();
+    let object_path = plant_loose_blob(fixture.root(), b"fixture object");
+    let mut bytes = fs::read(&object_path).expect("loose object reads");
+    bytes.extend_from_slice(b"trailing bytes");
+    fs::remove_file(&object_path).expect("loose object removes");
+    fs::write(&object_path, bytes).expect("loose object with trailing bytes writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = PinnedObjectDatabase::capture(&authority)
+        .err()
+        .expect("trailing loose-object bytes reject capture");
+
     assert_eq!(failure, LocalGitFailure::Repository);
 }
 
