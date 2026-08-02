@@ -708,7 +708,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return .init(state: .recoveryRequired, label: "Recovery required")
     case .failed(_, _, let terminalModelCall):
       if let terminalModelCall, case .unknown(let value) = terminalModelCall.disposition {
-        return .init(state: .failed, label: "Failed: unrecognized disposition (\(value))")
+        let label = SignalboxSessionSynchronizationMachine.retainedDiagnosticMessage(
+          "Failed: unrecognized disposition (\(value))"
+        )
+        return .init(state: .failed, label: label)
       }
       guard let cause = terminalModelCall?.cause else {
         return .init(state: .failed, label: "Failed")

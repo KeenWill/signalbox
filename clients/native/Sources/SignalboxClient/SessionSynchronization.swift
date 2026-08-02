@@ -1461,7 +1461,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       guard append(.turn(turn)) else {
         return .invalid("Snapshot exceeded the configured native-client capacity.")
       }
-      return .accepted
+      return turn.state.snapshotUnknownDiagnostic ?? .accepted
     case .transcriptModelCallUsage(let evidence):
       guard let turnAcceptancePosition = turnAcceptancePositions[evidence.turnID] else {
         return .invalid("Snapshot model-call usage order or identities were invalid.")
@@ -1972,6 +1972,18 @@ extension SignalboxToolBatchState {
       return payload.encodedUTF8Bytes
     }
     return 0
+  }
+}
+
+extension SignalboxTranscriptTurnState {
+  fileprivate var snapshotUnknownDiagnostic: SignalboxSnapshotAccumulatorOutcome? {
+    guard case .unknown(let kind, _, _) = self else {
+      return nil
+    }
+    return .diagnostic(
+      kind: "transcript_turn.state.\(kind)",
+      decodingDiagnostic: nil
+    )
   }
 }
 

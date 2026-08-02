@@ -364,7 +364,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testFutureTurnStateIsRetainedInAuthoritativeSnapshot() throws {
+  func testFutureTurnStateIsRetainedAndReportedInAuthoritativeSnapshot() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -376,7 +376,7 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
 
-    XCTAssertTrue(effects.isEmpty)
+    XCTAssertNotNil(SynchronizationFixture.reportedDiagnosticMessage(in: effects))
     XCTAssertEqual(
       transport.machine.phase,
       SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)

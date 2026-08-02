@@ -526,6 +526,20 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(projection.activity, ProcessProjectionFixture.unknownFailedActivity)
   }
 
+  func testUnknownFailedDispositionActivityIsBounded() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownFailedDisposition(
+      ProcessProjectionFixture.oversizedUnknownState
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(
+      projection.activity.label.utf8.count,
+      SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes
+    )
+  }
+
   func testSnapshotPreservesPendingAcceptanceOrderAndActiveActivity() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithQueuedAndActiveTurns()
     var projector = SignalboxProcessTranscriptProjector()
@@ -716,6 +730,33 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
     XCTAssertTrue(viewModel.canStopAndSend)
+  }
+
+  @MainActor
+  func testSideSnapshotFenceKeepsBufferedActivationLifecycle() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithKnownActiveTurn(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.activatedEvent(
+          cursor: ProcessProjectionFixture.bufferedTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessDriverFixture.turn)
+    XCTAssertFalse(viewModel.canSend)
   }
 
   @MainActor
@@ -4179,10 +4220,12 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithUnknownFailedDisposition() throws
+  static func snapshotWithUnknownFailedDisposition(
+    _ disposition: String = unknownDisposition
+  ) throws
     -> SignalboxSynchronizationSnapshot
   {
-    try snapshotWithFailedModelCall(disposition: unknownDisposition, causeMember: "")
+    try snapshotWithFailedModelCall(disposition: disposition, causeMember: "")
   }
 
   private static func snapshotWithFailedModelCall(
@@ -5072,7 +5115,9 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func activatedEvent() throws -> SignalboxFollowedSessionEvent {
+  static func activatedEvent(
+    cursor: UInt64 = 1
+  ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
       {
@@ -5080,7 +5125,8 @@ private enum ProcessProjectionFixture {
         "turn_id":"\(ProcessDriverFixture.turn)",
         "current_attempt_id":"\(ProcessDriverFixture.attempt)"
       }
-      """
+      """,
+      cursor: cursor
     )
   }
 

@@ -1911,9 +1911,6 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         }
       }
     case .turnActivated(let turnID, _):
-      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
-        return
-      }
       activeTurnID = turnID
       mutationBlocksByTurnID.removeValue(forKey: turnID)
       activity = .init(state: .running, label: "Running")
@@ -1959,42 +1956,27 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         presentDiagnostic("Preserved an unrecognized tool-batch state: \(kind).")
       }
     case .turnCompleted(let turnID, _, _, _):
-      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
-        return
-      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .completed, label: "Completed")
       )
     case .turnFailed(let turnID, _, _):
-      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
-        return
-      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .failed, label: "Failed")
       )
     case .turnRefused(let turnID, _, _):
-      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
-        return
-      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .refused, label: "Refused")
       )
     case .turnCancelled(let turnID, _, _):
-      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
-        return
-      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .cancelled, label: "Cancelled")
       )
     case .turnReconciliationRequired(let turnID, _, _),
       .turnToolReconciliationRequired(let turnID, _, _):
-      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
-        return
-      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .recoveryRequired, label: "Recovery required")
