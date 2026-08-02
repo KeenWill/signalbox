@@ -2899,6 +2899,7 @@ pub enum StoppedToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     },
 }
 impl StoppedToolResponsePartIdentity {
@@ -2907,6 +2908,7 @@ impl StoppedToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     ) -> Self;
 }
 pub struct StoppedToolRoundModelCallIdentities { /* private */ }
@@ -3302,7 +3304,7 @@ impl ToolUsingAssistantResponseError {
 pub struct ToolRequest { /* private */ }
 // sealed live producer: definitive model-call tool-round transition
 impl ToolRequest {
-    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments()
+    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments(), approval_posture()
 }
 pub struct ToolRequestReconstitutionInput { /* private */ }
 impl ToolRequestReconstitutionInput {
@@ -3315,6 +3317,7 @@ impl ToolRequestReconstitutionInput {
         name: ToolName,
         arguments: NormalizedToolArguments,
     ) -> Self;
+    pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
     pub fn into_request(self) -> ToolRequest;
 }
 
@@ -3327,6 +3330,12 @@ pub enum ToolPermissionDefault {
     Confirm,
     AlwaysConfirm,
 }
+pub enum ToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
 pub enum ToolEffectClass {
     EffectFree,
     ExternalEffect,
@@ -3336,8 +3345,41 @@ pub enum ToolDecisionSource {
     PolicyAuto,
     SessionBlanket,
     SessionOverride,
-    JudgeRecommendation,
+    Delegate,
 }
+
+pub enum ToolApprovalDecider {
+    User { command: DurableCommandId },
+    Delegate { model: DirectModelSelection, call: ModelCallId },
+}
+
+pub struct ToolDecisionRationale(/* private */);
+impl ToolDecisionRationale {
+    pub fn try_new(value: String) -> Result<Self, ToolDecisionRationaleError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+pub struct ToolDecisionRationaleError { /* private */ }
+// accessors: value(), into_value()
+
+pub enum DelegateApprovalRecommendation {
+    Approve,
+    Deny,
+    EscalateToHuman,
+}
+pub struct DelegateToolApproval { /* private */ }
+impl DelegateToolApproval {
+    pub fn try_new(
+        request: &ToolRequest,
+        model: DirectModelSelection,
+        call: ModelCallId,
+        recommendation: DelegateApprovalRecommendation,
+        rationale: ToolDecisionRationale,
+    ) -> Result<Self, DelegateToolApprovalError>;
+    // accessors: request(), model(), call(), recommendation(), rationale()
+}
+pub struct DelegateToolApprovalError { /* private */ }
+// accessors: posture(), recommendation()
 
 pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
@@ -3359,13 +3401,14 @@ pub enum ToolApprovalDecision {
     Deny { reason: Option<ToolDenialReason> },
 }
 pub struct ToolApprovalResolution { /* private */ }
-// sealed live producers: user command, registry auto, or frozen session blanket
+// sealed live producers: user command, registry auto, frozen session blanket, or checked delegate
 impl ToolApprovalResolution {
-    // accessors: request(), decision(), source(), is_approved()
+    // accessors: request(), decision(), source(), decider(), rationale(), is_approved()
 }
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
     pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
+    pub fn delegate(approval: DelegateToolApproval) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
     pub const fn session_blanket(
         request: ToolRequestId,
@@ -3380,8 +3423,13 @@ pub struct ToolApprovalResolutionReconstitutionError { /* private */ }
 pub enum InitialToolApproval {
     Confirm,
     AlwaysConfirm,
+    Human,
+    Delegated,
     PolicyAuto,
     SessionBlanket,
+}
+impl InitialToolApproval {
+    pub const fn requires_decision(self) -> bool;
 }
 
 pub struct DecideToolRequest { /* private */ }
@@ -3671,6 +3719,11 @@ impl ToolBatch {
     ) -> impl Iterator<Item = ToolAttemptId> + '_;
     pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery>;
+    pub fn prepare_delegate_decision(
+        self,
+        approval: DelegateToolApproval,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Result<PreparedDelegateToolApproval, DelegateToolApprovalTransitionError>;
     pub fn prepare_user_decision(
         self,
         command: DecideToolRequest,
@@ -3727,6 +3780,16 @@ pub struct AwaitingToolRecovery { /* private */ }
 // sealed: ToolBatch::awaiting_recovery
 // accessors: session(), turn(), producing_call(), yielded_frontier(),
 // issuing_attempt(), attempt()
+pub struct PreparedDelegateToolApproval { /* private */ }
+// accessors: batch(), approval(), resolution(), active_phase()
+pub enum DelegateToolApprovalTransitionFailure {
+    NoUndecidedRequest,
+    RequestMismatch,
+    ContinuationAttemptMismatch,
+}
+pub struct DelegateToolApprovalTransitionError { /* private */ }
+// accessors: batch(), approval(), failure()
+
 pub struct PreparedToolBatchDecision { /* private */ }
 // accessors: batch(), prepared_command(), active_phase(), into_parts()
 pub enum ToolBatchDecisionFailure {
@@ -7912,9 +7975,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_execution                            | 51                   |
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
-| domain: tool                                       | 38                   |
+| domain: tool                                       | 45                   |
 | domain: tool_attempt                               | 26                   |
-| domain: tool_execution                             | 17                   |
+| domain: tool_execution                             | 20                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
@@ -7924,7 +7987,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **599 (+7 free fn)** |
+| **signalbox-domain total**                         | **609 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
