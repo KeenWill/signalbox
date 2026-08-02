@@ -481,14 +481,6 @@ pub(super) fn scrubber() -> CredentialScrubber {
         .expect("fixture credential is usable")
 }
 
-pub(super) fn ascii_json_unicode_escape(value: &str) -> String {
-    assert!(value.is_ascii(), "fixture must be ASCII");
-    value
-        .encode_utf16()
-        .map(|code_unit| format!(r"\u{code_unit:04x}"))
-        .collect()
-}
-
 pub(super) fn debug_result_count_collision_key() -> String {
     DEBUG_RESULT_COUNT_COLLISION_COUNT.to_string()
 }

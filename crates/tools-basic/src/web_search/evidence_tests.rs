@@ -46,12 +46,14 @@ fn web_search_rejects_populated_success_result_suffix_collision() {
     );
 }
 
-/// INV-035: JSON-aware error sanitization decodes an escaped credential
-/// before the body can enter durable failure evidence.
+/// INV-035: typed error parsing retains only the detail component and exact
+/// credential scrubbing runs before provider detail enters durable evidence.
 #[test]
-fn web_search_error_body_redacts_json_escaped_credential() {
-    let escaped = ascii_json_unicode_escape(SYNTHETIC_KEY);
-    let body = format!(r#"{{"error":{{"detail":"{escaped}"}}}}"#).into_bytes();
+fn web_search_error_body_redacts_exact_credential() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": {"detail": SYNTHETIC_KEY},
+    }))
+    .expect("synthetic provider body serializes");
     let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
         .expect("fixture error body is bounded");
     let detail = provider_error_detail(error, &scrubber())

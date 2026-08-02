@@ -1,15 +1,13 @@
-use reqwest::{Url, header::HeaderValue};
+use reqwest::header::HeaderValue;
 use signalbox_application::ToolExecutorEvidence;
 use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_model_runtime::{CredentialValue, redact_text};
 
 use super::{
-    canonicalization::*,
-    diagnostic::WebSearchExecutorError,
-    egress::fixed_egress_diagnostic_outputs,
-    result::{ParsedResultUrlRemovalFacts, fixed_result_diagnostic_outputs},
-    text_decoding::*,
+    diagnostic::WebSearchExecutorError, egress::fixed_egress_diagnostic_outputs,
+    result::fixed_result_diagnostic_outputs, text_decoding::*,
 };
+use url::Url;
 
 pub(super) const MAX_CREDENTIAL_BYTES: usize = 4 * 1024;
 
@@ -78,26 +76,6 @@ impl CredentialScrubber {
         std::iter::once(self.exact.as_str()).chain(self.decoded_variants.iter().map(String::as_str))
     }
 
-    fn url_collision_variants(&self) -> Option<Vec<String>> {
-        let mut variants = Vec::new();
-        for variant in self.reversible_variants() {
-            retain_url_collision_variant(&mut variants, variant);
-        }
-        let mut inspected = 0;
-        while inspected < variants.len() {
-            let variant = variants[inspected].clone();
-            if let Some(preprocessed) = url_preprocessed_credential_variant(&variant) {
-                retain_url_collision_variant(&mut variants, &preprocessed);
-            }
-            let decoded = decoded_credential_variants(&variant)?;
-            for decoded_variant in decoded {
-                retain_url_collision_variant(&mut variants, &decoded_variant);
-            }
-            inspected += 1;
-        }
-        Some(variants)
-    }
-
     pub(super) fn output_collision_variants(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.exact.as_str())
             .chain(std::iter::once(self.json_escaped.as_str()))
@@ -111,34 +89,11 @@ impl CredentialScrubber {
         }) {
             return true;
         }
-        let Some(url_variants) = self.url_collision_variants() else {
-            return true;
-        };
-        self.url_contains_collision_variants(text, &url_variants)
-    }
-
-    fn url_contains_collision_variants(&self, text: &str, url_variants: &[String]) -> bool {
         let Ok(url) = Url::parse(text) else {
             return true;
         };
-        let default_port = match url.scheme() {
-            "http" => 80,
-            "https" => 443,
-            _ => return true,
-        };
-        let mut url_variants = url_variants.to_vec();
-        if extend_url_collision_variants(&mut url_variants, default_port, url.port().is_some()) {
-            return true;
-        }
-        let url_variants = url_variants.as_slice();
-        if url_variants.iter().any(|variant| {
-            unicode_case_insensitive_contains(text, variant)
-                || encoded_contains_credential(text, variant)
-        }) {
-            return true;
-        }
-        if url_variants
-            .iter()
+        if self
+            .reversible_variants()
             .any(|variant| url.scheme().eq_ignore_ascii_case(variant))
         {
             return true;
@@ -146,80 +101,13 @@ impl CredentialScrubber {
         let Some(host) = url.host_str() else {
             return false;
         };
-        if url_variants.iter().any(|variant| {
-            canonicalized_url_host(variant).is_some_and(|credential_host| {
-                unicode_case_insensitive_contains(host, &credential_host)
-            })
-        }) {
-            return true;
-        }
-        if let Some(result_host) = parse_ip_literal(host) {
-            if url_variants
-                .iter()
-                .any(|variant| parse_ip_literal(variant).is_some_and(|key| key == result_host))
-            {
-                return true;
-            }
-            match result_host {
-                std::net::IpAddr::V4(result_ipv4) => {
-                    let result_components = result_ipv4.octets();
-                    return url_variants.iter().any(|variant| {
-                        legacy_ipv4_component_contains(variant, result_ipv4)
-                            || canonicalized_ipv4_component_fragments(variant).any(|fragment| {
-                                result_components
-                                    .windows(fragment.len())
-                                    .any(|window| window == fragment)
-                            })
-                    });
-                }
-                std::net::IpAddr::V6(result_ipv6) => {
-                    let result_components = result_ipv6.segments();
-                    let result_octets = result_ipv6.octets();
-                    let result_hextets =
-                        result_components.map(|component| format!("{component:x}"));
-                    return url_variants.iter().any(|variant| {
-                        let (mixed_components, mixed_octets) =
-                            canonicalized_mixed_ipv6_ipv4_tail_fragments(variant);
-                        canonicalized_ipv6_hextet_text_fragment(variant).is_some_and(|fragment| {
-                            result_hextets
-                                .iter()
-                                .any(|component| component.contains(&fragment))
-                        }) || canonicalized_ipv6_separator_bound_hextet_text_fragments(variant)
-                            .iter()
-                            .any(|fragment| unicode_case_insensitive_contains(host, fragment))
-                            || canonicalized_ipv6_fragments(variant)
-                                .into_iter()
-                                .any(|fragment| {
-                                    result_components
-                                        .windows(fragment.len())
-                                        .any(|window| window == fragment)
-                                })
-                            || canonicalized_ipv4_tail_fragments(variant).into_iter().any(
-                                |fragment| {
-                                    result_octets
-                                        .windows(fragment.len())
-                                        .any(|window| window == fragment)
-                                },
-                            )
-                            || ipv4_tail_component_contains(variant, &result_octets[12..])
-                            || mixed_components.into_iter().any(|fragment| {
-                                result_components
-                                    .windows(fragment.len())
-                                    .any(|window| window == fragment)
-                            })
-                            || mixed_octets.into_iter().any(|fragment| {
-                                result_octets
-                                    .windows(fragment.len())
-                                    .any(|window| window == fragment)
-                            })
-                    });
-                }
-            }
-        }
-        if url_variants.iter().any(|variant| {
-            idna::domain_to_ascii(variant).is_ok_and(|credential_host| {
-                unicode_case_insensitive_contains(host, &credential_host)
-            })
+        if self.reversible_variants().any(|variant| {
+            whatwg_host(variant)
+                .is_some_and(|candidate| unicode_case_insensitive_contains(host, &candidate))
+                || idna::domain_to_ascii(variant)
+                    .is_ok_and(|candidate| unicode_case_insensitive_contains(host, &candidate))
+                || whatwg_http_url(variant)
+                    .is_some_and(|candidate| unicode_case_insensitive_contains(text, &candidate))
         }) {
             return true;
         }
@@ -230,100 +118,36 @@ impl CredentialScrubber {
         unicode_case_insensitive_contains(&unicode_host, &self.exact)
             || unicode_case_insensitive_contains(&unicode_host, &self.json_escaped)
             || self.contains_credential(&unicode_host)
-            || url_variants.iter().any(|variant| {
-                idna_mapped_unicode_variant(variant)
-                    .is_some_and(|mapped| unicode_case_insensitive_contains(&unicode_host, &mapped))
+            || self.reversible_variants().any(|variant| {
+                idna::domain_to_ascii(variant).is_ok_and(|ascii| {
+                    let (mapped, result) = idna::domain_to_unicode(&ascii);
+                    result.is_ok() && unicode_case_insensitive_contains(&unicode_host, &mapped)
+                })
             })
     }
-
-    pub(super) fn url_contains_credential_after_removed_url_components(
-        &self,
-        text: &str,
-        removal_facts: ParsedResultUrlRemovalFacts,
-    ) -> bool {
-        self.url_collision_variants().is_none_or(|mut variants| {
-            let original_variant_count = variants.len();
-            let mut inspected = 0;
-            while inspected < variants.len() {
-                let variant = variants[inspected].clone();
-                if removal_facts.user_information
-                    && let Some((_, retained)) = variant.rsplit_once('@')
-                {
-                    retain_url_collision_variant(&mut variants, retained);
-                }
-                if removal_facts.empty_port
-                    && let Some(retained) = removed_empty_port_delimiter_fragment(&variant)
-                {
-                    retain_url_collision_variant(&mut variants, &retained);
-                }
-                if removal_facts.host_trailing_dot
-                    && let Some(retained) = removed_host_trailing_dot_fragment(&variant)
-                {
-                    retain_url_collision_variant(&mut variants, &retained);
-                }
-                if removal_facts.query
-                    && let Some((retained, _)) = variant.split_once('?')
-                {
-                    retain_url_collision_variant(&mut variants, retained);
-                }
-                if removal_facts.fragment
-                    && let Some((retained, _)) = variant.split_once('#')
-                {
-                    retain_url_collision_variant(&mut variants, retained);
-                }
-                inspected += 1;
-            }
-            self.url_contains_collision_variants(text, &variants[original_variant_count..])
-        })
-    }
 }
 
-fn retain_url_collision_variant(variants: &mut Vec<String>, candidate: &str) {
-    if !candidate.is_empty() && !variants.iter().any(|retained| retained == candidate) {
-        variants.push(String::from(candidate));
-    }
+fn whatwg_host(value: &str) -> Option<String> {
+    let candidate = Url::parse(&format!("http://{value}/")).ok()?;
+    (candidate.username().is_empty()
+        && candidate.password().is_none()
+        && candidate.port().is_none()
+        && candidate.path() == "/"
+        && candidate.query().is_none()
+        && candidate.fragment().is_none())
+    .then(|| candidate.host_str().map(str::to_owned))?
 }
 
-fn extend_url_collision_variants(
-    variants: &mut Vec<String>,
-    default_port: u16,
-    result_has_port: bool,
-) -> bool {
-    let mut inspected = 0;
-    while inspected < variants.len() {
-        let variant = variants[inspected].clone();
-        let slash_normalized = variant.replace('\\', "/");
-        retain_url_collision_variant(variants, &slash_normalized);
-        if let Some(normalized) = normalize_url_path_dot_segments(&variant) {
-            retain_url_collision_variant(variants, &normalized);
-        }
-        if let Some(normalized) = canonicalized_url_port_fragment(&variant) {
-            retain_url_collision_variant(variants, &normalized);
-        }
-        if let Some(normalized) = canonicalized_authority_port_zero_fragment(&variant) {
-            retain_url_collision_variant(variants, &normalized);
-        }
-        if let Some(normalized) = canonicalized_port_path_zero_fragment(&variant) {
-            retain_url_collision_variant(variants, &normalized);
-        }
-        if let Some(normalized) = canonicalized_complete_url(&variant) {
-            retain_url_collision_variant(variants, &normalized);
-        }
-        if let Some(normalized) = inserted_special_scheme_authority_slash_fragment(&variant) {
-            retain_url_collision_variant(variants, &normalized);
-        }
-        if let Some(normalized) = removed_default_port_fragment(&variant, default_port) {
-            retain_url_collision_variant(variants, &normalized);
-        }
-        if result_has_port && let Some(retained) = discarded_port_zero_prefix_context(&variant) {
-            if retained.is_empty() {
-                return true;
-            }
-            retain_url_collision_variant(variants, retained);
-        }
-        inspected += 1;
+fn whatwg_http_url(value: &str) -> Option<String> {
+    let mut candidate = Url::parse(value).ok()?;
+    if !matches!(candidate.scheme(), "http" | "https") || candidate.host_str().is_none() {
+        return None;
     }
-    false
+    candidate.set_username("").ok()?;
+    candidate.set_password(None).ok()?;
+    candidate.set_query(None);
+    candidate.set_fragment(None);
+    Some(candidate.to_string())
 }
 
 pub(super) fn has_http_header_boundary_whitespace(value: &[u8]) -> bool {

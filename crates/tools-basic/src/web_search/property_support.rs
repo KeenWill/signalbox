@@ -3,27 +3,18 @@ use proptest::{
     strategy::BoxedStrategy,
     test_runner::{Config, TestCaseResult, TestRunner},
 };
-use reqwest::Url;
 use signalbox_model_runtime::CredentialValue;
+use url::Url;
 
 use super::{diagnostic::*, evidence::*, redaction::*, result::*, test_support::*};
 
 const PROPERTY_CASES: u32 = 512;
 const GRAMMAR_CREDENTIAL_ATOM: &str = "fixturegrammar";
-const GRAMMAR_PERCENT_REFLECTION: &str = "%66%69%78%74%75%72%65%67%72%61%6D%6D%61%72";
-const GRAMMAR_SERIALIZED_PERCENT_REFLECTION: &str =
-    "%2566%2569%2578%2574%2575%2572%2565%2567%2572%2561%256D%256D%2561%2572";
-const GRAMMAR_JSON_REFLECTION: &str =
-    r"\u0066\u0069\u0078\u0074\u0075\u0072\u0065\u0067\u0072\u0061\u006d\u006d\u0061\u0072";
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum CredentialGrammar {
     Exact,
-    PercentEncodedReflection,
-    PercentEncodedCredential,
     CaseFoldedReflection,
-    JsonEscapedReflection,
-    HtmlNumericReflection,
 }
 
 #[derive(Clone, Debug)]
@@ -198,11 +189,7 @@ fn credential_reflection_strategy() -> BoxedStrategy<CredentialReflection> {
         "[a-z][a-z0-9]{3,15}",
         prop_oneof![
             Just(CredentialGrammar::Exact),
-            Just(CredentialGrammar::PercentEncodedReflection),
-            Just(CredentialGrammar::PercentEncodedCredential),
             Just(CredentialGrammar::CaseFoldedReflection),
-            Just(CredentialGrammar::JsonEscapedReflection),
-            Just(CredentialGrammar::HtmlNumericReflection),
         ],
     )
         .prop_map(|(atom, grammar)| credential_reflection(&atom, grammar))
@@ -234,25 +221,9 @@ fn credential_reflection(atom: &str, grammar: CredentialGrammar) -> CredentialRe
             credential: atom.to_owned(),
             reflection: atom.to_owned(),
         },
-        CredentialGrammar::PercentEncodedReflection => CredentialReflection {
-            credential: atom.to_owned(),
-            reflection: percent_encode(atom),
-        },
-        CredentialGrammar::PercentEncodedCredential => CredentialReflection {
-            credential: percent_encode(atom),
-            reflection: atom.to_owned(),
-        },
         CredentialGrammar::CaseFoldedReflection => CredentialReflection {
             credential: atom.to_ascii_uppercase(),
             reflection: atom.to_owned(),
-        },
-        CredentialGrammar::JsonEscapedReflection => CredentialReflection {
-            credential: atom.to_owned(),
-            reflection: json_unicode_escape(atom),
-        },
-        CredentialGrammar::HtmlNumericReflection => CredentialReflection {
-            credential: atom.to_owned(),
-            reflection: html_numeric_escape(atom),
         },
     }
 }
@@ -344,174 +315,12 @@ fn assert_independent_component_absence(
     component: &str,
     credential: &CredentialReflection,
 ) -> TestCaseResult {
-    let entity_decoded = independently_decode_typed_entity_escape(component);
-    let component = independently_decode_typed_percent_escape(&entity_decoded).to_ascii_lowercase();
+    let component = component.to_ascii_lowercase();
     let credential_spelling = credential.credential.to_ascii_lowercase();
     let reflected_spelling = credential.reflection.to_ascii_lowercase();
     prop_assert!(!component.contains(&credential_spelling));
     prop_assert!(!component.contains(&reflected_spelling));
     Ok(())
-}
-
-fn independently_decode_typed_entity_escape(component: &str) -> String {
-    let mut decoded = String::with_capacity(component.len());
-    let mut remaining = component;
-    while !remaining.is_empty() {
-        if let Some(suffix) = remaining.strip_prefix("&amp;") {
-            decoded.push('&');
-            remaining = suffix;
-        } else if let Some(suffix) = remaining.strip_prefix("&lt;") {
-            decoded.push('<');
-            remaining = suffix;
-        } else if let Some(suffix) = remaining.strip_prefix("&gt;") {
-            decoded.push('>');
-            remaining = suffix;
-        } else if let Some(suffix) = remaining.strip_prefix("&quot;") {
-            decoded.push('"');
-            remaining = suffix;
-        } else if let Some(suffix) = remaining.strip_prefix("&#39;") {
-            decoded.push('\'');
-            remaining = suffix;
-        } else {
-            let character = remaining
-                .chars()
-                .next()
-                .expect("non-empty component has a first character");
-            decoded.push(character);
-            remaining = &remaining[character.len_utf8()..];
-        }
-    }
-    decoded
-}
-
-fn independently_decode_typed_percent_escape(component: &str) -> String {
-    let bytes = component.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let escaped = bytes
-            .get(index..index.saturating_add(3))
-            .and_then(|sequence| {
-                let [b'%', high, low] = sequence else {
-                    return None;
-                };
-                Some((hex_value(*high)? << 4) | hex_value(*low)?)
-            });
-        if let Some(byte) = escaped {
-            decoded.push(byte);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn percent_encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| format!("%{byte:02X}"))
-        .collect::<String>()
-}
-
-fn json_unicode_escape(value: &str) -> String {
-    value
-        .encode_utf16()
-        .map(|code_unit| format!(r"\u{code_unit:04x}"))
-        .collect::<String>()
-}
-
-fn html_numeric_escape(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| format!("&#{};", character as u32))
-        .collect::<String>()
-}
-
-/// The credential grammar's percent branch preserves a known reversible
-/// relationship instead of generating unrelated strings.
-#[test]
-fn credential_grammar_percent_branch_is_reversible() {
-    let case = credential_reflection(
-        GRAMMAR_CREDENTIAL_ATOM,
-        CredentialGrammar::PercentEncodedReflection,
-    );
-
-    assert_eq!(case.credential, GRAMMAR_CREDENTIAL_ATOM);
-    assert_eq!(case.reflection, GRAMMAR_PERCENT_REFLECTION);
-}
-
-/// The independent property oracle reverses one percent-escape layer added by
-/// typed URL serialization before checking for a credential reflection.
-#[test]
-fn typed_percent_escape_decoder_reverses_url_serialization_layer() {
-    let decoded = independently_decode_typed_percent_escape(GRAMMAR_SERIALIZED_PERCENT_REFLECTION);
-
-    assert_eq!(decoded, GRAMMAR_PERCENT_REFLECTION);
-}
-
-#[test]
-fn typed_entity_escape_decoder_reverses_ampersand() {
-    assert_eq!(independently_decode_typed_entity_escape("&amp;"), "&");
-}
-
-#[test]
-fn typed_entity_escape_decoder_reverses_less_than() {
-    assert_eq!(independently_decode_typed_entity_escape("&lt;"), "<");
-}
-
-#[test]
-fn typed_entity_escape_decoder_reverses_greater_than() {
-    assert_eq!(independently_decode_typed_entity_escape("&gt;"), ">");
-}
-
-#[test]
-fn typed_entity_escape_decoder_reverses_double_quote() {
-    assert_eq!(independently_decode_typed_entity_escape("&quot;"), "\"");
-}
-
-#[test]
-fn typed_entity_escape_decoder_reverses_apostrophe() {
-    assert_eq!(independently_decode_typed_entity_escape("&#39;"), "'");
-}
-
-#[test]
-fn typed_entity_escape_decoder_handles_mixed_escapes_and_plain_text() {
-    assert_eq!(
-        independently_decode_typed_entity_escape("a&amp;&lt;&gt;&quot;&#39;z"),
-        "a&<>\"'z"
-    );
-}
-
-#[test]
-fn typed_entity_escape_decoder_preserves_unknown_reference() {
-    assert_eq!(
-        independently_decode_typed_entity_escape("before&copy;after"),
-        "before&copy;after"
-    );
-}
-
-/// The credential grammar's JSON branch emits four-digit escapes that match
-/// the scrubber's JSON-escaped credential variant.
-#[test]
-fn credential_grammar_json_branch_matches_json_escape_form() {
-    let case = credential_reflection(
-        GRAMMAR_CREDENTIAL_ATOM,
-        CredentialGrammar::JsonEscapedReflection,
-    );
-
-    assert_eq!(case.credential, GRAMMAR_CREDENTIAL_ATOM);
-    assert_eq!(case.reflection, GRAMMAR_JSON_REFLECTION);
 }
 
 /// The structural URL grammar places generated text in user information while

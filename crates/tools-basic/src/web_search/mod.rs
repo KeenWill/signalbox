@@ -4,7 +4,6 @@
 // the composition slice removes this allowance.
 #![allow(dead_code)]
 
-mod canonicalization;
 mod diagnostic;
 mod egress;
 mod evidence;
@@ -12,8 +11,6 @@ mod redaction;
 mod result;
 mod text_decoding;
 
-#[cfg(test)]
-mod canonicalization_tests;
 #[cfg(test)]
 mod egress_tests;
 #[cfg(test)]
