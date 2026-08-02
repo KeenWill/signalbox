@@ -1265,7 +1265,7 @@ fn packed_reference_fallback_rejects_a_new_loose_leaf_after_snapshot() {
 }
 
 #[test]
-fn reference_publication_rejects_an_existing_packed_namespace_conflict() {
+fn reference_lock_rejects_an_existing_packed_namespace_conflict() {
     let fixture = Fixture::new();
     let name = "refs/heads/topic";
     let reference_path = fixture.root().join(".git").join(name);
@@ -1279,17 +1279,38 @@ fn reference_publication_rejects_an_existing_packed_namespace_conflict() {
             .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
-    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
-    let expected = lock.read(&authority).expect("missing reference reads");
-    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
-        .expect("replacement reference prepares");
-
-    let failure = lock
-        .publish(&authority, &expected)
-        .expect_err("packed namespace conflict rejects publication");
+    let failure = ReferenceLock::acquire(&authority, name)
+        .err()
+        .expect("packed namespace conflict rejects lock acquisition");
 
     assert_eq!(failure, LocalGitFailure::Operation);
     assert!(!reference_path.exists());
+}
+
+#[test]
+fn reference_lock_rejects_a_packed_parent_before_creating_loose_directories() {
+    let fixture = Fixture::new();
+    let packed_name = "refs/heads/topic";
+    let child_name = "refs/heads/topic/child";
+    let packed_path = fixture.root().join(".git/packed-refs");
+    let loose_parent = fixture.root().join(".git").join(packed_name);
+    fs::write(&packed_path, format!("{} {packed_name}\n", fixture.initial))
+        .expect("packed parent reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+
+    let failure = ReferenceLock::acquire(&authority, child_name)
+        .err()
+        .expect("packed parent rejects child lock acquisition");
+    let packed_target = crate::packed_reference::packed_reference_target(&authority, packed_name)
+        .expect("packed parent remains readable");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(!loose_parent.exists());
+    assert_eq!(packed_target, Some(fixture.initial));
 }
 
 #[test]

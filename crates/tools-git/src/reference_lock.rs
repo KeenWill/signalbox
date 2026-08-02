@@ -25,7 +25,9 @@ use crate::descriptor::{
 use crate::failure::LocalGitFailure;
 use crate::layout::valid_reference_name;
 use crate::limits::{MAX_REFERENCE_BYTES, MAX_REVISION_BYTES};
-use crate::packed_reference::{PackedReferenceNamespace, packed_reference_state};
+use crate::packed_reference::{
+    PackedReferenceNamespace, packed_reference_namespace_conflicts, packed_reference_state,
+};
 use crate::pinning::{PinnedRepository, RepositoryOperationGuard};
 use crate::reference_read::{open_git_directory_path, read_reference_leaf};
 
@@ -92,6 +94,9 @@ impl ReferenceLock {
     ) -> Result<Self, LocalGitFailure> {
         authority.validate_supported_layout()?;
         let operation_guard = authority.operation_guard()?;
+        if name.starts_with("refs/") && packed_reference_namespace_conflicts(authority, name)? {
+            return Err(LocalGitFailure::Operation);
+        }
         let bound = open_reference_parent(authority, name, ReferenceParentMode::CreateMissing)?;
         let creation_file_mode = bound.creation_file_mode;
         let parent = bound.directory;
