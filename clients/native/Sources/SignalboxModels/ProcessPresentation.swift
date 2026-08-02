@@ -338,11 +338,17 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
   public let kind: String
   public let role: SignalboxMessageRole
   public let text: String
+  public let unrecognizedKind: String?
 
-  public init(role: SignalboxMessageRole, text: String) {
+  public init(
+    role: SignalboxMessageRole,
+    text: String,
+    unrecognizedKind: String? = nil
+  ) {
     self.kind = "process_message"
     self.role = role
     self.text = text
+    self.unrecognizedKind = unrecognizedKind
   }
 }
 

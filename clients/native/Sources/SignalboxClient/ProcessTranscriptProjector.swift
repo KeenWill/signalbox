@@ -194,15 +194,20 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     let role: SignalboxMessageRole
+    let unrecognizedKind: String?
     switch message.entry {
     case .user:
       role = .user
+      unrecognizedKind = nil
     case .assistant, .contextSummary:
       role = .assistant
+      unrecognizedKind = nil
     case .imported(_, _, let speaker):
       role = importedRole(speaker)
-    case .unknown:
+      unrecognizedKind = nil
+    case .unknown(let kind, _, _):
       role = .unknown
+      unrecognizedKind = SignalboxProcessPresentation.retainedLabel(kind)
     }
     let eventID = try claimPresentationID(
       .semantic(
@@ -214,7 +219,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return SignalboxStoredEvent(
       eventID: eventID,
       event: .processMessage(
-        SignalboxProcessMessageEvent(role: role, text: content)
+        SignalboxProcessMessageEvent(
+          role: role,
+          text: content,
+          unrecognizedKind: unrecognizedKind
+        )
       )
     )
   }
@@ -228,14 +237,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     switch message.entry {
-    case .modelIdentityChanged(_, let defaultsVersion, let selectedModelID):
+    case .modelIdentityChanged(let turnID, let defaultsVersion, let selectedModelID):
       return try semanticRecord(
         message,
         event: .processConservative(
           SignalboxProcessConservativeEvent(
             kind: "model_identity_changed",
             diagnostic:
-              "Model \(selectedModelID.rawValue) became active at defaults version \(defaultsVersion.rawValue)."
+              "Turn \(turnID.rawValue) selected model \(selectedModelID.rawValue) at defaults version \(defaultsVersion.rawValue); source session \(message.sourceSessionID.rawValue), entry \(message.entryID.rawValue)."
           )
         )
       )

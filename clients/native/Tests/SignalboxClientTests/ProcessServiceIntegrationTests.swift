@@ -480,6 +480,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(projection.records.count, ProcessProjectionFixture.singleRecordCount)
     XCTAssertEqual(marker.kind, ProcessProjectionFixture.modelIdentityKind)
+    XCTAssertEqual(marker.diagnostic, ProcessProjectionFixture.modelIdentityDiagnostic)
   }
 
   func testTurnActivationSideProjectionAllowsAbsentModelIdentityMarker() throws {
@@ -506,6 +507,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       event.kind.utf8.count,
       SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+  }
+
+  func testUnknownTranscriptTextEntryPreservesItsPresentationKind() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownTextEntryKind()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+    let timelineMessage = try ProcessProjectionFixture.onlyTimelineMessage(
+      in: normalizer.timelineItems
+    )
+
+    XCTAssertEqual(message.role, .unknown)
+    XCTAssertEqual(message.text, ProcessProjectionFixture.unknownTextEntryContent)
+    XCTAssertEqual(message.unrecognizedKind, ProcessProjectionFixture.unknownTextEntryKind)
+    XCTAssertEqual(
+      timelineMessage.unrecognizedKind,
+      ProcessProjectionFixture.unknownTextEntryKind
     )
   }
 
@@ -4736,6 +4757,10 @@ private enum ProcessProjectionFixture {
   static let completedAssistantTranscriptRowID = "timeline-message-1"
   static let singleRecordCount = 1
   static let modelIdentityKind = "model_identity_changed"
+  static let modelIdentityDiagnostic =
+    "Turn \(ProcessDriverFixture.turn) selected model \(ProcessDriverFixture.modelCall) at defaults version 1; source session \(ProcessDriverFixture.session), entry \(proposedToolEntry)."
+  static let unknownTextEntryKind = "fixture_future_text_entry"
+  static let unknownTextEntryContent = "Fixture future text."
   static let unknownToolBatchState = "fixture_future_tool_batch_state"
   static let unknownToolBatchDiagnostic =
     "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
@@ -5151,6 +5176,48 @@ private enum ProcessProjectionFixture {
           "source_session_id":"\(ProcessDriverFixture.session)",
           "entry_id":"\(proposedToolEntry)",
           "entry":{"type":"\(kind)"}
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"1"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithUnknownTextEntryKind() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{"type":"\(unknownTextEntryKind)"}
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(unknownTextEntryContent)"
         }
         """,
         """
