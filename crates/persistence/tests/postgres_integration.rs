@@ -39,28 +39,30 @@ use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
     ActivatedAcceptedInputTurn, ActiveTurnPhase, AmbiguousModelCallTurnIdentities,
     AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
-    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
-    CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, PerInputConfigurationChoices,
+    ChildRelationshipPolicy, CompletedModelCallIdentities, ContextFrontierId,
+    CorrelatedModelCallTerminalObservation, CreateSession, CurrentToolAttemptState,
+    CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult, DelegationContent,
+    DelegationMessageId, DelegationProvenance, DelegationWaitMode, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval,
+    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
     PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionInputPosition, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
-    ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
-    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
-    TurnId, UserContent,
+    SessionCreationProvenance, SessionDelegation, SessionId, SessionInputPosition,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
+    ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -98,6 +100,7 @@ use signalbox_persistence::{
     session_credentials::{
         SessionCredentialPin, SessionModelCredential, current_session_credential,
     },
+    session_delegation::SessionDelegationRepository,
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
         StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
@@ -136,6 +139,71 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
         ),
     ])
     .expect("test credential pin is valid")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_session_repository_round_trips_atomic_child_and_history()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xd300;
+    let (fixture, _model_repository, _observation, request_id) =
+        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", "{}").await?;
+    let request = ToolRequestReconstitutionInput::new(
+        request_id,
+        fixture.session,
+        fixture.turn,
+        fixture.call,
+        ToolRequestOrdinal::from_u32(0),
+        ToolName::try_new("spawn_session".to_owned()).expect("valid tool name"),
+        NormalizedToolArguments::try_from_provider_text("{}".to_owned())
+            .expect("valid tool arguments"),
+    )
+    .into_request();
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
+    let relation = SessionDelegation::spawn(&request, child, ChildRelationshipPolicy::Background)
+        .expect("distinct parent and child");
+    let defaults = SessionConfigurationDefaults::new(direct(seed + 0x300));
+    let repository = SessionDelegationRepository::new(pool.clone(), test_session_credential_pin());
+
+    repository.create(&relation, &defaults).await?;
+    let wait = relation
+        .register_wait(&request, DelegationWaitMode::Foreground)
+        .expect("active parent relation accepts its request");
+    repository.register_wait(wait).await?;
+    let updated = repository
+        .deliver_message(
+            request_id,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x400)),
+            DelegationContent::try_new("work packet".to_owned()).expect("valid message content"),
+            DelegationProvenance::from_tool_request(&request),
+        )
+        .await?;
+    let loaded_relation = repository
+        .load(request_id)
+        .await?
+        .expect("created delegation remains loadable");
+    let loaded_child = SessionRepository::new(pool.clone())
+        .load_session(child)
+        .await?
+        .expect("delegated child remains loadable");
+
+    assert_eq!(loaded_relation, updated);
+    assert_eq!(loaded_relation.events().len(), 2);
+    assert_eq!(
+        loaded_child.creation_provenance(),
+        SessionCreationProvenance::delegated(request_id)
+    );
+    assert_eq!(
+        wait.foreground_subject()
+            .expect("foreground subject")
+            .child(),
+        child
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 fn model_credential_reference() -> ModelCallCredentialReference {
