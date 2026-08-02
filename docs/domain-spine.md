@@ -648,6 +648,8 @@ impl UpdateSessionPlacement {
     ) -> Self;
     // accessors: command_id(), session(), expected_version(), replacement()
 }
+// Eq/Hash exclude command_id (comparison-payload rule,
+// spec/identity-and-commands.md)
 pub enum SessionPlacementEventKind { Created, Updated }
 pub struct SessionPlacementEvent { /* private */ }
 impl SessionPlacementEvent {

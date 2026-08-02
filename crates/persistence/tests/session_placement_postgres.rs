@@ -32,6 +32,10 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_placement";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const UPDATE_FIXTURE_SESSION_ID_SEED: u128 = 0x20c;
+const UPDATE_FIXTURE_CREATION_COMMAND_ID_SEED: u128 = 0x10c;
+const UPDATE_FIXTURE_COMMAND_ID_SEED: u128 = 0x10d;
+const UPDATE_FIXTURE_RESULT_VERSION: u64 = 2;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -99,6 +103,18 @@ fn creation(
     )
     .prepare(session_id)
     .unwrap()
+}
+
+#[track_caller]
+fn recorded_applied_update(
+    outcome: &SessionPlacementRepositoryOutcome,
+) -> &signalbox_domain::UpdateSessionPlacementApplied {
+    let SessionPlacementRepositoryOutcome::Recorded(UpdateSessionPlacementResult::Applied(applied)) =
+        outcome
+    else {
+        panic!("the placement update fixture must record an applied result")
+    };
+    applied
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -411,18 +427,18 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_update_handle_applies_replays_and_rejects_conflicting_reuse()
+async fn s36_inv012_update_handle_applies_replays_and_rejects_conflicting_reuse()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x20c);
+    let session_id = session(UPDATE_FIXTURE_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x10c),
+            command(UPDATE_FIXTURE_CREATION_COMMAND_ID_SEED),
             session_id,
             SessionPlacement::pathless(),
         ))
         .await?;
-    let command_id = command(0x10d);
+    let command_id = command(UPDATE_FIXTURE_COMMAND_ID_SEED);
     let update = UpdateSessionPlacement::new(
         command_id,
         session_id,
@@ -431,14 +447,9 @@ async fn s36_update_handle_applies_replays_and_rejects_conflicting_reuse()
     );
     let repository = SessionPlacementRepository::new(pool.clone());
     let first = repository.handle(update.clone()).await?;
-    let SessionPlacementRepositoryOutcome::Recorded(UpdateSessionPlacementResult::Applied(applied)) =
-        &first
-    else {
-        panic!("the first update must apply")
-    };
-    let expected_version = SessionPlacementVersion::INITIAL
-        .next()
-        .expect("the initial placement version has a successor");
+    let applied = recorded_applied_update(&first);
+    let expected_version = SessionPlacementVersion::try_from_u64(UPDATE_FIXTURE_RESULT_VERSION)
+        .expect("the fixture result version is positive");
 
     assert_eq!(
         applied.event().prior_version(),
