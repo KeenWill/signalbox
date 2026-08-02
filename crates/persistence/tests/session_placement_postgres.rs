@@ -641,8 +641,52 @@ async fn s36_exhaustion_receipt_replay_requires_the_maximum_version() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_public_placement_read_rejects_cross_wired_creation_provenance()
+-> Result<(), Box<dyn Error>> {
+    let fixture = corrupt_creation_placement_provenance_fixture().await?;
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
+        .load_current(fixture.session)
+        .await
+        .expect_err("a public placement read must authenticate creation provenance");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("cross-wired creation provenance fails public read with typed corruption")
+    };
+    assert_eq!(reason, "session placement provenance receipt");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_creation_replay_rejects_cross_wired_placement_provenance() -> Result<(), Box<dyn Error>>
 {
+    let fixture = corrupt_creation_placement_provenance_fixture().await?;
+    let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+        .handle(fixture.creation)
+        .await
+        .expect_err("creation replay cannot use another command's placement event");
+    let CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Missing(field)) = error
+    else {
+        panic!("cross-wired creation placement fails with typed corruption")
+    };
+    assert_eq!(field, "stored_placement_version");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+struct CorruptCreationPlacementProvenanceFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    session: SessionId,
+    creation: signalbox_domain::PreparedCreateSession,
+}
+
+async fn corrupt_creation_placement_provenance_fixture()
+-> Result<CorruptCreationPlacementProvenanceFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let first_command = command(0x114);
     let first_session = session(0x208);
@@ -672,29 +716,12 @@ async fn s36_creation_replay_rejects_cross_wired_placement_provenance() -> Resul
     sqlx::query("ALTER TABLE session_placement_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-
-    let read_error = SessionPlacementRepository::new(pool.clone())
-        .load_current(first_session)
-        .await
-        .expect_err("a public placement read must authenticate creation provenance");
-    let SessionPlacementRepositoryError::Corruption(read_reason) = read_error else {
-        panic!("cross-wired creation provenance fails public read with typed corruption")
-    };
-    assert_eq!(read_reason, "session placement provenance receipt");
-
-    let error = repository
-        .handle(first)
-        .await
-        .expect_err("creation replay cannot use another command's placement event");
-    let CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Missing(field)) = error
-    else {
-        panic!("cross-wired creation placement fails with typed corruption")
-    };
-    assert_eq!(field, "stored_placement_version");
-
-    pool.close().await;
-    drop(container);
-    Ok(())
+    Ok(CorruptCreationPlacementProvenanceFixture {
+        container,
+        pool,
+        session: first_session,
+        creation: first,
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -782,9 +809,10 @@ async fn corrupt_placement_predecessor_fixture()
             scoped("projects.foo.first"),
         ))
         .await?;
+    let successor_command = command(0x133);
     repository
         .handle(UpdateSessionPlacement::new(
-            command(0x133),
+            successor_command,
             session,
             SessionPlacementVersion::try_from_u64(2)
                 .expect("fixture predecessor version is positive"),
@@ -800,7 +828,7 @@ async fn corrupt_placement_predecessor_fixture()
           WHERE session_id = $1 AND version = 2",
     )
     .bind(*session.as_uuid())
-    .bind(*command(0x133).as_uuid())
+    .bind(*successor_command.as_uuid())
     .execute(&pool)
     .await?;
     sqlx::query("ALTER TABLE session_placement_event ENABLE TRIGGER ALL")
