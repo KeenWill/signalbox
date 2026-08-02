@@ -3,6 +3,9 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The typed usage provenance, derived-cost row shape, and labeled client
+aggregation are verified against PR #389 (`agent/cost-accounting`).
+
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
@@ -1170,12 +1173,23 @@ by model-call UUID. The native client models both usage rows and the mandatory
 model-calls-end boundary, validates their contiguous indices, identities, and
 count, and retains usage rows in its bounded snapshot record set without
 presenting the former false unknown-frame diagnostic. Each row carries
-contiguous zero-based `model_call_index`, `turn_id`, `model_call_id`, and a
-required `usage` object with required-nullable `input_tokens`, `output_tokens`,
+contiguous zero-based `model_call_index`, `turn_id`, `model_call_id`, closed
+`usage_provenance` (`reported` or `estimated`), and a required `usage` object
+with required-nullable `input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, and `cache_read_input_tokens`. A null field means
-the provider did not report it; a reported zero is the canonical decimal string
-`"0"`. `transcript_model_calls_end { model_call_count }` acknowledges the exact
-row count before any entry message. Every terminal call has one row, including
+that axis was not supplied; a present zero is the canonical decimal string
+`"0"`. The required-nullable `cost` member is null when no derivation is
+available. Otherwise it carries canonical nonnegative decimal `amount_usd`, the
+exact bounded `rate_version`, and label `real` or `metered_equivalent`. Because
+no read-time derivation exists without evidence, a nonnull `cost` is rejected
+when all four usage axes are null. `amount_usd` admits exactly the decimal
+representation used for derivation: at most 28 fractional digits and a
+coefficient no greater than 79,228,162,514,264,337,593,543,950,335. The daemon
+derives that value at read time under the
+[configuration-and-credentials](configuration-and-credentials.md) contract; no
+bare dollar amount is durable model-call evidence.
+`transcript_model_calls_end { model_call_count }` acknowledges the exact row
+count before any entry message. Every terminal call has one row, including
 historical, cancellation, and recovery calls whose four fields are all null.
 
 The daemon builds that complete sequence in a secure unnamed temporary file
@@ -1964,16 +1978,22 @@ evidence. A transition committed at or below that cursor therefore remains
 visible even when it has not added a semantic transcript entry.
 
 `transcript` replays the validated usage rows after ordinary turn and frontier
-output. It prints one compact subtotal per turn that has terminal calls and one
-session-total line, including `terminal_calls=0` with `0/0` field coverage when
-there are no terminal calls. Each of the four token fields carries both its
-subtotal and `reported_calls/terminal_calls` coverage. Zero is printed as zero;
-a field with no reported calls is printed as `unreported`, and partial coverage
-is never silently treated as complete. Snapshot validation rejects noncontiguous
-indices, unknown turn identities, repeated model-call identities, or usage rows
-outside strict turn-acceptance and per-turn model-call-UUID order. These client
-totals are presentation arithmetic over the exact per-call evidence. The client
-does not compute currency cost or store a derived total.
+output. It prints separate `reported` and `estimated` token subtotals per turn
+that has terminal calls and at session scope, including `terminal_calls=0` with
+`0/0` field coverage. The two provenances are never silently summed. Each of the
+four token fields carries both its subtotal and `present_calls/terminal_calls`
+coverage. Zero is printed as zero; a field with no supplied calls is printed as
+`unreported`, and partial coverage is never silently treated as complete.
+Snapshot validation rejects noncontiguous indices, unknown turn identities,
+repeated model-call identities, or usage rows outside strict turn-acceptance and
+per-turn model-call-UUID order. Currency presentation aggregates only per-call
+derived figures sharing the same usage provenance, billing label, and rate
+version; each line states that labeled triple and its costed-call count. These
+client totals are presentation arithmetic over exact per-call read evidence and
+use an anonymous temporary-file index so distinct rate versions do not grow
+client heap. The client scans that index once for output; totals are never
+persisted, and an addition that cannot retain both operands exactly rejects the
+snapshot instead of reporting a rounded total.
 
 The unbounded aggregate session-summary sequence is bounded the same way. `list`
 validates ordering and the terminal count while spooling summary frames to an
