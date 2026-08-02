@@ -1329,7 +1329,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   private var mutationBlocksByTurnID: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
-  private var sideSnapshotBlockCursorsByTurnID: [SignalboxCanonicalUUID: UInt64] = [:]
+  private var sideSnapshotCursorsByTurnID: [SignalboxCanonicalUUID: UInt64] = [:]
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -1695,7 +1695,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activeTurnID = activeTurnID(in: snapshot)
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
-        sideSnapshotBlockCursorsByTurnID = [:]
+        sideSnapshotCursorsByTurnID = [:]
         activity = projection.activity
         streamedText = nil
         errorMessage = nil
@@ -1704,11 +1704,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
-        sideSnapshotBlockCursorsByTurnID = Dictionary(
-          uniqueKeysWithValues: mutationBlocksByTurnID.keys.map {
-            ($0, snapshot.cursor.rawValue)
-          }
-        )
+        sideSnapshotCursorsByTurnID = Dictionary(
+          uniqueKeysWithValues: snapshot.records.compactMap { record in
+            guard case .turn(let turn) = record else {
+              return nil
+            }
+            return (turn.turnID, snapshot.cursor.rawValue)
+          })
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
         if !mutationBlocksByTurnID.isEmpty {
           activity = projection.activity
@@ -1868,7 +1870,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     activity = .unavailable
     activeTurnID = nil
     mutationBlocksByTurnID = [:]
-    sideSnapshotBlockCursorsByTurnID = [:]
+    sideSnapshotCursorsByTurnID = [:]
     phase = .stopped
     latestDiagnostic = nil
     isSubmitting = false
@@ -1954,7 +1956,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           mutationBlocksByTurnID[turnID] = .unknownNestedState
         }
         activity = .init(state: .recoveryRequired, label: "Recovery required")
-        latestDiagnostic = "Preserved an unrecognized tool-batch state: \(kind)."
+        presentDiagnostic("Preserved an unrecognized tool-batch state: \(kind).")
       }
     case .turnCompleted(let turnID, _, _, _):
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
@@ -2006,13 +2008,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     for turnID: SignalboxCanonicalUUID,
     at cursor: SignalboxCanonicalUInt64
   ) -> Bool {
-    guard let snapshotCursor = sideSnapshotBlockCursorsByTurnID[turnID] else {
+    guard let snapshotCursor = sideSnapshotCursorsByTurnID[turnID] else {
       return true
     }
     guard cursor.rawValue > snapshotCursor else {
       return false
     }
-    sideSnapshotBlockCursorsByTurnID.removeValue(forKey: turnID)
+    sideSnapshotCursorsByTurnID.removeValue(forKey: turnID)
     return true
   }
 
@@ -2022,7 +2024,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   ) {
     terminalTurnIDs.insert(turnID)
     mutationBlocksByTurnID.removeValue(forKey: turnID)
-    sideSnapshotBlockCursorsByTurnID.removeValue(forKey: turnID)
+    sideSnapshotCursorsByTurnID.removeValue(forKey: turnID)
     if activeTurnID == turnID {
       activeTurnID = nil
     }
@@ -2125,12 +2127,16 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         activity = .init(state: .running, label: "Running")
       case .unknown(let value):
         activity = .init(state: .recoveryRequired, label: "Recovery required")
-        latestDiagnostic = "Preserved an unrecognized model-call disposition: \(value)."
+        presentDiagnostic("Preserved an unrecognized model-call disposition: \(value).")
       }
     case .unknown(let kind, _):
       activity = .init(state: .recoveryRequired, label: "Recovery required")
-      latestDiagnostic = "Preserved an unrecognized model-call state: \(kind)."
+      presentDiagnostic("Preserved an unrecognized model-call state: \(kind).")
     }
+  }
+
+  private func presentDiagnostic(_ message: String) {
+    latestDiagnostic = SignalboxSessionSynchronizationMachine.retainedDiagnosticMessage(message)
   }
 }
 

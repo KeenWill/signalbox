@@ -687,6 +687,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testNewerRecognizedSideSnapshotRejectsBufferedUnknownTransition() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    viewModel.apply(.event(trigger))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithKnownActiveTurn(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.unknownStateModelCallEvent(
+          cursor: ProcessProjectionFixture.bufferedTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+    XCTAssertTrue(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testProposedToolWaitsOnlyWhenSideSnapshotShowsApproval() async throws {
     let service = makeService(scenario: .pendingApproval)
     let sessions = try await service.listSessions(includeArchived: false)
@@ -767,6 +799,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       viewModel.latestDiagnostic,
       ProcessProjectionFixture.unknownToolBatchDiagnostic
+    )
+  }
+
+  @MainActor
+  func testEventPresentationBoundsUnknownToolBatchDiagnostic() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.unknownToolBatchEvent(
+          kind: ProcessProjectionFixture.oversizedUnknownState
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      viewModel.latestDiagnostic?.utf8.count,
+      SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes
     )
   }
 
@@ -4100,6 +4152,10 @@ private enum ProcessProjectionFixture {
   static let unknownToolBatchState = "fixture_future_tool_batch_state"
   static let unknownToolBatchDiagnostic =
     "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
+  static let oversizedUnknownState = String(
+    repeating: "x",
+    count: SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes + 1
+  )
   static let bufferedTransitionCursor: UInt64 = 2
   static let sideSnapshotCursor: UInt64 = 3
 
@@ -4216,6 +4272,21 @@ private enum ProcessProjectionFixture {
       """
       {"type":"fixture_future_turn_state","retained":true}
       """
+    )
+  }
+
+  static func snapshotWithKnownActiveTurn(
+    cursor: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithActiveTurnState(
+      """
+      {
+        "type":"active_running",
+        "current_attempt_id":"\(ProcessDriverFixture.attempt)",
+        "current_model_call":null
+      }
+      """,
+      cursor: cursor
     )
   }
 
@@ -5013,14 +5084,16 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func unknownToolBatchEvent() throws -> SignalboxFollowedSessionEvent {
+  static func unknownToolBatchEvent(
+    kind: String = unknownToolBatchState
+  ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
       {
         "type":"tool_batch_transition",
         "turn_id":"\(ProcessDriverFixture.turn)",
         "model_call_id":"\(ProcessDriverFixture.modelCall)",
-        "state":{"type":"\(unknownToolBatchState)"}
+        "state":{"type":"\(kind)"}
       }
       """
     )
@@ -5115,7 +5188,9 @@ private enum ProcessProjectionFixture {
     try modelCallEvent(disposition: unknownDisposition)
   }
 
-  static func unknownStateModelCallEvent() throws -> SignalboxFollowedSessionEvent {
+  static func unknownStateModelCallEvent(
+    cursor: UInt64 = 1
+  ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
       {
@@ -5124,7 +5199,8 @@ private enum ProcessProjectionFixture {
         "model_call_id":"\(ProcessDriverFixture.modelCall)",
         "state":{"type":"\(unknownModelCallState)"}
       }
-      """
+      """,
+      cursor: cursor
     )
   }
 

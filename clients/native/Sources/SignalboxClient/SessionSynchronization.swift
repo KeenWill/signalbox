@@ -1190,7 +1190,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     let retainedDiagnostic = SignalboxSynchronizationDiagnostic(
       kind: diagnostic.kind,
       stage: diagnostic.stage,
-      message: retainedDiagnosticMessage(diagnostic.message)
+      message: Self.retainedDiagnosticMessage(diagnostic.message)
     )
     diagnostics.append(retainedDiagnostic)
     let overflow = diagnostics.count - Self.maximumRetainedDiagnostics
@@ -1200,7 +1200,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     return retainedDiagnostic
   }
 
-  private func retainedDiagnosticMessage(_ message: String) -> String {
+  public static func retainedDiagnosticMessage(_ message: String) -> String {
     let scalars = message.unicodeScalars
     var retainedEnd = scalars.startIndex
     var retainedBytes = 0
