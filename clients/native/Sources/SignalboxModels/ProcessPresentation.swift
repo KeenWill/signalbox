@@ -3,6 +3,8 @@ import Foundation
 public enum SignalboxProcessPresentation {
   public static let maximumLabelUTF8Bytes = 4 * 1_024
 
+  /// Bounds protocol-derived labels so unbounded retained tokens cannot exhaust memory or
+  /// stall SwiftUI layout.
   public static func retainedLabel(_ label: String) -> String {
     let scalars = label.unicodeScalars
     var retainedEnd = scalars.startIndex
