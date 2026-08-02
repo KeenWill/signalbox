@@ -201,14 +201,18 @@ BEGIN
         OLD.model_call_id, OLD.request_id, OLD.session_id, OLD.turn_id,
         OLD.direct_model_selection_id,
         OLD.resolved_provider_model_identity_id,
-        OLD.credential_reference, OLD.usage_input_includes_cache_tokens,
-        OLD.usage_provenance_kind
+        OLD.credential_reference, OLD.usage_input_includes_cache_tokens
     ) IS DISTINCT FROM ROW(
         NEW.model_call_id, NEW.request_id, NEW.session_id, NEW.turn_id,
         NEW.direct_model_selection_id,
         NEW.resolved_provider_model_identity_id,
-        NEW.credential_reference, NEW.usage_input_includes_cache_tokens,
-        NEW.usage_provenance_kind
+        NEW.credential_reference, NEW.usage_input_includes_cache_tokens
+    ) OR (
+        NEW.usage_provenance_kind IS DISTINCT FROM OLD.usage_provenance_kind
+        AND NOT (
+            OLD.state_kind <> 'terminal'
+            AND NEW.state_kind = 'terminal'
+        )
     ) THEN
         RAISE EXCEPTION 'approval judge authorization facts are immutable'
             USING ERRCODE = '23514';

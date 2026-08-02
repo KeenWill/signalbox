@@ -138,6 +138,7 @@ const APPROVAL_PROPOSAL: &[(&str, &str)] = &[(APPROVAL_TOOL_NAME, APPROVAL_ARGUM
 const APPROVAL_RECOMMENDATION: &str = "approve";
 const APPROVAL_JUDGE_CREDENTIAL: &str = "fixture-credential";
 const APPROVAL_JUDGE_RATIONALE: &str = "fixture rationale";
+const APPROVAL_JUDGE_ESTIMATED_PROVENANCE: &str = "estimated";
 
 fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
     signalbox_persistence::SessionCredentialPin::try_new(vec![
@@ -2259,6 +2260,7 @@ async fn insert_completed_judge(
     seed: u128,
     recommendation: &str,
     input_tokens: Option<Decimal>,
+    usage_provenance: Option<&str>,
 ) -> Result<(Uuid, Uuid), sqlx::Error> {
     let (selection, call) = insert_prepared_judge(connection, fixture, request, seed).await?;
     sqlx::query(
@@ -2272,12 +2274,14 @@ async fn insert_completed_judge(
         "UPDATE tool_approval_judge_model_call
             SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
                 recommendation_kind = $1, rationale = $2,
-                input_tokens = $3
-          WHERE model_call_id = $4",
+                input_tokens = $3,
+                usage_provenance_kind = COALESCE($4, usage_provenance_kind)
+          WHERE model_call_id = $5",
     )
     .bind(recommendation)
     .bind(APPROVAL_JUDGE_RATIONALE)
     .bind(input_tokens)
+    .bind(usage_provenance)
     .bind(call)
     .execute(&mut *connection)
     .await?;
@@ -2317,9 +2321,19 @@ async fn persist_delegated_denial_fixture(
     request: ToolRequestId,
     judge_seed: u128,
     continuation_attempt: TurnAttemptId,
-) -> Result<(), sqlx::Error> {
-    let (selection, judge_call) =
-        insert_completed_judge(connection, fixture, request, judge_seed, "deny", None).await?;
+    input_tokens: Option<Decimal>,
+    usage_provenance: Option<&str>,
+) -> Result<Uuid, sqlx::Error> {
+    let (selection, judge_call) = insert_completed_judge(
+        connection,
+        fixture,
+        request,
+        judge_seed,
+        "deny",
+        input_tokens,
+        usage_provenance,
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source,
@@ -2361,7 +2375,7 @@ async fn persist_delegated_denial_fixture(
     .bind(fixture.call.into_uuid())
     .execute(&mut *connection)
     .await?;
-    Ok(())
+    Ok(judge_call)
 }
 
 fn database_constraint(error: &sqlx::Error) -> Option<&str> {
@@ -3379,12 +3393,14 @@ async fn delegated_denial_reloads_in_a_continuation_model_frontier() -> Result<(
     };
     let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1));
     let mut transaction = pool.begin().await?;
-    persist_delegated_denial_fixture(
+    let _judge_call = persist_delegated_denial_fixture(
         &mut transaction,
         &fixture,
         *request,
         seed + 0xe0,
         continuation_attempt,
+        None,
+        None,
     )
     .await?;
     transaction.commit().await?;
@@ -3421,6 +3437,57 @@ async fn delegated_denial_reloads_in_a_continuation_model_frontier() -> Result<(
             .await?,
         AuthorizeModelCallOutcome::Authorized(_)
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_terminal_transition_accepts_estimated_usage_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ed0;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let estimated_input_tokens = Decimal::from(13_u32);
+    let mut transaction = pool.begin().await?;
+    let judge_call = persist_delegated_denial_fixture(
+        &mut transaction,
+        &fixture,
+        *request,
+        seed + 0xe0,
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+        Some(estimated_input_tokens),
+        Some(APPROVAL_JUDGE_ESTIMATED_PROVENANCE),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    let stored_usage: (String, Decimal) = sqlx::query_as(
+        "SELECT usage_provenance_kind, input_tokens
+           FROM tool_approval_judge_model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(judge_call)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored_usage,
+        (
+            APPROVAL_JUDGE_ESTIMATED_PROVENANCE.to_owned(),
+            estimated_input_tokens,
+        )
+    );
 
     pool.close().await;
     drop(container);
@@ -3561,6 +3628,7 @@ async fn approval_guard_judge_completion_respects_posture() -> Result<(), Box<dy
         APPROVAL_JUDGE_SEED,
         APPROVAL_RECOMMENDATION,
         None,
+        None,
     )
     .await
     .expect_err("a judge cannot approve human-only authority");
@@ -3597,6 +3665,7 @@ async fn approval_guard_completed_judge_requires_atomic_decision_effect()
         *request,
         APPROVAL_JUDGE_SEED,
         APPROVAL_RECOMMENDATION,
+        None,
         None,
     )
     .await?;
@@ -3721,6 +3790,7 @@ async fn approval_guard_judge_usage_respects_u64_bounds() -> Result<(), Box<dyn 
         APPROVAL_JUDGE_SEED,
         APPROVAL_RECOMMENDATION,
         Some(too_large),
+        None,
     )
     .await
     .expect_err("judge usage above u64 cannot commit");
@@ -3757,6 +3827,7 @@ async fn approval_guard_judge_usage_rejects_fractional_counts() -> Result<(), Bo
         APPROVAL_JUDGE_SEED,
         APPROVAL_RECOMMENDATION,
         Some(Decimal::new(15, 1)),
+        None,
     )
     .await
     .expect_err("fractional judge usage cannot be rounded into storage");
