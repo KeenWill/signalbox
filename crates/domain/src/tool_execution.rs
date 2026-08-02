@@ -2038,6 +2038,7 @@ mod tests {
         const JUDGE_CALL_SEED: u128 = 12;
         const EXECUTION_ATTEMPT_SEED: u128 = 4;
         const SUBJECT_TOOL_NAME: &str = "tool_10";
+        const SUBJECT_ARGUMENTS: &str = "{}";
         const JUDGE_RATIONALE: &str = "bounded request";
 
         let request_id = tool_request_id(SUBJECT_REQUEST_SEED);
@@ -2047,9 +2048,11 @@ mod tests {
         let ordinal = ToolRequestOrdinal::from_u32(SUBJECT_ORDINAL);
         let name =
             ToolName::try_new(String::from(SUBJECT_TOOL_NAME)).expect("fixture name is valid");
-        let arguments =
-            NormalizedToolArguments::try_from_stored(ToolArgumentsKind::Json, String::from("{}"))
-                .expect("fixture arguments are canonical");
+        let arguments = NormalizedToolArguments::try_from_stored(
+            ToolArgumentsKind::Json,
+            String::from(SUBJECT_ARGUMENTS),
+        )
+        .expect("fixture arguments are canonical");
         let request_with_posture = |posture| {
             ToolRequestReconstitutionInput::new(
                 request_id,

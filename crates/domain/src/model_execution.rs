@@ -4524,6 +4524,10 @@ mod tests {
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::Confirm,
         ));
+    }
+
+    #[test]
+    fn policy_auto_approval_is_admitted_under_dangerous_blanket_posture() {
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::PolicyAuto,
