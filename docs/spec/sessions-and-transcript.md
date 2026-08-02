@@ -925,12 +925,13 @@ child session, and one parent-chosen policy:
 The `SessionDelegation` aggregate records an admitted sealed
 `DelegatedSpawnRequest`'s parent, bounded task, policy, child, and spawn
 provenance as the first event in one contiguous history. Typed await and message
-requests may act only on their exact relationship; consuming transition failures
-return the unchanged aggregate and attempted input. Message delivery remains
-available after a terminal outcome. Outcome authority is checked against the
-relationship before recording: an equal authority-and-outcome replay is
-idempotent, `ContinueRunning` preserves the active lifecycle, and every other
-outcome terminalizes it.
+requests may act only on their exact relationship and only under the correlated
+in-flight dispatch for that same request, session, and turn; consuming
+transition failures return the unchanged aggregate and attempted input. Message
+delivery remains available after a terminal outcome. Outcome authority is
+checked against the relationship before recording: an equal
+authority-and-outcome replay is idempotent, `ContinueRunning` preserves the
+active lifecycle, and every other outcome terminalizes it.
 
 A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
 `ParentAlone` does not evaluate descendants. The descendant form walks the

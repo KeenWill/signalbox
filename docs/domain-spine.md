@@ -958,11 +958,13 @@ impl SessionDelegation {
     pub fn register_wait(
         &self,
         awaiting_request: &DelegationAwaitRequest,
+        dispatch: &AuthorizedToolAttempt,
     ) -> Result<DelegationWait, DelegationTransitionError>;
     pub fn deliver_message(
         self,
         sending_request: DelegationMessageRequest,
         id: DelegationMessageId,
+        dispatch: &AuthorizedToolAttempt,
     ) -> Result<(Self, DelegationEvent), DelegationTransitionError>;
     pub fn record_outcome(
         self,
