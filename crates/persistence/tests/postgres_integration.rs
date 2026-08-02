@@ -171,7 +171,7 @@ async fn delegated_spawn_persists_exact_child_creation_provenance() -> Result<()
         .load_session(child)
         .await?
         .expect("delegated child remains loadable");
-    let stored: (String, String, Uuid, Uuid, Uuid) = sqlx::query_as(
+    let stored = sqlx::query(
         "SELECT session.creation_cause, session.ancestry_kind,
                 session.spawning_tool_request_id,
                 event.provenance_session_id, event.provenance_tool_request_id
@@ -189,11 +189,20 @@ async fn delegated_spawn_persists_exact_child_creation_provenance() -> Result<()
         loaded_child.creation_provenance(),
         SessionCreationProvenance::delegated(request_id)
     );
-    assert_eq!(stored.0, "delegated");
-    assert_eq!(stored.1, "none");
-    assert_eq!(stored.2, request_id.into_uuid());
-    assert_eq!(stored.3, fixture.session.into_uuid());
-    assert_eq!(stored.4, request_id.into_uuid());
+    assert_eq!(stored.try_get::<String, _>("creation_cause")?, "delegated");
+    assert_eq!(stored.try_get::<String, _>("ancestry_kind")?, "none");
+    assert_eq!(
+        stored.try_get::<Uuid, _>("spawning_tool_request_id")?,
+        request_id.into_uuid()
+    );
+    assert_eq!(
+        stored.try_get::<Uuid, _>("provenance_session_id")?,
+        fixture.session.into_uuid()
+    );
+    assert_eq!(
+        stored.try_get::<Uuid, _>("provenance_tool_request_id")?,
+        request_id.into_uuid()
+    );
 
     pool.close().await;
     drop(container);
@@ -246,7 +255,7 @@ async fn delegated_foreground_wait_persists_distinct_await_request() -> Result<(
         .expect("active relation accepts await request");
 
     repository.register_wait(wait).await?;
-    let stored: (Uuid, Uuid, String) = sqlx::query_as(
+    let stored = sqlx::query(
         "SELECT awaiting_tool_request_id, child_session_id, wait_mode
            FROM session_delegation_wait WHERE spawning_tool_request_id = $1",
     )
@@ -254,9 +263,15 @@ async fn delegated_foreground_wait_persists_distinct_await_request() -> Result<(
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(stored.0, awaiting.id().into_uuid());
-    assert_eq!(stored.1, child.into_uuid());
-    assert_eq!(stored.2, "foreground");
+    assert_eq!(
+        stored.try_get::<Uuid, _>("awaiting_tool_request_id")?,
+        awaiting.id().into_uuid()
+    );
+    assert_eq!(
+        stored.try_get::<Uuid, _>("child_session_id")?,
+        child.into_uuid()
+    );
+    assert_eq!(stored.try_get::<String, _>("wait_mode")?, "foreground");
 
     pool.close().await;
     drop(container);
