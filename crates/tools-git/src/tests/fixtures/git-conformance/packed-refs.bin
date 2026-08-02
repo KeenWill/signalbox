@@ -1,0 +1,4 @@
+# pack-refs with: peeled fully-peeled sorted 
+5b157a42f41234f041d36f0eb1f2540600127609 refs/heads/lock-fixture
+5b157a42f41234f041d36f0eb1f2540600127609 refs/heads/main
+5b157a42f41234f041d36f0eb1f2540600127609 refs/heads/topic

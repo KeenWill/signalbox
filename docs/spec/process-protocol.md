@@ -12,7 +12,8 @@ The goal-mode process and terminal surface was re-verified through PR #384
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
-surface in PR #349 (`agent/review-orchestrator-wiring`). This page is the
+surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
+import transport in PR #401 (`agent/import-chunks-protocol`). This page is the
 normative boundary between a local client process and `signalboxd`; domain
 values, PostgreSQL records, and wire messages remain distinct representations.
 
@@ -126,14 +127,25 @@ one owned request rather than cloning its payload. Submitted text moves into
 application admission: rejection drops it before awaiting response output, and
 acceptance reuses the decoded allocation. Conversation-import source bytes
 likewise move directly into a dedicated import admission path. At most one
-conversion-and-store operation runs at a time. A decoded import waiting for that
-permit retains its inbound-frame permit, so queued source bytes remain inside
-the existing 64 MiB aggregate frame budget; only the admitted import can retain
-the expanded aggregate or use repository work. The admitted service runs on the
-blocking pool so synchronous conversion does not occupy an asynchronous runtime
-worker. Its source and aggregate are dropped and its permit is released before
-response output. A peer that stops reading responses therefore cannot retain
-rejected input or completed import content.
+in-progress or single-shot import holds the import permit. One of the eight
+inbound-frame slots is reserved for the connection that owns an active chunked
+import; other connections share the remaining seven. An admitted
+`begin_conversation_import` that must wait for the import permit first enters a
+separate seven-waiter bound, then releases its small decoded frame slot before
+waiting. Further begins retain a general frame slot until a waiter place opens.
+A source-bearing single-shot request retains its frame slot while waiting. The
+reservation therefore preserves frame progress for an active append or commit
+without allowing queued single-shot sources to escape the aggregate raw-frame
+bound. Once admitted, each append moves its decoded chunk from the inbound frame
+into the per-connection assembly and releases the frame slot; the configured
+total-source bound limits that assembly. Commit runs the existing whole-source
+conversion on the blocking pool so synchronous conversion does not occupy an
+asynchronous runtime worker. Commit, abort, terminal size or conversion
+rejection, or disconnect drops the assembly and releases the permit before
+response output. An `already_in_progress` refusal is nonterminal and leaves the
+existing assembly available for append, commit, or explicit abort. A peer that
+stops reading a terminal response therefore cannot retain rejected input or
+completed import content.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
@@ -212,6 +224,10 @@ that variant.
 | `read_session_metadata`                 | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read one complete current metadata snapshot.                                                                                                                                                                                                                                                                                                                                    |
 | `replace_session_metadata`              | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                                                                                                  | Durably replace one complete metadata snapshot as the user actor.                                                                                                                                                                                                                                                                                                               |
 | `import_conversation`                   | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `source` (canonical padded base64 string)                                                                                                                                                         | Convert and idempotently resolve or insert one complete external conversation snapshot.                                                                                                                                                                                                                                                                                         |
+| `begin_conversation_import`             | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `declared_size_bytes` (canonical decimal string)                                                                                                                                                  | Begin one per-connection chunked import after admitting its declared total source size.                                                                                                                                                                                                                                                                                         |
+| `append_conversation_import`            | `chunk` (nonempty canonical padded base64 string carrying at most 4 MiB decoded bytes)                                                                                                                                                                                   | Append exact source bytes to the import in progress on this connection.                                                                                                                                                                                                                                                                                                         |
+| `commit_conversation_import`            | none                                                                                                                                                                                                                                                                     | Verify the assembled size, then convert and idempotently resolve or insert the complete source.                                                                                                                                                                                                                                                                                 |
+| `abort_conversation_import`             | none                                                                                                                                                                                                                                                                     | Discard the import in progress on this connection.                                                                                                                                                                                                                                                                                                                              |
 | `create_session_from_imported_frontier` | `command_id` and `imported_conversation_id` (canonical UUID strings), `through_position` (positive canonical decimal string), `relationship` (`resume` or `fork`), `initial_model_selection` (selection object), `runner_placement` (proposed; placement object or null) | Create an independent live session seeded through the selected inclusive imported position.                                                                                                                                                                                                                                                                                     |
 | `replace_session_defaults`              | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean), `system_prompt` (string or null)                                         | Install one complete immutable defaults epoch as the user actor, conditional on the exact current epoch.                                                                                                                                                                                                                                                                        |
 | `reconcile_turn`                        | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                           | Supply the user reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                                                                                                                                                            |
@@ -635,30 +651,42 @@ boundary before application construction or mutation and returns
 JSON escaping when the same accepted content is projected in a queued turn or
 durable update event. This section owns the exact capacity.
 
-An import `source` is the complete exact byte sequence encoded with RFC 4648
+The conversation-import transport in this section was verified against PR #401
+(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`).
+
+An import source is an exact byte sequence encoded with RFC 4648
 standard-alphabet padded base64. A noncanonical spelling is a malformed frame.
 The server validates canonical padding and trailing bits in the same decode that
-constructs the source bytes under the existing inbound-frame permit; validation
-does not construct a second full-size canonical encoding. There is no
-independent source-size admission rule in this slice: the existing 8 MiB
-encoded-frame limit determines whether one complete request can cross the
-boundary. Before socket I/O, the terminal's bounded reader takes at most one
-byte beyond three quarters of the frame cap, the greatest decoded byte count
-that base64 could possibly fit. It rejects a source reaching that extra byte;
-exact request encoding happens before socket I/O and remains authoritative for
-smaller inputs. The source path is client-local and never appears in the
-request.
+constructs source bytes under the existing inbound-frame permit; validation does
+not construct a second full-size canonical encoding. `MAX_FRAME_BYTES` remains 8
+MiB including the newline for every request. A single-shot `import_conversation`
+carries the complete source when its exact encoded frame fits. Otherwise the
+terminal uses one connection for `begin_conversation_import`, one or more
+`append_conversation_import` requests, and `commit_conversation_import`. Each
+append carries at most 4 MiB decoded bytes, leaving base64 and maximum-envelope
+headroom inside the unchanged frame bound.
+
+Begin declares the format and exact total byte count. The daemon admits at most
+one in-progress import per connection and rejects the declaration before
+assembly when it exceeds `conversation_import.max_source_bytes`. Append accepts
+only a nonempty chunk and acknowledges the resulting assembled byte count.
+Commit rechecks the configured bound and requires the actual assembled count to
+equal the declared count before passing the complete bytes to the unchanged
+converter seam. Abort or disconnect discards partial per-connection state. The
+source path remains client-local and never appears in a request.
 
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
-that variant. Every accepted non-review mutation request — `create_session`,
-`create_session_from_template`, `create_session_from_imported_frontier`,
-`submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
-`replace_session_metadata`, `replace_session_defaults`, `compact_session`,
-`import_conversation`, `spawn_session`, `await_session`, `send_session_message`,
-`replace_lost_runner`, `abandon_lost_runner`, or `promote_pending_runner` —
-produces exactly one of:
+that variant. Every accepted non-review mutation or conversation-import
+transport request — `create_session`, `create_session_from_template`,
+`create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
+`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
+`replace_session_defaults`, `compact_session`, `import_conversation`,
+`begin_conversation_import`, `append_conversation_import`,
+`commit_conversation_import`, `abort_conversation_import`, `spawn_session`,
+`await_session`, `send_session_message`, `replace_lost_runner`,
+`abandon_lost_runner`, or `promote_pending_runner` — produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
@@ -686,6 +714,9 @@ produces exactly one of:
   call;
 - `conversation_import_inserted` with `imported_conversation_id`;
 - `conversation_import_already_imported` with `imported_conversation_id`;
+- `conversation_import_begun` with the admitted `declared_size_bytes`;
+- `conversation_import_appended` with the exact `assembled_size_bytes`;
+- `conversation_import_aborted` with no additional member;
 - `session_spawned` with `tool_request_id`, `child_session_id`, and the exact
   `relationship`;
 - `session_await_registered` with `tool_request_id`, `child_session_id`, and
@@ -1126,8 +1157,25 @@ The `turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
 details report refusals made before command recording, so unlike every other
 `rejected` detail they name no durable command result and have no replay
 projection; a caller that repeats the request observes the current state, not a
-recorded outcome. Other error codes have no `detail`. An equal replay returns
-the same success or rejection projection as the first handling.
+recorded outcome. An equal replay returns the same success or rejection
+projection as the first handling.
+
+Conversation-import refusals instead use `code = "invalid_request"` with one
+required typed `detail`: `conversation_import_already_in_progress {}`;
+`conversation_import_not_in_progress {}`;
+`conversation_import_source_too_large { limit_bytes, declared_size_bytes, actual_size_bytes }`,
+where actual size is null at begin and exact at append or commit;
+`conversation_import_source_size_mismatch { declared_size_bytes, actual_size_bytes }`;
+or `conversation_import_conversion_failed { class, record_ordinal }`, where the
+one-based physical-record ordinal is null only when the converter has none. The
+closed classes are `empty_source`, `blank_line`, `invalid_utf8`, `invalid_json`,
+`json_depth_exceeded`, `top_level_not_object`, `invalid_record_type`,
+`invalid_source_metadata`, `invalid_message_envelope`, `invalid_message_role`,
+`message_role_mismatch`, `invalid_message_content`, `invalid_content_block`,
+`invalid_tool_result_block`, `invalid_reasoning`, `invalid_tool_call`, and
+`invalid_tool_result`. Evidence carries no source bytes, text, paths,
+identifiers taken from source, or parser excerpts. Error codes other than
+`rejected` and this import-specific `invalid_request` mapping have no `detail`.
 
 The protocol error-code set is:
 
@@ -1163,12 +1211,15 @@ likewise `commit_ambiguous`. A definitely pre-commit infrastructure failure maps
 to `unavailable`.
 
 Conversation import carries no durable command identity because exact
-format-and-source replay already resolves through the import digest. A selected
-converter's content-silent rejection maps to `invalid_request`. The current
-repository error does not retain the failing database phase, so every import
-database error maps conservatively to `commit_ambiguous`; retrying the exact
-format and bytes returns either the first inserted identity or the existing
-identity. Import integrity failures map to `internal`.
+format-and-source replay already resolves through the import digest. Both the
+single-shot request and chunked commit pass the same complete format and source
+to that idempotent operation. The typed, content-silent conversion and size
+refusals above map to `invalid_request`. The current repository error does not
+retain the failing database phase, so every import database error maps
+conservatively to `commit_ambiguous`; retrying the exact format and bytes
+returns either the first inserted identity or the existing identity. Import
+assembly allocation exhaustion maps to `unavailable`; integrity failures map to
+`internal`.
 
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.

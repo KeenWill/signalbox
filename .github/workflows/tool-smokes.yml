@@ -3,12 +3,14 @@ name: Tool live smokes
 on:
   pull_request:
     paths:
+      - "crates/egress-transport/**"
       - "crates/persistence/**"
       - "crates/tools-basic/**"
       - "crates/tools-code-host/**"
       - "crates/tools-conversations/**"
       - "crates/tools-github/**"
       - "crates/tools-plan/**"
+      - "crates/tools-web/**"
       - "crates/tools-workspace/**"
       - "apps/signalboxd/**"
       - "Cargo.lock"
