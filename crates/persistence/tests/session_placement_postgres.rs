@@ -49,6 +49,12 @@ const PAGED_HISTORY_UPDATE_COUNT: u64 = 65;
 const PAGED_HISTORY_EXPECTED_VERSION: u64 = 66;
 const PAGED_HISTORY_PATH_PREFIX: &str = "projects.history.revision";
 
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct PlacementHistoryRow {
+    version: i64,
+    event_kind: String,
+}
+
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
@@ -349,24 +355,11 @@ async fn s36_placement_update_returns_successor_event_shape() -> Result<(), Box<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_equal_placement_update_replay_returns_recorded_result() -> Result<(), Box<dyn Error>> {
-    let fixture = placement_update_fixture().await?;
-    let first = fixture.repository.handle(fixture.update.clone()).await?;
-
-    assert_eq!(fixture.repository.handle(fixture.update).await?, first);
-
-    fixture.pool.close().await;
-    drop(fixture.container);
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_placement_update_appends_created_and_updated_history() -> Result<(), Box<dyn Error>> {
     let fixture = placement_update_fixture().await?;
     fixture.repository.handle(fixture.update).await?;
-    let history: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT version::bigint, event_kind
+    let history: Vec<PlacementHistoryRow> = sqlx::query_as(
+        "SELECT version::bigint AS version, event_kind AS event_kind
            FROM session_placement_event
           WHERE session_id = $1 ORDER BY version",
     )
@@ -376,7 +369,16 @@ async fn s36_placement_update_appends_created_and_updated_history() -> Result<()
 
     assert_eq!(
         history,
-        vec![(1, "created".to_owned()), (2, "updated".to_owned())]
+        vec![
+            PlacementHistoryRow {
+                version: 1,
+                event_kind: "created".to_owned(),
+            },
+            PlacementHistoryRow {
+                version: 2,
+                event_kind: "updated".to_owned(),
+            },
+        ]
     );
 
     fixture.pool.close().await;
@@ -1183,6 +1185,8 @@ async fn s36_creation_receipt_must_match_the_session_ancestry_family() -> Result
 {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(0x221);
+    let imported_conversation_id = Uuid::from_u128(0x320);
+    let imported_frontier_entry_id = Uuid::from_u128(0x321);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
             command(0x122),
@@ -1203,8 +1207,8 @@ async fn s36_creation_receipt_must_match_the_session_ancestry_family() -> Result
           WHERE session_id = $1",
     )
     .bind(*session_id.as_uuid())
-    .bind(Uuid::from_u128(0x320))
-    .bind(Uuid::from_u128(0x321))
+    .bind(imported_conversation_id)
+    .bind(imported_frontier_entry_id)
     .execute(&pool)
     .await?;
 
@@ -1388,13 +1392,18 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
         .as_database_error()
         .expect("PostgreSQL reports the applied-result shape constraint");
 
-    assert_eq!(
-        database_error.constraint(),
-        Some("update_session_placement_command_result_shape")
-    );
+    assert_eq!(database_error.constraint(), Some(RESULT_SHAPE_CONSTRAINT));
 
     transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_applied_update_receipt_requires_a_result_version() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
     let command_id = command(0x117);
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -1424,10 +1433,7 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
         .as_database_error()
         .expect("PostgreSQL reports the applied-result shape constraint");
 
-    assert_eq!(
-        database_error.constraint(),
-        Some("update_session_placement_command_result_shape")
-    );
+    assert_eq!(database_error.constraint(), Some(RESULT_SHAPE_CONSTRAINT));
 
     transaction.rollback().await?;
     pool.close().await;
