@@ -15,6 +15,18 @@
 # above the model's cap.
 version = 1
 
+# Every model credential profile declares how calls authenticated through that
+# profile are billed. api_metered produces real dollar cost; subscription
+# produces metered-equivalent cost. Keep a profile name's billing meaning
+# stable, and use a new name when an authentication update changes that meaning.
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+billing_kind = "subscription"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
@@ -86,6 +98,13 @@ model_family = "anthropic"
 provider_model = "claude-fable-5"
 max_output_tokens = 8192
 context_window_tokens = 200000
+# Rates are decimal USD strings per million tokens. Declare the complete
+# five-field versioned set or omit all five; omission yields no dollar figure.
+rate_version = "example-2026-08-01"
+input_usd_per_million_tokens = "3"
+output_usd_per_million_tokens = "15"
+cache_creation_input_usd_per_million_tokens = "3.75"
+cache_read_input_usd_per_million_tokens = "0.30"
 
 # Hard cap: 128000.
 [[models]]

@@ -739,6 +739,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed_without_cache();
         }
+        "usage_partial_axes" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            emit(&format!(
+                r#"{{"type":"turn.completed","usage":{{"cached_input_tokens":{},"output_tokens":{},"total_tokens":19}}}}"#,
+                fixtures::CACHE_READ_INPUT_TOKENS,
+                fixtures::OUTPUT_TOKENS
+            ));
+        }
+        "usage_total_only" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            emit(r#"{"type":"turn.completed","usage":{"total_tokens":19}}"#);
+        }
         "completion_before_cancellation" => {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,

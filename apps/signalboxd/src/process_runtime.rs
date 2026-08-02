@@ -94,11 +94,11 @@ use signalbox_persistence::{
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
-        ProcessModelCallRecoveryPrecondition, ProcessModelSelection,
-        ProcessProviderModelCallFailureCause, ProcessReadError, ProcessReadRepository,
-        ProcessReconciliationOperation, ProcessSessionDefaultsRead, ProcessTranscriptEntry,
-        ProcessTranscriptItem, ProcessTranscriptModelCallUsage, ProcessTranscriptTurn,
-        ProcessTurnState,
+        ProcessModelCallRecoveryPrecondition, ProcessModelCallUsageProvenance,
+        ProcessModelSelection, ProcessProviderModelCallFailureCause, ProcessReadError,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
+        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -109,9 +109,9 @@ use signalbox_persistence::{
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, ConversationCursor as WireConversationCursor,
-    ConversationImportFormat, ConversationImportRejectionClass,
-    ConversationOrigin as WireConversationOrigin,
+    BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ClientRequest,
+    ConversationCursor as WireConversationCursor, ConversationImportFormat,
+    ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
@@ -121,9 +121,10 @@ use signalbox_process_protocol::{
     ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
-    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
-    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
+    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelSelection as WireModelSelection,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
+    ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
@@ -131,8 +132,8 @@ use signalbox_process_protocol::{
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
+    TranscriptTextEntry, TurnState, UsageProvenance, content_fragments, decode_client_line,
+    encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -1334,6 +1335,7 @@ where
                 request_id,
                 session_id,
                 &services.pool,
+                &services.model_configuration,
                 snapshot_permit,
             )
             .await
@@ -1353,6 +1355,7 @@ where
                 request_id,
                 session_id,
                 &services.pool,
+                &services.model_configuration,
                 &services.fanouts,
                 shutdown,
                 snapshot_permit,
@@ -8461,6 +8464,7 @@ async fn handle_read_transcript<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -8472,6 +8476,7 @@ where
         selected_session,
         version,
         request_id,
+        model_configuration,
     )
     .await;
     drop(snapshot_permit);
@@ -8507,6 +8512,7 @@ async fn handle_follow_session<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     fanouts: &ProcessFanouts,
     mut shutdown: watch::Receiver<bool>,
     snapshot_permit: OwnedSemaphorePermit,
@@ -8523,6 +8529,7 @@ where
             selected_session,
             version,
             request_id,
+            model_configuration,
         ),
     )
     .await;
@@ -8667,6 +8674,7 @@ async fn spool_transcript(
     session: SessionId,
     version: ProtocolVersion,
     request_id: RequestId,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
     let reader = repository.open_transcript(session).await;
     let Some(mut reader) = reader.map_err(TranscriptSpoolError::Read)? else {
@@ -8701,10 +8709,17 @@ async fn spool_transcript(
                     .map_err(TranscriptSpoolError::Spool)?;
             }
             ProcessTranscriptItem::ModelCallUsage(usage) => {
-                write_model_call_usage(&mut file, version, request_id, model_call_count, &usage)
-                    .await
-                    .map_err(SnapshotSpoolError::from_connection)
-                    .map_err(TranscriptSpoolError::Spool)?;
+                write_model_call_usage(
+                    &mut file,
+                    version,
+                    request_id,
+                    model_call_count,
+                    &usage,
+                    model_configuration,
+                )
+                .await
+                .map_err(SnapshotSpoolError::from_connection)
+                .map_err(TranscriptSpoolError::Spool)?;
                 model_call_count = model_call_count
                     .checked_add(1)
                     .ok_or(SnapshotSpoolError::EncodeInvariant)
@@ -8824,11 +8839,39 @@ async fn write_model_call_usage<Writer>(
     request_id: RequestId,
     model_call_index: u64,
     evidence: &ProcessTranscriptModelCallUsage,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let usage = evidence.usage();
+    let cost = model_configuration
+        .derive_model_call_cost(
+            evidence.target(),
+            evidence.credential_profile(),
+            crate::configuration::ModelCallInputUsage::from_persisted(
+                usage.input_tokens(),
+                evidence.input_token_semantics(),
+            ),
+            usage.output_tokens(),
+            usage.cache_creation_input_tokens(),
+            usage.cache_read_input_tokens(),
+        )
+        .map(|cost| -> Result<_, ProcessConnectionError> {
+            Ok(ModelCallDollarCost {
+                amount_usd: CanonicalDollarAmount::try_new(
+                    cost.amount_usd().normalize().to_string(),
+                )
+                .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+                rate_version: BillingRateVersion::try_new(cost.rate_version().to_owned())
+                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+                label: match cost.billing_kind() {
+                    crate::BillingKind::ApiMetered => ModelCallCostLabel::Real,
+                    crate::BillingKind::Subscription => ModelCallCostLabel::MeteredEquivalent,
+                },
+            })
+        })
+        .transpose()?;
     write_message(
         writer,
         version,
@@ -8837,6 +8880,10 @@ where
             model_call_index: CanonicalU64::new(model_call_index),
             turn_id: wire_uuid(evidence.turn().into_uuid()),
             model_call_id: wire_uuid(evidence.call().into_uuid()),
+            usage_provenance: match evidence.provenance() {
+                ProcessModelCallUsageProvenance::Reported => UsageProvenance::Reported,
+                ProcessModelCallUsageProvenance::Estimated => UsageProvenance::Estimated,
+            },
             usage: ModelCallTokenUsage {
                 input_tokens: usage.input_tokens().map(CanonicalU64::new),
                 output_tokens: usage.output_tokens().map(CanonicalU64::new),
@@ -8845,6 +8892,7 @@ where
                     .map(CanonicalU64::new),
                 cache_read_input_tokens: usage.cache_read_input_tokens().map(CanonicalU64::new),
             },
+            cost,
         },
     )
     .await
@@ -11744,6 +11792,10 @@ mod tests {
         let current_catalog = crate::HubModelConfiguration::parse(
             r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
