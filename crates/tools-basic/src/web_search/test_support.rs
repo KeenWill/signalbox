@@ -425,11 +425,16 @@ pub(super) const KNOWN_FAILURE_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(K
 
 pub(super) const POPULATED_RESPONSE_OPTION_DEBUG_COLLISION_KEY: &str = "Some(W";
 
+pub(super) const POPULATED_PARTIAL_RESPONSE_OPTION_DEBUG_COLLISION_KEY: &str =
+    "Some(WebSearchResponse { completeness: M";
+
 pub(super) const POPULATED_PROVIDER_ERROR_OPTION_DEBUG_COLLISION_KEY: &str = "Some(WebSearchP";
 
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 
 pub(super) const POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY: &str = "ToolExecutionErrorDetail";
+
+pub(super) const POPULATED_FAILURE_RESULT_DEBUG_COLLISION_KEY: &str = "Ok(KnownFailed { detail: S";
 
 pub(super) const POPULATED_SUCCESS_DEBUG_ESCAPE_COLLISION_KEY: &str = "\\";
 
@@ -438,6 +443,8 @@ pub(super) const REMOVED_DIAGNOSTIC_PROBE_WORD: &str = "diagnostic";
 pub(super) const REMOVED_DETAIL_PROBE_WORD: &str = "probe";
 
 pub(super) const DEBUG_RESULT_COUNT_COLLISION_COUNT: usize = 1;
+
+pub(super) const FIXTURE_LEGACY_PERCENT_ENCODED_RESULT_URL: &str = "https://example.com/caf%E9";
 
 pub(super) const FIXTURE_UNPARSED_PROVIDER_ERROR: &str =
     "synthetic provider-private response bytes";
