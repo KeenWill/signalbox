@@ -1644,6 +1644,14 @@ mod tests {
         )
     }
 
+    fn confirmation_definition(name: &str) -> ToolDefinition {
+        definition(
+            name,
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
+        )
+    }
+
     fn request_with_seed(arguments: &str, seed: u128) -> ToolRequest {
         ToolRequestReconstitutionInput::new(
             ToolRequestId::from_uuid(Uuid::from_u128(seed + 4)),
@@ -2039,39 +2047,48 @@ mod tests {
     }
 
     #[test]
-    fn configured_postures_override_policy_while_absence_preserves_it() {
-        let confirm = definition(
-            "confirm",
-            ToolPermissionDefault::Confirm,
-            ToolEffectClass::EffectFree,
-        );
-        let delegated = confirm
-            .clone()
-            .with_approval_posture(ToolApprovalPosture::Delegated);
-        let human = confirm
-            .clone()
-            .with_approval_posture(ToolApprovalPosture::Human);
-        let automatic = confirm.with_approval_posture(ToolApprovalPosture::Auto);
+    fn absent_posture_preserves_legacy_confirmation() {
+        const SUBJECT_TOOL: &str = "subject";
 
         assert_eq!(
             initial_tool_approval(
                 DangerousToolAutoApproval::Disabled,
-                Some(&definition(
-                    "absent",
-                    ToolPermissionDefault::Confirm,
-                    ToolEffectClass::EffectFree,
-                ))
+                Some(&confirmation_definition(SUBJECT_TOOL)),
             ),
             InitialToolApproval::Confirm
         );
+    }
+
+    #[test]
+    fn delegated_posture_overrides_confirmation_policy() {
+        const SUBJECT_TOOL: &str = "subject";
+        let delegated = confirmation_definition(SUBJECT_TOOL)
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&delegated)),
             InitialToolApproval::Delegated
         );
+    }
+
+    #[test]
+    fn human_posture_overrides_dangerous_session_blanket() {
+        const SUBJECT_TOOL: &str = "subject";
+        let human =
+            confirmation_definition(SUBJECT_TOOL).with_approval_posture(ToolApprovalPosture::Human);
+
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&human)),
             InitialToolApproval::Human
         );
+    }
+
+    #[test]
+    fn auto_posture_overrides_confirmation_policy() {
+        const SUBJECT_TOOL: &str = "subject";
+        let automatic =
+            confirmation_definition(SUBJECT_TOOL).with_approval_posture(ToolApprovalPosture::Auto);
+
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&automatic)),
             InitialToolApproval::PolicyAuto

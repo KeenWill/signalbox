@@ -8516,8 +8516,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_approval_decision_events_round_trip_with_full_provenance()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn tool_approval_user_approve_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(3)?,
             ServerMessage::SessionEvent {
@@ -8534,7 +8533,12 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}"#,
-        )?;
+        )
+    }
+
+    #[test]
+    fn tool_approval_user_deny_event_round_trips_with_reason()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(15)?,
             ServerMessage::SessionEvent {
@@ -8553,7 +8557,12 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"user declined"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}"#,
-        )?;
+        )
+    }
+
+    #[test]
+    fn tool_approval_delegate_deny_event_round_trips_with_rationale()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
             ServerMessage::SessionEvent {
@@ -8571,55 +8580,90 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
-        )?;
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
-        );
-        assert_server_malformed(
-            r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
-        );
-        Ok(())
+        )
     }
 
     #[test]
-    fn tool_approval_decision_events_reject_invalid_delegate_shapes() {
+    fn tool_approval_user_decider_rejects_delegate_rationale() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
+        );
+    }
+
+    #[test]
+    fn tool_approval_delegate_decider_requires_rationale() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
+        );
+    }
+
+    #[test]
+    fn tool_approval_delegate_denial_rejects_user_reason() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
         );
+    }
+
+    #[test]
+    fn tool_approval_delegate_rationale_rejects_empty_text() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"8","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""}}}"#,
         );
+    }
+
+    #[test]
+    fn tool_approval_delegate_rationale_rejects_nul() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"9","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"unsafe\u0000rationale"}}}"#,
         );
-        let oversized_rationale = "x".repeat(MAX_TOOL_DECISION_RATIONALE_BYTES + 1);
+    }
+
+    #[test]
+    fn tool_approval_delegate_rationale_rejects_oversize() {
+        const RATIONALE_FILLER: &str = "x";
+        let oversized_rationale = RATIONALE_FILLER.repeat(MAX_TOOL_DECISION_RATIONALE_BYTES + 1);
         let oversized_frame = [
             r#"{"version":1,"request_id":"10","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""#,
             oversized_rationale.as_str(),
             r#""}}}"#,
         ]
         .concat();
+
         assert_server_malformed(&oversized_frame);
     }
 
     #[test]
-    fn tool_approval_decision_events_reject_invalid_user_denial_reasons() {
+    fn tool_approval_user_denial_reason_rejects_empty_text() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"11","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":""},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
         );
+    }
+
+    #[test]
+    fn tool_approval_user_denial_reason_rejects_surrounding_whitespace() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"12","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":" surrounding whitespace"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
         );
+    }
+
+    #[test]
+    fn tool_approval_user_denial_reason_rejects_control_scalar() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"13","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"unsafe\u0000reason"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
         );
-        let oversized_reason = "x".repeat(MAX_TOOL_DENIAL_REASON_BYTES + 1);
+    }
+
+    #[test]
+    fn tool_approval_user_denial_reason_rejects_oversize() {
+        const REASON_FILLER: &str = "x";
+        let oversized_reason = REASON_FILLER.repeat(MAX_TOOL_DENIAL_REASON_BYTES + 1);
         let oversized_frame = [
             r#"{"version":1,"request_id":"14","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":""#,
             oversized_reason.as_str(),
             r#""},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}}"#,
         ]
         .concat();
+
         assert_server_malformed(&oversized_frame);
     }
 

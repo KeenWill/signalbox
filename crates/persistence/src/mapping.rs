@@ -519,14 +519,20 @@ mod tests {
     }
 
     #[test]
-    fn tool_approval_posture_mapping_is_closed() {
+    fn tool_approval_posture_mapping_round_trips() {
         assert_eq!(
             tool_approval_posture_from_str(tool_approval_posture_to_str(
                 ToolApprovalPosture::Delegated,
             )),
             Some(ToolApprovalPosture::Delegated)
         );
-        assert_eq!(tool_approval_posture_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn unknown_tool_approval_posture_is_rejected() {
+        const UNKNOWN_POSTURE: &str = "unknown";
+
+        assert_eq!(tool_approval_posture_from_str(UNKNOWN_POSTURE), None);
     }
 
     /// INV-002: PostgreSQL numeric values are decoded and checked before a

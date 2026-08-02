@@ -4942,12 +4942,15 @@ mod tests {
 
     #[test]
     fn approval_decision_event_requests_authoritative_snapshot_refresh() {
+        const SUBJECT_TURN_SEED: u128 = 1;
+        const SUBJECT_REQUEST_SEED: u128 = 2;
+        const SUBJECT_COMMAND_SEED: u128 = 3;
         let event = SessionEvent::ToolApprovalDecided {
-            turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
-            tool_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(SUBJECT_TURN_SEED)),
+            tool_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(SUBJECT_REQUEST_SEED)),
             decision: ToolApprovalEventDecision::Approve {},
             decider: ToolApprovalEventDecider::User {
-                command_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                command_id: CanonicalUuid::from_uuid(Uuid::from_u128(SUBJECT_COMMAND_SEED)),
             },
             rationale: None,
         };
