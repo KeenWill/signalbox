@@ -821,6 +821,10 @@ pub enum ChildRelationshipPolicy {
     },
 }
 pub enum DelegationWaitMode { Foreground, Background }
+pub enum DelegatedSpawnRejection { ActiveDirectChildLimit }
+impl DelegatedSpawnRejection {
+    pub const fn limit(self) -> u32;
+}
 pub enum DescendantTerminationScope { ParentAlone, ParentAndDescendants }
 
 pub struct DelegationContent(/* private NonEmptyUnicodeText */);
@@ -8034,7 +8038,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
-| domain: session_delegation                         | 22                   |
+| domain: session_delegation                         | 23                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8062,7 +8066,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **622 (+7 free fn)** |
+| **signalbox-domain total**                         | **623 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

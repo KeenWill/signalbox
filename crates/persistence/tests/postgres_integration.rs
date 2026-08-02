@@ -41,8 +41,8 @@ use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
     CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
+    DecideToolRequestResult, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
     NormalizedToolArguments, PerInputConfigurationChoices,
@@ -3489,6 +3489,7 @@ async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_act
                 "stop the prepared continuation",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -3842,6 +3843,7 @@ async fn s04_inv006_inv025_in_flight_continuation_call_restart_parks_recovery()
                 "reconcile the parked continuation call",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -3920,6 +3922,7 @@ async fn s04_s07_inv006_inv037_stop_requested_continuation_call_restart_reconcil
                 "stop the in-flight continuation",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -4037,6 +4040,7 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
                 "stop checkpointed tool",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -4222,6 +4226,7 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
         "stop while confirm is pending",
         DeliveryRequest::Interrupt {
             expected_active_turn: fixture.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
@@ -4472,6 +4477,7 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
                 "stop ambiguous tool",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -5235,6 +5241,7 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
                 "stop tool response",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -5485,6 +5492,7 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
                 "stop tool response",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -6116,6 +6124,7 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
                 "cancel retained capability failure",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -6429,6 +6438,7 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
         "stop issued call",
         DeliveryRequest::Interrupt {
             expected_active_turn: fixture.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
@@ -6678,6 +6688,7 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
                 "stop before ambiguous result",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -6843,6 +6854,7 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
                 "interrupt existing ambiguity wait",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: waiting.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -6974,6 +6986,7 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
                 "stop before known failure",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: failed.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -7035,6 +7048,7 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
                 "stop before refusal",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: refused.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -7181,6 +7195,7 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
                 "stop before cardinality check",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: failed.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -7261,6 +7276,7 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
         "completion race interrupt",
         DeliveryRequest::Interrupt {
             expected_active_turn: completed.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
@@ -7344,6 +7360,7 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
         "restart race interrupt",
         DeliveryRequest::Interrupt {
             expected_active_turn: restarted.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
@@ -8444,6 +8461,7 @@ async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguo
                 "continue after the user reconciliation decision",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: parked.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),
@@ -8631,6 +8649,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
                     "stop before restart",
                     DeliveryRequest::Interrupt {
                         expected_active_turn: stopped.turn,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
                         configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault,),
                     },
                 ),
@@ -16375,6 +16394,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         0x446,
         DeliveryRequest::Interrupt {
             expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
         0x945,
@@ -16507,6 +16527,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         "matching interrupt",
         DeliveryRequest::Interrupt {
             expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
@@ -17701,46 +17722,80 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
     );
 
     let expected_turn = TurnId::from_uuid(Uuid::from_u128(0xb11));
-    let active_modes = [
+    let interrupt = input_with_delivery(
+        0x314,
+        0x711,
+        "active interrupt",
         DeliveryRequest::Interrupt {
             expected_active_turn: expected_turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
+    );
+    assert!(matches!(
+        repository
+            .handle(
+                interrupt,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x914)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa14))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::NoActiveTurn {
+                expected_active_turn: recorded,
+                ..
+            }
+        )) if recorded == expected_turn
+    ));
+
+    let next_safe_point = input_with_delivery(
+        0x315,
+        0x711,
+        "active next safe point",
         DeliveryRequest::NextSafePoint {
             expected_active_turn: expected_turn,
         },
+    );
+    assert!(matches!(
+        repository
+            .handle(
+                next_safe_point,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x915)),
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::NoActiveTurn {
+                expected_active_turn: recorded,
+                ..
+            }
+        )) if recorded == expected_turn
+    ));
+
+    let after_current = input_with_delivery(
+        0x316,
+        0x711,
+        "active after current",
         DeliveryRequest::AfterCurrentTurn {
             expected_active_turn: expected_turn,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
-    ];
-    for (offset, delivery) in active_modes.into_iter().enumerate() {
-        let turn = match delivery {
-            DeliveryRequest::NextSafePoint { .. } => None,
-            DeliveryRequest::Interrupt { .. } | DeliveryRequest::AfterCurrentTurn { .. } => {
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa14 + offset as u128)))
+    );
+    assert!(matches!(
+        repository
+            .handle(
+                after_current,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x916)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa16))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::NoActiveTurn {
+                expected_active_turn: recorded,
+                ..
             }
-            DeliveryRequest::StartWhenNoActiveTurn { .. } => {
-                unreachable!("the table contains only active-work delivery modes")
-            }
-        };
-        let command = input_with_delivery(0x314 + offset as u128, 0x711, "active", delivery);
-        assert!(matches!(
-            repository
-                .handle(
-                    command,
-                    AcceptedInputId::from_uuid(Uuid::from_u128(0x914 + offset as u128)),
-                    turn,
-                )
-                .await?,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::NoActiveTurn {
-                    expected_active_turn: recorded,
-                    ..
-                }
-            )) if recorded == expected_turn
-        ));
-    }
+        )) if recorded == expected_turn
+    ));
 
     let stale = start_input(
         0x318,
@@ -20091,6 +20146,7 @@ async fn s04_inv032_reconciliation_dispatch_requires_exact_terminal_attempt()
                 "stop before ambiguous result",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
                 },
             ),

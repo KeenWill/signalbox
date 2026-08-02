@@ -213,12 +213,12 @@ pub use session::{
     TranscriptFrontier,
 };
 pub use session_delegation::{
-    BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegationContent,
-    DelegationContentError, DelegationEvent, DelegationEventOrdinal, DelegationLifecycle,
-    DelegationMessage, DelegationMessageDirection, DelegationOutcome, DelegationOutcomeReason,
-    DelegationProvenance, DelegationTransitionError, DelegationTransitionFailure, DelegationWait,
-    DelegationWaitMode, DescendantTerminationScope, ParentTerminationAuthority,
-    ParentTerminationKind, SessionDelegation, TerminalChildTurn,
+    BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRejection,
+    DelegationContent, DelegationContentError, DelegationEvent, DelegationEventOrdinal,
+    DelegationLifecycle, DelegationMessage, DelegationMessageDirection, DelegationOutcome,
+    DelegationOutcomeReason, DelegationProvenance, DelegationTransitionError,
+    DelegationTransitionFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
+    ParentTerminationAuthority, ParentTerminationKind, SessionDelegation, TerminalChildTurn,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,

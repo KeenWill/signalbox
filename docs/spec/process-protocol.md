@@ -676,7 +676,9 @@ that variant. Every accepted non-review mutation request — `create_session`,
   intentionally echoes no session, because the session is not part of the
   canonical decision payload;
 - `session_spawned` with `tool_request_id`, `child_session_id`, and the exact
-  recorded `relationship` object;
+  recorded `relationship` object, or `session_spawn_rejected` with
+  `tool_request_id`, `reason = active_direct_child_limit`, and canonical-decimal
+  `limit = "32"`;
 - `session_await_registered` with `tool_request_id`, `child_session_id`, and
   `mode = background`, or `session_await_completed` with `tool_request_id`,
   `child_session_id`, closed `outcome`, nullable `content`, and exact
@@ -1128,9 +1130,13 @@ For `create_session`, `create_session_from_template`,
 `create_session_from_imported_frontier`, `submit_input`, `compact_session`,
 `reconcile_turn`, `stop_turn`, `decide_tool_request`,
 `replace_session_metadata`, `replace_session_defaults`, `replace_lost_runner`,
-`abandon_lost_runner`, `promote_pending_runner`, and every review mutation, a
-lost commit response maps to `commit_ambiguous`; the client retries the exact
-command identity and payload to discover the recorded outcome. A
+`abandon_lost_runner`, `promote_pending_runner`, `spawn_session`,
+`await_session`, `send_session_message`, and every review mutation, a lost
+commit response maps to `commit_ambiguous`; the client retries the exact command
+identity and payload to discover the recorded outcome. Delegation retries reuse
+the exact issued `ToolRequestId` and complete normalized arguments; equal replay
+returns the recorded child, wait, message, or capacity-refusal receipt, while
+different arguments under that identity are `conflicting_reuse`. A
 `reconcile_turn`, `decide_tool_request`, `replace_lost_runner`,
 `abandon_lost_runner`, or `promote_pending_runner` retry reaches that recorded
 outcome or resumes its exact claimed pending effect unconditionally, because a
@@ -1386,8 +1392,12 @@ logical request before any mutation occurs.
 
 `spawn_session` additionally carries `task` inside the complete bounded
 normalized argument object and the closed relationship object, and returns
-`session_spawned { tool_request_id, child_session_id, relationship }`.
-`await_session` carries the related child and wait mode, and returns either
+`session_spawned { tool_request_id, child_session_id, relationship }`. Capacity
+refusal instead returns
+`session_spawn_rejected { tool_request_id, reason, limit }`; the only
+version-one reason is `active_direct_child_limit` and `limit` is canonical
+decimal `"32"`. `await_session` carries the related child and wait mode, and
+returns either
 `session_await_registered { tool_request_id, child_session_id, mode }` for
 background or
 `session_await_completed { tool_request_id, child_session_id, outcome, content, provenance }`
@@ -1419,12 +1429,30 @@ when both are affected; each event's own `session_id` identifies its stream.
 Cursor ordering, snapshot-first follow, deduplication, and resync rules are
 unchanged. No event embeds or links the child transcript.
 
+Turn snapshots extend the closed state union with
+`queued_delegation { turn_id, admission_position, trigger, defaults_version }`
+and
+`active_awaiting_child { turn_id, await_request_id, spawning_request_id, child_session_id }`.
+The trigger is exactly `initial_task { spawning_request_id }` or
+`wake { first_wake_sequence }`; it never carries accepted-input identity or user
+content. Transcript entries add `delegation_task`, `delegation_message`, and
+`delegation_result`, each carrying the exact reference/provenance fields owned
+by the session contract and no embedded child transcript.
+
 `descendant_scope` is required on both `stop_goal` and `stop_turn`. The terminal
 client spells omission as `parent_alone` and `--descendants` as
 `parent_and_descendants`; it never guesses from the relationship policy. A
 successful cascade receipt includes the selected scope and the exact count of
 recorded descendant dispositions, so a zero-child choice and an unperformed
 cascade cannot be confused.
+
+The scope is part of the durable command intent, not receipt-only metadata.
+Domain `GoalUserAction::Stop { descendant_scope }` and
+`DeliveryRequest::Interrupt { descendant_scope, .. }` retain it; command
+storage, comparison, and reconstitution carry the same closed value. Reusing
+either durable command identity with another scope is `conflicting_reuse`, and
+an equal retry returns the already-recorded parent transition and
+descendant-disposition count without reevaluating the cascade.
 
 ## Durable update dispatch
 

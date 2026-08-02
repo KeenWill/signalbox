@@ -25,12 +25,13 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     ActivatedAcceptedInputTurn, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelCallId,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, PerInputConfigurationChoices, ProviderModelIdentity,
-    ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
+    DecideToolRequestResult, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision,
+    ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
     ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
@@ -2880,6 +2881,7 @@ async fn s10_s11_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_run
                 .expect("fixture interrupt content is admitted"),
             DeliveryRequest::Interrupt {
                 expected_active_turn: fixture.turn,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: default_configuration(),
             },
         )?)
@@ -2986,6 +2988,7 @@ async fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejecte
                 .expect("fixture interrupt content is admitted"),
             DeliveryRequest::Interrupt {
                 expected_active_turn: fixture.turn,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: default_configuration(),
             },
         )?)

@@ -6780,9 +6780,9 @@ mod tests {
     use super::*;
     use crate::{
         AcceptedInputDisposition, AssistantText, AttemptEnd, CreateSessionFromImportedFrontier,
-        CurrentTurnAttemptState, FrozenModelSelection, ImportedConversation,
-        ImportedConversationFormat, ImportedRawRecordPosition, ImportedRawSourceRecord,
-        ImportedRecordEntryPosition, ImportedSessionReconstitutionInput,
+        CurrentTurnAttemptState, DescendantTerminationScope, FrozenModelSelection,
+        ImportedConversation, ImportedConversationFormat, ImportedRawRecordPosition,
+        ImportedRawSourceRecord, ImportedRecordEntryPosition, ImportedSessionReconstitutionInput,
         ImportedSessionRelationship, ImportedSourceAttestation, ImportedSourceMetadata,
         ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
         ImportedTranscriptContent, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
@@ -7901,6 +7901,7 @@ mod tests {
         };
         let interrupt_delivery = DeliveryRequest::Interrupt {
             expected_active_turn: predecessor.turn(),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,
@@ -8688,6 +8689,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: cancelled.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -8831,6 +8833,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: cancelled.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -8975,6 +8978,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: cancelled.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -9120,6 +9124,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: cancelled.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -9258,6 +9263,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: cancelled.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -10410,6 +10416,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: cancelled.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -10789,6 +10796,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: reconciled.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -11356,6 +11364,7 @@ mod tests {
             origins,
             DeliveryRequest::Interrupt {
                 expected_active_turn: origins.active.turn(),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
                     ModelSelectionOverride::UseSessionDefault,
@@ -11533,6 +11542,7 @@ mod tests {
         };
         let delivery = DeliveryRequest::Interrupt {
             expected_active_turn: origins.active.turn(),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,
@@ -12371,6 +12381,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: failed.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -12479,6 +12490,7 @@ mod tests {
                 order: successor_order,
                 delivery: DeliveryRequest::Interrupt {
                     expected_active_turn: failed.turn(),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
@@ -12572,6 +12584,7 @@ mod tests {
         .expect("the fixture interrupt is exactly correlated");
         let interrupt_delivery = DeliveryRequest::Interrupt {
             expected_active_turn: predecessor.turn(),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,
@@ -12921,6 +12934,7 @@ mod tests {
         .expect("the fixture interrupt is exactly correlated");
         let interrupt_delivery = DeliveryRequest::Interrupt {
             expected_active_turn: predecessor.turn(),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,
@@ -13240,6 +13254,7 @@ mod tests {
         );
         let successor_delivery = DeliveryRequest::Interrupt {
             expected_active_turn: cancelled.turn(),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,
@@ -13331,6 +13346,7 @@ mod tests {
         );
         let successor_delivery = DeliveryRequest::Interrupt {
             expected_active_turn: cancelled.turn(),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,
@@ -13597,6 +13613,7 @@ mod tests {
         );
         let successor_delivery = DeliveryRequest::Interrupt {
             expected_active_turn: active.turn(),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,

@@ -7,13 +7,14 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockProvenance, GoalBlockedReasonKind,
-    GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind, GoalEventOrdinal,
-    GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
-    GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport, GoalSchedulerProvenance,
-    GoalState, GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure,
-    GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias,
-    ModelSelectionOverride, OriginConfiguration, ReconstitutedGoalCommand, SessionId, TurnId,
+    DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockProvenance,
+    GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind,
+    GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
+    GoalModelProvenance, GoalNeed, GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport,
+    GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
+    GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
+    ModelAlias, ModelSelectionOverride, OriginConfiguration, ReconstitutedGoalCommand, SessionId,
+    TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -791,7 +792,7 @@ async fn apply_user_command(
             GoalUserProvenance::new(command.command_id()),
         ),
         (GoalUserAction::Resume(_), None)
-        | (GoalUserAction::Stop, None)
+        | (GoalUserAction::Stop { .. }, None)
         | (GoalUserAction::Supersede(_), None) => {
             return Ok(GoalCommandResult::Rejected(
                 GoalCommandRejection::GoalNotAttached,
@@ -801,7 +802,7 @@ async fn apply_user_command(
             guidance.clone(),
             GoalUserProvenance::new(command.command_id()),
         ),
-        (GoalUserAction::Stop, Some(goal)) => {
+        (GoalUserAction::Stop { .. }, Some(goal)) => {
             goal.stop(GoalUserProvenance::new(command.command_id()))
         }
         (GoalUserAction::Supersede(statement), Some(goal)) => goal.supersede(
@@ -974,11 +975,13 @@ async fn insert_command(
     let operation = goal_operation_to_str(command.action());
     let statement = match command.action() {
         GoalUserAction::Attach(value) | GoalUserAction::Supersede(value) => Some(value.as_str()),
-        GoalUserAction::Resume(_) | GoalUserAction::Stop => None,
+        GoalUserAction::Resume(_) | GoalUserAction::Stop { .. } => None,
     };
     let guidance = match command.action() {
         GoalUserAction::Resume(value) => value.as_ref().map(GoalGuidance::as_str),
-        GoalUserAction::Attach(_) | GoalUserAction::Stop | GoalUserAction::Supersede(_) => None,
+        GoalUserAction::Attach(_) | GoalUserAction::Stop { .. } | GoalUserAction::Supersede(_) => {
+            None
+        }
     };
     let (result_kind, rejection_kind, result_ordinal) = match result {
         GoalCommandResult::Applied(event) => {
@@ -1355,7 +1358,9 @@ fn action_from_stored(
         GoalOperationKind::Resume => Ok(GoalUserAction::Resume(
             guidance.map(goal_guidance).transpose()?,
         )),
-        GoalOperationKind::Stop => Ok(GoalUserAction::Stop),
+        GoalOperationKind::Stop => Ok(GoalUserAction::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+        }),
         GoalOperationKind::Supersede => Ok(GoalUserAction::Supersede(goal_statement(required(
             statement,
             "supersede statement",

@@ -656,6 +656,7 @@ mod tests {
             content("stop"),
             DeliveryRequest::Interrupt {
                 expected_active_turn: expected_turn,
+                descendant_scope: signalbox_domain::DescendantTerminationScope::ParentAlone,
                 configuration: choices(1),
             },
         )

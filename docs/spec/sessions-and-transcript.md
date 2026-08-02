@@ -887,6 +887,16 @@ its `TranscriptAncestry` is independently `None`. Delegation does not copy,
 reference, merge, or expose the parent transcript, and it does not widen the
 none-or-one ancestry baseline.
 
+Delegated work never fabricates accepted user input. The closed semantic-entry
+family adds reference-only `DelegationTask`, `DelegationMessage`, and
+`DelegationResult` entries. Each names its immutable spawning request and exact
+task, message, or child-result record; the referenced delegation record remains
+content authority. Task entries identify the spawned child. Message entries
+retain sender, recipient, message identity, and relationship ordinal. Result
+entries retain the closed outcome and exact child-turn or parent-command
+provenance, and carry text only for `Returned`. None has `Actor::User`, an
+`AcceptedInputId`, or a child-transcript reference.
+
 The child copies the complete `SessionConfigurationDefaults` value from the
 immutable defaults epoch frozen to the parent turn that owns the spawning
 request. The spawn transaction resolves that stored epoch through the parent
@@ -912,6 +922,28 @@ produce the corresponding typed outcome. Every evaluated relationship records an
 outcome with the parent event, exact spawn request, and user command provenance.
 No path deletes the child or its history, and neither a continued child nor a
 terminated child can become a silent orphan or silent kill.
+
+Version-one bound `Stop` and `Cancel` use the same forceful scheduling mechanics
+but retain different relationship outcomes and recurse through the corresponding
+policy arm. The cascade terminalizes queued or unsent child work without
+creating successor input. Issued model or tool work receives sealed
+parent-policy cancellation authority and follows the existing confirmed-cancel
+or reconciliation-required path; `Stop` records `ChildStopped`, while `Cancel`
+records `ChildCancelled`. This derivative authority does not create a standalone
+user cancellation verb and does not weaken the successor requirement on direct
+user interrupt. The child turn retains the existing `cancelled` or
+`reconciliation_required` disposition; stopped versus cancelled is the typed
+relationship outcome, not a sixth turn disposition.
+
+Traversal uses the locked active relationship tree. Background and bound
+`KeepRunning` edges record `ContinueRunning` and prune that branch. Bound `Stop`
+recurses through the child's `on_parent_stopped` arms; bound `Cancel` recurses
+through `on_parent_cancelled`. Previously terminal edges are not reopened. All
+reachable relationship rows are locked in increasing spawning-request order
+before effects are written, and the disposition count includes every evaluated
+edge, including continue-running. Later explicit user work in a retained child
+session remains independent; late physical completion cannot replace the already
+recorded parent-policy outcome.
 
 One parent may have at most 32 active direct children. The fixed bound is part
 of admission, needs no configuration knob, and does not bound completed

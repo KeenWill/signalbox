@@ -35,12 +35,12 @@ use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FrozenModelSelection, Goal, GoalBlockProvenance,
-    GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
-    GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
-    GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
-    ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, FrozenModelSelection, Goal,
+    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection,
+    GoalCommandResult, GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement,
+    GoalUserAction, GoalUserCommand, ImportedConversation, ImportedConversationFormat,
+    ImportedConversationId, ImportedSessionRelationship as DomainImportedSessionRelationship,
+    ImportedSourceAttestation, ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
     ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
@@ -1061,7 +1061,9 @@ where
                 request_id,
                 command_id.into_uuid(),
                 session_id,
-                GoalUserAction::Stop,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
                 services,
             )
             .await
@@ -7172,6 +7174,7 @@ where
         content,
         DeliveryRequest::Interrupt {
             expected_active_turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
@@ -7261,6 +7264,7 @@ where
         content,
         DeliveryRequest::Interrupt {
             expected_active_turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::new(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
@@ -9494,7 +9498,7 @@ where
         GoalUserAction::Attach(_) | GoalUserAction::Resume(_) | GoalUserAction::Supersede(_) => {
             true
         }
-        GoalUserAction::Stop => false,
+        GoalUserAction::Stop { .. } => false,
     };
     let command = GoalUserCommand::new(DurableCommandId::from_uuid(command_uuid), session, action);
     let candidates = schedules_turn.then(|| {

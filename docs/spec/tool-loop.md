@@ -798,6 +798,27 @@ transition, not a later transcript projection. Duplicate observation is
 idempotent by spawning request and cannot attach a late result to another parent
 tool call.
 
+Every delivered child outcome completes the `await_session` tool attempt as
+`Completed(Text)`; a child failure is delivered data, not an executor failure.
+`Returned` uses the exact returned `DelegationContent`. The non-returned values
+use these exact compact JSON texts as `ToolResultContent`:
+`{"outcome":"failed","reason":"child_execution_failed"}`,
+`{"outcome":"failed","reason":"child_result_unavailable"}`,
+`{"outcome":"stopped","reason":"child_stopped"}`,
+`{"outcome":"stopped","reason":"parent_stopped"}`,
+`{"outcome":"cancelled","reason":"child_cancelled"}`, or
+`{"outcome":"cancelled","reason":"parent_cancelled"}`. The durable child result
+retains the complete typed provenance even though this provider-neutral payload
+does not expose it.
+
+The active-direct-child refusal is the closed domain value
+`DelegatedSpawnRejection::ActiveDirectChildLimit`; its `limit()` is the fixed
+value 32. It ends the spawn tool attempt as `KnownFailed(ExecutionFailed)` with
+admitted detail `active direct child limit reached`; it never fabricates a child
+identity. The direct process operation returns
+`session_spawn_rejected { tool_request_id, reason: active_direct_child_limit, limit: "32" }`,
+and equal replay returns that same recorded refusal.
+
 ## Provider bridge and daemon catalog
 
 The provider-neutral application operation carries ordered conversation messages

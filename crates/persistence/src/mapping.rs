@@ -87,7 +87,7 @@ pub(crate) const fn goal_operation_to_str(value: &GoalUserAction) -> &'static st
     match value {
         GoalUserAction::Attach(_) => "attach",
         GoalUserAction::Resume(_) => "resume",
-        GoalUserAction::Stop => "stop",
+        GoalUserAction::Stop { .. } => "stop",
         GoalUserAction::Supersede(_) => "supersede",
     }
 }

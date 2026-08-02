@@ -13,6 +13,8 @@ use crate::{
 /// complete normalized tool-argument envelope.
 pub const MAX_DELEGATION_CONTENT_UTF8_BYTES: usize = 1_048_576;
 
+const MAX_ACTIVE_DIRECT_CHILDREN: u32 = 32;
+
 const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
 const AWAIT_SESSION_TOOL_NAME: &str = "await_session";
 const SEND_SESSION_MESSAGE_TOOL_NAME: &str = "send_session_message";
@@ -47,6 +49,22 @@ pub enum DelegationWaitMode {
 pub enum DescendantTerminationScope {
     ParentAlone,
     ParentAndDescendants,
+}
+
+/// Closed reason that a valid delegated spawn was refused before child creation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DelegatedSpawnRejection {
+    /// The parent already retains the maximum active direct-child inventory.
+    ActiveDirectChildLimit,
+}
+
+impl DelegatedSpawnRejection {
+    /// Returns the fixed limit associated with this refusal.
+    pub const fn limit(self) -> u32 {
+        match self {
+            Self::ActiveDirectChildLimit => MAX_ACTIVE_DIRECT_CHILDREN,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1067,6 +1085,15 @@ mod tests {
     };
 
     const TEST_TASK: &str = "inspect delegated work";
+
+    #[test]
+    fn s18_spawn_capacity_rejection_carries_the_fixed_direct_child_limit() {
+        assert_eq!(
+            DelegatedSpawnRejection::ActiveDirectChildLimit.limit(),
+            MAX_ACTIVE_DIRECT_CHILDREN
+        );
+    }
+
     fn named_request(session: u128, name: &str, arguments: serde_json::Value) -> ToolRequest {
         let identity_offset = match name {
             SPAWN_SESSION_TOOL_NAME => 100,
