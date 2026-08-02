@@ -1722,7 +1722,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
             return (turn.turnID, snapshot.cursor.rawValue)
           })
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
-        if let snapshotActiveTurnID, projection.activity.state == .running {
+        if let snapshotActiveTurnID {
           activeTurnID = snapshotActiveTurnID
           activity = projection.activity
         } else if case .turnActivated(let turnID, _) = trigger.event,

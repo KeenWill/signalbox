@@ -1014,6 +1014,39 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testSideSnapshotAdoptsRecoveryTurnBeforeBufferedActivation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let trigger = try ProcessProjectionFixture.activatedEvent(
+      cursor: ProcessProjectionFixture.bufferedTransitionCursor
+    )
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessDriverFixture.turn)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertFalse(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+
+    viewModel.apply(.event(trigger))
+
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessDriverFixture.turn)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+  }
+
+  @MainActor
   func testSideSnapshotFenceKeepsRecoveryAcrossBufferedActivation() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
