@@ -678,6 +678,31 @@ fn web_search_rejects_ipv4_tail_decimal_digit_substring_in_ipv6_result_host() {
     );
 }
 
+/// INV-035: a separator-bound decimal dotted-IPv4 tail component is compared
+/// with that component's canonical hexadecimal output.
+#[test]
+fn web_search_rejects_separator_bound_ipv4_tail_component_in_ipv6_result_host() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_IPV4_TAIL_IPV6_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("separator-bound IPv4-tail fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV4_TAIL_SEPARATOR_SUBSTRING_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a compressed IPv6 prefix and partial dotted IPv4 tail are
 /// canonicalized together before comparison with a result host.
 #[test]
@@ -1141,6 +1166,29 @@ fn web_search_rejects_internal_port_zero_credential_in_result_url() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_INTERNAL_PORT_ZERO_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: discarded leading port zeros cannot conceal a credential whose
+/// retained spelling spans the port/path boundary.
+#[test]
+fn web_search_rejects_port_path_zero_credential_in_result_url() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_PORT_PATH_ZERO_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("port/path zero fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_PORT_PATH_ZERO_COLLISION_KEY.as_bytes().to_vec(),
     ))
     .expect("fixture credential is usable");
 

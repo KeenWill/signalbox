@@ -63,6 +63,26 @@ pub(super) fn canonicalized_authority_port_zero_fragment(value: &str) -> Option<
     (!canonical_port.is_empty()).then(|| format!("{authority_context}:{canonical_port}"))
 }
 
+pub(super) fn canonicalized_port_path_zero_fragments(value: &str) -> Vec<String> {
+    let Some((port_fragment, path_suffix)) = value.split_once('/') else {
+        return Vec::new();
+    };
+    if port_fragment.len() < 2
+        || !port_fragment.starts_with('0')
+        || !port_fragment.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Vec::new();
+    }
+    let removable_zeroes = port_fragment
+        .bytes()
+        .take_while(|byte| *byte == b'0')
+        .count()
+        .min(port_fragment.len() - 1);
+    (1..=removable_zeroes)
+        .map(|removed| format!("{}/{}", &port_fragment[removed..], path_suffix))
+        .collect()
+}
+
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
     let candidate = format!("http://{value}/");
     let url = Url::parse(&candidate).ok()?;
@@ -454,6 +474,8 @@ pub(super) fn canonicalized_ipv4_tail_fragments(value: &str) -> Vec<Vec<u8>> {
 }
 
 pub(super) fn ipv4_tail_component_contains(value: &str, octets: &[u8]) -> bool {
+    let value = value.strip_prefix('.').unwrap_or(value);
+    let value = value.strip_suffix('.').unwrap_or(value);
     normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
         octets
             .iter()

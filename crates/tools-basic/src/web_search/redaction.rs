@@ -140,6 +140,16 @@ impl CredentialScrubber {
             return true;
         }
         if url_variants.iter().any(|variant| {
+            canonicalized_port_path_zero_fragments(variant)
+                .iter()
+                .any(|normalized| {
+                    unicode_case_insensitive_contains(text, normalized)
+                        || encoded_contains_credential(text, normalized)
+                })
+        }) {
+            return true;
+        }
+        if url_variants.iter().any(|variant| {
             canonicalized_complete_url(variant).is_some_and(|normalized| {
                 unicode_case_insensitive_contains(text, &normalized)
                     || encoded_contains_credential(text, &normalized)
