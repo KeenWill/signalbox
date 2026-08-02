@@ -102,15 +102,15 @@ jobs:
     # availability setting is documented above and deliberately supplies no
     # additional author-trust decision.
     environment: web-smoke
-    # A queued web-smoke invocation can be evicted by a third concurrent
-    # trigger rather than merely delayed: a concurrency group holds at most
-    # one running and one pending member, and `cancel-in-progress: false`
-    # does not protect the pending slot from replacement. Scoping this group
-    # per ref, as the workflow-level group above does for whole runs, would
-    # close that gap but would also let unrelated PRs spend the shared
-    # credential concurrently, defeating the single-flight serialization this
-    # literal group provides. Accepted for a report-only, non-gating job: a
-    # dropped queued run costs one missed smoke, not a silent merge risk.
+    # Flat and literal: the simplest form, matching codex-smoke's group. A
+    # queued invocation can be evicted by a third concurrent trigger rather
+    # than merely delayed (a concurrency group holds at most one running and
+    # one pending member, and `cancel-in-progress: false` does not protect
+    # the pending slot from replacement), but this job is report-only and
+    # non-gating, so a lost queued run costs nothing: the next push or manual
+    # dispatch re-triggers it. Single-flight credential serialization comes
+    # along incidentally with this shape; it is not the reason for it and is
+    # not load-bearing.
     concurrency:
       group: web-smoke
       cancel-in-progress: false
