@@ -40,7 +40,7 @@ fn created_reference_directory_replacement_is_never_treated_as_owned() {
     let retired_path = parent.path().join("retired");
     let actor_marker = b"actor-owned directory";
 
-    let opened = open_or_create_ref_directory_with_mode_tracked_and_hook(
+    let failure = open_or_create_ref_directory_with_mode_tracked_and_hook(
         &directory,
         created_name,
         Mode::RUSR | Mode::WUSR | Mode::XUSR,
@@ -57,9 +57,9 @@ fn created_reference_directory_replacement_is_never_treated_as_owned() {
             Ok(())
         },
     )
-    .expect("concurrent directory creation is adopted without delete authority");
+    .expect_err("concurrent directory replacement rejects creation");
 
-    drop(opened);
+    assert_eq!(failure, LocalGitFailure::Operation);
     assert!(retired_path.exists());
     assert_eq!(
         fs::read(parent.path().join(created_name).join("marker")).expect("actor marker reads"),
@@ -1307,6 +1307,33 @@ fn reference_lock_rejects_a_packed_parent_before_creating_loose_directories() {
         .expect("packed parent rejects child lock acquisition");
     let packed_target = crate::packed_reference::packed_reference_target(&authority, packed_name)
         .expect("packed parent remains readable");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(!loose_parent.exists());
+    assert_eq!(packed_target, Some(fixture.initial));
+}
+
+#[test]
+fn reference_lock_removes_created_parents_when_a_packed_parent_races_acquisition() {
+    let fixture = Fixture::new();
+    let packed_name = "refs/heads/topic";
+    let child_name = "refs/heads/topic/child";
+    let packed_path = fixture.root().join(".git/packed-refs");
+    let loose_parent = fixture.root().join(".git").join(packed_name);
+    let expected_identity =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+
+    let failure = ReferenceLock::acquire_with_test_hook(&authority, child_name, || {
+        fs::write(&packed_path, format!("{} {packed_name}\n", fixture.initial))
+            .expect("racing packed parent writes");
+    })
+    .err()
+    .expect("racing packed parent rejects lock acquisition");
+    let packed_target = crate::packed_reference::packed_reference_target(&authority, packed_name)
+        .expect("racing packed parent remains readable");
 
     assert_eq!(failure, LocalGitFailure::Operation);
     assert!(!loose_parent.exists());

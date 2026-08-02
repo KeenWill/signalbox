@@ -62,7 +62,19 @@ pub(super) struct ReferenceParent {
     pub(super) directory: OwnedFd,
     pub(super) leaf: OsString,
     hierarchy: Vec<(PathBuf, FileIdentity)>,
+    created_directories: Vec<CreatedReferenceDirectory>,
     creation_file_mode: Option<Mode>,
+}
+
+struct CreatedReferenceDirectory {
+    parent: OwnedFd,
+    name: OsString,
+    identity: FileIdentity,
+}
+
+struct OpenedReferenceDirectory {
+    directory: OwnedFd,
+    created_identity: Option<FileIdentity>,
 }
 
 #[derive(Clone, Copy)]
@@ -92,12 +104,34 @@ impl ReferenceLock {
         authority: &PinnedRepository,
         name: &str,
     ) -> Result<Self, LocalGitFailure> {
+        Self::acquire_with_hook(authority, name, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn acquire_with_test_hook<AfterParent: FnOnce()>(
+        authority: &PinnedRepository,
+        name: &str,
+        after_parent: AfterParent,
+    ) -> Result<Self, LocalGitFailure> {
+        Self::acquire_with_hook(authority, name, after_parent)
+    }
+
+    fn acquire_with_hook<AfterParent: FnOnce()>(
+        authority: &PinnedRepository,
+        name: &str,
+        after_parent: AfterParent,
+    ) -> Result<Self, LocalGitFailure> {
         authority.validate_supported_layout()?;
         let operation_guard = authority.operation_guard()?;
         if name.starts_with("refs/") && packed_reference_namespace_conflicts(authority, name)? {
             return Err(LocalGitFailure::Operation);
         }
-        let bound = open_reference_parent(authority, name, ReferenceParentMode::CreateMissing)?;
+        let mut bound = open_reference_parent(authority, name, ReferenceParentMode::CreateMissing)?;
+        after_parent();
+        if name.starts_with("refs/") && packed_reference_namespace_conflicts(authority, name)? {
+            bound.remove_created_directories();
+            return Err(LocalGitFailure::Operation);
+        }
         let creation_file_mode = bound.creation_file_mode;
         let parent = bound.directory;
         let leaf = bound.leaf;
@@ -621,6 +655,19 @@ impl ReferenceLock {
 }
 
 impl ReferenceParent {
+    fn remove_created_directories(&mut self) {
+        for created in self.created_directories.drain(..).rev() {
+            let _ = remove_entry_if_identity(
+                &created.parent,
+                &created.name,
+                created.identity,
+                AtFlags::REMOVEDIR,
+            );
+        }
+    }
+}
+
+impl ReferenceParent {
     pub(super) fn hierarchy_is_current(&self, authority: &PinnedRepository) -> bool {
         self.hierarchy.iter().all(|(relative, expected)| {
             open_git_directory_path(authority, relative)
@@ -990,6 +1037,7 @@ pub(super) fn open_reference_parent(
         ReferenceParentMode::CreateMissing | ReferenceParentMode::ExistingOnly => None,
     };
     let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    let mut created_directories = Vec::new();
     let mut relative = PathBuf::new();
     let mut hierarchy = vec![(
         relative.clone(),
@@ -1005,11 +1053,21 @@ pub(super) fn open_reference_parent(
         };
         let next_directory = match mode {
             ReferenceParentMode::CreateMissing => match creation_modes {
-                Some(creation_modes) => open_or_create_ref_directory_with_mode_tracked(
-                    &directory,
-                    component,
-                    creation_modes.directory,
-                )?,
+                Some(creation_modes) => {
+                    let opened = open_or_create_ref_directory_with_mode_tracked(
+                        &directory,
+                        component,
+                        creation_modes.directory,
+                    )?;
+                    if let Some(identity) = opened.created_identity {
+                        created_directories.push(CreatedReferenceDirectory {
+                            parent: dup(&directory).map_err(|_| LocalGitFailure::Operation)?,
+                            name: component.to_owned(),
+                            identity,
+                        });
+                    }
+                    opened.directory
+                }
                 None => open_or_create_ref_directory(&directory, component)?,
             },
             ReferenceParentMode::ExistingOnly => openat(
@@ -1033,6 +1091,7 @@ pub(super) fn open_reference_parent(
         directory,
         leaf,
         hierarchy,
+        created_directories,
         creation_file_mode: creation_modes.map(|modes| modes.file),
     })
 }
@@ -1094,14 +1153,15 @@ pub(super) fn open_or_create_ref_directory_with_mode(
     mode: Mode,
 ) -> Result<OwnedFd, LocalGitFailure> {
     open_or_create_ref_directory_with_mode_tracked(parent, name, mode)
+        .map(|opened| opened.directory)
 }
 
-pub(super) fn open_or_create_ref_directory_with_mode_tracked(
+fn open_or_create_ref_directory_with_mode_tracked(
     parent: &OwnedFd,
     name: &OsStr,
     mode: Mode,
-) -> Result<OwnedFd, LocalGitFailure> {
-    open_or_create_ref_directory_with_mode_tracked_and_hook(parent, name, mode, || Ok(()))
+) -> Result<OpenedReferenceDirectory, LocalGitFailure> {
+    open_or_create_ref_directory_with_mode_tracked_and_hook_inner(parent, name, mode, || Ok(()))
 }
 
 pub(super) fn open_or_create_ref_directory_with_mode_tracked_and_hook<PostCreate>(
@@ -1113,9 +1173,25 @@ pub(super) fn open_or_create_ref_directory_with_mode_tracked_and_hook<PostCreate
 where
     PostCreate: FnOnce() -> Result<(), LocalGitFailure>,
 {
+    open_or_create_ref_directory_with_mode_tracked_and_hook_inner(parent, name, mode, post_create)
+        .map(|opened| opened.directory)
+}
+
+fn open_or_create_ref_directory_with_mode_tracked_and_hook_inner<PostCreate>(
+    parent: &OwnedFd,
+    name: &OsStr,
+    mode: Mode,
+    post_create: PostCreate,
+) -> Result<OpenedReferenceDirectory, LocalGitFailure>
+where
+    PostCreate: FnOnce() -> Result<(), LocalGitFailure>,
+{
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     match openat(parent, name, flags, Mode::empty()) {
-        Ok(directory) => Ok(directory),
+        Ok(directory) => Ok(OpenedReferenceDirectory {
+            directory,
+            created_identity: None,
+        }),
         Err(error) if error == rustix::io::Errno::NOENT => {
             mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR)
                 .map_err(|_| LocalGitFailure::Operation)?;
@@ -1137,7 +1213,7 @@ where
                     .map_err(|_| LocalGitFailure::Operation)?,
             );
             if current_identity != created_identity {
-                return Ok(current);
+                return Err(LocalGitFailure::Operation);
             }
             fchmod(&created, mode).map_err(|_| LocalGitFailure::Operation)?;
             let created_metadata =
@@ -1156,7 +1232,10 @@ where
             if path_identity != Some(created_identity) {
                 return Err(LocalGitFailure::Operation);
             }
-            Ok(created)
+            Ok(OpenedReferenceDirectory {
+                directory: created,
+                created_identity: Some(created_identity),
+            })
         }
         Err(_) => Err(LocalGitFailure::Operation),
     }
