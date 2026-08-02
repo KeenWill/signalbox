@@ -21,7 +21,9 @@ use signalbox_domain::{
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, TranscriptAncestry,
+    SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementEventKind,
+    SessionPlacementReconstitutionFacts, SessionPlacementVersion, TranscriptAncestry,
+    VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -39,6 +41,7 @@ use crate::{
         dangerous_tool_auto_approval_from_str, dangerous_tool_auto_approval_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+        session_placement_event_kind_from_str, session_placement_event_kind_to_str,
     },
     model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
     outbox,
@@ -454,6 +457,27 @@ async fn insert_prepared(
     .await
     .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
 
+    sqlx::query(
+        "INSERT INTO session_placement_event
+            (session_id, version, prior_version, event_kind, placement_path,
+             root_global_read_intent, provenance_command_id, recorded_at)
+         VALUES ($1, 1, NULL, $2, NULL, FALSE, $3, transaction_timestamp())",
+    )
+    .bind(session_id_to_uuid(session.id()))
+    .bind(session_placement_event_kind_to_str(
+        SessionPlacementEventKind::Created,
+    ))
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_current_placement (session_id, current_version)
+         VALUES ($1, 1)",
+    )
+    .bind(session_id_to_uuid(session.id()))
+    .execute(&mut *connection)
+    .await?;
+
     crate::session_credentials::insert_initial_session_credential_event(
         connection,
         session_id_to_uuid(session.id()),
@@ -651,7 +675,14 @@ async fn load_creation_from_connection(
             v.direct_model_selection_id AS stored_direct_id,
             v.model_alias_id AS stored_alias_id,
             v.dangerous_tool_auto_approval AS stored_tool_auto_approval,
-            v.system_prompt AS stored_system_prompt
+            v.system_prompt AS stored_system_prompt,
+            placement_head.current_version AS current_placement_head_version,
+            current_placement.version AS current_placement_event_version,
+            initial_placement.version AS initial_placement_version,
+            initial_placement.prior_version AS initial_placement_prior_version,
+            initial_placement.event_kind AS initial_placement_event_kind,
+            initial_placement.placement_path AS initial_placement_path,
+            initial_placement.root_global_read_intent AS initial_placement_root_intent
          FROM durable_command AS d
          LEFT JOIN create_session_from_imported_frontier_command AS c
            ON c.command_id = d.command_id
@@ -660,6 +691,15 @@ async fn load_creation_from_connection(
          LEFT JOIN session_defaults_version AS v
            ON v.session_id = c.created_session_id
           AND v.version = c.initial_defaults_version
+         LEFT JOIN session_current_placement AS placement_head
+           ON placement_head.session_id = c.created_session_id
+         LEFT JOIN session_placement_event AS current_placement
+           ON current_placement.session_id = placement_head.session_id
+          AND current_placement.version = placement_head.current_version
+         LEFT JOIN session_placement_event AS initial_placement
+           ON initial_placement.session_id = c.created_session_id
+          AND initial_placement.version = 1
+          AND initial_placement.provenance_command_id = c.command_id
          WHERE d.command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -744,6 +784,7 @@ async fn load_creation_from_connection(
         typed_version,
         "stored model selection",
     )?;
+    validate_initial_placement_effect(&row)?;
     let projection = load_seed_projection(connection, stored_session, &conversation).await?;
 
     CreateSessionFromImportedFrontierReconstitutionInput::new(
@@ -762,6 +803,47 @@ async fn load_creation_from_connection(
     .reconstitute()
     .map(Some)
     .map_err(|error| ImportedSessionCorruption::CreationDomain(error.failure()).into())
+}
+
+fn validate_initial_placement_effect(row: &PgRow) -> Result<(), ImportedSessionRepositoryError> {
+    let head =
+        crate::session_placement::decode_version(required(row, "current_placement_head_version")?)
+            .map_err(|_| {
+                ImportedSessionCorruption::Inconsistent("current placement head version")
+            })?;
+    let current_event =
+        crate::session_placement::decode_version(required(row, "current_placement_event_version")?)
+            .map_err(|_| {
+                ImportedSessionCorruption::Inconsistent("current placement event version")
+            })?;
+    if head != current_event {
+        return Err(ImportedSessionCorruption::Inconsistent("current placement head event").into());
+    }
+    let initial =
+        crate::session_placement::decode_version(required(row, "initial_placement_version")?)
+            .map_err(|_| ImportedSessionCorruption::Inconsistent("initial placement version"))?;
+    let prior: Option<Decimal> = row.try_get("initial_placement_prior_version")?;
+    let event_kind_spelling: String = required(row, "initial_placement_event_kind")?;
+    let event_kind =
+        session_placement_event_kind_from_str(&event_kind_spelling).ok_or_else(|| {
+            ImportedSessionRepositoryError::from(ImportedSessionCorruption::Unsupported {
+                field: "initial placement event kind",
+                value: event_kind_spelling,
+            })
+        })?;
+    let placement = crate::session_placement::decode_placement(
+        row.try_get("initial_placement_path")?,
+        required(row, "initial_placement_root_intent")?,
+    )
+    .map_err(|_| ImportedSessionCorruption::Inconsistent("initial placement"))?;
+    if initial != SessionPlacementVersion::INITIAL
+        || prior.is_some()
+        || event_kind != SessionPlacementEventKind::Created
+        || placement != SessionPlacement::pathless()
+    {
+        return Err(ImportedSessionCorruption::Inconsistent("initial placement effect").into());
+    }
+    Ok(())
 }
 
 fn identity_collision(error: &sqlx::Error) -> Option<ImportedSessionIdentityCollision> {
@@ -783,6 +865,10 @@ fn identity_collision(error: &sqlx::Error) -> Option<ImportedSessionIdentityColl
 pub(crate) fn reconstitute_bounded_current(
     requested_session: SessionId,
     row: PgRow,
+    current_placement_session: SessionId,
+    current_placement_version: SessionPlacementVersion,
+    placement_session: SessionId,
+    current_placement: VersionedSessionPlacement,
 ) -> Result<Session, ImportedSessionRepositoryError> {
     require_spelling(&row, "stored_cause", USER_INITIATED)?;
     require_spelling(&row, "stored_ancestry", IMPORTED_ANCESTRY)?;
@@ -857,6 +943,12 @@ pub(crate) fn reconstitute_bounded_current(
         defaults_session,
         defaults_version,
         defaults,
+        SessionPlacementReconstitutionFacts {
+            current_pointer_session: current_placement_session,
+            current_pointer_version: current_placement_version,
+            selected_event_session: placement_session,
+            selected_event: current_placement,
+        },
         seed_records,
         seed_headers,
     )
@@ -889,6 +981,12 @@ pub(crate) async fn load_complete_current(
         session.id(),
         current_defaults.version(),
         current_defaults.defaults().clone(),
+        SessionPlacementReconstitutionFacts {
+            current_pointer_session: session.id(),
+            current_pointer_version: session.current_placement().version(),
+            selected_event_session: session.id(),
+            selected_event: session.current_placement().clone(),
+        },
         conversation,
         projection.seed_records,
         projection.seed_snapshots,
