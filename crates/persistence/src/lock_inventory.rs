@@ -66,6 +66,19 @@ pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
           WHERE session_id = $1
           FOR UPDATE";
 
+pub(crate) const SESSION_DELEGATION_PARENT: &str =
+    "SELECT 1 FROM session WHERE session_id = $1 FOR UPDATE";
+
+pub(crate) const SESSION_DELEGATION_RELATION: &str = "SELECT
+            relation.*, request.request_id, request.producing_model_call_id,
+            request.request_ordinal, request.tool_name,
+            request.arguments_kind, request.arguments_text
+       FROM session_delegation AS relation
+       JOIN tool_request AS request
+         ON request.request_id = relation.spawning_tool_request_id
+      WHERE relation.spawning_tool_request_id = $1
+      FOR UPDATE OF relation";
+
 pub(crate) const REPLACE_SESSION_METADATA: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
