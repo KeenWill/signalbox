@@ -2,9 +2,9 @@
 
 use std::{ffi::OsStr, fs};
 
-use rustix::fs::{CWD, Mode, OFlags, openat};
+use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat};
 
-use crate::descriptor::QuarantineDirectory;
+use crate::descriptor::{QuarantineDirectory, file_identity, remove_entry_if_identity};
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_repository_layout;
 use crate::limits::{MAX_BRANCH_BYTES, MAX_REVISION_BYTES};
@@ -153,6 +153,38 @@ fn quarantine_creation_failure_removes_its_persisted_directory() {
 }
 
 #[test]
+fn foreign_cleanup_entry_is_rejected_before_quarantine_creation() {
+    let parent = tempfile::tempdir().expect("cleanup parent constructs");
+    let directory = openat(
+        CWD,
+        parent.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("cleanup parent opens");
+    let entry = parent.path().join("entry");
+    let retired = parent.path().join("retired");
+    let owned_bytes = b"owned entry";
+    let actor_bytes = b"foreign entry";
+    fs::write(&entry, owned_bytes).expect("owned entry writes");
+    let owned = file_identity(&fs::metadata(&entry).expect("owned entry metadata reads"));
+    fs::rename(&entry, &retired).expect("owned entry retires");
+    fs::write(&entry, actor_bytes).expect("foreign entry writes");
+
+    let failure =
+        remove_entry_if_identity(&directory, OsStr::new("entry"), owned, AtFlags::empty())
+            .expect_err("foreign entry rejects cleanup");
+    let remaining_entries = fs::read_dir(parent.path())
+        .expect("cleanup parent reads")
+        .count();
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(fs::read(entry).expect("foreign entry reads"), actor_bytes);
+    assert_eq!(fs::read(retired).expect("owned entry reads"), owned_bytes);
+    assert_eq!(remaining_entries, 2);
+}
+
+#[test]
 fn reference_publication_rolls_back_when_its_hierarchy_is_replaced() {
     let fixture = Fixture::new();
     let heads = fixture.root().join(".git/refs/heads");
@@ -255,6 +287,77 @@ fn absent_reference_publication_preserves_a_post_publish_replacement() {
         fs::read_to_string(reference_path).expect("actor replacement reference reads"),
         format!("{actor_target}\n")
     );
+}
+
+#[test]
+fn reference_publication_reports_success_when_displaced_reference_is_replaced_after_exchange() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let actor_replacement = b"actor replacement\n".to_vec();
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    lock.publish_with_test_hooks(
+        &authority,
+        &expected,
+        || {},
+        || {
+            fs::write(&lock_path, &actor_replacement)
+                .expect("actor replaces displaced reference in place");
+        },
+    )
+    .expect("observable reference publication reports success");
+
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("published reference reads"),
+        format!("{}\n", git2::Oid::ZERO_SHA1)
+    );
+    assert_eq!(
+        fs::read(lock_path).expect("actor replacement reads"),
+        actor_replacement
+    );
+}
+
+#[test]
+fn reference_publication_reports_success_when_displaced_reference_is_removed_after_exchange() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    lock.publish_with_test_hooks(
+        &authority,
+        &expected,
+        || {},
+        || {
+            fs::remove_file(&lock_path).expect("actor removes displaced reference");
+        },
+    )
+    .expect("observable reference publication reports success");
+
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("published reference reads"),
+        format!("{}\n", git2::Oid::ZERO_SHA1)
+    );
+    assert!(!lock_path.exists());
 }
 
 #[test]

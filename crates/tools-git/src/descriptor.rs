@@ -281,6 +281,17 @@ pub(super) fn remove_entry_if_identity(
     expected: FileIdentity,
     removal_flags: AtFlags,
 ) -> Result<(), LocalGitFailure> {
+    let current = match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(status) => Some(FileIdentity {
+            device: status.st_dev,
+            inode: status.st_ino,
+        }),
+        Err(error) if error == rustix::io::Errno::NOENT => None,
+        Err(_) => return Err(LocalGitFailure::Operation),
+    };
+    if current != Some(expected) {
+        return Err(LocalGitFailure::Operation);
+    }
     let quarantine = QuarantineDirectory::create(parent)?;
     let quarantined_name = OsStr::new("owned");
     rustix::fs::renameat_with(

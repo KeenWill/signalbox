@@ -325,6 +325,10 @@ impl ReferenceLock {
         let expected_leaf_snapshot = reference_snapshot_identity_at(&self.parent, &self.leaf)?
             .ok_or(LocalGitFailure::Operation)?;
         before_exchange();
+        if reference_snapshot_identity_at(&self.parent, &self.leaf)? != Some(expected_leaf_snapshot)
+        {
+            return Err(LocalGitFailure::Operation);
+        }
         renameat_with(
             &self.parent,
             &self.lock_name,
@@ -333,10 +337,25 @@ impl ReferenceLock {
             RenameFlags::EXCHANGE,
         )
         .map_err(|_| LocalGitFailure::Operation)?;
-        let displaced_after_exchange =
-            reference_snapshot_identity_at(&self.parent, &self.lock_name)?
-                .ok_or(LocalGitFailure::Operation)?;
         after_publish();
+        let displaced_after_exchange =
+            match reference_snapshot_identity_at(&self.parent, &self.lock_name) {
+                Ok(Some(displaced)) if displaced == expected_leaf_snapshot => displaced,
+                Ok(Some(_)) | Ok(None) | Err(_) => {
+                    let publication_is_current = self.prepared_publication_is_current();
+                    let packed_state_is_current = packed_reference_state(authority, &self.name)
+                        .is_ok_and(|current| current == expected_packed);
+                    if publication_is_current
+                        && packed_state_is_current
+                        && authority.validate_supported_layout().is_ok()
+                        && self.hierarchy_is_current(authority)
+                    {
+                        self.committed = true;
+                        return Ok(());
+                    }
+                    return Err(LocalGitFailure::Operation);
+                }
+            };
         let displaced = read_reference_leaf(&self.parent, &self.lock_name, authority, &self.name);
         let packed_state_is_current = packed_reference_state(authority, &self.name)
             .is_ok_and(|current| current == expected_packed);

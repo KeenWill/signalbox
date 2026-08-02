@@ -467,6 +467,11 @@ impl IndexLock {
                     return Err(LocalGitFailure::Operation);
                 }
                 before_exchange();
+                if index_snapshot_identity_at(&self.parent, &self.index_name)?
+                    != Some(original_index)
+                {
+                    return Err(LocalGitFailure::Operation);
+                }
                 renameat_with(
                     &self.parent,
                     &self.lock_name,
@@ -475,10 +480,21 @@ impl IndexLock {
                     RenameFlags::EXCHANGE,
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
-                let displaced_after_exchange =
-                    index_snapshot_identity_at(&self.parent, &self.lock_name)?
-                        .ok_or(LocalGitFailure::Operation)?;
                 after_exchange();
+                let displaced_after_exchange =
+                    match index_snapshot_identity_at(&self.parent, &self.lock_name) {
+                        Ok(Some(displaced)) if displaced == original_index => displaced,
+                        Ok(Some(_)) | Ok(None) | Err(_) => {
+                            let publication_is_current =
+                                index_snapshot_identity_at(&self.parent, &self.index_name)
+                                    == Ok(Some(prepared_index));
+                            if publication_is_current && self.validate_supported_layout().is_ok() {
+                                self.committed = true;
+                                return Ok(self.identity);
+                            }
+                            return Err(LocalGitFailure::Operation);
+                        }
+                    };
                 let publication_is_owned =
                     index_snapshot_identity_at(&self.parent, &self.index_name)
                         == Ok(Some(prepared_index));

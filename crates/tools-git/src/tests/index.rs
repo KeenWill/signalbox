@@ -421,7 +421,7 @@ fn index_commit_rejects_a_replacement_before_exchange() {
 }
 
 #[test]
-fn index_lock_preserves_a_displaced_replacement_after_exchange() {
+fn index_lock_reports_success_when_the_displaced_index_is_replaced_after_exchange() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");
@@ -433,14 +433,13 @@ fn index_lock_preserves_a_displaced_replacement_after_exchange() {
         .write_raw(&prepared_index)
         .expect("prepared index writes");
 
-    let failure = index_lock
+    index_lock
         .commit_with_exchange_test_hook(|| {
             fs::write(&lock_path, &actor_replacement)
                 .expect("actor replaces displaced index in place");
         })
-        .expect_err("displaced index replacement rejects cleanup");
+        .expect("observable index publication reports success");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
         fs::read(index_path).expect("prepared live index reads"),
         prepared_index
@@ -449,6 +448,31 @@ fn index_lock_preserves_a_displaced_replacement_after_exchange() {
         fs::read(lock_path).expect("actor displaced replacement reads"),
         actor_replacement
     );
+}
+
+#[test]
+fn index_lock_reports_success_when_the_displaced_index_is_removed_after_exchange() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let prepared_index = b"prepared index bytes".to_vec();
+    let (mut index_lock, _index) =
+        IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
+    index_lock
+        .write_raw(&prepared_index)
+        .expect("prepared index writes");
+
+    index_lock
+        .commit_with_exchange_test_hook(|| {
+            fs::remove_file(&lock_path).expect("actor removes displaced index");
+        })
+        .expect("observable index publication reports success");
+
+    assert_eq!(
+        fs::read(index_path).expect("prepared live index reads"),
+        prepared_index
+    );
+    assert!(!lock_path.exists());
 }
 
 #[test]
