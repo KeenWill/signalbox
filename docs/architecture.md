@@ -226,11 +226,11 @@ implemented active phase, including approval and recovery waits, retains the
 session slot. A running turn owns exactly one current attempt, while a waiting
 turn carries its exact wait subject and no attempt. The complete state,
 stop-cause, and terminal-guard algebra, including live closed-boundary fatal
-handling, is normative in
+handling and delegated foreground/background waits, is normative in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md). Future
-child waits require the open delegation decision and will retain the slot unless
-it defines explicit branching semantics. Initial scheduler mechanics are fixed
-in the same page; their listed operational refinements remain open.
+branching beyond the accepted foreground/background wait modes remains separate
+scope. Initial scheduler mechanics are fixed in the same page; their listed
+operational refinements remain open.
 
 ## Explicitly open boundaries
 

@@ -2,6 +2,8 @@
 
 use std::num::NonZeroU64;
 
+use sha2::{Digest, Sha256};
+
 use crate::{
     DelegationMessageId, DurableCommandId, NonEmptyUnicodeText, SessionCreationProvenance,
     SessionId, ToolRequest, ToolRequestId, TurnId,
@@ -158,30 +160,41 @@ pub struct TerminalChildTurn {
     session: SessionId,
     turn: TurnId,
     kind: TerminalChildTurnKind,
+    reason: DelegationOutcomeReason,
+    result_digest: Option<[u8; 32]>,
 }
 impl TerminalChildTurn {
     pub fn from_scheduling(
         value: &crate::AcceptedInputTurnSchedulingProjection,
         reason: DelegationOutcomeReason,
+        assistant_text: &[crate::AssistantText],
     ) -> Option<Self> {
-        let kind = match (value.status(), reason) {
+        let (kind, result_digest) = match (value.status(), reason) {
             (
                 crate::AcceptedInputTurnSchedulingStatus::TerminalCompleted,
                 DelegationOutcomeReason::ChildCompleted,
-            ) => TerminalChildTurnKind::Returned,
+            ) => {
+                let content = DelegationContent::from_assistant_text(assistant_text).ok()?;
+                (
+                    TerminalChildTurnKind::Returned,
+                    Some(delegation_content_digest(&content)),
+                )
+            }
             (
                 crate::AcceptedInputTurnSchedulingStatus::TerminalFailed
                 | crate::AcceptedInputTurnSchedulingStatus::TerminalRefused,
                 DelegationOutcomeReason::ChildExecutionFailed,
-            ) => TerminalChildTurnKind::Failed,
+            ) => (TerminalChildTurnKind::Failed, None),
             (
                 crate::AcceptedInputTurnSchedulingStatus::TerminalCompleted,
                 DelegationOutcomeReason::ChildResultUnavailable,
-            ) => TerminalChildTurnKind::Failed,
+            ) if DelegationContent::from_assistant_text(assistant_text).is_err() => {
+                (TerminalChildTurnKind::Failed, None)
+            }
             (
                 crate::AcceptedInputTurnSchedulingStatus::TerminalCancelled,
                 DelegationOutcomeReason::ChildCancelled,
-            ) => TerminalChildTurnKind::Cancelled,
+            ) => (TerminalChildTurnKind::Cancelled, None),
             (
                 crate::AcceptedInputTurnSchedulingStatus::Queued
                 | crate::AcceptedInputTurnSchedulingStatus::Active
@@ -197,6 +210,8 @@ impl TerminalChildTurn {
             session: value.session(),
             turn: value.turn(),
             kind,
+            reason,
+            result_digest,
         })
     }
     pub const fn session(self) -> SessionId {
@@ -605,6 +620,9 @@ impl SessionDelegation {
             }
             _ => return Err(self.fail(DelegationTransitionFailure::InvalidProvenance)),
         };
+        if sending_request.id() == self.spawning_request {
+            return Err(self.fail(DelegationTransitionFailure::InvalidProvenance));
+        }
         if sending_request.name().as_str() != SEND_SESSION_MESSAGE_TOOL_NAME
             || !request_arguments_match(
                 sending_request,
@@ -748,21 +766,41 @@ fn validate_outcome(
         | DelegationOutcome::ContinueRunning { reason, provenance } => (*reason, *provenance),
     };
     let provenance_matches = match outcome {
-        DelegationOutcome::ResultReturned { .. } => {
-            child_turn_matches(relation, provenance, TerminalChildTurnKind::Returned)
-        }
-        DelegationOutcome::ChildFailed { .. } => {
-            child_turn_matches(relation, provenance, TerminalChildTurnKind::Failed)
-        }
+        DelegationOutcome::ResultReturned { content, .. } => child_turn_matches(
+            relation,
+            provenance,
+            reason,
+            Some(content),
+            TerminalChildTurnKind::Returned,
+        ),
+        DelegationOutcome::ChildFailed { .. } => child_turn_matches(
+            relation,
+            provenance,
+            reason,
+            None,
+            TerminalChildTurnKind::Failed,
+        ),
         DelegationOutcome::ChildStopped { .. }
             if reason == DelegationOutcomeReason::ChildStopped =>
         {
-            child_turn_matches(relation, provenance, TerminalChildTurnKind::Stopped)
+            child_turn_matches(
+                relation,
+                provenance,
+                reason,
+                None,
+                TerminalChildTurnKind::Stopped,
+            )
         }
         DelegationOutcome::ChildCancelled { .. }
             if reason == DelegationOutcomeReason::ChildCancelled =>
         {
-            child_turn_matches(relation, provenance, TerminalChildTurnKind::Cancelled)
+            child_turn_matches(
+                relation,
+                provenance,
+                reason,
+                None,
+                TerminalChildTurnKind::Cancelled,
+            )
         }
         DelegationOutcome::ChildStopped { .. }
         | DelegationOutcome::ChildCancelled { .. }
@@ -806,13 +844,23 @@ fn validate_outcome(
 fn child_turn_matches(
     relation: &SessionDelegation,
     provenance: DelegationProvenance,
+    reason: DelegationOutcomeReason,
+    content: Option<&DelegationContent>,
     kind: TerminalChildTurnKind,
 ) -> bool {
+    let result_digest = content.map(delegation_content_digest);
     matches!(
         provenance.kind,
         DelegationProvenanceKind::ChildTurn { terminal }
-            if terminal.session() == relation.child && terminal.kind == kind
+            if terminal.session() == relation.child
+                && terminal.kind == kind
+                && terminal.reason == reason
+                && terminal.result_digest == result_digest
     )
+}
+
+fn delegation_content_digest(content: &DelegationContent) -> [u8; 32] {
+    Sha256::digest(content.as_str().as_bytes()).into()
 }
 
 fn request_arguments_match(request: &ToolRequest, expected: serde_json::Value) -> bool {
@@ -1001,8 +1049,21 @@ mod tests {
             SEND_SESSION_MESSAGE_TOOL_NAME => 300,
             _ => 400,
         };
-        ToolRequest::from_model_proposal(
+        named_request_with_id(
+            session,
+            name,
+            arguments,
             tool_request_id(session + identity_offset),
+        )
+    }
+    fn named_request_with_id(
+        session: u128,
+        name: &str,
+        arguments: serde_json::Value,
+        request_id: ToolRequestId,
+    ) -> ToolRequest {
+        ToolRequest::from_model_proposal(
+            request_id,
             session_id(session),
             turn_id(session + 10),
             model_call_id(session + 20),
@@ -1052,11 +1113,15 @@ mod tests {
         session: u128,
         turn: TurnId,
         kind: TerminalChildTurnKind,
+        reason: DelegationOutcomeReason,
+        content: Option<&DelegationContent>,
     ) -> DelegationProvenance {
         DelegationProvenance::from_terminal_child(TerminalChildTurn {
             session: session_id(session),
             turn,
             kind,
+            reason,
+            result_digest: content.map(delegation_content_digest),
         })
     }
     fn parent_termination_provenance(
@@ -1145,7 +1210,7 @@ mod tests {
 
         assert_eq!(
             error.failure(),
-            DelegationTransitionFailure::InvalidToolRequestPurpose
+            DelegationTransitionFailure::InvalidProvenance
         );
     }
 
@@ -1290,6 +1355,40 @@ mod tests {
         );
         assert_eq!(
             error.failure(),
+            DelegationTransitionFailure::InvalidToolRequestPurpose
+        );
+    }
+
+    /// S18 / INV-010: the spawning request identity cannot authorize a later message.
+    #[test]
+    fn s18_inv010_message_rejects_spawning_request_identity() {
+        let spawning_request = request(2);
+        let message_content = content("message");
+        let colliding_request = named_request_with_id(
+            2,
+            SEND_SESSION_MESSAGE_TOOL_NAME,
+            serde_json::json!({
+                "content": message_content.as_str(),
+                "peer_session_id": session_id(3).as_uuid().to_string(),
+            }),
+            spawning_request.id(),
+        );
+        let relation = SessionDelegation::spawn(
+            &spawning_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let error = relation
+            .deliver_message(
+                &colliding_request,
+                DelegationMessageId::from_uuid(uuid::Uuid::from_u128(7)),
+                message_content,
+            )
+            .expect_err("spawn identity cannot be reused for a message");
+
+        assert_eq!(
+            error.failure(),
             DelegationTransitionFailure::InvalidProvenance
         );
     }
@@ -1416,28 +1515,81 @@ mod tests {
             ChildRelationshipPolicy::Background,
         )
         .expect("distinct child");
+        let returned_content = content("delivered result");
+        let mismatched_content = content("fabricated result");
+        let returned_provenance = terminal_provenance(
+            3,
+            child_request.turn(),
+            TerminalChildTurnKind::Returned,
+            DelegationOutcomeReason::ChildCompleted,
+            Some(&returned_content),
+        );
+        let mismatch = relation
+            .clone()
+            .record_outcome(DelegationOutcome::ResultReturned {
+                content: mismatched_content,
+                reason: DelegationOutcomeReason::ChildCompleted,
+                provenance: returned_provenance,
+            })
+            .expect_err("terminal evidence binds exact returned content");
         let relation = relation
             .record_outcome(DelegationOutcome::ResultReturned {
-                content: content("delivered result"),
+                content: returned_content,
                 reason: DelegationOutcomeReason::ChildCompleted,
-                provenance: terminal_provenance(
-                    3,
-                    child_request.turn(),
-                    TerminalChildTurnKind::Returned,
-                ),
+                provenance: returned_provenance,
             })
             .expect("child result terminalizes");
+        assert_eq!(
+            mismatch.failure(),
+            DelegationTransitionFailure::InvalidProvenance
+        );
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
         assert_eq!(relation.events().len(), 2);
         let error = relation
             .record_outcome(DelegationOutcome::ChildFailed {
                 reason: DelegationOutcomeReason::ChildExecutionFailed,
-                provenance: terminal_provenance(3, turn_id(6), TerminalChildTurnKind::Failed),
+                provenance: terminal_provenance(
+                    3,
+                    turn_id(6),
+                    TerminalChildTurnKind::Failed,
+                    DelegationOutcomeReason::ChildExecutionFailed,
+                    None,
+                ),
             })
             .expect_err("terminal relation never reopens");
         assert_eq!(
             error.failure(),
             DelegationTransitionFailure::AlreadyTerminal
+        );
+    }
+
+    /// S18 / INV-010: child failure evidence cannot be relabeled with another reason.
+    #[test]
+    fn s18_inv010_child_failure_preserves_exact_evidence_reason() {
+        let parent_request = request(2);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let result_unavailable_provenance = terminal_provenance(
+            3,
+            turn_id(6),
+            TerminalChildTurnKind::Failed,
+            DelegationOutcomeReason::ChildResultUnavailable,
+            None,
+        );
+        let error = relation
+            .record_outcome(DelegationOutcome::ChildFailed {
+                reason: DelegationOutcomeReason::ChildExecutionFailed,
+                provenance: result_unavailable_provenance,
+            })
+            .expect_err("failure evidence retains its exact reason");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidProvenance
         );
     }
 
@@ -1452,15 +1604,19 @@ mod tests {
             ChildRelationshipPolicy::Background,
         )
         .expect("distinct child");
+        let returned_content = content("already delivered");
+        let returned_provenance = terminal_provenance(
+            3,
+            child_request.turn(),
+            TerminalChildTurnKind::Returned,
+            DelegationOutcomeReason::ChildCompleted,
+            Some(&returned_content),
+        );
         let relation = relation
             .record_outcome(DelegationOutcome::ResultReturned {
-                content: content("already delivered"),
+                content: returned_content,
                 reason: DelegationOutcomeReason::ChildCompleted,
-                provenance: terminal_provenance(
-                    3,
-                    child_request.turn(),
-                    TerminalChildTurnKind::Returned,
-                ),
+                provenance: returned_provenance,
             })
             .expect("child result terminalizes");
         let registration = relation
@@ -1495,6 +1651,8 @@ mod tests {
                     3,
                     child_request.turn(),
                     TerminalChildTurnKind::Cancelled,
+                    DelegationOutcomeReason::ChildCancelled,
+                    None,
                 ),
             })
             .expect("child records its own cancellation");
@@ -1532,8 +1690,13 @@ mod tests {
     fn s19_inv010_child_cancel_records_child_turn_reason_and_provenance() {
         let parent_request = request(2);
         let child_request = request(3);
-        let provenance =
-            terminal_provenance(3, child_request.turn(), TerminalChildTurnKind::Cancelled);
+        let provenance = terminal_provenance(
+            3,
+            child_request.turn(),
+            TerminalChildTurnKind::Cancelled,
+            DelegationOutcomeReason::ChildCancelled,
+            None,
+        );
         let relation = SessionDelegation::spawn(
             &parent_request,
             session_id(3),
@@ -1620,10 +1783,11 @@ mod tests {
             on_parent_cancelled: BoundChildAction::Cancel,
         };
         let parent_request = request_with_policy(2, policy);
+        let command = command_id(5);
         let provenance = parent_termination_provenance(
             2,
             parent_request.turn(),
-            command_id(5),
+            command,
             DelegationOutcomeReason::ParentStopped {
                 scope: DescendantTerminationScope::ParentAndDescendants,
             },
@@ -1641,7 +1805,7 @@ mod tests {
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
         assert_eq!(
             provenance.parent_command(),
-            Some((session_id(2), parent_request.turn(), command_id(5)))
+            Some((parent_request.session(), parent_request.turn(), command))
         );
     }
 

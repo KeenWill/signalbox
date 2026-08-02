@@ -834,11 +834,12 @@ pub enum DelegationContentError {
     Oversized { utf8_byte_length: usize },
 }
 
-pub struct TerminalChildTurn { /* private checked terminal scheduling evidence */ }
+pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
 impl TerminalChildTurn {
     pub fn from_scheduling(
         value: &AcceptedInputTurnSchedulingProjection,
         reason: DelegationOutcomeReason,
+        assistant_text: &[AssistantText],
     ) -> Option<Self>;
     // accessors: session(), turn()
 }

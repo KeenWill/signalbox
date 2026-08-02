@@ -34,9 +34,10 @@ A session is one durable, independently browsable conversation with its own
 records two required, independent, immutable creation facts, paired as
 `SessionCreationProvenance` (INV-003):
 
-- **Creation cause** — why the session exists. The only constructible variant is
-  `UserInitiated`. Reserved causes (application, schedule, delegation) are not
-  represented as placeholder variants.
+- **Creation cause** — why the session exists. `UserInitiated` identifies an
+  ordinary session. `Delegated` names the exact `ToolRequestId` of the
+  `spawn_session` request that created the child. Other possible causes
+  (application and schedule) are not represented as placeholder variants.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one

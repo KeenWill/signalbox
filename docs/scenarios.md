@@ -603,7 +603,8 @@ INV-tagged test names and attached doc comments.
   [session delegation](spec/sessions-and-transcript.md#session-delegation).
 - **State transitions:** Background children continue. Bound children apply
   their separately recorded stop/cancel action; `KeepRunning` is itself a typed
-  disposition. A child is never deleted and may finish after the parent.
+  disposition under the owning
+  [session-delegation contract](spec/sessions-and-transcript.md#session-delegation).
 - **Transient updates:** Cancellation progress remains per physical attempt;
   relationship outcomes are durable updates rather than presence hints.
 - **Owning component:** Daemon applies the recorded policy and user-selected
