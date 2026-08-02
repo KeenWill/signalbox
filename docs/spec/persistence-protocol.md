@@ -31,15 +31,17 @@ transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 and the session-placement event, current head, and creation transaction were
-verified through PR #415 (`agent/scoped-visibility-creation`). This page covers
-the Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+verified through PR #415 (`agent/scoped-visibility-creation`); and the exact
+stop-command descendant scopes were verified through this PR
+(`agent/delegation`). This page covers the Postgres representation in
+`crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -954,6 +956,14 @@ commit by rereading exact durable authority (`reread_ambiguous_authorization`)
 rather than only surfacing the flag.
 
 ## Delegation storage and locking
+
+**Implemented behavior.** Migration `202608020018_session_delegation.sql`
+retains the closed `parent_alone` or `parent_and_descendants` selection on every
+stop goal command and interrupt submit-input command. The accepted-input copy
+retains the same value for an applied interrupt. Other goal operations and
+delivery kinds require a null scope. Command and accepted-input reconstitution
+decode the stored selection without substituting a default, so equal replay
+returns the recorded result and changed-scope reuse conflicts.
 
 This section is the foundation proposal for migration
 `202608020018_session_delegation.sql` and becomes verified only with the full

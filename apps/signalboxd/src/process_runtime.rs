@@ -114,11 +114,12 @@ use signalbox_process_protocol::{
     ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
-    ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
-    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
-    GoalBlockedProvenance as WireGoalBlockedProvenance, GoalBlockedReason as WireGoalBlockedReason,
-    GoalCommandRejection as WireGoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
-    ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
+    DescendantTerminationScope as WireDescendantTerminationScope, ErrorCode, ErrorDetail,
+    FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
+    FrameDecodeErrorKind, FrameEncodeError, GoalBlockedProvenance as WireGoalBlockedProvenance,
+    GoalBlockedReason as WireGoalBlockedReason, GoalCommandRejection as WireGoalCommandRejection,
+    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+    ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
     MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
@@ -1239,6 +1240,7 @@ where
         ClientRequest::StopGoal {
             command_id,
             session_id,
+            descendant_scope,
         } => {
             handle_goal_user_command(
                 writer,
@@ -1247,7 +1249,7 @@ where
                 command_id.into_uuid(),
                 session_id,
                 GoalUserAction::Stop {
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    descendant_scope: decode_descendant_scope(descendant_scope),
                 },
                 services,
             )
@@ -1859,6 +1861,7 @@ where
             expected_active_turn_id,
             content,
             expected_defaults_version,
+            descendant_scope,
         } => {
             handle_stop_turn(
                 writer,
@@ -1869,6 +1872,7 @@ where
                 expected_active_turn_id,
                 content,
                 expected_defaults_version,
+                decode_descendant_scope(descendant_scope),
                 &services.pool,
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
@@ -7923,6 +7927,17 @@ where
     .await
 }
 
+const fn decode_descendant_scope(
+    value: WireDescendantTerminationScope,
+) -> DescendantTerminationScope {
+    match value {
+        WireDescendantTerminationScope::ParentAlone => DescendantTerminationScope::ParentAlone,
+        WireDescendantTerminationScope::ParentAndDescendants => {
+            DescendantTerminationScope::ParentAndDescendants
+        }
+    }
+}
+
 /// Stops the exact active turn through the accepted interrupt treatment.
 ///
 /// The delivery is the `Interrupt` treatment the turn lifecycle already
@@ -7945,6 +7960,7 @@ async fn handle_stop_turn<Writer>(
     expected_active_turn_id: CanonicalUuid,
     content: InputContent,
     expected_defaults_version: CanonicalU64,
+    descendant_scope: DescendantTerminationScope,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
@@ -7983,7 +7999,7 @@ where
         content,
         DeliveryRequest::Interrupt {
             expected_active_turn,
-            descendant_scope: DescendantTerminationScope::ParentAlone,
+            descendant_scope,
             configuration: PerInputConfigurationChoices::new(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
@@ -11247,6 +11263,22 @@ mod tests {
             ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
         },
     };
+
+    #[test]
+    fn s19_descendant_scope_decode_is_exact() {
+        assert_eq!(
+            super::decode_descendant_scope(
+                signalbox_process_protocol::DescendantTerminationScope::ParentAlone,
+            ),
+            signalbox_domain::DescendantTerminationScope::ParentAlone
+        );
+        assert_eq!(
+            super::decode_descendant_scope(
+                signalbox_process_protocol::DescendantTerminationScope::ParentAndDescendants,
+            ),
+            signalbox_domain::DescendantTerminationScope::ParentAndDescendants
+        );
+    }
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
 
     #[test]

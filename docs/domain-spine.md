@@ -7486,7 +7486,9 @@ impl GoalReconstitutionError {
 pub enum GoalUserAction {
     Attach(GoalStatement),
     Resume(Option<GoalGuidance>),
-    Stop { descendant_scope: DescendantTerminationScope },
+    Stop {
+        descendant_scope: DescendantTerminationScope,
+    },
     Supersede(GoalStatement),
 }
 pub struct GoalUserCommand { /* private command identity + session + action */ }

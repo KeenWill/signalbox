@@ -2227,6 +2227,16 @@ fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationEr
     }
 }
 
+/// Explicit delegated-child scope selected by a parent termination request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DescendantTerminationScope {
+    /// Apply the stop only to the named parent session.
+    ParentAlone,
+    /// Evaluate every reachable delegated-child relationship.
+    ParentAndDescendants,
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2283,6 +2293,8 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Target session.
         session_id: CanonicalUuid,
+        /// Explicit delegated-child scope.
+        descendant_scope: DescendantTerminationScope,
     },
     /// Atomically replace the active immutable statement.
     SupersedeGoal {
@@ -2641,6 +2653,8 @@ pub enum ClientRequest {
         content: InputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
+        /// Explicit delegated-child scope.
+        descendant_scope: DescendantTerminationScope,
     },
     /// Supply the user decision for one pending tool request.
     DecideToolRequest {
@@ -5586,12 +5600,12 @@ mod tests {
         ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
         ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
         ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
-        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, GoalBlockedProvenance, GoalBlockedReason,
-        GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
-        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        CurrentModelCallState, DescendantTerminationScope, ErrorCode, ErrorDetail,
+        FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, GoalBlockedProvenance,
+        GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
+        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
+        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
@@ -5854,8 +5868,9 @@ mod tests {
             ClientRequest::StopGoal {
                 command_id: command(13)?,
                 session_id: uuid(3),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             },
-            r#"{"type":"stop_goal","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003"}"#,
+            r#"{"type":"stop_goal","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003","descendant_scope":"parent_and_descendants"}"#,
         )?;
         assert_server_message_round_trip(
             request(14)?,
@@ -7644,6 +7659,7 @@ mod tests {
                 expected_active_turn_id: uuid(7),
                 content: InputContent::new(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -8813,6 +8829,7 @@ mod tests {
             expected_active_turn_id: uuid(7),
             content: InputContent::new(String::from("continue after the stop")),
             expected_defaults_version: CanonicalU64::new(1),
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
         };
 
         let frame =
@@ -8825,7 +8842,8 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
              \"content\":\"continue after the stop\",\
-             \"expected_defaults_version\":\"1\"}}\n"
+             \"expected_defaults_version\":\"1\",\
+             \"descendant_scope\":\"parent_and_descendants\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())

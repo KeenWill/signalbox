@@ -99,7 +99,7 @@ pub(super) const BOUNDARY_WHITESPACE_BOUND_COLLISION_KEY: &[u8] = b"KnownFailed 
 pub(super) const TIMESTAMP_COLLISION_KEY: &str = "2026";
 
 pub(super) const FORMATTER_EVENT_BOUNDARY_COLLISION_KEY: &str =
-    "Z  WARN signalbox_tools_basic_web_search";
+    "Z  WARN signalbox_tools_web_web_search";
 
 pub(super) const EXECUTOR_OUTCOME_COLLISION_KEY: &str = "CompletedText";
 

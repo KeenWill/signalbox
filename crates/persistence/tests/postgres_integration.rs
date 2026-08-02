@@ -1581,7 +1581,7 @@ async fn insert_malformed_submit_rejection(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             content_kind, content_text, delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -1593,7 +1593,7 @@ async fn insert_malformed_submit_rejection(
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             content_kind, content_text, delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -1635,7 +1635,7 @@ async fn insert_cross_wired_occupied_rejection(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             content_kind, content_text, delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -1648,7 +1648,7 @@ async fn insert_cross_wired_occupied_rejection(
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             content_kind, content_text, delivery_kind, descendant_scope,
              $3, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -1692,7 +1692,7 @@ async fn insert_parked_approval_interrupt_rejection(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             content_kind, content_text, delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -1705,7 +1705,7 @@ async fn insert_parked_approval_interrupt_rejection(
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, 'interrupt',
+             content_kind, content_text, 'interrupt', 'parent_alone',
              $3, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -5123,7 +5123,7 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
         "stop while confirm is pending",
         DeliveryRequest::Interrupt {
             expected_active_turn: fixture.turn,
-            descendant_scope: DescendantTerminationScope::ParentAlone,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
