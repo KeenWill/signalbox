@@ -98,6 +98,7 @@ pub(super) fn decode_html_character_references(text: &str) -> Option<DecodedText
                 changed = true;
             }
             None if entity.starts_with('#') => return None,
+            None if plausible_named_character_reference(entity) => return None,
             None if prefixed_legacy_named_character_reference(&reference[..relative_end + 1]) => {
                 return None;
             }
@@ -114,6 +115,14 @@ pub(super) fn decode_html_character_references(text: &str) -> Option<DecodedText
             ReversibleTextChange::Unchanged
         },
     })
+}
+
+fn plausible_named_character_reference(entity: &str) -> bool {
+    entity
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && entity.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 pub(super) fn numeric_character_reference_prefix(reference: &str) -> bool {
@@ -258,8 +267,10 @@ pub(super) fn decode_html_character_reference(entity: &str) -> Option<String> {
     let named = match entity {
         "amp" | "AMP" => Some("&"),
         "apos" => Some("'"),
+        "ast" => Some("*"),
         "gt" | "GT" => Some(">"),
         "lt" | "LT" => Some("<"),
+        "nbsp" => Some("\u{a0}"),
         "quot" | "QUOT" => Some("\""),
         _ => None,
     };

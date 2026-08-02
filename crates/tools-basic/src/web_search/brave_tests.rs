@@ -1,4 +1,7 @@
-use super::{brave::*, egress::*, test_provider_support::*, test_support::*, transport_failure::*};
+use super::{
+    brave::*, diagnostic::*, egress::*, test_provider_support::*, test_support::*,
+    transport_failure::*,
+};
 
 /// The recorded synthetic Brave envelope decodes only web results and the
 /// provider's pagination fact; no transport or network is involved.
@@ -54,6 +57,28 @@ fn brave_recorded_null_web_response_decodes_empty_results() {
 
     assert!(response.results().is_empty());
     assert!(!response.more_results_available());
+}
+
+/// A success envelope that omits the `web` member is malformed rather than
+/// an authoritative empty page.
+#[test]
+fn brave_response_without_web_member_is_invalid() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "type": "search",
+        "query": {
+            "original": FIXTURE_QUERY,
+            "more_results_available": false,
+        },
+    }))
+    .expect("recorded response fixture encodes");
+
+    let failure = decode_provider_response(WebSearchProvider::Brave, &body)
+        .expect_err("missing web member is rejected");
+
+    assert_eq!(
+        failure.class(),
+        WebSearchTransportFailureClass::InvalidResponse
+    );
 }
 
 /// A success envelope without provider pagination facts cannot claim that

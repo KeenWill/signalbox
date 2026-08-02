@@ -104,6 +104,10 @@ pub(super) const FIXTURE_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
 pub(super) const FIXTURE_ESCAPED_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
     "Synthetic &amp;copy; snippet";
 
+pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE: &str = "nbsp";
+
+pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_VALUE: &str = "\u{a0}";
+
 pub(super) const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
 
 pub(super) const FIXTURE_NORMALIZED_RESULT_URL: &str = "https://exa\nmple.com/result";
@@ -202,6 +206,8 @@ pub(super) const URL_INTERNAL_PORT_ZERO_COLLISION_KEY: &str = "m:04";
 
 pub(super) const URL_PORT_PATH_ZERO_COLLISION_KEY: &str = "00/p";
 
+pub(super) const URL_AUTHORITY_PORT_PATH_ZERO_COLLISION_KEY: &str = "m:0400/p";
+
 pub(super) const URL_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "m:80/p";
 
 pub(super) const URL_BARE_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "80/p";
@@ -211,6 +217,16 @@ pub(super) const URL_REMOVED_DEFAULT_PORT_COLLISION_KEY: &str = "m:80";
 pub(super) const URL_DEFAULT_PORT_DIGIT_SUFFIX_COLLISION_KEY: &str = "0/p";
 
 pub(super) const URL_COMPOSED_PORT_PATH_COLLISION_KEY: &str = "0400/a/../p";
+
+pub(super) fn maximum_zero_prefixed_port_path_collision_key() -> String {
+    let leading_zeroes = "0".repeat(MAX_CREDENTIAL_BYTES - "1/p".len());
+    format!("{leading_zeroes}1/p")
+}
+
+pub(super) fn maximum_zero_prefixed_port_path_result_url() -> String {
+    let leading_zeroes = "0".repeat(MAX_CREDENTIAL_BYTES - "1/p".len());
+    format!("https://example.com:{leading_zeroes}1/path")
+}
 
 pub(super) const URL_EMPTY_PORT_COLLISION_KEY: &str = "m:/p";
 
@@ -367,6 +383,8 @@ pub(super) const COMPLETED_EVIDENCE_DEBUG_COLLISION_KEY: &str = "CompletedText";
 pub(super) const KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY: &str = "KnownFailed";
 
 pub(super) const SUCCESS_RESULT_DEBUG_COLLISION_KEY: &str = "Ok";
+
+pub(super) const SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(C";
 
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 
