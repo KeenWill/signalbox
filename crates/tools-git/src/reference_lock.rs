@@ -19,7 +19,7 @@ use rustix::{
 
 use crate::descriptor::{FileIdentity, descriptor_entry_exists, file_identity};
 use crate::failure::LocalGitFailure;
-use crate::packed_reference::packed_reference_target;
+use crate::packed_reference::{packed_reference_namespace_conflicts, packed_reference_target};
 use crate::pinning::PinnedRepository;
 use crate::reference_read::{open_git_directory_path, read_reference_leaf};
 
@@ -179,8 +179,11 @@ impl ReferenceLock {
         if !self.path_still_owned() || !self.hierarchy_is_current(authority) {
             return Err(LocalGitFailure::Operation);
         }
+        let expected_packed = packed_reference_target(authority, &self.name)?;
+        if packed_reference_namespace_conflicts(authority, &self.name)? {
+            return Err(LocalGitFailure::Operation);
+        }
         if !descriptor_entry_exists(&self.parent, &self.leaf)? {
-            let expected_packed = packed_reference_target(authority, &self.name)?;
             if self.read(authority)? != *expected {
                 return Err(LocalGitFailure::Operation);
             }
@@ -196,7 +199,13 @@ impl ReferenceLock {
             after_publish();
             let packed_is_current = packed_reference_target(authority, &self.name)
                 .is_ok_and(|current| current == expected_packed);
-            if !packed_is_current || !self.hierarchy_is_current(authority) {
+            let packed_namespace_is_clear =
+                packed_reference_namespace_conflicts(authority, &self.name)
+                    .is_ok_and(|conflicts| !conflicts);
+            if !packed_is_current
+                || !packed_namespace_is_clear
+                || !self.hierarchy_is_current(authority)
+            {
                 if self.published_path_still_owned() {
                     let _ = unlinkat(&self.parent, &self.leaf, AtFlags::empty());
                 }
@@ -215,7 +224,15 @@ impl ReferenceLock {
         .map_err(|_| LocalGitFailure::Operation)?;
         after_publish();
         let displaced = read_reference_leaf(&self.parent, &self.lock_name, authority, &self.name);
-        if displaced.as_ref() != Ok(expected) || !self.hierarchy_is_current(authority) {
+        let packed_is_current = packed_reference_target(authority, &self.name)
+            .is_ok_and(|current| current == expected_packed);
+        let packed_namespace_is_clear = packed_reference_namespace_conflicts(authority, &self.name)
+            .is_ok_and(|conflicts| !conflicts);
+        if displaced.as_ref() != Ok(expected)
+            || !packed_is_current
+            || !packed_namespace_is_clear
+            || !self.hierarchy_is_current(authority)
+        {
             renameat_with(
                 &self.parent,
                 &self.lock_name,

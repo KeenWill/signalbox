@@ -2,6 +2,7 @@ use std::{collections::HashSet, fs, io::Read};
 
 use rustix::fs::{Mode, OFlags, openat};
 
+use crate::descriptor::file_snapshot_identity;
 use crate::failure::LocalGitFailure;
 use crate::limits::MAX_PACKED_REFS_BYTES;
 use crate::pinning::PinnedRepository;
@@ -76,7 +77,11 @@ pub(super) fn read_packed_references(
         .take((MAX_PACKED_REFS_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| LocalGitFailure::Operation)?;
-    if bytes.len() > MAX_PACKED_REFS_BYTES || bytes.len() as u64 != metadata.len() {
+    let after_read = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+    if bytes.len() > MAX_PACKED_REFS_BYTES
+        || bytes.len() as u64 != metadata.len()
+        || file_snapshot_identity(&metadata) != file_snapshot_identity(&after_read)
+    {
         return Err(LocalGitFailure::Operation);
     }
     let mut references = Vec::new();
@@ -91,7 +96,7 @@ pub(super) fn read_packed_references(
             .ok_or(LocalGitFailure::Operation)?;
         let oid = std::str::from_utf8(&line[..separator])
             .ok()
-            .and_then(|oid| git2::Oid::from_str(oid).ok())
+            .and_then(|oid| git2::Oid::from_str_ext(oid, authority.object_format).ok())
             .ok_or(LocalGitFailure::Operation)?;
         let existing = line
             .get(separator + 1..)

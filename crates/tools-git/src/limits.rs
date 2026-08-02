@@ -20,7 +20,7 @@ pub(super) const MAX_PACKED_REFS_BYTES: usize = 1024 * 1024;
 
 pub(super) const MAX_SHALLOW_ENTRIES: usize = 1024;
 
-pub(super) const MAX_SHALLOW_BYTES: usize = MAX_SHALLOW_ENTRIES * 41;
+pub(super) const MAX_SHALLOW_BYTES: usize = MAX_SHALLOW_ENTRIES * 65;
 
 pub(super) const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
 

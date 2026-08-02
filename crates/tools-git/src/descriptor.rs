@@ -25,6 +25,16 @@ pub(super) struct RepositoryIdentity {
     pub(super) config: FileIdentity,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FileSnapshotIdentity {
+    pub(super) file: FileIdentity,
+    pub(super) length: u64,
+    pub(super) modified_seconds: i64,
+    pub(super) modified_nanoseconds: i64,
+    pub(super) changed_seconds: i64,
+    pub(super) changed_nanoseconds: i64,
+}
+
 pub(super) fn descriptor_path_from_fd(file: &OwnedFd) -> PathBuf {
     PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
 }
@@ -37,6 +47,17 @@ pub(super) fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
     FileIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
+    }
+}
+
+pub(super) fn file_snapshot_identity(metadata: &fs::Metadata) -> FileSnapshotIdentity {
+    FileSnapshotIdentity {
+        file: file_identity(metadata),
+        length: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
     }
 }
 

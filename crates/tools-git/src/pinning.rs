@@ -2,12 +2,13 @@ use std::{
     ffi::OsStr,
     fmt, fs,
     io::Read,
+    ops::{Deref, DerefMut},
     os::{fd::OwnedFd, unix::ffi::OsStrExt},
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
-use git2::{Config, ErrorCode, Odb, Repository, RepositoryOpenFlags};
+use git2::{Config, ErrorCode, ObjectFormat, Odb, Repository, RepositoryInitOptions};
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
 use crate::construction::LocalGitToolsConstructionError;
@@ -23,7 +24,13 @@ pub(super) struct PinnedRepository {
     pub(super) git_directory: fs::File,
     pub(super) _config: fs::File,
     pub(super) _config_snapshot: fs::File,
-    repository: Mutex<Repository>,
+    pub(super) object_format: ObjectFormat,
+    repository: Mutex<RepositoryShell>,
+}
+
+pub(super) struct RepositoryShell {
+    repository: Repository,
+    _directory: tempfile::TempDir,
 }
 
 pub(super) struct PinnedObjectDatabase {
@@ -35,6 +42,20 @@ impl fmt::Debug for PinnedRepository {
         formatter
             .debug_struct("PinnedRepository")
             .finish_non_exhaustive()
+    }
+}
+
+impl Deref for RepositoryShell {
+    type Target = Repository;
+
+    fn deref(&self) -> &Self::Target {
+        &self.repository
+    }
+}
+
+impl DerefMut for RepositoryShell {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.repository
     }
 }
 
@@ -95,20 +116,21 @@ impl PinnedRepository {
         if observed != expected {
             return Err(LocalGitToolsConstructionError::Repository);
         }
-        let repository = open_pinned_repository(&root, &git_directory, &config.snapshot)
+        let repository = open_pinned_repository(&root, &config.snapshot, config.object_format)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         Ok(Self {
             root,
             git_directory,
             _config: config.source,
             _config_snapshot: config.snapshot,
+            object_format: config.object_format,
             repository: Mutex::new(repository),
         })
     }
 
     pub(super) fn repository(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, Repository>, LocalGitFailure> {
+    ) -> Result<std::sync::MutexGuard<'_, RepositoryShell>, LocalGitFailure> {
         self.repository
             .lock()
             .map_err(|_| LocalGitFailure::Repository)
@@ -116,6 +138,13 @@ impl PinnedRepository {
 
     pub(super) fn git_path(&self, path: &str) -> PathBuf {
         descriptor_path(&self.git_directory).join(path)
+    }
+
+    pub(super) fn object_id_bytes(&self) -> usize {
+        match self.object_format {
+            ObjectFormat::Sha1 => 20,
+            ObjectFormat::Sha256 => 32,
+        }
     }
 }
 
@@ -130,6 +159,10 @@ impl PinnedObjectDatabase {
         .map_err(|_| LocalGitFailure::Repository)?;
         let directory = tempfile::tempdir().map_err(|_| LocalGitFailure::Operation)?;
         fs::create_dir(directory.path().join("pack")).map_err(|_| LocalGitFailure::Operation)?;
+        let loose_name_bytes = authority
+            .object_id_bytes()
+            .saturating_mul(2)
+            .saturating_sub(2);
         let mut inspected = 0_usize;
         let mut captured_bytes = 0_u64;
         for entry in fs::read_dir(descriptor_path_from_fd(&objects))
@@ -158,7 +191,7 @@ impl PinnedObjectDatabase {
                     &directory.path().join("pack"),
                     &mut inspected,
                     &mut captured_bytes,
-                    false,
+                    None,
                 )?;
                 continue;
             }
@@ -179,7 +212,7 @@ impl PinnedObjectDatabase {
                 &destination,
                 &mut inspected,
                 &mut captured_bytes,
-                true,
+                Some(loose_name_bytes),
             )?;
         }
         Ok(Self { directory })
@@ -202,7 +235,7 @@ pub(super) fn pin_object_directory(
     destination: &Path,
     inspected: &mut usize,
     captured_bytes: &mut u64,
-    loose: bool,
+    loose_name_bytes: Option<usize>,
 ) -> Result<(), LocalGitFailure> {
     for entry in
         fs::read_dir(descriptor_path_from_fd(source)).map_err(|_| LocalGitFailure::Repository)?
@@ -213,9 +246,9 @@ pub(super) fn pin_object_directory(
             return Err(LocalGitFailure::Repository);
         }
         let name = entry.file_name();
-        if loose
-            && (name.as_bytes().len() != 38 || !name.as_bytes().iter().all(u8::is_ascii_hexdigit))
-        {
+        if loose_name_bytes.is_some_and(|expected| {
+            name.as_bytes().len() != expected || !name.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        }) {
             return Err(LocalGitFailure::Repository);
         }
         let descriptor = openat(
@@ -227,7 +260,7 @@ pub(super) fn pin_object_directory(
         .map_err(|_| LocalGitFailure::Repository)?;
         let mut file = fs::File::from(descriptor);
         let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-        let per_file_limit = if loose {
+        let per_file_limit = if loose_name_bytes.is_some() {
             MAX_OBJECT_BYTES.saturating_mul(2)
         } else {
             MAX_PACK_FILE_BYTES
@@ -268,6 +301,10 @@ pub(super) fn live_object_database_bytes(
     .map_err(|_| LocalGitFailure::Repository)?;
     let mut inspected = 0_usize;
     let mut bytes = 0_u64;
+    let loose_name_bytes = authority
+        .object_id_bytes()
+        .saturating_mul(2)
+        .saturating_sub(2);
     for entry in
         fs::read_dir(descriptor_path_from_fd(&objects)).map_err(|_| LocalGitFailure::Repository)?
     {
@@ -288,7 +325,7 @@ pub(super) fn live_object_database_bytes(
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Repository)?;
-            measure_object_directory(&pack, &mut inspected, &mut bytes, false)?;
+            measure_object_directory(&pack, &mut inspected, &mut bytes, None)?;
             continue;
         }
         if name.as_bytes().len() != 2 || !name.as_bytes().iter().all(u8::is_ascii_hexdigit) {
@@ -301,7 +338,7 @@ pub(super) fn live_object_database_bytes(
             Mode::empty(),
         )
         .map_err(|_| LocalGitFailure::Repository)?;
-        measure_object_directory(&loose, &mut inspected, &mut bytes, true)?;
+        measure_object_directory(&loose, &mut inspected, &mut bytes, Some(loose_name_bytes))?;
     }
     Ok(bytes)
 }
@@ -310,7 +347,7 @@ pub(super) fn measure_object_directory(
     directory: &OwnedFd,
     inspected: &mut usize,
     total_bytes: &mut u64,
-    loose: bool,
+    loose_name_bytes: Option<usize>,
 ) -> Result<(), LocalGitFailure> {
     for entry in
         fs::read_dir(descriptor_path_from_fd(directory)).map_err(|_| LocalGitFailure::Repository)?
@@ -321,9 +358,9 @@ pub(super) fn measure_object_directory(
             return Err(LocalGitFailure::Repository);
         }
         let name = entry.file_name();
-        if loose
-            && (name.as_bytes().len() != 38 || !name.as_bytes().iter().all(u8::is_ascii_hexdigit))
-        {
+        if loose_name_bytes.is_some_and(|expected| {
+            name.as_bytes().len() != expected || !name.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        }) {
             return Err(LocalGitFailure::Repository);
         }
         let descriptor = openat(
@@ -336,7 +373,7 @@ pub(super) fn measure_object_directory(
         let metadata = fs::File::from(descriptor)
             .metadata()
             .map_err(|_| LocalGitFailure::Repository)?;
-        let per_file_limit = if loose {
+        let per_file_limit = if loose_name_bytes.is_some() {
             MAX_OBJECT_BYTES.saturating_mul(2)
         } else {
             MAX_PACK_FILE_BYTES
@@ -354,20 +391,27 @@ pub(super) fn measure_object_directory(
 
 pub(super) fn open_pinned_repository(
     root: &fs::File,
-    git_directory: &fs::File,
     config: &fs::File,
-) -> Result<Repository, git2::Error> {
+    object_format: ObjectFormat,
+) -> Result<RepositoryShell, git2::Error> {
     let root_path = descriptor_path(root);
-    let git_directory_path = descriptor_path(git_directory);
-    let repository = Repository::open_ext(
-        &git_directory_path,
-        RepositoryOpenFlags::BARE | RepositoryOpenFlags::NO_SEARCH,
-        std::iter::empty::<&Path>(),
-    )?;
+    let directory =
+        tempfile::tempdir().map_err(|error| git2::Error::from_str(&error.to_string()))?;
+    let mut options = RepositoryInitOptions::new();
+    options
+        .bare(true)
+        .no_reinit(true)
+        .external_template(false)
+        .initial_head("refs/heads/signalbox-pinned")
+        .object_format(object_format);
+    let repository = Repository::init_opts(directory.path(), &options)?;
     repository.set_workdir(&root_path, false)?;
     let config = Config::open(&descriptor_path(config))?;
     repository.set_config(&config)?;
-    Ok(repository)
+    Ok(RepositoryShell {
+        repository,
+        _directory: directory,
+    })
 }
 
 pub(super) fn repository_filemode(repository: &Repository) -> Result<bool, LocalGitFailure> {

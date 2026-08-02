@@ -2,7 +2,7 @@
 
 use std::{fs, path::Path};
 
-use git2::{IndexAddOption, Oid, Repository, Signature};
+use git2::{IndexAddOption, ObjectFormat, Oid, Repository, RepositoryInitOptions, Signature};
 use tempfile::TempDir;
 
 pub(super) const AUTHOR_NAME: &str = "Signalbox Fixer";
@@ -20,12 +20,38 @@ pub(super) struct Fixture {
     pub(super) initial: Oid,
 }
 
+pub(super) struct Sha256Fixture {
+    directory: TempDir,
+    pub(super) initial: Oid,
+}
+
 impl Fixture {
     pub(super) fn new() -> Self {
         let directory = tempfile::tempdir().expect("temporary repository root constructs");
         let repository = Repository::init(directory.path()).expect("repository initializes");
         fs::write(directory.path().join(TRACKED_PATH), INITIAL_CONTENT)
             .expect("fixture file writes");
+        let initial = commit_all(&repository, INITIAL_MESSAGE);
+        Self { directory, initial }
+    }
+
+    pub(super) fn root(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+impl Sha256Fixture {
+    pub(super) fn new() -> Self {
+        let directory = tempfile::tempdir().expect("temporary SHA-256 repository root constructs");
+        let mut options = RepositoryInitOptions::new();
+        options
+            .external_template(false)
+            .initial_head("main")
+            .object_format(ObjectFormat::Sha256);
+        let repository = Repository::init_opts(directory.path(), &options)
+            .expect("SHA-256 repository initializes");
+        fs::write(directory.path().join(TRACKED_PATH), INITIAL_CONTENT)
+            .expect("SHA-256 fixture file writes");
         let initial = commit_all(&repository, INITIAL_MESSAGE);
         Self { directory, initial }
     }

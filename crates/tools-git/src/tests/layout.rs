@@ -2,11 +2,15 @@
 
 use std::{fs, os::unix::fs::symlink};
 
+use git2::ObjectFormat;
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
+use crate::failure::LocalGitFailure;
+use crate::index_lock::IndexLock;
 use crate::layout::{reject_administrative_symlinks, validate_repository_layout};
-use crate::pinning::{PinnedRepository, repository_filemode};
-use crate::tests::support::Fixture;
+use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
+use crate::reference_read::resolve_pinned_reference_chain;
+use crate::tests::support::{Fixture, Sha256Fixture};
 
 #[test]
 fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
@@ -97,4 +101,88 @@ fn repository_open_parses_the_validated_config_snapshot() {
     let filemode = repository_filemode(&repository).expect("snapshot filemode reads");
 
     assert!(filemode);
+}
+
+#[test]
+fn repository_shell_and_object_capture_reject_descendant_replacement() {
+    let fixture = Fixture::new();
+    let outside = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let objects = fixture.root().join(".git/objects");
+    let retired_objects = fixture.root().join(".git/objects.retired");
+    fs::rename(&objects, &retired_objects).expect("fixture objects retire");
+    symlink(outside.root().join(".git/objects"), &objects)
+        .expect("outside object database symlink constructs");
+
+    let repository = authority
+        .repository()
+        .expect("private repository shell locks");
+    let outside_lookup_failed = repository.find_commit(outside.initial).is_err();
+    drop(repository);
+    let capture_failure = PinnedObjectDatabase::capture(&authority)
+        .err()
+        .expect("replacement object database rejects capture");
+
+    assert!(outside_lookup_failed);
+    assert_eq!(capture_failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn repository_shell_never_parses_mutated_live_object_format() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectformat = sha1\n",
+    )
+    .expect("validated SHA-1 fixture config writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+
+    let authority = PinnedRepository::open_with_hooks(
+        fixture.root(),
+        expected,
+        || {},
+        || {
+            fs::write(
+                &config_path,
+                "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectformat = sha256\n",
+            )
+            .expect("live fixture object format mutates");
+        },
+    )
+    .expect("repository shell opens from the SHA-1 snapshot");
+    let repository = authority.repository().expect("fixture repository locks");
+
+    assert_eq!(authority.object_format, ObjectFormat::Sha1);
+    assert_eq!(repository.object_format(), ObjectFormat::Sha1);
+}
+
+#[test]
+fn sha256_repository_preserves_references_shallow_ids_and_index_checksum() {
+    let fixture = Sha256Fixture::new();
+    fs::write(
+        fixture.root().join(".git/shallow"),
+        format!("{}\n", fixture.initial),
+    )
+    .expect("SHA-256 shallow boundary writes");
+    let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
+    let (_, head) =
+        resolve_pinned_reference_chain(&authority, None).expect("SHA-256 reference chain resolves");
+    let (index_lock, index) =
+        IndexLock::acquire_for_repository(&authority).expect("SHA-256 index lock acquires");
+    let first_entry = index.get(0).expect("SHA-256 fixture index has one entry");
+    let first_entry_format = first_entry.id.object_format();
+    index_lock.commit().expect("SHA-256 index publishes");
+    let published_index =
+        git2::Index::open_ext(&fixture.root().join(".git/index"), ObjectFormat::Sha256)
+            .expect("published SHA-256 index checksum validates");
+
+    assert_eq!(authority.object_format, ObjectFormat::Sha256);
+    assert_eq!(head, Some(fixture.initial));
+    assert_eq!(first_entry_format, ObjectFormat::Sha256);
+    assert_eq!(published_index.len(), index.len());
 }

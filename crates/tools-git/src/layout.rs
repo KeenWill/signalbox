@@ -6,13 +6,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use git2::ObjectFormat;
 use rustix::{
     fs::{CWD, Dir, Mode, OFlags, openat},
     io::dup,
 };
 
 use crate::construction::LocalGitToolsConstructionError;
-use crate::descriptor::{RepositoryIdentity, file_identity};
+use crate::descriptor::{RepositoryIdentity, file_identity, file_snapshot_identity};
 use crate::limits::{
     MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REVISION_BYTES, MAX_SHALLOW_BYTES,
     MAX_SHALLOW_ENTRIES,
@@ -21,6 +22,7 @@ use crate::limits::{
 pub(super) struct RepositoryConfig {
     pub(super) source: fs::File,
     pub(super) snapshot: fs::File,
+    pub(super) object_format: ObjectFormat,
 }
 
 pub(super) fn validate_repository_layout(
@@ -39,19 +41,23 @@ pub(super) fn validate_repository_layout(
         return Err(LocalGitToolsConstructionError::Repository);
     }
     let git_directory_identity = file_identity(&metadata);
-    let git_directory = openat(
-        CWD,
-        &dot_git,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let git_directory = fs::File::from(
+        openat(
+            CWD,
+            &dot_git,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?,
+    );
     if dot_git.join("commondir").exists() || dot_git.join("objects/info/alternates").exists() {
         return Err(LocalGitToolsConstructionError::Repository);
     }
-    reject_administrative_symlinks(&git_directory)?;
-    reject_escaping_config(&dot_git.join("config"))?;
-    let config_metadata = fs::symlink_metadata(dot_git.join("config"))
+    let config = open_repository_config_at(&git_directory)?;
+    reject_administrative_symlinks_for_format(&git_directory, config.object_format)?;
+    let config_metadata = config
+        .source
+        .metadata()
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     Ok(RepositoryIdentity {
         root: root_identity,
@@ -62,6 +68,18 @@ pub(super) fn validate_repository_layout(
 
 pub(super) fn reject_administrative_symlinks(
     git_directory: &OwnedFd,
+) -> Result<(), LocalGitToolsConstructionError> {
+    reject_administrative_symlinks_for_format(
+        &fs::File::from(
+            dup(git_directory).map_err(|_| LocalGitToolsConstructionError::Repository)?,
+        ),
+        ObjectFormat::Sha1,
+    )
+}
+
+fn reject_administrative_symlinks_for_format(
+    git_directory: &fs::File,
+    object_format: ObjectFormat,
 ) -> Result<(), LocalGitToolsConstructionError> {
     let root = dup(git_directory).map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let mut pending = vec![(root, PathBuf::new())];
@@ -121,7 +139,7 @@ pub(super) fn reject_administrative_symlinks(
                 return Err(LocalGitToolsConstructionError::Repository);
             }
             if relative == Path::new("shallow") {
-                validate_shallow_file(&mut file)?;
+                validate_shallow_file(&mut file, object_format)?;
             }
         }
     }
@@ -130,6 +148,7 @@ pub(super) fn reject_administrative_symlinks(
 
 pub(super) fn validate_shallow_file(
     file: &mut fs::File,
+    object_format: ObjectFormat,
 ) -> Result<(), LocalGitToolsConstructionError> {
     let mut bytes = Vec::with_capacity(MAX_SHALLOW_BYTES);
     Read::by_ref(file)
@@ -140,13 +159,17 @@ pub(super) fn validate_shallow_file(
         return Err(LocalGitToolsConstructionError::Repository);
     }
     let mut entries = 0_usize;
+    let object_id_bytes = match object_format {
+        ObjectFormat::Sha1 => 40,
+        ObjectFormat::Sha256 => 64,
+    };
     for line in bytes.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
         }
         entries = entries.saturating_add(1);
         if entries > MAX_SHALLOW_ENTRIES
-            || line.len() != 40
+            || line.len() != object_id_bytes
             || !line.iter().all(u8::is_ascii_hexdigit)
         {
             return Err(LocalGitToolsConstructionError::Repository);
@@ -202,7 +225,13 @@ fn validate_repository_config_descriptor(
         .take((MAX_REPOSITORY_CONFIG_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    if bytes.len() > MAX_REPOSITORY_CONFIG_BYTES || bytes.len() as u64 != metadata.len() {
+    let after_read = file
+        .metadata()
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    if bytes.len() > MAX_REPOSITORY_CONFIG_BYTES
+        || bytes.len() as u64 != metadata.len()
+        || file_snapshot_identity(&metadata) != file_snapshot_identity(&after_read)
+    {
         return Err(LocalGitToolsConstructionError::Repository);
     }
     if bytes.starts_with(b"\xef\xbb\xbf") {
@@ -211,6 +240,8 @@ fn validate_repository_config_descriptor(
     let config =
         String::from_utf8(bytes.clone()).map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let mut section = "";
+    let mut object_format = ObjectFormat::Sha1;
+    let mut object_format_seen = false;
     for line in config.lines() {
         let mut normalized = line.trim().to_ascii_lowercase();
         if normalized.starts_with('[') {
@@ -245,11 +276,25 @@ fn validate_repository_config_descriptor(
             }
         }
         if section == "extensions"
-            && normalized
-                .split_once('=')
-                .is_some_and(|(key, _)| key.trim() == "worktreeconfig")
+            && let Some((key, value)) = normalized.split_once('=')
         {
-            return Err(LocalGitToolsConstructionError::Repository);
+            match key.trim() {
+                "worktreeconfig" => {
+                    return Err(LocalGitToolsConstructionError::Repository);
+                }
+                "objectformat" if !object_format_seen => {
+                    object_format = match value.trim() {
+                        "sha1" => ObjectFormat::Sha1,
+                        "sha256" => ObjectFormat::Sha256,
+                        _ => return Err(LocalGitToolsConstructionError::Repository),
+                    };
+                    object_format_seen = true;
+                }
+                "objectformat" => {
+                    return Err(LocalGitToolsConstructionError::Repository);
+                }
+                _ => {}
+            }
         }
     }
     let mut snapshot =
@@ -262,5 +307,6 @@ fn validate_repository_config_descriptor(
     Ok(RepositoryConfig {
         source: file,
         snapshot,
+        object_format,
     })
 }

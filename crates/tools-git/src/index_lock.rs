@@ -7,16 +7,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use git2::Index;
+use git2::{Index, ObjectFormat};
 use rustix::{
     fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, openat, renameat_with, unlinkat},
     io::dup,
 };
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 use crate::descriptor::{FileIdentity, descriptor_path, file_identity};
 use crate::failure::LocalGitFailure;
-use crate::limits::MAX_INDEX_BYTES;
+use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
 use crate::pinning::PinnedRepository;
 
 pub(super) struct IndexLock {
@@ -25,6 +26,7 @@ pub(super) struct IndexLock {
     lock_name: OsString,
     lock: fs::File,
     identity: FileIdentity,
+    object_format: ObjectFormat,
     expected_index: Option<IndexSnapshotIdentity>,
     _private_directory: tempfile::TempDir,
     private_index_path: PathBuf,
@@ -39,14 +41,18 @@ pub(super) struct IndexSnapshot {
 struct IndexSnapshotIdentity {
     file: FileIdentity,
     length: u64,
-    digest: [u8; 20],
+    digest: [u8; 32],
 }
 
 impl IndexSnapshot {
-    pub(super) fn acquire(index_path: &Path) -> Result<(Self, Index), LocalGitFailure> {
+    pub(super) fn acquire(
+        index_path: &Path,
+        object_format: ObjectFormat,
+    ) -> Result<(Self, Index), LocalGitFailure> {
         let mut file = tempfile::tempfile().map_err(|_| LocalGitFailure::Operation)?;
-        copy_index_snapshot(index_path, &mut file, false)?;
-        let index = Index::open(&descriptor_path(&file)).map_err(|_| LocalGitFailure::Operation)?;
+        copy_index_snapshot(index_path, &mut file, false, object_format)?;
+        let index = Index::open_ext(&descriptor_path(&file), object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
         Ok((Self { _file: file }, index))
     }
 }
@@ -60,6 +66,7 @@ impl IndexLock {
             OsString::from("index"),
             OsString::from("index.lock"),
             index_installation_mode(authority)?,
+            authority.object_format,
             tempfile::tempdir,
         )
     }
@@ -73,6 +80,7 @@ impl IndexLock {
             index_path,
             lock_path,
             Mode::RUSR | Mode::WUSR,
+            ObjectFormat::Sha1,
             tempfile::tempdir,
         )
     }
@@ -90,6 +98,7 @@ impl IndexLock {
             index_path,
             lock_path,
             Mode::RUSR | Mode::WUSR,
+            ObjectFormat::Sha1,
             create_private_directory,
         )
     }
@@ -98,6 +107,7 @@ impl IndexLock {
         index_path: &Path,
         lock_path: &Path,
         missing_index_mode: Mode,
+        object_format: ObjectFormat,
         create_private_directory: Create,
     ) -> Result<(Self, Index), LocalGitFailure>
     where
@@ -127,6 +137,7 @@ impl IndexLock {
             index_name,
             lock_name,
             missing_index_mode,
+            object_format,
             create_private_directory,
         )
     }
@@ -136,6 +147,7 @@ impl IndexLock {
         index_name: OsString,
         lock_name: OsString,
         missing_index_mode: Mode,
+        object_format: ObjectFormat,
         create_private_directory: Create,
     ) -> Result<(Self, Index), LocalGitFailure>
     where
@@ -164,6 +176,7 @@ impl IndexLock {
             lock_name,
             lock,
             identity,
+            object_format,
             expected_index: None,
             _private_directory: private_directory,
             private_index_path,
@@ -173,15 +186,20 @@ impl IndexLock {
             .lock
             .set_permissions(fs::Permissions::from_mode(missing_index_mode.bits()))
             .map_err(|_| LocalGitFailure::Operation)?;
-        guard.expected_index =
-            copy_index_snapshot_at(&guard.parent, &guard.index_name, &mut guard.lock, true)?;
+        guard.expected_index = copy_index_snapshot_at(
+            &guard.parent,
+            &guard.index_name,
+            &mut guard.lock,
+            true,
+            guard.object_format,
+        )?;
         guard
             .lock
             .sync_all()
             .map_err(|_| LocalGitFailure::Operation)?;
         guard.copy_lock_to_private_index()?;
-        let index =
-            Index::open(&guard.private_index_path).map_err(|_| LocalGitFailure::Operation)?;
+        let index = Index::open_ext(&guard.private_index_path, guard.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
         Ok((guard, index))
     }
 
@@ -244,7 +262,7 @@ impl IndexLock {
 
     pub(super) fn write(&mut self, index: &mut Index) -> Result<(), LocalGitFailure> {
         if index.path() != Some(self.private_index_path.as_path()) {
-            return write_index_entries(&mut self.lock, index);
+            return write_index_entries(&mut self.lock, index, self.object_format);
         }
         index.write().map_err(|_| LocalGitFailure::Operation)?;
         let descriptor = openat(
@@ -387,6 +405,7 @@ pub(super) fn index_installation_mode(
 pub(super) fn write_index_entries(
     destination: &mut fs::File,
     index: &Index,
+    object_format: ObjectFormat,
 ) -> Result<(), LocalGitFailure> {
     let mut bytes = Vec::new();
     let version = if index.iter().any(|entry| entry.flags_extended != 0) {
@@ -433,7 +452,7 @@ pub(super) fn write_index_entries(
             bytes.push(0);
         }
     }
-    bytes.extend_from_slice(&Sha1::digest(&bytes));
+    append_index_checksum(&mut bytes, object_format);
     if bytes.len() > MAX_INDEX_BYTES {
         return Err(LocalGitFailure::Operation);
     }
@@ -453,6 +472,7 @@ pub(super) fn copy_index_snapshot(
     index_path: &Path,
     destination: &mut fs::File,
     preserve_permissions: bool,
+    object_format: ObjectFormat,
 ) -> Result<(), LocalGitFailure> {
     match openat(
         CWD,
@@ -461,9 +481,10 @@ pub(super) fn copy_index_snapshot(
         Mode::empty(),
     ) {
         Ok(descriptor) => {
-            copy_open_index_snapshot(descriptor, destination, preserve_permissions).map(drop)?
+            copy_open_index_snapshot(descriptor, destination, preserve_permissions, object_format)
+                .map(drop)?
         }
-        Err(rustix::io::Errno::NOENT) => write_empty_index(destination)?,
+        Err(rustix::io::Errno::NOENT) => write_empty_index(destination, object_format)?,
         Err(_) => return Err(LocalGitFailure::Repository),
     }
     Ok(())
@@ -473,6 +494,7 @@ fn copy_open_index_snapshot(
     descriptor: OwnedFd,
     destination: &mut fs::File,
     preserve_permissions: bool,
+    object_format: ObjectFormat,
 ) -> Result<IndexSnapshotIdentity, LocalGitFailure> {
     let mut source = fs::File::from(descriptor);
     let metadata = source.metadata().map_err(|_| LocalGitFailure::Repository)?;
@@ -492,13 +514,14 @@ fn copy_open_index_snapshot(
     if bytes.len() as u64 != metadata.len() || bytes.len() > MAX_INDEX_BYTES {
         return Err(LocalGitFailure::Repository);
     }
+    reject_split_index(&bytes, object_format)?;
     destination
         .write_all(&bytes)
         .map_err(|_| LocalGitFailure::Operation)?;
     Ok(IndexSnapshotIdentity {
         file: file_identity(&metadata),
         length: metadata.len(),
-        digest: Sha1::digest(&bytes).into(),
+        digest: Sha256::digest(&bytes).into(),
     })
 }
 
@@ -547,6 +570,7 @@ fn copy_index_snapshot_at(
     index_name: &OsStr,
     destination: &mut fs::File,
     preserve_permissions: bool,
+    object_format: ObjectFormat,
 ) -> Result<Option<IndexSnapshotIdentity>, LocalGitFailure> {
     match openat(
         parent,
@@ -555,10 +579,11 @@ fn copy_index_snapshot_at(
         Mode::empty(),
     ) {
         Ok(descriptor) => {
-            copy_open_index_snapshot(descriptor, destination, preserve_permissions).map(Some)
+            copy_open_index_snapshot(descriptor, destination, preserve_permissions, object_format)
+                .map(Some)
         }
         Err(rustix::io::Errno::NOENT) => {
-            write_empty_index(destination)?;
+            write_empty_index(destination, object_format)?;
             Ok(None)
         }
         Err(_) => Err(LocalGitFailure::Repository),
@@ -604,14 +629,151 @@ fn snapshot_identity(
     Ok(IndexSnapshotIdentity {
         file: file_identity(metadata),
         length: metadata.len(),
-        digest: Sha1::digest(&bytes).into(),
+        digest: Sha256::digest(&bytes).into(),
     })
 }
 
-pub(super) fn write_empty_index(file: &mut fs::File) -> Result<(), LocalGitFailure> {
+fn reject_split_index(bytes: &[u8], object_format: ObjectFormat) -> Result<(), LocalGitFailure> {
+    let object_id_bytes = match object_format {
+        ObjectFormat::Sha1 => 20,
+        ObjectFormat::Sha256 => 32,
+    };
+    let extension_end = bytes
+        .len()
+        .checked_sub(object_id_bytes)
+        .filter(|end| *end >= 12)
+        .ok_or(LocalGitFailure::Repository)?;
+    if &bytes[..4] != b"DIRC" {
+        return Err(LocalGitFailure::Repository);
+    }
+    let version = u32::from_be_bytes(
+        bytes[4..8]
+            .try_into()
+            .map_err(|_| LocalGitFailure::Repository)?,
+    );
+    if !(2..=4).contains(&version) {
+        return Err(LocalGitFailure::Repository);
+    }
+    let entries = usize::try_from(u32::from_be_bytes(
+        bytes[8..12]
+            .try_into()
+            .map_err(|_| LocalGitFailure::Repository)?,
+    ))
+    .map_err(|_| LocalGitFailure::Repository)?;
+    if entries > MAX_INDEX_ENTRIES {
+        return Err(LocalGitFailure::Repository);
+    }
+    let mut cursor = 12_usize;
+    for _entry in 0..entries {
+        let entry_start = cursor;
+        let flags_offset = cursor
+            .checked_add(40 + object_id_bytes)
+            .filter(|offset| offset.saturating_add(2) <= extension_end)
+            .ok_or(LocalGitFailure::Repository)?;
+        let flags = u16::from_be_bytes(
+            bytes[flags_offset..flags_offset + 2]
+                .try_into()
+                .map_err(|_| LocalGitFailure::Repository)?,
+        );
+        cursor = flags_offset + 2;
+        if flags & 0x4000 != 0 {
+            cursor = cursor
+                .checked_add(2)
+                .filter(|cursor| *cursor <= extension_end)
+                .ok_or(LocalGitFailure::Repository)?;
+        }
+        if version == 4 {
+            let mut prefix_bytes = 0_usize;
+            loop {
+                let byte = *bytes.get(cursor).ok_or(LocalGitFailure::Repository)?;
+                cursor += 1;
+                prefix_bytes += 1;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                if prefix_bytes == 10 {
+                    return Err(LocalGitFailure::Repository);
+                }
+            }
+            let suffix = bytes
+                .get(cursor..extension_end)
+                .ok_or(LocalGitFailure::Repository)?;
+            let nul = suffix
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or(LocalGitFailure::Repository)?;
+            cursor = cursor
+                .checked_add(nul + 1)
+                .ok_or(LocalGitFailure::Repository)?;
+        } else {
+            let stated_path_bytes = usize::from(flags & 0x0fff);
+            if stated_path_bytes < 0x0fff {
+                let nul = cursor
+                    .checked_add(stated_path_bytes)
+                    .filter(|nul| bytes.get(*nul) == Some(&0))
+                    .ok_or(LocalGitFailure::Repository)?;
+                cursor = nul + 1;
+            } else {
+                let path = bytes
+                    .get(cursor..extension_end)
+                    .ok_or(LocalGitFailure::Repository)?;
+                let nul = path
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .ok_or(LocalGitFailure::Repository)?;
+                cursor = cursor
+                    .checked_add(nul + 1)
+                    .ok_or(LocalGitFailure::Repository)?;
+            }
+            let entry_bytes = cursor
+                .checked_sub(entry_start)
+                .ok_or(LocalGitFailure::Repository)?;
+            cursor = entry_start
+                .checked_add((entry_bytes + 7) & !7)
+                .filter(|cursor| *cursor <= extension_end)
+                .ok_or(LocalGitFailure::Repository)?;
+        }
+    }
+    while cursor < extension_end {
+        let header_end = cursor
+            .checked_add(8)
+            .filter(|end| *end <= extension_end)
+            .ok_or(LocalGitFailure::Repository)?;
+        let signature = &bytes[cursor..cursor + 4];
+        let extension_bytes = usize::try_from(u32::from_be_bytes(
+            bytes[cursor + 4..header_end]
+                .try_into()
+                .map_err(|_| LocalGitFailure::Repository)?,
+        ))
+        .map_err(|_| LocalGitFailure::Repository)?;
+        if signature == b"link" {
+            return Err(LocalGitFailure::Repository);
+        }
+        cursor = header_end
+            .checked_add(extension_bytes)
+            .filter(|cursor| *cursor <= extension_end)
+            .ok_or(LocalGitFailure::Repository)?;
+    }
+    Ok(())
+}
+
+pub(super) fn write_empty_index(
+    file: &mut fs::File,
+    object_format: ObjectFormat,
+) -> Result<(), LocalGitFailure> {
     const EMPTY_INDEX_HEADER: &[u8; 12] = b"DIRC\0\0\0\x02\0\0\0\0";
     file.write_all(EMPTY_INDEX_HEADER)
         .map_err(|_| LocalGitFailure::Operation)?;
-    file.write_all(&Sha1::digest(EMPTY_INDEX_HEADER))
-        .map_err(|_| LocalGitFailure::Operation)
+    match object_format {
+        ObjectFormat::Sha1 => file.write_all(&Sha1::digest(EMPTY_INDEX_HEADER)),
+        ObjectFormat::Sha256 => file.write_all(&Sha256::digest(EMPTY_INDEX_HEADER)),
+    }
+    .map_err(|_| LocalGitFailure::Operation)
+}
+
+fn append_index_checksum(bytes: &mut Vec<u8>, object_format: ObjectFormat) {
+    match object_format {
+        ObjectFormat::Sha1 => bytes.extend_from_slice(&Sha1::digest(&*bytes)),
+        ObjectFormat::Sha256 => bytes.extend_from_slice(&Sha256::digest(&*bytes)),
+    }
 }

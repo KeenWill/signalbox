@@ -98,3 +98,86 @@ fn loose_reference_rejects_growth_after_metadata_capture() {
 
     assert_eq!(failure, LocalGitFailure::Operation);
 }
+
+#[test]
+fn loose_reference_rejects_same_length_rewrite_after_metadata_capture() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/rewritten";
+    let reference_path = fixture.root().join(".git").join(name);
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let bound =
+        open_reference_parent(&authority, name, false).expect("fixture reference parent opens");
+
+    let failure =
+        read_reference_leaf_with_test_hook(&bound.directory, &bound.leaf, &authority, name, || {
+            fs::write(&reference_path, format!("{}\n", git2::Oid::ZERO_SHA1))
+                .expect("fixture reference rewrites in place")
+        })
+        .expect_err("same-length rewrite rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn reference_publication_rejects_an_existing_packed_namespace_conflict() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        format!("{} refs/heads/topic/child\n", fixture.initial),
+    )
+    .expect("packed namespace conflict writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("missing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish(&authority, &expected)
+        .expect_err("packed namespace conflict rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(!reference_path.exists());
+}
+
+#[test]
+fn reference_publication_rolls_back_a_racing_packed_namespace_conflict() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let packed_path = fixture.root().join(".git/packed-refs");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("missing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_test_hooks(
+            &authority,
+            &expected,
+            || {},
+            || {
+                fs::write(
+                    &packed_path,
+                    format!("{} refs/heads/topic/child\n", fixture.initial),
+                )
+                .expect("racing packed namespace conflict writes");
+            },
+        )
+        .expect_err("racing packed namespace conflict rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(!reference_path.exists());
+}

@@ -11,6 +11,7 @@ use rustix::{
     io::dup,
 };
 
+use crate::descriptor::file_snapshot_identity;
 use crate::failure::LocalGitFailure;
 use crate::limits::MAX_REVISION_BYTES;
 use crate::packed_reference::packed_reference_target;
@@ -127,7 +128,11 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
         .take((MAX_REVISION_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| LocalGitFailure::Operation)?;
-    if bytes.len() > MAX_REVISION_BYTES || bytes.len() as u64 != metadata.len() {
+    let after_read = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+    if bytes.len() > MAX_REVISION_BYTES
+        || bytes.len() as u64 != metadata.len()
+        || file_snapshot_identity(&metadata) != file_snapshot_identity(&after_read)
+    {
         return Err(LocalGitFailure::Operation);
     }
     let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
@@ -140,7 +145,7 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
     }
     let direct = std::str::from_utf8(bytes)
         .ok()
-        .and_then(|value| git2::Oid::from_str(value).ok())
+        .and_then(|value| git2::Oid::from_str_ext(value, authority.object_format).ok())
         .ok_or(LocalGitFailure::Operation)?;
     Ok(PinnedReferenceValue::Direct(direct))
 }
