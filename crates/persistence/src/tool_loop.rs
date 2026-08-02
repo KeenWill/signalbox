@@ -1651,9 +1651,16 @@ pub(crate) async fn decode_approvals(
         })
         .collect::<Result<Vec<_>, ToolLoopRepositoryError>>()?;
     let receipts = load_user_decision_receipts(connection, &user_commands).await?;
+    let mut delegate_request_ids = Vec::new();
+    for row in &rows {
+        if required::<String>(row, "decision_source")? == "delegate" {
+            delegate_request_ids.push(tool_request_id_from_uuid(required(row, "request_id")?));
+        }
+    }
+    let delegate_requests = load_requests_by_id(connection, &delegate_request_ids).await?;
     let mut approvals = Vec::with_capacity(rows.len());
     for row in rows {
-        approvals.push(decode_approval(connection, row, &receipts).await?);
+        approvals.push(decode_approval(connection, row, &receipts, &delegate_requests).await?);
     }
     Ok(approvals)
 }
@@ -1662,6 +1669,7 @@ async fn decode_approval(
     connection: &mut PgConnection,
     row: PgRow,
     user_receipts: &BTreeMap<DurableCommandId, PreparedDecideToolRequest>,
+    delegate_requests: &BTreeMap<ToolRequestId, signalbox_domain::ToolRequest>,
 ) -> Result<signalbox_domain::ToolApprovalResolution, ToolLoopRepositoryError> {
     let request = tool_request_id_from_uuid(required(&row, "request_id")?);
     let reason: Option<String> = row.try_get("denial_reason")?;
@@ -1722,8 +1730,8 @@ async fn decode_approval(
             let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
             let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
             let rationale: Option<String> = row.try_get("rationale")?;
-            let request_record = load_request_by_id(connection, request)
-                .await?
+            let request_record = delegate_requests
+                .get(&request)
                 .ok_or(ToolLoopCorruption::Missing("delegate approval request"))?;
             let recommendation = match decision {
                 ToolApprovalDecision::Approve => DelegateApprovalRecommendation::Approve,
@@ -1739,7 +1747,7 @@ async fn decode_approval(
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate rationale"))?;
             let approval = DelegateToolApproval::try_new(
-                &request_record,
+                request_record,
                 DirectModelSelection::from_uuid(
                     delegate_model.ok_or(ToolLoopCorruption::Missing("delegate model"))?,
                 ),
