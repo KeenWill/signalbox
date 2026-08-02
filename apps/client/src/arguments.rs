@@ -109,6 +109,7 @@ pub(crate) enum Command {
         turn_id: Option<CanonicalUuid>,
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
+        descendants: bool,
     },
     Approve {
         session_id: CanonicalUuid,
@@ -147,6 +148,7 @@ pub(crate) enum GoalCommand {
     Stop {
         session_id: CanonicalUuid,
         command_id: Option<CommandId>,
+        descendants: bool,
     },
     Supersede {
         session_id: CanonicalUuid,
@@ -461,6 +463,9 @@ struct GoalMutationArguments {
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
+    /// Also apply the stop to descendants according to each relationship policy.
+    #[arg(long)]
+    descendants: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -1202,6 +1207,9 @@ struct StopArguments {
         value_parser = canonical_u64
     )]
     defaults_version: Option<CanonicalU64>,
+    /// Also apply the stop to descendants according to each relationship policy.
+    #[arg(long)]
+    descendants: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -1383,6 +1391,7 @@ pub(crate) fn parse(
             GoalSubcommand::Stop(arguments) => GoalCommand::Stop {
                 session_id: arguments.session_id,
                 command_id: arguments.command_id,
+                descendants: arguments.descendants,
             },
             GoalSubcommand::Supersede(arguments) => GoalCommand::Supersede {
                 session_id: arguments.session_id,
@@ -1939,6 +1948,7 @@ pub(crate) fn parse(
             turn_id: arguments.turn,
             command_id: arguments.command_id,
             defaults_version: arguments.defaults_version,
+            descendants: arguments.descendants,
         },
         CliCommand::Approve(arguments) => Command::Approve {
             session_id: arguments.session_id,
@@ -2800,6 +2810,40 @@ mod tests {
                 ..
             })) if recovered_turn.to_string() == turn
         ));
+    }
+
+    /// S19: the stop verb exposes the explicit descendant-cascade choice.
+    #[test]
+    fn s19_stop_descendants_flag_selects_cascade() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(["stop", session, "--descendants"].map(Into::into))
+            .expect("the descendant-cascade choice parses");
+        let ParseOutcome::Run(Arguments {
+            command: Command::Stop { descendants, .. },
+            ..
+        }) = parsed
+        else {
+            panic!("stop --descendants must select the stop command");
+        };
+
+        assert!(descendants);
+    }
+
+    /// S19: goal stop exposes the same explicit descendant-cascade choice.
+    #[test]
+    fn s19_goal_stop_descendants_flag_selects_cascade() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(["goal", "stop", session, "--descendants"].map(Into::into))
+            .expect("the goal descendant-cascade choice parses");
+        let ParseOutcome::Run(Arguments {
+            command: Command::Goal(GoalCommand::Stop { descendants, .. }),
+            ..
+        }) = parsed
+        else {
+            panic!("goal stop --descendants must select the goal-stop command");
+        };
+
+        assert!(descendants);
     }
 
     /// S10: both decision verbs bind the session and the exact pending

@@ -65,19 +65,20 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
     ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-    ConversationSummary, CurrentModelCallState, ErrorCode, GoalHistoryEvent, GoalLifecycleState,
-    ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker,
-    ImportedTextPreview, InputContent, InputDelivery, MetadataActor, ModelSelection,
-    ProtocolVersion, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
-    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
-    SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-    decode_server_line, encode_client_line,
+    ConversationSummary, CurrentModelCallState, DescendantTerminationScope, ErrorCode,
+    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
+    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+    MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail, RequestId,
+    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
+    ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
@@ -680,6 +681,7 @@ async fn s_goal_inv048_process_protocol_supersession_history_round_trips()
             ClientRequest::StopGoal {
                 command_id: stop_command,
                 session_id,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )
         .await?;
@@ -3968,6 +3970,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(successor_content.clone()),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )
         .await?;
@@ -4017,6 +4020,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )
         .await?;
@@ -4051,6 +4055,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(String::from("a second distinct stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )
         .await?;
@@ -4088,6 +4093,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 expected_active_turn_id: unstarted_turn_id,
                 content: InputContent::new(String::from("names no active turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )
         .await?;
@@ -4112,6 +4118,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 expected_active_turn_id: unstarted_turn_id,
                 content: InputContent::new(String::from("names a stale turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )
         .await?;
@@ -4146,6 +4153,7 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
         expected_active_turn_id: stopped_turn_id,
         content: InputContent::new(String::from("continue after the stop")),
         expected_defaults_version: CanonicalU64::new(1),
+        descendant_scope: DescendantTerminationScope::ParentAlone,
     };
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
@@ -4194,6 +4202,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("stop during the approval wait")),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )
         .await?;
@@ -4252,6 +4261,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after the denied round")),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
             },
         )
         .await?;

@@ -27,13 +27,13 @@ use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, ErrorCode, GoalHistoryEvent, GoalLifecycleState,
-    InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES, MAX_FRAME_BYTES,
-    MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ConversationOriginFilter, ConversationSummary, DescendantTerminationScope, ErrorCode,
+    GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
+    ModelSelection, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
+    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SystemPromptMember,
     SystemPromptText, ToolBatchState, ToolDecision, TurnState, decode_server_line,
@@ -507,6 +507,7 @@ async fn execute(
             turn_id,
             command_id,
             defaults_version,
+            descendants,
         } => {
             let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
             stop(
@@ -516,6 +517,7 @@ async fn execute(
                 turn_id,
                 command_id,
                 defaults_version,
+                descendants,
                 input,
             )
             .await
@@ -1499,11 +1501,13 @@ async fn goal(
         GoalCommand::Stop {
             session_id,
             command_id,
+            descendants,
         } => {
             goal_mutation(client, output, session_id, command_id, |command_id| {
                 ClientRequest::StopGoal {
                     command_id,
                     session_id,
+                    descendant_scope: descendant_scope(descendants),
                 }
             })
             .await
@@ -2313,6 +2317,10 @@ async fn reconcile(
 /// call cancels directly, an issued call first enters its durable
 /// cancellation-requested state — and the content becomes the
 /// immediate-successor turn this verb then follows to its own terminal.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed stop request keeps each recovery and scope input explicit"
+)]
 async fn stop(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -2320,6 +2328,7 @@ async fn stop(
     turn_id: Option<CanonicalUuid>,
     command_id: Option<CommandId>,
     defaults_version: Option<CanonicalU64>,
+    descendants: bool,
     content: String,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
@@ -2344,6 +2353,7 @@ async fn stop(
         expected_active_turn,
         InputContent::new(content),
         defaults_version,
+        descendant_scope(descendants),
     )
     .await?;
 
@@ -2560,6 +2570,14 @@ async fn reconcile_turn(
     }
 }
 
+const fn descendant_scope(descendants: bool) -> DescendantTerminationScope {
+    if descendants {
+        DescendantTerminationScope::ParentAndDescendants
+    } else {
+        DescendantTerminationScope::ParentAlone
+    }
+}
+
 async fn stop_turn(
     client: &mut ProcessClient,
     command_id: CommandId,
@@ -2567,6 +2585,7 @@ async fn stop_turn(
     expected_active_turn_id: CanonicalUuid,
     content: InputContent,
     defaults_version: CanonicalU64,
+    descendant_scope: DescendantTerminationScope,
 ) -> Result<CanonicalUuid, ClientError> {
     let mut connection = client
         .mutation_request(ClientRequest::StopTurn {
@@ -2575,6 +2594,7 @@ async fn stop_turn(
             expected_active_turn_id,
             content,
             expected_defaults_version: defaults_version,
+            descendant_scope,
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -4086,11 +4106,12 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationOriginFilter, ConversationSummary, FrameEncodeError, GoalHistoryEvent,
-        GoalLifecycleState, ImportedContentKind, ImportedSessionRelationship,
-        ImportedSourceSpeaker, InputContent, InputDelivery, ModelCallDisposition, ModelCallState,
-        ModelSelection, ProtocolVersion, ReviewConcernTerminalOutcome, ReviewExternalObjectKind,
-        ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ConversationOriginFilter, ConversationSummary, DescendantTerminationScope,
+        FrameEncodeError, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+        ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
+        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
+        ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
         ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
         ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
         ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
@@ -4111,16 +4132,29 @@ mod tests {
         ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest, SnapshotSelection,
         SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
         await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
-        decide, decode_goal_mutation_receipt, imported, model_call_recovery_transition,
-        open_scanned_import_source, read_goal_text_file, read_input, read_review_json_file,
-        read_system_prompt_file, reconcile_turn, review, review_concern_state_is_coherent,
-        review_finding_event_status, review_judgment_effect_state_is_coherent,
-        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
-        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
-        session_recovery_transition, socket_path, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        decide, decode_goal_mutation_receipt, descendant_scope, imported,
+        model_call_recovery_transition, open_scanned_import_source, read_goal_text_file,
+        read_input, read_review_json_file, read_system_prompt_file, reconcile_turn, review,
+        review_concern_state_is_coherent, review_finding_event_status,
+        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
+        review_pass_completion_is_coherent, review_publication_state_is_coherent,
+        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
+        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
+        terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    #[test]
+    fn s19_descendant_scope_follows_the_explicit_cli_choice() {
+        assert_eq!(
+            descendant_scope(false),
+            DescendantTerminationScope::ParentAlone
+        );
+        assert_eq!(
+            descendant_scope(true),
+            DescendantTerminationScope::ParentAndDescendants
+        );
+    }
 
     #[test]
     fn inv033_goal_history_replay_accepts_supersession_lineage() -> Result<(), ClientError> {
@@ -6272,20 +6306,25 @@ mod tests {
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let content = InputContent::new(String::from("continue after the stop"));
+        let defaults_version = CanonicalU64::new(1);
+        let selected_scope = DescendantTerminationScope::ParentAndDescendants;
+        let expected_request = ClientRequest::StopTurn {
+            command_id,
+            session_id,
+            expected_active_turn_id: active_turn_id,
+            content: content.clone(),
+            expected_defaults_version: defaults_version,
+            descendant_scope: selected_scope,
+        };
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
-                request.request(),
-                ClientRequest::StopTurn {
-                    session_id: requested_session,
-                    expected_active_turn_id: requested_turn,
-                    ..
-                } if *requested_session == session_id && *requested_turn == active_turn_id
-            ));
+            assert_eq!(request.request(), &expected_request);
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -6306,11 +6345,12 @@ mod tests {
         let mut client = ProcessClient::new(socket);
         let accepted_successor = stop_turn(
             &mut client,
-            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            command_id,
             session_id,
             active_turn_id,
-            InputContent::new(String::from("continue after the stop")),
-            CanonicalU64::new(1),
+            content,
+            defaults_version,
+            selected_scope,
         )
         .await?;
         assert_eq!(accepted_successor, successor_turn_id);

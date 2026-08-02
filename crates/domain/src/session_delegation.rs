@@ -666,13 +666,11 @@ impl SessionDelegation {
             })
             .cloned()
         {
-            let replay = DelegationMessage {
-                id,
-                direction,
-                content,
-                provenance,
-            };
-            if existing.message() == Some(&replay) {
+            if existing.message().is_some_and(|message| {
+                message.direction() == direction
+                    && message.content() == &content
+                    && message.provenance() == provenance
+            }) {
                 return Ok((self, existing));
             }
             return Err(self.fail(DelegationTransitionFailure::ConflictingMessageReplay));
@@ -1493,8 +1491,12 @@ mod tests {
             .expect("first identity is admitted");
         let (replayed, replayed_event) = relation
             .clone()
-            .deliver_message(&parent_message_request, message_id, first_content.clone())
-            .expect("equal replay returns its event");
+            .deliver_message(
+                &parent_message_request,
+                DelegationMessageId::from_uuid(uuid::Uuid::from_u128(8)),
+                first_content.clone(),
+            )
+            .expect("equal replay returns the persisted message identity");
         let argument_error = relation
             .clone()
             .deliver_message(
@@ -1503,23 +1505,11 @@ mod tests {
                 content("conflicting content"),
             )
             .expect_err("request content cannot authorize different content");
-        let replay_error = relation
-            .clone()
-            .deliver_message(
-                &parent_message_request,
-                DelegationMessageId::from_uuid(uuid::Uuid::from_u128(8)),
-                first_content,
-            )
-            .expect_err("one request cannot allocate another message");
         assert_eq!(replayed.events(), relation.events());
         assert_eq!(replayed_event, event);
         assert_eq!(
             argument_error.failure(),
             DelegationTransitionFailure::InvalidToolRequestPurpose
-        );
-        assert_eq!(
-            replay_error.failure(),
-            DelegationTransitionFailure::ConflictingMessageReplay
         );
     }
 
