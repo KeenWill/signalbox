@@ -731,6 +731,19 @@ struct ModelCallPinFacts {
     credential_reference: String,
 }
 
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct ApprovalJudgeDurableState {
+    prepared_judge_exists: bool,
+    decision_exists: bool,
+    active_wait_exists: bool,
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct ApprovalJudgeDecisionDurableState {
+    prepared_judge_exists: bool,
+    decision_exists: bool,
+}
+
 #[track_caller]
 fn assert_ambiguous_tool_recovery(outcome: StartupScanSessionOutcome) {
     match outcome {
@@ -3579,22 +3592,22 @@ async fn approval_judge_preparation_serializes_a_concurrent_user_decision()
         database_constraint(&source),
         Some("tool_approval_decision_requires_terminal_judge")
     );
-    let durable_state: (bool, bool, bool) = sqlx::query_as(
+    let durable_state: ApprovalJudgeDurableState = sqlx::query_as(
         "SELECT
             EXISTS (
                 SELECT 1 FROM tool_approval_judge_model_call
                  WHERE model_call_id = $1 AND state_kind = 'prepared'
-            ),
+            ) AS prepared_judge_exists,
             EXISTS (
                 SELECT 1 FROM tool_approval_decision WHERE request_id = $2
-            ),
+            ) AS decision_exists,
             EXISTS (
                 SELECT 1 FROM turn_lifecycle
                  WHERE turn_id = $3 AND session_id = $4
                    AND state_kind = 'active'
                    AND active_phase_kind = 'awaiting_tool_approval'
                    AND approval_tool_request_id = $2
-            )",
+            ) AS active_wait_exists",
     )
     .bind(judge_call)
     .bind(request.into_uuid())
@@ -3602,7 +3615,9 @@ async fn approval_judge_preparation_serializes_a_concurrent_user_decision()
     .bind(fixture.session.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_state, (true, false, true));
+    assert!(durable_state.prepared_judge_exists);
+    assert!(!durable_state.decision_exists);
+    assert!(durable_state.active_wait_exists);
 
     pool.close().await;
     drop(container);
@@ -3642,21 +3657,22 @@ async fn approval_decision_insert_serializes_a_concurrent_judge_preparation()
 
     decision_transaction.rollback().await?;
     let (_, judge_call) = judge_task.await??;
-    let durable_state: (bool, bool) = sqlx::query_as(
+    let durable_state: ApprovalJudgeDecisionDurableState = sqlx::query_as(
         "SELECT
             EXISTS (
                 SELECT 1 FROM tool_approval_judge_model_call
                  WHERE model_call_id = $1 AND state_kind = 'prepared'
-            ),
+            ) AS prepared_judge_exists,
             EXISTS (
                 SELECT 1 FROM tool_approval_decision WHERE request_id = $2
-            )",
+            ) AS decision_exists",
     )
     .bind(judge_call)
     .bind(request.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_state, (true, false));
+    assert!(durable_state.prepared_judge_exists);
+    assert!(!durable_state.decision_exists);
 
     pool.close().await;
     drop(container);
