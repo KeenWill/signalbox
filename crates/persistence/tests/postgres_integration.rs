@@ -489,14 +489,26 @@ async fn delegated_parent_termination_record_reconstitutes_sealed_authority()
     .bind(request_id.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(stored.try_get::<String, _>("outcome_kind")?, "child_stopped");
+    assert_eq!(
+        stored.try_get::<String, _>("outcome_kind")?,
+        "child_stopped"
+    );
     assert_eq!(
         stored.try_get::<String, _>("reason_kind")?,
         "parent_stopped_parent_and_descendants"
     );
-    assert_eq!(stored.try_get::<Uuid, _>("provenance_session_id")?, fixture.session.into_uuid());
-    assert_eq!(stored.try_get::<Uuid, _>("provenance_turn_id")?, fixture.turn.into_uuid());
-    assert_eq!(stored.try_get::<Uuid, _>("provenance_command_id")?, Uuid::from_u128(seed + 7));
+    assert_eq!(
+        stored.try_get::<Uuid, _>("provenance_session_id")?,
+        fixture.session.into_uuid()
+    );
+    assert_eq!(
+        stored.try_get::<Uuid, _>("provenance_turn_id")?,
+        fixture.turn.into_uuid()
+    );
+    assert_eq!(
+        stored.try_get::<Uuid, _>("provenance_command_id")?,
+        Uuid::from_u128(seed + 7)
+    );
 
     pool.close().await;
     drop(container);
@@ -554,9 +566,7 @@ async fn delegated_unavailable_child_result_reconstitutes_from_completed_turn()
     .await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         fixture.selection,
-        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
-            seed + 6,
-        ))),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6))),
     )])
     .expect("one delegated fixture target forms a catalog");
     complete_text_turn(
