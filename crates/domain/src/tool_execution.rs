@@ -20,9 +20,10 @@ use crate::{
     ResolvedContextFrontierSnapshot, RunnerToolAttemptAuthorization, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
     ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
-    ToolEffectClass, ToolExecutionErrorKind, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
-    tool::MAX_TOOL_REQUESTS_PER_RESPONSE, tool_attempt::RUNNER_ISSUANCE_AVAILABLE,
-    tool_attempt::RUNNER_ISSUANCE_ISSUED, tool_attempt::RUNNER_ISSUANCE_RETIRED,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionErrorKind, ToolRequest, ToolRequestId,
+    TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
+    tool_attempt::RUNNER_ISSUANCE_AVAILABLE, tool_attempt::RUNNER_ISSUANCE_ISSUED,
+    tool_attempt::RUNNER_ISSUANCE_RETIRED,
 };
 
 /// Stored active phase for one complete logical tool batch.
@@ -716,6 +717,25 @@ impl ToolBatch {
             })
     }
 
+    /// Authorizes one exact prepared attempt and binds its canonical request.
+    pub fn authorize_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolDispatchAuthority, ToolBatchExecutionError> {
+        let authorized = self.authorize_attempt(attempt)?;
+        let request = self
+            .requests
+            .iter()
+            .find(|request| request.id() == authorized.attempt().request())
+            .cloned()
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            })?;
+        ToolDispatchAuthority::try_new(request, &authorized).ok_or(ToolBatchExecutionError {
+            failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+        })
+    }
+
     /// Restores in-flight authority after an ambiguous authorization
     /// acknowledgement only through this freshly validated complete batch.
     pub fn resume_in_flight_attempt(
@@ -751,6 +771,25 @@ impl ToolBatch {
             .map_err(|_| ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptStageMismatch,
             })
+    }
+
+    /// Restores one exact in-flight attempt with its canonical request.
+    pub fn resume_in_flight_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolDispatchAuthority, ToolBatchExecutionError> {
+        let authorized = self.resume_in_flight_attempt(attempt)?;
+        let request = self
+            .requests
+            .iter()
+            .find(|request| request.id() == authorized.attempt().request())
+            .cloned()
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            })?;
+        ToolDispatchAuthority::try_new(request, &authorized).ok_or(ToolBatchExecutionError {
+            failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+        })
     }
 
     /// Authorizes one runner dispatch while pairing it with this batch's

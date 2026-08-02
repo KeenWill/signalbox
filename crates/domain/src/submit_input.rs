@@ -3198,6 +3198,14 @@ mod tests {
             session_id(id),
             version(current),
             defaults(selection),
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session_id(id),
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: session_id(id),
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("test session projection is complete")

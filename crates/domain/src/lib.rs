@@ -29,6 +29,7 @@ mod semantic_entry;
 mod session;
 mod session_delegation;
 mod session_metadata;
+mod session_placement;
 mod session_template;
 mod submit_input;
 mod tool;
@@ -208,9 +209,9 @@ pub use session::{
     CreateSessionReconstitutionError, CreateSessionReconstitutionFailure,
     CreateSessionReconstitutionInput, ImportedSessionRelationship, ImportedSessionSeed,
     InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
-    SessionCreationCause, SessionCreationProvenance, SessionReconstitutionError,
-    SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
-    TranscriptFrontier,
+    SessionCreationCause, SessionCreationProvenance, SessionPlacementReconstitutionFacts,
+    SessionReconstitutionError, SessionReconstitutionFailure, SessionReconstitutionInput,
+    TranscriptAncestry, TranscriptFrontier,
 };
 pub use session_delegation::{
     BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,
@@ -230,6 +231,12 @@ pub use session_metadata::{
     ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
     ReplaceSessionMetadataSessionNotFound, SessionMetadataContent, SessionMetadataContentError,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SessionMetadataUpdatedAt,
+};
+pub use session_placement::{
+    RootPlacementGlobalReadIntent, SessionPlacement, SessionPlacementDirectory,
+    SessionPlacementError, SessionPlacementEvent, SessionPlacementEventKind, SessionPlacementPath,
+    SessionPlacementPathError, SessionPlacementVersion, SessionReadRefusalReason,
+    SessionReadScopeDecision, SessionReadScopeRefusal, VersionedSessionPlacement,
 };
 pub use session_template::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateNameError,
@@ -280,9 +287,9 @@ pub use tool_attempt::{
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation, ToolAttemptReconstitutionError,
     ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,
-    ToolAttemptTransitionFailure, ToolDispatchGeneration, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorDetailError, ToolExecutionErrorDetailFailure,
-    ToolExecutionErrorKind,
+    ToolAttemptTransitionFailure, ToolDispatchAuthority, ToolDispatchGeneration,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorDetailError,
+    ToolExecutionErrorDetailFailure, ToolExecutionErrorKind,
 };
 pub use tool_execution::{
     AwaitingToolApproval, AwaitingToolRecovery, DelegateToolApprovalTransitionError,

@@ -89,6 +89,11 @@ name = "session_metadata_postgres"
 path = "tests/session_metadata_postgres.rs"
 required-features = ["postgres-integration"]
 
+[[test]]
+name = "session_placement_postgres"
+path = "tests/session_placement_postgres.rs"
+required-features = ["postgres-integration"]
+
 [[bench]]
 name = "postgres_load"
 path = "benches/postgres_load.rs"

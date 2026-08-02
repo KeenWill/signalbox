@@ -6,8 +6,8 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, DangerousToolAutoApproval, DurableCommandId, GoalBlockedReasonKind,
     GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
-    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, ToolAttemptId,
-    ToolPermissionDefault, ToolRequestId, TurnId,
+    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+    SessionPlacementEventKind, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -35,6 +35,8 @@ pub(crate) enum DurableCommandKind {
     CompactSession,
     /// Session goal command.
     Goal,
+    /// Session placement update.
+    UpdateSessionPlacement,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -52,6 +54,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
         DurableCommandKind::Goal => "goal",
+        DurableCommandKind::UpdateSessionPlacement => "update_session_placement",
     }
 }
 
@@ -70,6 +73,26 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),
         "goal" => Some(DurableCommandKind::Goal),
+        "update_session_placement" => Some(DurableCommandKind::UpdateSessionPlacement),
+        _ => None,
+    }
+}
+
+pub(crate) const fn session_placement_event_kind_to_str(
+    value: SessionPlacementEventKind,
+) -> &'static str {
+    match value {
+        SessionPlacementEventKind::Created => "created",
+        SessionPlacementEventKind::Updated => "updated",
+    }
+}
+
+pub(crate) fn session_placement_event_kind_from_str(
+    value: &str,
+) -> Option<SessionPlacementEventKind> {
+    match value {
+        "created" => Some(SessionPlacementEventKind::Created),
+        "updated" => Some(SessionPlacementEventKind::Updated),
         _ => None,
     }
 }
@@ -444,7 +467,7 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_domain::{
         AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, ToolPermissionDefault, TurnId,
+        SessionInputPosition, SessionPlacementEventKind, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -455,6 +478,7 @@ mod tests {
         durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
         input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
         plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
+        session_placement_event_kind_from_str, session_placement_event_kind_to_str,
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
@@ -493,6 +517,23 @@ mod tests {
             Some(DurableCommandKind::CompactSession)
         );
         assert_eq!(durable_command_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn session_placement_event_kind_mapping_is_closed() {
+        assert_eq!(
+            session_placement_event_kind_from_str(session_placement_event_kind_to_str(
+                SessionPlacementEventKind::Created,
+            )),
+            Some(SessionPlacementEventKind::Created)
+        );
+        assert_eq!(
+            session_placement_event_kind_from_str(session_placement_event_kind_to_str(
+                SessionPlacementEventKind::Updated,
+            )),
+            Some(SessionPlacementEventKind::Updated)
+        );
+        assert_eq!(session_placement_event_kind_from_str("unknown"), None);
     }
 
     #[test]

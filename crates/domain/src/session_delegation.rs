@@ -1115,7 +1115,7 @@ impl SessionDelegation {
     pub fn register_wait(
         &self,
         awaiting_request: &DelegationAwaitRequest,
-        dispatch: &crate::AuthorizedToolAttempt,
+        dispatch: &crate::ToolDispatchAuthority,
     ) -> Result<DelegationWait, DelegationTransitionError> {
         if !dispatch_matches(awaiting_request.request(), dispatch)
             || awaiting_request.request().session() != self.parent
@@ -1137,7 +1137,7 @@ impl SessionDelegation {
         mut self,
         sending_request: DelegationMessageRequest,
         id: DelegationMessageId,
-        dispatch: &crate::AuthorizedToolAttempt,
+        dispatch: &crate::ToolDispatchAuthority,
     ) -> Result<(Self, DelegationEvent), DelegationTransitionError> {
         if !dispatch_matches(sending_request.request(), dispatch) {
             return Err(Self::reject_message(
@@ -1340,11 +1340,8 @@ impl SessionDelegation {
     }
 }
 
-fn dispatch_matches(request: &ToolRequest, dispatch: &crate::AuthorizedToolAttempt) -> bool {
-    let attempt = dispatch.attempt();
-    attempt.request() == request.id()
-        && attempt.session() == request.session()
-        && attempt.turn() == request.turn()
+fn dispatch_matches(request: &ToolRequest, dispatch: &crate::ToolDispatchAuthority) -> bool {
+    dispatch.request() == request
 }
 
 fn has_child_terminal_outcome(relation: &SessionDelegation) -> bool {
@@ -2154,20 +2151,22 @@ mod aggregate_tests {
         )
     }
 
-    fn dispatch_for(request: &ToolRequest) -> crate::AuthorizedToolAttempt {
+    fn dispatch_for(request: &ToolRequest) -> crate::ToolDispatchAuthority {
         let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
             .reconstitute()
             .expect("fixture policy approves its exact request");
         let approved = ApprovedToolRequest::try_from_resolution(request.clone(), approval)
             .expect("fixture approval binds its exact request");
-        approved
+        let authorized = approved
             .prepare_attempt(
                 tool_attempt_id(127),
                 turn_attempt_id(131),
                 ToolEffectClass::EffectFree,
             )
             .authorize()
-            .expect("prepared fixture dispatch authorizes")
+            .expect("prepared fixture dispatch authorizes");
+        crate::ToolDispatchAuthority::try_new(request.clone(), &authorized)
+            .expect("fixture dispatch binds its exact request")
     }
 
     fn spawn_request(policy: ChildRelationshipPolicy) -> DelegatedSpawnRequest {
@@ -2507,6 +2506,31 @@ mod aggregate_tests {
         );
     }
 
+    /// S18 / INV-010: dispatch authority binds the complete await request.
+    #[test]
+    fn s18_inv010_wait_registration_rejects_same_identity_argument_drift() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let dispatched = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Background,
+        );
+        let drifted = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Foreground,
+        );
+        let dispatch = dispatch_for(dispatched.request());
+        let error = relation
+            .register_wait(&drifted, &dispatch)
+            .expect_err("same identities cannot substitute different await arguments");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidProvenance
+        );
+    }
+
     /// S18 / INV-010: each relation peer derives one exact message direction.
     #[test]
     fn s18_inv010_messages_are_bidirectional() {
@@ -2609,6 +2633,33 @@ mod aggregate_tests {
 
         assert_eq!(returned_relation, relation);
         assert_eq!(returned_request, request);
+        assert_eq!(returned_id, id);
+    }
+
+    /// S18 / INV-010: dispatch authority binds the complete message request.
+    #[test]
+    fn s18_inv010_message_rejects_same_identity_content_drift() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let dispatched = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "authorized content",
+        );
+        let drifted = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "substituted content",
+        );
+        let dispatch = dispatch_for(dispatched.request());
+        let id = delegation_message_id(5);
+        let error = relation
+            .clone()
+            .deliver_message(drifted.clone(), id, &dispatch)
+            .expect_err("same identities cannot substitute different message content");
+        let (returned_relation, returned_request, returned_id) = rejected_message(error);
+
+        assert_eq!(returned_relation, relation);
+        assert_eq!(returned_request, drifted);
         assert_eq!(returned_id, id);
     }
 

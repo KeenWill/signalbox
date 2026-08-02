@@ -6789,12 +6789,13 @@ mod tests {
         ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
         ModelSelectionRequest, NormalizedToolArguments, PerInputConfigurationChoices,
         ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionCreationProvenance, SessionReconstitutionInput,
-        ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
-        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
-        ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestOrdinal,
-        ToolRequestReconstitutionInput, ToolResultContent, ToolResultText,
+        SessionCreationCause, SessionCreationProvenance, SessionPlacement, SessionPlacementVersion,
+        SessionReconstitutionInput, ToolApprovalDecision,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
+        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
+        ToolBatchReconstitutionInput, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+        ToolExecutionErrorKind, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ToolResultContent, ToolResultText, VersionedSessionPlacement,
         test_support::{
             accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
             imported_transcript_entry_id, model_call_id, provider_model_identity,
@@ -6819,6 +6820,14 @@ mod tests {
             session,
             version,
             defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session,
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: session,
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("test session facts are fully correlated")
@@ -6924,6 +6933,12 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             command_defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: prepared.session().id(),
+                current_pointer_version: SessionPlacementVersion::INITIAL,
+                selected_event_session: prepared.session().id(),
+                selected_event: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            },
             conversation,
             vec![crate::ImportedSessionSeedReconstitutionInput::new(
                 seed.session(),
@@ -13857,6 +13872,14 @@ mod tests {
             ancestral,
             version,
             defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: ancestral,
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: ancestral,
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("ancestral session facts are fully correlated");
