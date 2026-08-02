@@ -1923,6 +1923,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         return
       }
       mutationBlocksByTurnID.removeValue(forKey: turnID)
+      guard mutationBlocksByTurnID.isEmpty else {
+        return
+      }
       activity = .init(state: .running, label: "Running")
     case .modelCallTransition(let turnID, _, let state):
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
@@ -1968,27 +1971,32 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .turnCompleted(let turnID, _, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .completed, label: "Completed")
       )
     case .turnFailed(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .failed, label: "Failed")
       )
     case .turnRefused(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .refused, label: "Refused")
       )
     case .turnCancelled(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .cancelled, label: "Cancelled")
       )
     case .turnReconciliationRequired(let turnID, _, _),
       .turnToolReconciliationRequired(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .recoveryRequired, label: "Recovery required")
       )
     case .sessionCreated, .contextCompacted, .unknown:
@@ -2012,11 +2020,14 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private func applyTerminalTurn(
     turnID: SignalboxCanonicalUUID,
+    at cursor: SignalboxCanonicalUInt64,
     terminalActivity: SignalboxProcessActivity
   ) {
+    let admitsTerminalState = admitsStateTransition(for: turnID, at: cursor)
     terminalTurnIDs.insert(turnID)
-    mutationBlocksByTurnID.removeValue(forKey: turnID)
-    sideSnapshotCursorsByTurnID.removeValue(forKey: turnID)
+    if admitsTerminalState {
+      mutationBlocksByTurnID.removeValue(forKey: turnID)
+    }
     if activeTurnID == turnID {
       activeTurnID = nil
     }
@@ -2028,7 +2039,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     for acceptedInput in acceptedInputs {
       retainAcceptedInputAwaitingTranscript(acceptedInput)
     }
-    guard mutationBlocksByTurnID.isEmpty else {
+    guard admitsTerminalState, mutationBlocksByTurnID.isEmpty else {
       return
     }
     activity =

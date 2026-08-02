@@ -931,6 +931,56 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testNewerActivationPreservesAnotherTurnsUnknownActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownAndQueuedTurns(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.queuedTurnActivatedEvent(
+          cursor: ProcessProjectionFixture.newerTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertFalse(viewModel.canSend)
+  }
+
+  @MainActor
+  func testNewerSameTurnSnapshotBlockSurvivesBufferedTerminalReplay() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let terminal = try ProcessProjectionFixture.refusedEvent(
+      cursor: ProcessProjectionFixture.bufferedTransitionCursor
+    )
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownTurnState(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: terminal
+      )
+    )
+
+    viewModel.apply(.event(terminal))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertFalse(viewModel.canSend)
+  }
+
+  @MainActor
   func testProposedToolWaitsOnlyWhenSideSnapshotShowsApproval() async throws {
     let service = makeService(scenario: .pendingApproval)
     let sessions = try await service.listSessions(includeArchived: false)
@@ -4395,6 +4445,7 @@ private enum ProcessProjectionFixture {
   )
   static let bufferedTransitionCursor: UInt64 = 2
   static let sideSnapshotCursor: UInt64 = 3
+  static let newerTransitionCursor: UInt64 = 4
 
   static func materializedAcceptedInputIDs() throws -> Set<SignalboxCanonicalUUID> {
     [try SignalboxCanonicalUUID(validating: ProcessSubmissionFixture.acceptedInputID)]
@@ -4517,11 +4568,14 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithUnknownTurnState() throws -> SignalboxSynchronizationSnapshot {
+  static func snapshotWithUnknownTurnState(
+    cursor: UInt64 = 1
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithActiveTurnState(
       """
       {"type":"fixture_future_turn_state","retained":true}
-      """
+      """,
+      cursor: cursor
     )
   }
 
@@ -5299,16 +5353,20 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithUnknownAndQueuedTurns() throws -> SignalboxSynchronizationSnapshot {
+  static func snapshotWithUnknownAndQueuedTurns(
+    cursor: UInt64 = 1
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithQueuedTurns(
       middleState: """
         {"type":"fixture_future_turn_state","retained":true}
-        """
+        """,
+      cursor: cursor
     )
   }
 
   private static func snapshotWithQueuedTurns(
-    middleState: String
+    middleState: String,
+    cursor: UInt64 = 1
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -5316,7 +5374,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"\(cursor)"
         }
         """,
         """
@@ -5356,7 +5414,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1",
+          "cursor":"\(cursor)",
           "turn_count":"3",
           "entry_count":"0"
         }
@@ -5533,16 +5591,34 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func refusedEvent() throws -> SignalboxFollowedSessionEvent {
-    try refusedEvent(turnID: ProcessDriverFixture.turn)
+  static func queuedTurnActivatedEvent(
+    cursor: UInt64
+  ) throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"turn_activated",
+        "turn_id":"\(secondPendingTurn)",
+        "current_attempt_id":"\(ProcessDriverFixture.attempt)"
+      }
+      """,
+      cursor: cursor
+    )
+  }
+
+  static func refusedEvent(
+    cursor: UInt64 = 1
+  ) throws -> SignalboxFollowedSessionEvent {
+    try refusedEvent(turnID: ProcessDriverFixture.turn, cursor: cursor)
   }
 
   static func submittedTurnRefusedEvent() throws -> SignalboxFollowedSessionEvent {
-    try refusedEvent(turnID: ProcessSubmissionFixture.acceptedTurnID)
+    try refusedEvent(turnID: ProcessSubmissionFixture.acceptedTurnID, cursor: 1)
   }
 
   private static func refusedEvent(
-    turnID: String
+    turnID: String,
+    cursor: UInt64
   ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
@@ -5552,7 +5628,8 @@ private enum ProcessProjectionFixture {
         "model_call_id":"\(ProcessDriverFixture.modelCall)",
         "terminal_frontier_id":"\(ProcessDriverFixture.frontier)"
       }
-      """
+      """,
+      cursor: cursor
     )
   }
 
