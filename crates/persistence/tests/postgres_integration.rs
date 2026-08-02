@@ -24108,3 +24108,83 @@ async fn session_plan_competing_append_uses_one_ordinal() -> Result<(), Box<dyn 
     drop(container);
     Ok(())
 }
+
+/// Head certification independently authenticates an older dependency tip
+/// after a valid non-dependency event becomes the session event head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_malformed_distinct_dependency_head()
+-> Result<(), Box<dyn Error>> {
+    const FIRST_LATER_ENTRY_TEXT: &str = "advance beyond the dependency tip";
+    const SECOND_LATER_ENTRY_TEXT: &str = "must not extend a malformed dependency tip";
+    const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const MALFORMED_EDGE_TEXT: &str = "dependency event must remain shape-valid";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(FIRST_LATER_ENTRY_TEXT),
+            create_plan_arguments(SECOND_LATER_ENTRY_TEXT),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(FIRST_LATER_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DROP CONSTRAINT session_plan_event_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = sqlx::query(
+        "UPDATE session_plan_event
+            SET entry_text = $1
+          WHERE session_id = $2
+            AND event_ordinal = $3",
+    )
+    .bind(MALFORMED_EDGE_TEXT)
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let append_error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::Create {
+                text: plan_text(SECOND_LATER_ENTRY_TEXT),
+            },
+        ))
+        .await
+        .expect_err("a later event cannot hide a malformed dependency tip");
+
+    assert_eq!(corrupted.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(append_error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

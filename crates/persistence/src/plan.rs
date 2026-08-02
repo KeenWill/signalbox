@@ -229,6 +229,21 @@ const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
                 OR certified.event_ordinal IS NULL
                 OR NOT session_plan_event_has_valid_shape(certified)
                 OR NOT session_plan_event_has_authority(certified)
+                OR (
+                    head.dependency_event_ordinal IS NOT NULL
+                    AND (
+                        certified_dependency.event_ordinal IS NULL
+                        OR certified_dependency.event_kind IS DISTINCT FROM 'depends_on'
+                        OR certified_dependency.entry_ordinal IS DISTINCT FROM
+                            latest_dependency.entry_ordinal
+                        OR certified_dependency.dependency_ordinal IS DISTINCT FROM
+                            latest_dependency.dependency_ordinal
+                        OR certified_dependency.event_ordinal IS DISTINCT FROM
+                            latest_dependency.first_event_ordinal
+                        OR NOT session_plan_event_has_valid_shape(certified_dependency)
+                        OR NOT session_plan_event_has_authority(certified_dependency)
+                    )
+                )
        END
   FROM (VALUES (1)) AS singleton(marker)
   LEFT JOIN LATERAL (
@@ -245,7 +260,7 @@ const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
        LIMIT 1
   ) AS latest ON TRUE
   LEFT JOIN LATERAL (
-      SELECT first_event_ordinal
+      SELECT entry_ordinal, dependency_ordinal, first_event_ordinal
         FROM session_plan_current_dependency
        WHERE session_id = $1
        ORDER BY first_event_ordinal DESC
@@ -253,7 +268,10 @@ const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
   ) AS latest_dependency ON TRUE
   LEFT JOIN session_plan_event AS certified
     ON certified.session_id = head.session_id
-   AND certified.event_ordinal = head.event_ordinal";
+   AND certified.event_ordinal = head.event_ordinal
+  LEFT JOIN session_plan_event AS certified_dependency
+    ON certified_dependency.session_id = head.session_id
+   AND certified_dependency.event_ordinal = head.dependency_event_ordinal";
 
 const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
        event.entry_ordinal, event.dependency_ordinal,
@@ -1499,7 +1517,10 @@ mod tests {
     fn event_head_certifies_the_latest_projected_dependency() {
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("head.dependency_event_ordinal"));
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("latest_dependency.first_event_ordinal"));
+        assert!(INVALID_EVENT_SEQUENCE_SQL.contains("certified_dependency.entry_ordinal"));
+        assert!(INVALID_EVENT_SEQUENCE_SQL.contains("certified_dependency.dependency_ordinal"));
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_valid_shape"));
+        assert!(INVALID_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority"));
     }
 
     #[test]
