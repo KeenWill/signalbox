@@ -3027,6 +3027,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-egress-transport"
+version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "rustls",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-expect-table"
 version = "0.0.0"
 dependencies = [
@@ -3229,9 +3239,9 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-egress-transport",
  "signalbox-model-runtime",
  "signalbox-tool-contract",
- "signalbox-tools-web",
  "tokio",
 ]
 
@@ -3275,9 +3285,9 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-egress-transport",
  "signalbox-model-runtime",
  "signalbox-tool-contract",
- "signalbox-tools-web",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3314,6 +3324,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-egress-transport",
  "signalbox-model-runtime",
  "signalbox-tool-contract",
  "tokio",

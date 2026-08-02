@@ -10,7 +10,7 @@ use reqwest::{
 };
 use signalbox_model_runtime::CredentialValue;
 
-use signalbox_tools_web::{
+use signalbox_egress_transport::{
     PublicDestinationClientError, has_more_response_bytes, public_destination_client,
 };
 

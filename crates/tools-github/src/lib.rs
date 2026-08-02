@@ -29,15 +29,15 @@ use signalbox_domain::{
     NormalizedToolArguments, ToolAttemptDispatchCorrelation, ToolEffectClass,
     ToolExecutionErrorDetail, ToolPermissionDefault,
 };
+use signalbox_egress_transport::{
+    PublicDestinationClientError, WebFetchTransportFailure, has_more_response_bytes,
+    public_destination_client,
+};
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
-};
-use signalbox_tools_web::{
-    PublicDestinationClientError, WebFetchTransportFailure, has_more_response_bytes,
-    public_destination_client,
 };
 
 /// Pull-request metadata tool name.

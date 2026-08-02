@@ -1,10 +1,9 @@
 //! Built-in web egress tools.
 
-mod egress_transport;
 mod web_fetch;
 mod web_search;
 
-pub use egress_transport::{
+pub use signalbox_egress_transport::{
     PublicDestinationClientError, ReqwestWebFetchConstructionError, WebFetchTransportFailure,
     has_more_response_bytes, public_destination_client,
 };

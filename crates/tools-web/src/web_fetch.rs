@@ -17,7 +17,7 @@ use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
 
-use crate::egress_transport::{
+use signalbox_egress_transport::{
     ReqwestWebFetchConstructionError, WebFetchTransportFailure, build_web_fetch_client,
     has_more_response_bytes, is_public_destination_address, parse_url_host_ip,
     public_destination_client,
@@ -587,7 +587,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::egress_transport::{PublicDestinationClientError, ResolvedPublicDestination};
+    use signalbox_egress_transport::{PublicDestinationClientError, ResolvedPublicDestination};
 
     const FIXTURE_ORIGIN: &str = "https://example.com";
     const REDIRECT_STATUS: u16 = 302;

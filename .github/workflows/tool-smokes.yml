@@ -3,6 +3,7 @@ name: Tool live smokes
 on:
   pull_request:
     paths:
+      - "crates/egress-transport/**"
       - "crates/persistence/**"
       - "crates/tools-basic/**"
       - "crates/tools-code-host/**"
