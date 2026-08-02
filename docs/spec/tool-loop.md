@@ -792,11 +792,11 @@ exact bytes as `DelegationContent`; `await_session` adapts that value to
 `ToolResultContent`. Zero parts or a concatenation beyond the delegation-content
 bound has no return value and records the typed `ChildFailed` /
 `ChildResultUnavailable` outcome with the exact completed child turn. Execution
-failure instead records `ChildExecutionFailed`; stopped and cancelled terminal
-paths likewise materialize their closed outcome. This copy is part of the child
-transition, not a later transcript projection. Duplicate observation is
-idempotent by spawning request and cannot attach a late result to another parent
-tool call.
+failure instead records `ChildExecutionFailed`; a child's own cancellation and
+proof-bearing parent-policy stop or cancellation likewise materialize their
+closed outcomes. This copy is part of the child transition, not a later
+transcript projection. Duplicate observation is idempotent by spawning request
+and cannot attach a late result to another parent tool call.
 
 Every delivered child outcome completes the `await_session` tool attempt as
 `Completed(Text)`; a child failure is delivered data, not an executor failure.
@@ -804,7 +804,6 @@ Every delivered child outcome completes the `await_session` tool attempt as
 use these exact compact JSON texts as `ToolResultContent`:
 `{"outcome":"failed","reason":"child_execution_failed"}`,
 `{"outcome":"failed","reason":"child_result_unavailable"}`,
-`{"outcome":"stopped","reason":"child_stopped"}`,
 `{"outcome":"stopped","reason":"parent_stopped"}`,
 `{"outcome":"cancelled","reason":"child_cancelled"}`, or
 `{"outcome":"cancelled","reason":"parent_cancelled"}`. The durable child result

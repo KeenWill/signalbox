@@ -1710,7 +1710,7 @@ below. The client accepts a global `--socket <path>` override or reads
   [conversation-import operational surface](conversation-import.md#operational-surface);
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--descendants] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
-- `session spawn <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> (--task <text> | --task-file <path>) (--background | --bound --on-parent-stopped <keep-running|stop|cancel> --on-parent-cancelled <keep-running|stop|cancel>)`;
+- `session spawn <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> (--task <text> | --task-file <path>) (--background | --bound --on-parent-stopped <keep_running|stop|cancel> --on-parent-cancelled <keep_running|stop|cancel>)`;
 - `session await <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> <child-session-uuid> --mode <foreground|background>`;
 - `session message <sender-session-uuid> <sender-turn-uuid> <tool-request-uuid> <peer-session-uuid> (--content <text> | --content-file <path>)`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;

@@ -904,7 +904,6 @@ pub enum DelegationOutcomeReason {
     ChildCompleted,
     ChildExecutionFailed,
     ChildResultUnavailable,
-    ChildStopped,
     ChildCancelled,
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
