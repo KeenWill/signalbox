@@ -906,11 +906,11 @@ one parent-chosen policy:
 
 The `SessionDelegation` aggregate admits creation only from a sealed
 `DelegatedSpawnRequest` and records that request's parent, bounded task, policy,
-child, and spawn provenance as the first event in one contiguous history.
-Typed await and message requests may act only on their exact relationship;
-consuming transition failures return the unchanged aggregate and attempted
-input. Message delivery remains available after a terminal outcome. Outcome
-authority is checked against the relationship before recording: an equal
+child, and spawn provenance as the first event in one contiguous history. Typed
+await and message requests may act only on their exact relationship; consuming
+transition failures return the unchanged aggregate and attempted input. Message
+delivery remains available after a terminal outcome. Outcome authority is
+checked against the relationship before recording: an equal
 authority-and-outcome replay is idempotent, `ContinueRunning` preserves the
 active lifecycle, and every other outcome terminalizes it.
 
