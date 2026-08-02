@@ -11,7 +11,7 @@ fn brave_recorded_response_decodes_structured_results() {
         "type": "search",
         "query": {
             "original": FIXTURE_QUERY,
-            "more_results_available": false,
+            "more_results_available": FIXTURE_MORE_RESULTS_AVAILABLE,
         },
         "web": {
             "type": "search",
@@ -35,7 +35,10 @@ fn brave_recorded_response_decodes_structured_results() {
     assert_eq!(decoded.title(), FIXTURE_RESULT_TITLE);
     assert_eq!(decoded.url(), FIXTURE_RESULT_URL);
     assert_eq!(decoded.snippet(), FIXTURE_RESULT_SNIPPET);
-    assert!(!response.more_results_available());
+    assert_eq!(
+        response.more_results_available(),
+        FIXTURE_MORE_RESULTS_AVAILABLE
+    );
 }
 
 /// A recorded Brave success envelope with `web: null` is an empty page;
@@ -46,7 +49,7 @@ fn brave_recorded_null_web_response_decodes_empty_results() {
         "type": "search",
         "query": {
             "original": FIXTURE_QUERY,
-            "more_results_available": false,
+            "more_results_available": FIXTURE_MORE_RESULTS_AVAILABLE,
         },
         "web": null,
     }))
@@ -56,7 +59,10 @@ fn brave_recorded_null_web_response_decodes_empty_results() {
         .expect("recorded empty provider response decodes");
 
     assert!(response.results().is_empty());
-    assert!(!response.more_results_available());
+    assert_eq!(
+        response.more_results_available(),
+        FIXTURE_MORE_RESULTS_AVAILABLE
+    );
 }
 
 /// A success envelope that omits the `web` member is malformed rather than
@@ -135,6 +141,34 @@ fn brave_response_with_unexpected_web_type_is_invalid() {
         "web": {
             "type": "schema_drift",
             "results": [],
+        },
+    }))
+    .expect("recorded response fixture encodes");
+
+    assert!(matches!(
+        decode_provider_response(WebSearchProvider::Brave, &body),
+        Err(WebSearchTransportFailure::InvalidResponse)
+    ));
+}
+
+/// A structurally compatible result with a different discriminator is not a
+/// Brave web-search result.
+#[test]
+fn brave_response_with_unexpected_result_type_is_invalid() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "type": "search",
+        "query": {
+            "original": FIXTURE_QUERY,
+            "more_results_available": FIXTURE_MORE_RESULTS_AVAILABLE,
+        },
+        "web": {
+            "type": "search",
+            "results": [{
+                "type": "schema_drift",
+                "title": FIXTURE_RESULT_TITLE,
+                "url": FIXTURE_RESULT_URL,
+                "description": FIXTURE_RESULT_SNIPPET,
+            }],
         },
     }))
     .expect("recorded response fixture encodes");

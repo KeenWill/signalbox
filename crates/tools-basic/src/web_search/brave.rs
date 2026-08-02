@@ -2,6 +2,7 @@ use super::{egress::*, result::*, transport_failure::*};
 use serde::Deserialize;
 
 const BRAVE_SEARCH_TYPE: &str = "search";
+const BRAVE_SEARCH_RESULT_TYPE: &str = "search_result";
 
 #[derive(serde::Deserialize)]
 pub(super) struct BraveResponse {
@@ -44,6 +45,8 @@ pub(super) struct BraveWebResults {
 
 #[derive(serde::Deserialize)]
 pub(super) struct BraveResult {
+    #[serde(rename = "type")]
+    pub(super) result_type: String,
     pub(super) title: String,
     pub(super) url: String,
     #[serde(rename = "description")]
@@ -79,6 +82,12 @@ pub(super) fn decode_brave_response(
         BraveWebMember::Results(_) => return Err(WebSearchTransportFailure::InvalidResponse),
     };
     if raw_results.len() > MAX_PROVIDER_RESULTS {
+        return Err(WebSearchTransportFailure::InvalidResponse);
+    }
+    if raw_results
+        .iter()
+        .any(|result| result.result_type != BRAVE_SEARCH_RESULT_TYPE)
+    {
         return Err(WebSearchTransportFailure::InvalidResponse);
     }
     let results = raw_results
