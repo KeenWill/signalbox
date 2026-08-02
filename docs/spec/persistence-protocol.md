@@ -482,8 +482,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Seven explicit lock statements live
-in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Ten explicit lock statements live in
+the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -505,7 +505,13 @@ in the schema instead:
 - the goal-event continuity trigger in that migration takes `FOR NO KEY UPDATE`
   on the event's session row before reading the preceding event, serializing
   ordinal and generation assignment even when the Rust transaction reached that
-  row first with `FOR NO KEY UPDATE`.
+  row first with `FOR NO KEY UPDATE`;
+- the approval-judge insert guard (migration `202608020015`) first takes
+  `FOR UPDATE` on the request's active `turn_lifecycle` row and then on the
+  `tool_request` row before it admits a prepared judge call; and
+- the deferred approval-decision authority trigger in that migration takes
+  `FOR UPDATE` on the `tool_request` row before it checks for a nonterminal
+  judge call and validates the decision's frozen-posture authority.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -566,14 +572,20 @@ Locks per transaction, in acquisition order:
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
-  the `session_scheduler` row `FOR UPDATE` is the first and only explicit lock.
-  An unseen decision command first claims the user-global registry; after
-  resolving the request's owning session it takes that scheduler lock before
-  reading or mutating the active tool batch. A replay resolves entirely from the
-  command registry and receipt and takes no lifecycle lock. Guarded
-  `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call updates then
-  serialize under the scheduler lock; their foreign keys may take implicit
-  `KEY SHARE` locks on parent rows.
+  the `session_scheduler` row `FOR UPDATE` is the first and only Rust-issued
+  explicit lock. An unseen decision command first claims the user-global
+  registry; after resolving the request's owning session it takes that scheduler
+  lock before reading or mutating the active tool batch. A replay resolves
+  entirely from the command registry and receipt and takes no lifecycle lock.
+  Guarded `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call
+  updates then serialize under the scheduler lock; their foreign keys may take
+  implicit `KEY SHARE` locks on parent rows. At decision commit, the deferred
+  authority trigger takes the `tool_request` row `FOR UPDATE` after the
+  scheduler lock and before checking that no nonterminal judge remains.
+- **Approval-judge preparation**: the schema guard first attempts to lock the
+  exact active `turn_lifecycle` row `FOR UPDATE`, then locks the `tool_request`
+  row `FOR UPDATE`, and only then checks for an existing decision and validates
+  the prepared call.
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
