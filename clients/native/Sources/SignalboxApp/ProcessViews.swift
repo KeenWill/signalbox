@@ -1337,18 +1337,28 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private enum TimelinePresentationKey: Hashable {
     case normalized(String)
     case unrecognized(UInt64)
+    case unrecognizedHistoryBoundary
+  }
+
+  private struct RetainedUnrecognizedTimelineItem {
+    let item: SignalboxTimelineItem
+    let utf8Bytes: UInt
   }
 
   private var mutationBlocksByTurnID: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
   private var sideSnapshotCursorsByTurnID: [SignalboxCanonicalUUID: UInt64] = [:]
   private var normalizedTimelineItemIDs: Set<String> = []
   private var timelinePresentationOrder: [TimelinePresentationKey] = []
-  private var unrecognizedLiveTimelineItemsByCursor: [UInt64: SignalboxTimelineItem] = [:]
+  private var unrecognizedLiveTimelineItemsByCursor:
+    [UInt64: RetainedUnrecognizedTimelineItem] = [:]
+  private var unrecognizedLiveTimelineUTF8Bytes: UInt = 0
+  private var hasUnrecognizedLiveTimelineHistoryBoundary = false
+  private var nextUnrecognizedLiveEventID = -1
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
   var canDecideToolRequest: Bool {
-    connectedService != nil && mutationBlocksByTurnID.isEmpty
+    connectedService != nil && !isDecidingTool && mutationBlocksByTurnID.isEmpty
   }
 
   init(
@@ -1927,6 +1937,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     normalizedTimelineItemIDs = []
     timelinePresentationOrder = []
     unrecognizedLiveTimelineItemsByCursor = [:]
+    unrecognizedLiveTimelineUTF8Bytes = 0
+    hasUnrecognizedLiveTimelineHistoryBoundary = false
+    nextUnrecognizedLiveEventID = -1
     phase = .stopped
     latestDiagnostic = nil
     isSubmitting = false
@@ -2076,20 +2089,97 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     guard unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] == nil else {
       return
     }
-    let eventID = SignalboxEventID(
-      rawValue: -1 - unrecognizedLiveTimelineItemsByCursor.count
+    let retainedKind = SignalboxProcessPresentation.retainedLabel(kind)
+    let retainedDiagnostic = SignalboxProcessPresentation.retainedLabel(
+      decodingDiagnostic?.message
+        ?? "The session event kind is not rendered by this client."
     )
-    unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] = .unknown(
-      SignalboxUnknownEventCard(
-        eventID: eventID,
-        kind: SignalboxProcessPresentation.retainedLabel(kind),
-        diagnostic: decodingDiagnostic?.message
-          ?? "The session event kind is not rendered by this client."
-      )
+    let retainedBytes = UInt(retainedKind.utf8.count + retainedDiagnostic.utf8.count)
+    guard makeRoomForUnrecognizedLiveTimelineItem(utf8Bytes: retainedBytes) else {
+      return
+    }
+    let retained = RetainedUnrecognizedTimelineItem(
+      item: .unknown(
+        SignalboxUnknownEventCard(
+          eventID: SignalboxEventID(rawValue: nextUnrecognizedLiveEventID),
+          kind: retainedKind,
+          diagnostic: retainedDiagnostic
+        )
+      ),
+      utf8Bytes: retainedBytes
     )
+    nextUnrecognizedLiveEventID -= 1
+    unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] = retained
+    unrecognizedLiveTimelineUTF8Bytes += retainedBytes
     timelinePresentationOrder.append(.unrecognized(cursor.rawValue))
     refreshTimeline()
   }
+
+  private func makeRoomForUnrecognizedLiveTimelineItem(utf8Bytes: UInt) -> Bool {
+    let capacity = SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+      .eventBufferCapacity
+    guard
+      capacity.maximumEvents > 1,
+      utf8Bytes <= capacity.maximumUTF8Bytes
+    else {
+      return false
+    }
+    while retainedUnrecognizedLiveTimelineCount >= capacity.maximumEvents
+      || unrecognizedLiveTimelineUTF8Bytes > capacity.maximumUTF8Bytes - utf8Bytes
+    {
+      guard evictOldestUnrecognizedLiveTimelineItem() else {
+        return false
+      }
+    }
+    return true
+  }
+
+  private var retainedUnrecognizedLiveTimelineCount: UInt {
+    UInt(unrecognizedLiveTimelineItemsByCursor.count)
+      + (hasUnrecognizedLiveTimelineHistoryBoundary ? 1 : 0)
+  }
+
+  private func evictOldestUnrecognizedLiveTimelineItem() -> Bool {
+    guard
+      let index = timelinePresentationOrder.firstIndex(where: { key in
+        if case .unrecognized = key {
+          return true
+        }
+        return false
+      }),
+      case .unrecognized(let cursor) = timelinePresentationOrder[index],
+      let evicted = unrecognizedLiveTimelineItemsByCursor.removeValue(forKey: cursor)
+    else {
+      return false
+    }
+    unrecognizedLiveTimelineUTF8Bytes -= evicted.utf8Bytes
+    if hasUnrecognizedLiveTimelineHistoryBoundary {
+      timelinePresentationOrder.remove(at: index)
+    } else {
+      timelinePresentationOrder[index] = .unrecognizedHistoryBoundary
+      hasUnrecognizedLiveTimelineHistoryBoundary = true
+      unrecognizedLiveTimelineUTF8Bytes += Self.unrecognizedLiveTimelineHistoryBoundaryBytes
+    }
+    return true
+  }
+
+  private static let unrecognizedLiveTimelineHistoryBoundaryKind =
+    "unrecognized_session_event_history_truncated"
+  private static let unrecognizedLiveTimelineHistoryBoundaryDiagnostic =
+    "Earlier unrecognized session events were removed to keep retained history bounded."
+  private static let unrecognizedLiveTimelineHistoryBoundary: SignalboxTimelineItem =
+    .unknown(
+      SignalboxUnknownEventCard(
+        eventID: SignalboxEventID(rawValue: .min),
+        kind: unrecognizedLiveTimelineHistoryBoundaryKind,
+        diagnostic: unrecognizedLiveTimelineHistoryBoundaryDiagnostic
+      )
+    )
+
+  private static let unrecognizedLiveTimelineHistoryBoundaryBytes = UInt(
+    unrecognizedLiveTimelineHistoryBoundaryKind.utf8.count
+      + unrecognizedLiveTimelineHistoryBoundaryDiagnostic.utf8.count
+  )
 
   private func refreshTimeline() {
     let normalizedItems = normalizer.timelineItems
@@ -2107,7 +2197,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .normalized(let id):
         return normalizedItemsByID[id]
       case .unrecognized(let cursor):
-        return unrecognizedLiveTimelineItemsByCursor[cursor]
+        return unrecognizedLiveTimelineItemsByCursor[cursor]?.item
+      case .unrecognizedHistoryBoundary:
+        return Self.unrecognizedLiveTimelineHistoryBoundary
       }
     }
   }

@@ -1691,6 +1691,33 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testToolDecisionPresentationGateClosesWhileDecisionIsInFlight() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService(
+      suspendsFirstDecision: true
+    )
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    await viewModel.connect()
+    let invocationID = SignalboxToolInvocationID(
+      rawValue: MockSignalboxFixtures.invocationID
+    )
+
+    XCTAssertTrue(viewModel.canDecideToolRequest)
+    let decision = Task {
+      await viewModel.decideToolRequest(invocationID, decision: .approve)
+    }
+    await service.waitUntilDecisionStarted()
+
+    XCTAssertFalse(viewModel.canDecideToolRequest)
+    await service.completeDecision()
+    await decision.value
+    XCTAssertTrue(viewModel.canDecideToolRequest)
+  }
+
+  @MainActor
   func testProviderTextCapacityFailureDropsOverlayAndRequestsRecovery() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -3539,8 +3566,16 @@ private actor AmbiguousThenAcceptingStopProcessService: SignalboxProcessServiceP
 private actor AmbiguousThenAcceptingToolDecisionProcessService:
   SignalboxProcessServiceProtocol
 {
+  private let suspendsFirstDecision: Bool
   private var prepareCallCount = 0
   private(set) var submittedCommandIDs: [String] = []
+  private var decisionStarted = false
+  private var decisionStartedWaiter: CheckedContinuation<Void, Never>?
+  private var completionWaiter: CheckedContinuation<Void, Never>?
+
+  init(suspendsFirstDecision: Bool = false) {
+    self.suspendsFirstDecision = suspendsFirstDecision
+  }
 
   func testConnection() async throws {}
 
@@ -3590,6 +3625,14 @@ private actor AmbiguousThenAcceptingToolDecisionProcessService:
     _ prepared: SignalboxPreparedToolRequestDecision
   ) async throws -> SignalboxToolRequestDecided {
     submittedCommandIDs.append(prepared.commandID.rawValue.rawValue)
+    decisionStarted = true
+    decisionStartedWaiter?.resume()
+    decisionStartedWaiter = nil
+    if suspendsFirstDecision, submittedCommandIDs.count == 1 {
+      await withCheckedContinuation { continuation in
+        completionWaiter = continuation
+      }
+    }
     guard submittedCommandIDs.count > 1 else {
       throw ProcessSubmissionFixture.ambiguousMutationError
     }
@@ -3597,6 +3640,20 @@ private actor AmbiguousThenAcceptingToolDecisionProcessService:
       toolRequestID: prepared.toolRequestID,
       decision: prepared.decision
     )
+  }
+
+  func waitUntilDecisionStarted() async {
+    guard !decisionStarted else {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      decisionStartedWaiter = continuation
+    }
+  }
+
+  func completeDecision() {
+    completionWaiter?.resume()
+    completionWaiter = nil
   }
 
   func makeSynchronization(
@@ -6726,24 +6783,81 @@ extension ProcessServiceIntegrationTests {
     XCTAssertEqual(unknown.diagnostic, ProcessProjectionFixture.unknownSessionEventDiagnostic)
     XCTAssertEqual(viewModel.latestDiagnostic, ProcessProjectionFixture.transportDiagnostic.message)
   }
+
+  @MainActor
+  func testUnknownLiveSessionEventHistoryIsBoundedAndVisible() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    try ProcessProjectionFixture.fillUnknownSessionEventHistory(in: viewModel)
+    let boundaryCards = try ProcessProjectionFixture.boundaryAndNewestUnknownCards(
+      in: viewModel.timeline
+    )
+
+    XCTAssertEqual(viewModel.timeline.count, ProcessProjectionFixture.unknownHistoryCapacity)
+    XCTAssertEqual(boundaryCards.boundary.kind, ProcessProjectionFixture.unknownHistoryKind)
+    XCTAssertEqual(
+      boundaryCards.boundary.diagnostic,
+      ProcessProjectionFixture.unknownHistoryDiagnostic
+    )
+    XCTAssertEqual(boundaryCards.newest.kind, ProcessProjectionFixture.futureSessionEventKind)
+  }
 }
 
 extension ProcessProjectionFixture {
+  static let futureSessionEventKind = "fixture_future_session_event"
+  static let unknownHistoryKind = "unrecognized_session_event_history_truncated"
+  static let unknownHistoryDiagnostic =
+    "Earlier unrecognized session events were removed to keep retained history bounded."
+  static let unknownHistoryCapacity = Int(
+    SignalboxProcessApplicationPolicy.nativeDefault.synchronization.eventBufferCapacity
+      .maximumEvents
+  )
   static let unknownSessionEventDiagnostic =
     "The session event kind is not rendered by this client."
   static let unknownEventSideSnapshotTimelineKinds: [ProcessTimelineFixtureKind] = [
     .message, .unknown, .tool,
   ]
 
-  static func unknownSessionEvent() throws -> SignalboxFollowedSessionEvent {
+  static func unknownSessionEvent(
+    kind: String = oversizedUnknownState,
+    cursor: UInt64 = 1
+  ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
       {
-        "type":"\(oversizedUnknownState)",
+        "type":"\(kind)",
         "retained_fixture_field":true
       }
-      """
+      """,
+      cursor: cursor
     )
+  }
+
+  @MainActor
+  static func fillUnknownSessionEventHistory(
+    in viewModel: ProcessSessionDetailViewModel
+  ) throws {
+    let capacity = SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+      .eventBufferCapacity.maximumEvents
+    for cursor in 1...(capacity + 1) {
+      viewModel.apply(
+        .event(try unknownSessionEvent(kind: futureSessionEventKind, cursor: UInt64(cursor)))
+      )
+    }
+  }
+
+  static func boundaryAndNewestUnknownCards(
+    in timeline: [SignalboxTimelineItem]
+  ) throws -> (boundary: SignalboxUnknownEventCard, newest: SignalboxUnknownEventCard) {
+    guard
+      case .unknown(let boundary)? = timeline.first,
+      case .unknown(let newest)? = timeline.last
+    else {
+      throw ProcessDriverUpdateRecorderError.expectedUnknownEvent
+    }
+    return (boundary, newest)
   }
 
   static func onlyUnknownCard(
