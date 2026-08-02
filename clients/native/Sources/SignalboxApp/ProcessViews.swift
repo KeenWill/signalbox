@@ -1336,6 +1336,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private var mutationBlocksByTurnID: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
   private var sideSnapshotCursorsByTurnID: [SignalboxCanonicalUUID: UInt64] = [:]
+  private var unrecognizedLiveEventCursors: Set<UInt64> = []
+  private var unrecognizedLiveTimelineItems: [SignalboxTimelineItem] = []
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -1694,7 +1696,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .authoritativeSnapshot(let snapshot):
         let projection = try projector.projectAuthoritativeSnapshot(snapshot)
         try normalizer.replaceAll(with: projection.records)
-        timeline = normalizer.timelineItems
+        refreshTimeline()
         pendingInputs = projection.pendingInputs
         acceptedInputsAwaitingTranscript.removeAll {
           projection.materializedAcceptedInputIDs.contains($0.id)
@@ -1713,7 +1715,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .sideSnapshot(let snapshot, let trigger):
         let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
         normalizer.upsert(contentsOf: projection.records)
-        timeline = normalizer.timelineItems
+        refreshTimeline()
         let snapshotTerminalTurnIDs = terminalTurnIDs(in: snapshot)
         let snapshotActiveTurnID = activeTurnID(in: snapshot)
         let snapshotTerminalizedActiveTurn = activeTurnID.map {
@@ -1916,6 +1918,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     activeTurnID = nil
     mutationBlocksByTurnID = [:]
     sideSnapshotCursorsByTurnID = [:]
+    unrecognizedLiveEventCursors = []
+    unrecognizedLiveTimelineItems = []
     phase = .stopped
     latestDiagnostic = nil
     isSubmitting = false
@@ -2046,9 +2050,41 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         at: followed.cursor,
         terminalActivity: .init(state: .recoveryRequired, label: "Recovery required")
       )
-    case .sessionCreated, .contextCompacted, .unknown:
+    case .unknown(let kind, _, let decodingDiagnostic):
+      retainUnrecognizedLiveEvent(
+        kind: kind,
+        decodingDiagnostic: decodingDiagnostic,
+        cursor: followed.cursor
+      )
+    case .sessionCreated, .contextCompacted:
       break
     }
+  }
+
+  private func retainUnrecognizedLiveEvent(
+    kind: String,
+    decodingDiagnostic: SignalboxDecodingDiagnostic?,
+    cursor: SignalboxCanonicalUInt64
+  ) {
+    guard unrecognizedLiveEventCursors.insert(cursor.rawValue).inserted else {
+      return
+    }
+    let eventID = SignalboxEventID(rawValue: -1 - unrecognizedLiveTimelineItems.count)
+    unrecognizedLiveTimelineItems.append(
+      .unknown(
+        SignalboxUnknownEventCard(
+          eventID: eventID,
+          kind: SignalboxProcessPresentation.retainedLabel(kind),
+          diagnostic: decodingDiagnostic?.message
+            ?? "The session event kind is not rendered by this client."
+        )
+      )
+    )
+    refreshTimeline()
+  }
+
+  private func refreshTimeline() {
+    timeline = normalizer.timelineItems + unrecognizedLiveTimelineItems
   }
 
   private func admitsStateTransition(

@@ -6694,3 +6694,57 @@ private enum ProcessDriverUpdateRecorderError: Error {
   case snapshotTimeout
   case unexpectedRequest
 }
+
+extension ProcessServiceIntegrationTests {
+  @MainActor
+  func testUnknownLiveSessionEventAddsStableBoundedTimelineCard() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    let followed = try ProcessProjectionFixture.unknownSessionEvent()
+
+    viewModel.apply(.event(followed))
+    viewModel.apply(.event(followed))
+    viewModel.apply(.diagnostic(ProcessProjectionFixture.transportDiagnostic))
+
+    let unknown = try ProcessProjectionFixture.onlyUnknownCard(in: viewModel.timeline)
+    XCTAssertEqual(viewModel.timeline.count, ProcessProjectionFixture.singleRecordCount)
+    XCTAssertEqual(
+      unknown.kind,
+      SignalboxProcessPresentation.retainedLabel(ProcessProjectionFixture.oversizedUnknownState)
+    )
+    XCTAssertEqual(unknown.diagnostic, ProcessProjectionFixture.unknownSessionEventDiagnostic)
+    XCTAssertEqual(viewModel.latestDiagnostic, ProcessProjectionFixture.transportDiagnostic.message)
+  }
+}
+
+extension ProcessProjectionFixture {
+  static let unknownSessionEventDiagnostic =
+    "The session event kind is not rendered by this client."
+
+  static func unknownSessionEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"\(oversizedUnknownState)",
+        "retained_fixture_field":true
+      }
+      """
+    )
+  }
+
+  static func onlyUnknownCard(
+    in timeline: [SignalboxTimelineItem]
+  ) throws -> SignalboxUnknownEventCard {
+    let unknownCards: [SignalboxUnknownEventCard] = timeline.compactMap {
+      guard case .unknown(let unknown) = $0 else {
+        return nil
+      }
+      return unknown
+    }
+    guard unknownCards.count == singleRecordCount, let unknown = unknownCards.first else {
+      throw ProcessDriverUpdateRecorderError.expectedUnknownEvent
+    }
+    return unknown
+  }
+}
