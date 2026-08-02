@@ -1057,7 +1057,7 @@ detail.
 ### Session plan tools
 
 This catalog family is verified through PR #385 (`agent/plan-dependencies`) at
-implementation ref `570ace026a80cb6cfe718e8774e7f314c988801d`.
+implementation ref `c9ca8ba54e2f93cb3a715321ffcae605ce925bed`.
 
 The process-lifetime daemon catalog always includes `plan_write` and `plan_read`
 in both base and fully mapped production composition. `signalboxd` binds their
