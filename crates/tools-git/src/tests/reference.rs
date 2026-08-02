@@ -248,6 +248,34 @@ fn detached_head_publication_advances_to_a_full_object_id() {
 }
 
 #[test]
+fn non_head_reference_lock_rejects_a_head_transition_after_acquisition() {
+    let fixture = Fixture::new();
+    let reference_path = fixture.root().join(".git/refs/heads/topic");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let mut lock =
+        ReferenceLock::acquire(&authority, "refs/heads/topic").expect("reference lock acquires");
+    let previous = lock.read(&authority).expect("missing reference reads");
+    lock.prepare(&authority, fixture.initial)
+        .expect("replacement reference prepares");
+    fs::write(
+        fixture.root().join(".git/HEAD"),
+        format!("{}\n", fixture.initial),
+    )
+    .expect("concurrent detached HEAD writes");
+
+    let failure = lock
+        .publish(&authority, &previous)
+        .expect_err("HEAD transition rejects non-HEAD publication");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(!reference_path.exists());
+}
+
+#[test]
 fn real_git_contended_lock_fixture_is_rejected_without_mutation() {
     let fixture = Fixture::new();
     let name = "refs/heads/contended";

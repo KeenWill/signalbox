@@ -10,7 +10,7 @@ use std::{
 };
 
 use bstr::BStr;
-use git2::ObjectFormat;
+use git2::{Config, ObjectFormat};
 use rustix::{
     fs::{CWD, Dir, Mode, OFlags, openat},
     io::dup,
@@ -19,8 +19,8 @@ use signalbox_tools_workspace::WorkspaceRootIdentity;
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
-    FileSnapshotIdentity, RepositoryIdentity, file_identity, file_snapshot_identity,
-    unsupported_control_files_are_absent,
+    FileSnapshotIdentity, RepositoryIdentity, descriptor_path, file_identity,
+    file_snapshot_identity, unsupported_control_files_are_absent,
 };
 use crate::failure::LocalGitFailure;
 use crate::limits::{
@@ -170,6 +170,7 @@ fn valid_head_record(bytes: &[u8], object_format: ObjectFormat) -> bool {
     if let Some(target) = record.strip_prefix(b"ref: ") {
         return target.len() <= MAX_REFERENCE_BYTES
             && target.starts_with(b"refs/")
+            && std::str::from_utf8(target).is_ok()
             && valid_reference_name(target);
     }
     parse_full_object_id_bytes(record, object_format).is_some()
@@ -340,7 +341,10 @@ pub(super) fn validate_shallow_file(
             return Err(LocalGitToolsConstructionError::Repository);
         }
     }
-    Ok(())
+    // The private repository cannot represent a live shallow boundary without
+    // reopening it by path. Reject nonempty shallow repositories instead of
+    // silently exposing parents hidden by workspace Git semantics.
+    Err(LocalGitToolsConstructionError::Repository)
 }
 
 pub(super) fn validate_live_shallow(
@@ -483,9 +487,8 @@ fn validate_repository_config_descriptor(
     let config =
         String::from_utf8(bytes.clone()).map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let mut section = "";
-    let mut object_format = ObjectFormat::Sha1;
     let mut object_format_seen = false;
-    let mut repository_format_version = None;
+    let mut repository_format_version_seen = false;
     let mut bare_seen = false;
     for line in config.lines() {
         let mut normalized = line.trim().to_owned();
@@ -532,40 +535,29 @@ fn validate_repository_config_descriptor(
             ) {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
-            if let Some((key, value)) = key_value
+            if let Some((key, _value)) = key_value
                 && key.trim().eq_ignore_ascii_case("repositoryformatversion")
             {
-                if repository_format_version.is_some() {
+                if repository_format_version_seen {
                     return Err(LocalGitToolsConstructionError::Repository);
                 }
-                repository_format_version = Some(
-                    value
-                        .trim()
-                        .parse::<u32>()
-                        .map_err(|_| LocalGitToolsConstructionError::Repository)?,
-                );
+                repository_format_version_seen = true;
             }
-            if let Some((key, value)) = key_value
+            if let Some((key, _value)) = key_value
                 && key.trim().eq_ignore_ascii_case("bare")
             {
-                let value = value.trim().to_ascii_lowercase();
-                if bare_seen || !matches!(value.as_str(), "false" | "no" | "off" | "0") {
+                if bare_seen {
                     return Err(LocalGitToolsConstructionError::Repository);
                 }
                 bare_seen = true;
             }
         }
         if section == "extensions" {
-            let (key, value) = normalized
+            let (key, _value) = normalized
                 .split_once('=')
                 .ok_or(LocalGitToolsConstructionError::Repository)?;
             match key.trim().to_ascii_lowercase().as_str() {
                 "objectformat" if !object_format_seen => {
-                    object_format = match value.trim() {
-                        "sha1" => ObjectFormat::Sha1,
-                        "sha256" => ObjectFormat::Sha256,
-                        _ => return Err(LocalGitToolsConstructionError::Repository),
-                    };
                     object_format_seen = true;
                 }
                 _ => {
@@ -574,15 +566,51 @@ fn validate_repository_config_descriptor(
             }
         }
     }
-    match (repository_format_version.unwrap_or(0), object_format_seen) {
-        (0, false) | (1, _) => {}
-        _ => return Err(LocalGitToolsConstructionError::Repository),
-    }
     let mut snapshot =
         tempfile::tempfile().map_err(|_| LocalGitToolsConstructionError::Repository)?;
     snapshot
         .write_all(&bytes)
         .and_then(|()| snapshot.rewind())
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let parsed = Config::open(&descriptor_path(&snapshot))
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let repository_format_version = if repository_format_version_seen {
+        parsed
+            .get_i64("core.repositoryformatversion")
+            .ok()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(LocalGitToolsConstructionError::Repository)?
+    } else {
+        0
+    };
+    if bare_seen
+        && parsed
+            .get_bool("core.bare")
+            .ok()
+            .filter(|value| !value)
+            .is_none()
+    {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
+    let object_format = if object_format_seen {
+        match parsed
+            .get_string("extensions.objectformat")
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?
+            .as_str()
+        {
+            "sha1" => ObjectFormat::Sha1,
+            "sha256" => ObjectFormat::Sha256,
+            _ => return Err(LocalGitToolsConstructionError::Repository),
+        }
+    } else {
+        ObjectFormat::Sha1
+    };
+    match (repository_format_version, object_format_seen) {
+        (0, false) | (1, _) => {}
+        _ => return Err(LocalGitToolsConstructionError::Repository),
+    }
+    snapshot
+        .rewind()
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     Ok(RepositoryConfig {
         source: file,

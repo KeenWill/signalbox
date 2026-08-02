@@ -24,7 +24,8 @@ and descriptor-captured object data. It is never allowed to discover a
 repository or open the live workspace administration tree by an ambient or
 caller-selected path. `gix-validate` owns complete reference-name grammar, and
 `gix-hash` owns complete and prefix object-ID grammar; Signalbox adds the
-declared-object-format and `refs/` namespace checks.
+declared-object-format, `refs/` namespace, and UTF-8 representability checks
+required by the typed surface.
 
 Live administration reads remain in the authority layer. Configuration, `HEAD`,
 shallow state, loose and packed references, index/reference lock snapshots, and
@@ -102,7 +103,9 @@ disposition commit.
   bounds, allocation failure, and host I/O failure are rejected; the tool does
   not repair an already corrupt repository.
 - Repository semantics outside the direct main-worktree subset are unsupported,
-  not partially trusted. Linked worktrees, repository discovery, alternate
+  not partially trusted. Nonempty shallow state and non-UTF-8 reference names
+  reject because the current private repository and typed string surface cannot
+  preserve their semantics. Linked worktrees, repository discovery, alternate
   object databases, replacement-object configuration, and other rejected
   extension surfaces require a separate user-approved contract before support.
 - Remote authentication, transport security, server-side authorization, and

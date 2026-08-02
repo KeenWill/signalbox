@@ -67,6 +67,22 @@ fn repository_layout_rejects_a_malformed_head() {
 }
 
 #[test]
+fn repository_layout_rejects_a_non_utf8_symbolic_head() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root().join(".git/HEAD"),
+        b"ref: refs/heads/nonutf-\xff\n",
+    )
+    .expect("non-UTF-8 symbolic HEAD writes");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("non-UTF-8 symbolic HEAD rejects admission");
+
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
 fn repository_layout_rejects_an_abbreviated_detached_head() {
     let fixture = Fixture::new();
     fs::write(fixture.root().join(".git/HEAD"), "abc123\n")
@@ -643,6 +659,19 @@ fn repository_config_rejects_sha256_under_format_version_zero() {
 }
 
 #[test]
+fn repository_config_accepts_quoted_object_format_with_an_inline_comment() {
+    let fixture = Sha256Fixture::new();
+    fs::write(
+        fixture.root().join(".git/config"),
+        "[core]\nrepositoryformatversion = 1\nbare = false\n[extensions]\nobjectFormat = \"sha256\" # format\n",
+    )
+    .expect("quoted SHA-256 config writes");
+
+    validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+        .expect("git2-decoded SHA-256 object format admits repository");
+}
+
+#[test]
 fn repository_config_rejects_an_uppercase_sha1_object_format_value() {
     let fixture = Fixture::new();
     fs::write(
@@ -984,9 +1013,9 @@ fn shallow_validation_rejects_a_path_replaced_after_snapshot() {
     let fixture = Fixture::new();
     let shallow_path = fixture.root().join(".git/shallow");
     let retired_shallow_path = fixture.root().join(".git/shallow.retired");
-    let valid_shallow = format!("{}\n", fixture.initial);
+    let valid_shallow = String::new();
     let replacement_shallow = format!("\n{}\n", fixture.initial);
-    fs::write(&shallow_path, &valid_shallow).expect("valid shallow file writes");
+    fs::write(&shallow_path, &valid_shallow).expect("empty shallow file writes");
     let git_directory = openat(
         CWD,
         fixture.root().join(".git"),
@@ -1214,7 +1243,7 @@ fn sha256_repository_admits_the_declared_object_format() {
 }
 
 #[test]
-fn sha256_repository_accepts_a_sha256_shallow_boundary() {
+fn sha256_repository_rejects_a_nonempty_shallow_boundary() {
     let fixture = Sha256Fixture::new();
     fs::write(
         fixture.root().join(".git/shallow"),
@@ -1222,8 +1251,11 @@ fn sha256_repository_accepts_a_sha256_shallow_boundary() {
     )
     .expect("SHA-256 shallow boundary writes");
 
-    validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
-        .expect("SHA-256 shallow boundary validates");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("nonempty SHA-256 shallow boundary rejects admission");
+
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
