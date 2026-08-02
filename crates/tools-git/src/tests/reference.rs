@@ -121,6 +121,38 @@ fn quarantine_rejects_a_replacement_after_its_created_identity_is_captured() {
 }
 
 #[test]
+fn quarantine_creation_failure_removes_its_persisted_directory() {
+    let parent = tempfile::tempdir().expect("quarantine parent constructs");
+    let parent_descriptor = openat(
+        CWD,
+        parent.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("quarantine parent opens");
+
+    let failure = QuarantineDirectory::create_with_test_hook(&parent_descriptor, || {
+        let quarantine_path = fs::read_dir(parent.path())
+            .expect("quarantine parent reads")
+            .next()
+            .expect("created quarantine entry exists")
+            .expect("created quarantine entry reads")
+            .path();
+        fs::remove_dir(quarantine_path).expect("created quarantine removes before reopen");
+    })
+    .err()
+    .expect("removed quarantine rejects reopen");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(
+        fs::read_dir(parent.path())
+            .expect("quarantine parent reopens")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn reference_publication_rolls_back_when_its_hierarchy_is_replaced() {
     let fixture = Fixture::new();
     let heads = fixture.root().join(".git/refs/heads");
@@ -425,6 +457,67 @@ fn symbolic_reference_preparation_rejects_a_non_reference_target_without_mutatio
         fs::read(lock_path).expect("unmodified reference lock reads"),
         actor_payload
     );
+}
+
+#[test]
+fn symbolic_reference_preparation_rejects_an_oversized_target_without_mutation() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let target = format!("refs/heads/{}", "a".repeat(MAX_BRANCH_BYTES));
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+
+    let failure = lock
+        .prepare_symbolic(&authority, &target)
+        .expect_err("oversized symbolic target rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::metadata(fixture.root().join(".git/refs/heads/topic.lock"))
+            .expect("unmodified reference lock metadata reads")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn oversized_reference_name_cannot_fall_back_to_packed_references() {
+    let fixture = Fixture::new();
+    let name = format!("refs/heads/{}", "a".repeat(MAX_BRANCH_BYTES));
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        format!("# pack-refs with: sorted\n{} {name}\n", fixture.initial),
+    )
+    .expect("oversized packed reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+
+    let failure = crate::reference_read::read_pinned_reference(&authority, &name)
+        .expect_err("oversized packed fallback rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn abbreviated_loose_reference_object_id_is_rejected() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/abbreviated";
+    fs::write(fixture.root().join(".git").join(name), "abc123\n")
+        .expect("abbreviated loose reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+
+    let failure = crate::reference_read::read_pinned_reference(&authority, name)
+        .expect_err("abbreviated loose reference rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]

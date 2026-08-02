@@ -200,7 +200,7 @@ impl ReferenceLock {
         target: &str,
     ) -> Result<(), LocalGitFailure> {
         authority.validate_supported_layout()?;
-        if !target.starts_with("refs/") || !git2::Reference::is_valid_name(target) {
+        if !target.starts_with("refs/") || validate_reference_name(target).is_err() {
             return Err(LocalGitFailure::Operation);
         }
         let expected = format!("ref: {target}\n");
@@ -625,7 +625,8 @@ fn finalize_reference_exchange_if_current(
             &quarantine,
             quarantined_displaced,
             quarantined_publication,
-        );
+            None,
+        )?;
         return Err(LocalGitFailure::Operation);
     }
     if renameat_with(
@@ -637,31 +638,48 @@ fn finalize_reference_exchange_if_current(
     )
     .is_err()
     {
-        let _ = renameat_with(
-            quarantine.descriptor(),
+        restore_or_remove_quarantined_reference(
+            &quarantine,
             quarantined_displaced,
             parent,
             lock_name,
-            RenameFlags::NOREPLACE,
-        );
+            None,
+        )?;
+        restore_or_remove_quarantined_reference(
+            &quarantine,
+            quarantined_publication,
+            parent,
+            leaf,
+            Some(publication),
+        )?;
         return Err(LocalGitFailure::Operation);
     }
     if reference_snapshot_identity_at(parent, leaf) != Ok(Some(publication)) {
-        let _ = renameat_with(
-            quarantine.descriptor(),
+        restore_or_remove_quarantined_reference(
+            &quarantine,
             quarantined_displaced,
             parent,
             lock_name,
-            RenameFlags::NOREPLACE,
-        );
+            None,
+        )?;
         return Err(LocalGitFailure::Operation);
     }
-    unlinkat(
+    if unlinkat(
         quarantine.descriptor(),
         quarantined_displaced,
         AtFlags::empty(),
     )
-    .map_err(|_| LocalGitFailure::Operation)?;
+    .is_err()
+    {
+        restore_or_remove_quarantined_reference(
+            &quarantine,
+            quarantined_displaced,
+            parent,
+            lock_name,
+            Some(displaced),
+        )?;
+        return Err(LocalGitFailure::Operation);
+    }
     Ok(())
 }
 
@@ -707,21 +725,50 @@ fn restore_quarantined_publication(
     quarantine: &QuarantineDirectory,
     quarantined_displaced: &OsStr,
     quarantined_publication: &OsStr,
-) {
-    let _ = renameat_with(
-        quarantine.descriptor(),
-        quarantined_publication,
-        parent,
-        leaf,
-        RenameFlags::NOREPLACE,
-    );
-    let _ = renameat_with(
-        quarantine.descriptor(),
+    publication: Option<ReferenceSnapshotIdentity>,
+) -> Result<(), LocalGitFailure> {
+    restore_or_remove_quarantined_reference(
+        quarantine,
         quarantined_displaced,
         parent,
         lock_name,
+        None,
+    )?;
+    restore_or_remove_quarantined_reference(
+        quarantine,
+        quarantined_publication,
+        parent,
+        leaf,
+        publication,
+    )
+}
+
+fn restore_or_remove_quarantined_reference(
+    quarantine: &QuarantineDirectory,
+    quarantined_name: &OsStr,
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: Option<ReferenceSnapshotIdentity>,
+) -> Result<(), LocalGitFailure> {
+    if renameat_with(
+        quarantine.descriptor(),
+        quarantined_name,
+        parent,
+        name,
         RenameFlags::NOREPLACE,
-    );
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    let expected = expected.ok_or(LocalGitFailure::Operation)?;
+    if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_name)
+        != Ok(Some(expected))
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    unlinkat(quarantine.descriptor(), quarantined_name, AtFlags::empty())
+        .map_err(|_| LocalGitFailure::Operation)
 }
 
 fn rollback_reference_exchange_if_current(
@@ -775,38 +822,56 @@ fn rollback_reference_exchange_if_current(
     if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_publication)
         != Ok(Some(publication))
     {
-        let _ = renameat_with(
-            quarantine.descriptor(),
-            quarantined_publication,
+        restore_quarantined_publication(
             parent,
             leaf,
-            RenameFlags::NOREPLACE,
-        );
-        let _ = renameat_with(
-            quarantine.descriptor(),
-            quarantined_displaced,
-            parent,
             lock_name,
-            RenameFlags::NOREPLACE,
-        );
+            &quarantine,
+            quarantined_displaced,
+            quarantined_publication,
+            None,
+        )?;
         return Err(LocalGitFailure::Operation);
     }
-    renameat_with(
+    if renameat_with(
         quarantine.descriptor(),
         quarantined_displaced,
         parent,
         leaf,
         RenameFlags::NOREPLACE,
     )
-    .map_err(|_| LocalGitFailure::Operation)?;
-    renameat_with(
+    .is_err()
+    {
+        restore_quarantined_publication(
+            parent,
+            leaf,
+            lock_name,
+            &quarantine,
+            quarantined_displaced,
+            quarantined_publication,
+            Some(publication),
+        )?;
+        return Err(LocalGitFailure::Operation);
+    }
+    if renameat_with(
         quarantine.descriptor(),
         quarantined_publication,
         parent,
         lock_name,
         RenameFlags::NOREPLACE,
     )
-    .map_err(|_| LocalGitFailure::Operation)
+    .is_err()
+    {
+        restore_or_remove_quarantined_reference(
+            &quarantine,
+            quarantined_publication,
+            parent,
+            lock_name,
+            Some(publication),
+        )?;
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
 }
 
 fn reference_snapshot_identity(
@@ -895,11 +960,7 @@ pub(super) fn open_reference_parent(
     name: &str,
     mode: ReferenceParentMode,
 ) -> Result<ReferenceParent, LocalGitFailure> {
-    if name.len() > MAX_BRANCH_BYTES
-        || (name != "HEAD" && (!name.starts_with("refs/") || !git2::Reference::is_valid_name(name)))
-    {
-        return Err(LocalGitFailure::Operation);
-    }
+    validate_reference_name(name)?;
     let path = Path::new(name);
     let leaf = path
         .file_name()
@@ -959,6 +1020,16 @@ pub(super) fn open_reference_parent(
         hierarchy,
         creation_file_mode: creation_modes.map(|(_, file_mode)| file_mode),
     })
+}
+
+pub(super) fn validate_reference_name(name: &str) -> Result<(), LocalGitFailure> {
+    if name.len() > MAX_BRANCH_BYTES
+        || (name != "HEAD" && (!name.starts_with("refs/") || !git2::Reference::is_valid_name(name)))
+    {
+        Err(LocalGitFailure::Operation)
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn reference_creation_modes(

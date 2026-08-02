@@ -44,7 +44,7 @@ pub(super) const MAX_WORKTREE_INSPECTIONS: usize = 4096;
 
 pub(super) const MAX_MERGE_PARENTS: usize = 64;
 
-pub(super) const MAX_MERGE_HEAD_BYTES: usize = MAX_MERGE_PARENTS * 41;
+pub(super) const MAX_MERGE_HEAD_BYTES: usize = MAX_MERGE_PARENTS * 65;
 
 pub(super) const MAX_WORKTREE_PATH_BYTES: usize = 4 * 1024 * 1024;
 

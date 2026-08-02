@@ -391,7 +391,7 @@ fn index_snapshot_rejects_same_length_rewrite_after_metadata_capture() {
 }
 
 #[test]
-fn index_commit_restores_the_exact_entry_displaced_by_exchange() {
+fn index_commit_rejects_a_replacement_before_exchange() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");

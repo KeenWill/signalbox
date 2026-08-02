@@ -2,7 +2,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::Read,
-    os::fd::OwnedFd,
+    os::{fd::OwnedFd, unix::fs::FileExt},
     path::{Component, Path},
 };
 
@@ -13,11 +13,13 @@ use rustix::{
 
 use crate::descriptor::file_snapshot_identity;
 use crate::failure::LocalGitFailure;
+use crate::layout::parse_full_object_id;
 use crate::limits::MAX_REVISION_BYTES;
 use crate::packed_reference::packed_reference_target;
 use crate::pinning::PinnedRepository;
 use crate::reference_lock::{
     PinnedReferenceValue, ReferenceLock, ReferenceParentMode, open_reference_parent,
+    validate_reference_name,
 };
 
 pub(super) fn open_git_directory_path(
@@ -52,6 +54,7 @@ fn read_pinned_reference_with_hook<Hook: FnOnce()>(
     name: &str,
     after_metadata: Hook,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    validate_reference_name(name)?;
     let bound = match open_reference_parent(authority, name, ReferenceParentMode::ExistingOnly) {
         Ok(bound) => bound,
         Err(error) if name.starts_with("refs/") => {
@@ -159,16 +162,25 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
     if !metadata.is_file() || metadata.len() > MAX_REVISION_BYTES as u64 {
         return Err(LocalGitFailure::Operation);
     }
-    after_metadata();
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let mut initial_bytes = Vec::with_capacity(metadata.len() as usize);
     Read::by_ref(&mut file)
         .take((MAX_REVISION_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
+        .read_to_end(&mut initial_bytes)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let after_initial_read = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+    if initial_bytes.len() > MAX_REVISION_BYTES
+        || initial_bytes.len() as u64 != metadata.len()
+        || file_snapshot_identity(&metadata) != file_snapshot_identity(&after_initial_read)
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    after_metadata();
+    let mut bytes = vec![0_u8; initial_bytes.len()];
+    file.read_exact_at(&mut bytes, 0)
         .map_err(|_| LocalGitFailure::Operation)?;
     let after_read = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
-    if bytes.len() > MAX_REVISION_BYTES
-        || bytes.len() as u64 != metadata.len()
-        || file_snapshot_identity(&metadata) != file_snapshot_identity(&after_read)
+    if bytes != initial_bytes
+        || file_snapshot_identity(&after_initial_read) != file_snapshot_identity(&after_read)
     {
         return Err(LocalGitFailure::Operation);
     }
@@ -189,14 +201,14 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
     let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
     if let Some(symbolic) = bytes.strip_prefix(b"ref: ") {
         let symbolic = std::str::from_utf8(symbolic).map_err(|_| LocalGitFailure::Operation)?;
-        if !symbolic.starts_with("refs/") || !git2::Reference::is_valid_name(symbolic) {
+        if !symbolic.starts_with("refs/") || validate_reference_name(symbolic).is_err() {
             return Err(LocalGitFailure::Operation);
         }
         return Ok(PinnedReferenceValue::Symbolic(symbolic.to_owned()));
     }
     let direct = std::str::from_utf8(bytes)
         .ok()
-        .and_then(|value| git2::Oid::from_str_ext(value, authority.object_format).ok())
+        .and_then(|value| parse_full_object_id(value, authority.object_format))
         .ok_or(LocalGitFailure::Operation)?;
     Ok(PinnedReferenceValue::Direct(direct))
 }

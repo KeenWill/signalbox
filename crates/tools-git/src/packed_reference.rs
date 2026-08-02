@@ -4,6 +4,7 @@ use rustix::fs::{Mode, OFlags, openat};
 
 use crate::descriptor::file_snapshot_identity;
 use crate::failure::LocalGitFailure;
+use crate::layout::parse_full_object_id;
 use crate::limits::MAX_PACKED_REFS_BYTES;
 use crate::pinning::PinnedRepository;
 
@@ -156,7 +157,7 @@ fn read_packed_references_with_hook<AfterRead: FnOnce()>(
             if !previous_was_reference
                 || std::str::from_utf8(peeled)
                     .ok()
-                    .and_then(|oid| git2::Oid::from_str_ext(oid, authority.object_format).ok())
+                    .and_then(|oid| parse_full_object_id(oid, authority.object_format))
                     .is_none()
             {
                 return Err(LocalGitFailure::Operation);
@@ -170,7 +171,7 @@ fn read_packed_references_with_hook<AfterRead: FnOnce()>(
             .ok_or(LocalGitFailure::Operation)?;
         let oid = std::str::from_utf8(&line[..separator])
             .ok()
-            .and_then(|oid| git2::Oid::from_str_ext(oid, authority.object_format).ok())
+            .and_then(|oid| parse_full_object_id(oid, authority.object_format))
             .ok_or(LocalGitFailure::Operation)?;
         let existing = line
             .get(separator + 1..)

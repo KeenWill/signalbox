@@ -35,6 +35,47 @@ fn duplicate_packed_reference_names_are_rejected() {
 }
 
 #[test]
+fn abbreviated_packed_reference_object_id_is_rejected() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/abbreviated";
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        format!("# pack-refs with: sorted\nabc123 {name}\n"),
+    )
+    .expect("abbreviated packed reference writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = packed_reference_target(&authority, name)
+        .expect_err("abbreviated packed reference rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn abbreviated_peeled_packed_reference_object_id_is_rejected() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/peeled";
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        format!(
+            "# pack-refs with: peeled sorted\n{} {name}\n^abc123\n",
+            fixture.initial
+        ),
+    )
+    .expect("abbreviated peeled reference writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = packed_reference_target(&authority, name)
+        .expect_err("abbreviated peeled reference rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
 fn sorted_packed_reference_header_rejects_unsorted_records() {
     let fixture = Fixture::new();
     fs::write(

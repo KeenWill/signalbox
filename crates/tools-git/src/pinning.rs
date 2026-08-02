@@ -14,12 +14,16 @@ use std::{
 
 use flate2::read::ZlibDecoder;
 use git2::{Config, ErrorCode, ObjectFormat, Odb, Repository, RepositoryInitOptions};
-use rustix::fs::{CWD, Mode, OFlags, openat};
+use rustix::{
+    fs::{CWD, Mode, OFlags, openat},
+    io::dup,
+};
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
-    FileSnapshotIdentity, RepositoryIdentity, descriptor_path, descriptor_path_from_fd,
-    file_identity, file_snapshot_identity, unsupported_control_files_are_absent,
+    FileIdentity, FileSnapshotIdentity, RepositoryIdentity, descriptor_path,
+    descriptor_path_from_fd, file_identity, file_snapshot_identity,
+    unsupported_control_files_are_absent,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::{
@@ -32,6 +36,7 @@ use crate::limits::{
 };
 
 pub(super) struct PinnedRepository {
+    root_path: PathBuf,
     pub(super) root: fs::File,
     pub(super) git_directory: fs::File,
     _refs: fs::File,
@@ -46,6 +51,7 @@ pub(super) struct PinnedRepository {
 }
 
 pub(super) struct RepositoryOperationGuard {
+    root_path: PathBuf,
     root: fs::File,
     git_directory: fs::File,
     _refs: fs::File,
@@ -216,11 +222,12 @@ impl PinnedRepository {
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         validate_directory_binding(&git_directory, OsStr::new("refs"), &refs)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        let repository = open_pinned_repository(&root, &config.snapshot, config.object_format)
+        let repository = open_pinned_repository(&config.snapshot, config.object_format)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let authority = Self {
+            root_path: root_path.to_owned(),
             root,
             git_directory,
             _refs: refs,
@@ -260,37 +267,17 @@ impl PinnedRepository {
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
-        validate_directory_binding(&self.root, OsStr::new(".git"), &self.git_directory)?;
-        validate_directory_binding(&self.git_directory, OsStr::new("refs"), &self._refs)?;
-        validate_head_at(
+        validate_supported_layout(
+            &self.root_path,
+            &self.root,
             &self.git_directory,
-            self.object_format,
-            self.head_identity,
-            &self.head_bytes,
-        )?;
-        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
-        validate_live_shallow(&self.git_directory, self.object_format)?;
-        validate_config_at(
-            &self.git_directory,
+            &self._refs,
             &self.config_snapshot,
             self.config_identity,
-        )?;
-        validate_head_at(
-            &self.git_directory,
-            self.object_format,
             self.head_identity,
             &self.head_bytes,
-        )?;
-        validate_live_shallow(&self.git_directory, self.object_format)?;
-        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
-        validate_head_at(
-            &self.git_directory,
             self.object_format,
-            self.head_identity,
-            &self.head_bytes,
-        )?;
-        validate_directory_binding(&self.git_directory, OsStr::new("refs"), &self._refs)?;
-        validate_directory_binding(&self.root, OsStr::new(".git"), &self.git_directory)
+        )
     }
 
     pub(super) fn validate_object_layout(&self) -> Result<(), LocalGitFailure> {
@@ -300,6 +287,7 @@ impl PinnedRepository {
     pub(super) fn operation_guard(&self) -> Result<RepositoryOperationGuard, LocalGitFailure> {
         self.validate_supported_layout()?;
         let guard = RepositoryOperationGuard {
+            root_path: self.root_path.clone(),
             root: self
                 .root
                 .try_clone()
@@ -336,38 +324,58 @@ impl PinnedRepository {
 
 impl RepositoryOperationGuard {
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
-        validate_directory_binding(&self.root, OsStr::new(".git"), &self.git_directory)?;
-        validate_directory_binding(&self.git_directory, OsStr::new("refs"), &self._refs)?;
-        validate_head_at(
+        validate_supported_layout(
+            &self.root_path,
+            &self.root,
             &self.git_directory,
-            self.object_format,
-            self.head_identity,
-            &self.head_bytes,
-        )?;
-        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
-        validate_live_shallow(&self.git_directory, self.object_format)?;
-        validate_config_at(
-            &self.git_directory,
+            &self._refs,
             &self.config_snapshot,
             self.config_identity,
-        )?;
-        validate_head_at(
-            &self.git_directory,
-            self.object_format,
             self.head_identity,
             &self.head_bytes,
-        )?;
-        validate_live_shallow(&self.git_directory, self.object_format)?;
-        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
-        validate_head_at(
-            &self.git_directory,
             self.object_format,
-            self.head_identity,
-            &self.head_bytes,
-        )?;
-        validate_directory_binding(&self.git_directory, OsStr::new("refs"), &self._refs)?;
-        validate_directory_binding(&self.root, OsStr::new(".git"), &self.git_directory)
+        )
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_supported_layout(
+    root_path: &Path,
+    root: &fs::File,
+    git_directory: &fs::File,
+    refs: &fs::File,
+    config_snapshot: &fs::File,
+    config_identity: FileSnapshotIdentity,
+    head_identity: FileSnapshotIdentity,
+    head_bytes: &[u8],
+    object_format: ObjectFormat,
+) -> Result<(), LocalGitFailure> {
+    validate_root_path_binding(root_path, root)?;
+    validate_directory_binding(root, OsStr::new(".git"), git_directory)?;
+    validate_directory_binding(git_directory, OsStr::new("refs"), refs)?;
+    validate_head_at(git_directory, object_format, head_identity, head_bytes)?;
+    unsupported_control_files_are_absent(git_directory.as_fd())?;
+    validate_live_shallow(git_directory, object_format)?;
+    validate_config_at(git_directory, config_snapshot, config_identity)?;
+    // Repeat the mutable-file checks to bracket config validation and catch a
+    // concurrent change that occurs between either side of the sequence.
+    validate_head_at(git_directory, object_format, head_identity, head_bytes)?;
+    validate_live_shallow(git_directory, object_format)?;
+    unsupported_control_files_are_absent(git_directory.as_fd())?;
+    validate_head_at(git_directory, object_format, head_identity, head_bytes)?;
+    validate_directory_binding(git_directory, OsStr::new("refs"), refs)?;
+    validate_directory_binding(root, OsStr::new(".git"), git_directory)?;
+    validate_root_path_binding(root_path, root)
+}
+
+fn validate_root_path_binding(root_path: &Path, root: &fs::File) -> Result<(), LocalGitFailure> {
+    let expected = file_identity(&root.metadata().map_err(|_| LocalGitFailure::Repository)?);
+    let current = fs::symlink_metadata(root_path).map_err(|_| LocalGitFailure::Repository)?;
+    if current.file_type().is_symlink() || !current.is_dir() || file_identity(&current) != expected
+    {
+        return Err(LocalGitFailure::Repository);
+    }
+    Ok(())
 }
 
 fn validate_directory_binding(
@@ -460,6 +468,13 @@ fn config_snapshot_bytes(file: &fs::File) -> Result<Vec<u8>, LocalGitFailure> {
 
 impl PinnedObjectDatabase {
     pub(super) fn capture(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
+        Self::capture_with_hook(authority, || {})
+    }
+
+    fn capture_with_hook<AfterScan: FnOnce()>(
+        authority: &PinnedRepository,
+        after_scan: AfterScan,
+    ) -> Result<Self, LocalGitFailure> {
         authority.validate_object_layout()?;
         let objects = openat(
             &authority.git_directory,
@@ -476,6 +491,7 @@ impl PinnedObjectDatabase {
             .saturating_sub(2);
         let mut inspected = 0_usize;
         let mut captured_bytes = 0_u64;
+        let mut pinned_children = Vec::new();
         for entry in fs::read_dir(descriptor_path_from_fd(&objects))
             .map_err(|_| LocalGitFailure::Repository)?
         {
@@ -497,6 +513,7 @@ impl PinnedObjectDatabase {
                     Mode::empty(),
                 )
                 .map_err(|_| LocalGitFailure::Repository)?;
+                pinned_children.push((name.clone(), owned_directory_identity(&pack)?));
                 pin_object_directory(
                     &pack,
                     &directory.path().join("pack"),
@@ -522,6 +539,7 @@ impl PinnedObjectDatabase {
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Repository)?;
+            pinned_children.push((name.clone(), owned_directory_identity(&loose)?));
             let destination = directory.path().join(&name);
             fs::create_dir(&destination).map_err(|_| LocalGitFailure::Operation)?;
             pin_object_directory(
@@ -532,10 +550,31 @@ impl PinnedObjectDatabase {
                 loose_kind,
             )?;
         }
+        after_scan();
         let snapshot = Self { directory };
         snapshot.validate_object_sizes(authority.object_format)?;
+        validate_owned_directory_binding(
+            &authority.git_directory,
+            OsStr::new("objects"),
+            &objects,
+        )?;
+        validate_object_child_bindings(&objects, &pinned_children)?;
         authority.validate_object_layout()?;
+        validate_owned_directory_binding(
+            &authority.git_directory,
+            OsStr::new("objects"),
+            &objects,
+        )?;
+        validate_object_child_bindings(&objects, &pinned_children)?;
         Ok(snapshot)
+    }
+
+    #[cfg(test)]
+    pub(super) fn capture_with_test_hook<AfterScan: FnOnce()>(
+        authority: &PinnedRepository,
+        after_scan: AfterScan,
+    ) -> Result<Self, LocalGitFailure> {
+        Self::capture_with_hook(authority, after_scan)
     }
 
     pub(super) fn add_to(&self, object_database: &Odb<'_>) -> Result<(), LocalGitFailure> {
@@ -706,8 +745,67 @@ pub(super) fn live_object_database_bytes(
         .map_err(|_| LocalGitFailure::Repository)?;
         measure_object_directory(&loose, &mut inspected, &mut bytes, loose_kind)?;
     }
+    validate_owned_directory_binding(&authority.git_directory, OsStr::new("objects"), &objects)?;
     authority.validate_object_layout()?;
+    validate_owned_directory_binding(&authority.git_directory, OsStr::new("objects"), &objects)?;
     Ok(bytes)
+}
+
+fn validate_owned_directory_binding<Parent: AsFd>(
+    parent: &Parent,
+    name: &OsStr,
+    pinned: &OwnedFd,
+) -> Result<(), LocalGitFailure> {
+    let pinned_file = fs::File::from(dup(pinned).map_err(|_| LocalGitFailure::Repository)?);
+    let expected = file_identity(
+        &pinned_file
+            .metadata()
+            .map_err(|_| LocalGitFailure::Repository)?,
+    );
+    let current = fs::File::from(
+        openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Repository)?,
+    );
+    if file_identity(
+        &current
+            .metadata()
+            .map_err(|_| LocalGitFailure::Repository)?,
+    ) != expected
+    {
+        return Err(LocalGitFailure::Repository);
+    }
+    Ok(())
+}
+
+fn owned_directory_identity(directory: &OwnedFd) -> Result<FileIdentity, LocalGitFailure> {
+    let file = fs::File::from(dup(directory).map_err(|_| LocalGitFailure::Repository)?);
+    file.metadata()
+        .map(|metadata| file_identity(&metadata))
+        .map_err(|_| LocalGitFailure::Repository)
+}
+
+fn validate_object_child_bindings(
+    objects: &OwnedFd,
+    expected: &[(std::ffi::OsString, FileIdentity)],
+) -> Result<(), LocalGitFailure> {
+    for (name, identity) in expected {
+        let current = openat(
+            objects,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Repository)?;
+        if owned_directory_identity(&current)? != *identity {
+            return Err(LocalGitFailure::Repository);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn measure_object_directory(
@@ -812,11 +910,9 @@ fn validate_loose_object(
 }
 
 pub(super) fn open_pinned_repository(
-    root: &fs::File,
     config: &fs::File,
     object_format: ObjectFormat,
 ) -> Result<RepositoryShell, git2::Error> {
-    let root_path = descriptor_path(root);
     let directory =
         tempfile::tempdir().map_err(|error| git2::Error::from_str(&error.to_string()))?;
     let mut options = RepositoryInitOptions::new();
@@ -827,7 +923,6 @@ pub(super) fn open_pinned_repository(
         .initial_head("refs/heads/signalbox-pinned")
         .object_format(object_format);
     let repository = Repository::init_opts(directory.path(), &options)?;
-    repository.set_workdir(&root_path, false)?;
     let config = Config::open(&descriptor_path(config))?;
     repository.set_config(&config)?;
     Ok(RepositoryShell {

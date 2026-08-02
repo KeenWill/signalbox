@@ -663,7 +663,8 @@ fn rollback_index_exchange_if_current(
             &quarantine,
             quarantined_displaced,
             quarantined_publication,
-        );
+            None,
+        )?;
         return Err(LocalGitFailure::Operation);
     }
     if renameat_with(
@@ -682,7 +683,8 @@ fn rollback_index_exchange_if_current(
             &quarantine,
             quarantined_displaced,
             quarantined_publication,
-        );
+            Some(publication),
+        )?;
         return Err(LocalGitFailure::Operation);
     }
     if renameat_with(
@@ -694,6 +696,7 @@ fn rollback_index_exchange_if_current(
     )
     .is_err()
     {
+        remove_quarantined_index_if_current(&quarantine, quarantined_publication, publication)?;
         return Err(LocalGitFailure::Operation);
     }
     if index_snapshot_identity_at(parent, index_name) != Ok(Some(displaced))
@@ -711,21 +714,44 @@ fn restore_quarantined_index_exchange(
     quarantine: &QuarantineDirectory,
     quarantined_displaced: &OsStr,
     quarantined_publication: &OsStr,
-) {
-    let _ = renameat_with(
+    publication: Option<IndexSnapshotIdentity>,
+) -> Result<(), LocalGitFailure> {
+    if renameat_with(
         quarantine.descriptor(),
         quarantined_publication,
         parent,
         index_name,
         RenameFlags::NOREPLACE,
-    );
-    let _ = renameat_with(
+    )
+    .is_err()
+    {
+        let publication = publication.ok_or(LocalGitFailure::Operation)?;
+        remove_quarantined_index_if_current(quarantine, quarantined_publication, publication)?;
+    }
+    if renameat_with(
         quarantine.descriptor(),
         quarantined_displaced,
         parent,
         lock_name,
         RenameFlags::NOREPLACE,
-    );
+    )
+    .is_err()
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
+}
+
+fn remove_quarantined_index_if_current(
+    quarantine: &QuarantineDirectory,
+    name: &OsStr,
+    expected: IndexSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    if index_snapshot_identity_at(quarantine.descriptor(), name) != Ok(Some(expected)) {
+        return Err(LocalGitFailure::Operation);
+    }
+    unlinkat(quarantine.descriptor(), name, AtFlags::empty())
+        .map_err(|_| LocalGitFailure::Operation)
 }
 
 pub(super) fn index_installation_mode(

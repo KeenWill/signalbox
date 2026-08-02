@@ -168,19 +168,33 @@ fn valid_head_record(bytes: &[u8], object_format: ObjectFormat) -> bool {
     }
     std::str::from_utf8(record)
         .ok()
-        .and_then(|value| git2::Oid::from_str_ext(value, object_format).ok())
+        .and_then(|value| parse_full_object_id(value, object_format))
         .is_some()
 }
 
 pub(super) fn reject_administrative_symlinks(
     git_directory: &OwnedFd,
+    object_format: ObjectFormat,
 ) -> Result<(), LocalGitToolsConstructionError> {
     reject_administrative_symlinks_for_format(
         &fs::File::from(
             dup(git_directory).map_err(|_| LocalGitToolsConstructionError::Repository)?,
         ),
-        ObjectFormat::Sha1,
+        object_format,
     )
+}
+
+pub(super) const fn object_id_hex_bytes(object_format: ObjectFormat) -> usize {
+    match object_format {
+        ObjectFormat::Sha1 => 40,
+        ObjectFormat::Sha256 => 64,
+    }
+}
+
+pub(super) fn parse_full_object_id(value: &str, object_format: ObjectFormat) -> Option<git2::Oid> {
+    (value.len() == object_id_hex_bytes(object_format))
+        .then(|| git2::Oid::from_str_ext(value, object_format).ok())
+        .flatten()
 }
 
 fn reject_administrative_symlinks_for_format(
@@ -552,7 +566,6 @@ fn validate_repository_config_descriptor(
         tempfile::tempfile().map_err(|_| LocalGitToolsConstructionError::Repository)?;
     snapshot
         .write_all(&bytes)
-        .and_then(|()| snapshot.sync_all())
         .and_then(|()| snapshot.rewind())
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     Ok(RepositoryConfig {

@@ -9,6 +9,7 @@ use std::{
 use git2::{ObjectFormat, ObjectType};
 use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat, symlinkat};
 
+use crate::construction::LocalGitToolsConstructionError;
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
 use crate::layout::{
@@ -23,6 +24,13 @@ use crate::tests::support::{
     Fixture, Sha256Fixture, plant_loose_blob, plant_loose_blob_with_claimed_id, plant_packed_blob,
 };
 
+fn assert_repository_construction_failure(failure: LocalGitToolsConstructionError) {
+    assert!(matches!(
+        failure,
+        LocalGitToolsConstructionError::Repository
+    ));
+}
+
 #[test]
 fn repository_layout_rejects_a_missing_head() {
     let fixture = Fixture::new();
@@ -31,7 +39,7 @@ fn repository_layout_rejects_a_missing_head() {
     let failure =
         validate_repository_layout(fixture.root()).expect_err("missing HEAD rejects admission");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -42,7 +50,19 @@ fn repository_layout_rejects_a_malformed_head() {
     let failure =
         validate_repository_layout(fixture.root()).expect_err("malformed HEAD rejects admission");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn repository_layout_rejects_an_abbreviated_detached_head() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root().join(".git/HEAD"), "abc123\n")
+        .expect("abbreviated detached HEAD writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("abbreviated detached HEAD rejects admission");
+
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -53,7 +73,7 @@ fn repository_layout_rejects_a_missing_refs_directory() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("missing refs directory rejects admission");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -66,7 +86,7 @@ fn repository_layout_rejects_a_regular_refs_file() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("regular refs file rejects admission");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -114,12 +134,122 @@ fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
     fs::rename(&git_path, &retired_git).expect("fixture administrative directory retires");
     symlink(outside.path(), &git_path).expect("replacement administrative symlink constructs");
 
-    reject_administrative_symlinks(&git_directory)
+    reject_administrative_symlinks(&git_directory, ObjectFormat::Sha1)
         .expect("pinned original administrative directory validates");
+    let replacement_git_directory = openat(
+        CWD,
+        outside.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("replacement administrative directory opens");
+    let replacement_failure =
+        reject_administrative_symlinks(&replacement_git_directory, ObjectFormat::Sha1)
+            .expect_err("replacement administrative directory rejects its symlink");
     fs::remove_file(&git_path).expect("replacement administrative symlink removes");
     fs::rename(retired_git, git_path).expect("fixture administrative directory restores");
 
-    assert!(outside.path().join("escape").is_symlink());
+    assert_repository_construction_failure(replacement_failure);
+}
+
+#[test]
+fn repository_shell_never_binds_a_path_resolved_worktree() {
+    let fixture = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let repository = authority.repository().expect("fixture repository locks");
+    let retired_root = fixture.root().with_extension("retired");
+    let replacement_bytes = b"actor replacement root";
+    fs::rename(fixture.root(), &retired_root).expect("fixture root retires");
+    fs::create_dir(fixture.root()).expect("replacement root constructs");
+    fs::write(fixture.root().join("actor"), replacement_bytes)
+        .expect("replacement root marker writes");
+
+    repository
+        .blob(b"descriptor-independent object")
+        .expect("bare repository shell writes an object");
+
+    assert!(repository.workdir().is_none());
+    assert_eq!(
+        fs::read(fixture.root().join("actor")).expect("replacement root marker reads"),
+        replacement_bytes
+    );
+    assert!(!fixture.root().join(".git").exists());
+    fs::remove_dir_all(fixture.root()).expect("replacement root removes");
+    fs::rename(retired_root, fixture.root()).expect("fixture root restores");
+}
+
+#[test]
+fn operation_guard_rejects_a_valid_repository_replacing_the_root_path() {
+    let fixture = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let guard = authority
+        .operation_guard()
+        .expect("repository operation guard constructs");
+    let retired_root = fixture.root().with_extension("retired");
+    fs::rename(fixture.root(), &retired_root).expect("fixture root retires");
+    let mut options = git2::RepositoryInitOptions::new();
+    options.external_template(false).initial_head("main");
+    git2::Repository::init_opts(fixture.root(), &options)
+        .expect("replacement repository initializes");
+
+    let failure = guard
+        .validate_supported_layout()
+        .expect_err("replacement root rejects operation");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    fs::remove_dir_all(fixture.root()).expect("replacement repository removes");
+    fs::rename(retired_root, fixture.root()).expect("fixture root restores");
+}
+
+#[test]
+fn object_capture_rejects_an_object_database_replaced_after_scan() {
+    let fixture = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let objects = fixture.root().join(".git/objects");
+    let retired_objects = fixture.root().join(".git/objects.retired");
+
+    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
+        fs::rename(&objects, &retired_objects).expect("object database retires");
+        fs::create_dir(&objects).expect("replacement object database constructs");
+    })
+    .err()
+    .expect("replacement object database rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(objects.is_dir());
+    fs::remove_dir(&objects).expect("replacement object database removes");
+    fs::rename(retired_objects, objects).expect("object database restores");
+}
+
+#[test]
+fn object_capture_rejects_a_loose_directory_replaced_after_scan() {
+    let fixture = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let objects = fixture.root().join(".git/objects");
+    let object_id = fixture.initial.to_string();
+    let prefix = object_id.get(..2).expect("fixture object prefix exists");
+    let loose = objects.join(prefix);
+    let retired_loose = objects.join(format!("{prefix}.retired"));
+
+    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
+        fs::rename(&loose, &retired_loose).expect("loose object directory retires");
+        fs::create_dir(&loose).expect("replacement loose object directory constructs");
+    })
+    .err()
+    .expect("replacement loose object directory rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(loose.is_dir());
+    fs::remove_dir(&loose).expect("replacement loose object directory removes");
+    fs::rename(retired_loose, loose).expect("loose object directory restores");
 }
 
 #[test]
@@ -137,7 +267,7 @@ fn administrative_scan_rejects_a_symlink_without_retaining_a_deep_path() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("deep administrative symlink rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 fn plant_deep_administrative_symlink(parent: OwnedFd, remaining: usize) {
@@ -177,7 +307,7 @@ fn repository_open_rejects_an_administrative_directory_replaced_after_open() {
     })
     .expect_err("replaced administrative directory rejects repository open");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
     fs::remove_dir_all(&replacement_git).expect("replacement administrative directory removes");
     fs::rename(retired_git, git_path).expect("fixture administrative directory restores");
 }
@@ -201,7 +331,7 @@ fn repository_open_rejects_a_symlinked_root_path() {
 
     fs::remove_file(&root).expect("fixture root symlink removes");
     fs::rename(&retired_root, &root).expect("fixture root restores");
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -218,7 +348,7 @@ fn repository_open_rejects_a_symlinked_administrative_path() {
 
     fs::remove_file(&git_path).expect("administrative symlink removes");
     fs::rename(&retired_git_path, &git_path).expect("administrative directory restores");
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -234,7 +364,7 @@ fn repository_config_rejects_a_utf8_bom_before_an_include_section() {
     let failure =
         validate_repository_layout(fixture.root()).expect_err("BOM-prefixed include rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -250,7 +380,7 @@ fn repository_config_rejects_a_tab_delimited_filter_section() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("tab-delimited filter section rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -266,7 +396,7 @@ fn repository_config_rejects_an_unsupported_reference_storage_extension() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("unsupported reference storage extension rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -279,7 +409,7 @@ fn repository_config_rejects_an_unsupported_format_version() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("future repository format version rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -295,7 +425,7 @@ fn repository_config_rejects_sha256_under_format_version_zero() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("SHA-256 under format version zero rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -311,7 +441,7 @@ fn repository_config_rejects_duplicate_format_versions() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("duplicate repository format versions reject");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -326,7 +456,7 @@ fn repository_config_rejects_a_bare_repository() {
 
     let failure = validate_repository_layout(fixture.root()).expect_err("bare repository rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -342,7 +472,7 @@ fn repository_config_rejects_duplicate_bare_declarations() {
     let failure =
         validate_repository_layout(fixture.root()).expect_err("duplicate bare declarations reject");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -358,7 +488,7 @@ fn repository_config_rejects_a_valueless_hooks_path() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("valueless hooks path rejects repository");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -374,7 +504,7 @@ fn repository_config_rejects_a_valueless_worktree() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("valueless worktree rejects repository");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -437,7 +567,7 @@ fn repository_layout_rejects_a_leading_blank_shallow_record() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("leading blank shallow record rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -452,7 +582,7 @@ fn repository_layout_rejects_a_doubled_trailing_shallow_newline() {
     let failure = validate_repository_layout(fixture.root())
         .expect_err("doubled trailing shallow newline rejects");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -466,7 +596,7 @@ fn repository_open_rejects_commondir_created_after_layout_validation() {
     })
     .expect_err("late commondir rejects repository open");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]
@@ -545,7 +675,7 @@ fn shallow_validation_rejects_a_path_replaced_after_snapshot() {
     )
     .expect_err("replaced shallow pathname rejects validation");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
     assert_eq!(
         fs::read_to_string(shallow_path).expect("replacement shallow file reads"),
         replacement_shallow
@@ -675,7 +805,7 @@ fn repository_open_rejects_live_object_format_changed_after_snapshot() {
     )
     .expect_err("mutated live object format rejects repository open");
 
-    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_repository_construction_failure(failure);
 }
 
 #[test]

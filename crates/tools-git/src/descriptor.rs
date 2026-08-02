@@ -81,7 +81,10 @@ impl QuarantineDirectory {
             Mode::empty(),
         ) {
             Ok(directory) => directory,
-            Err(_) => return Err(LocalGitFailure::Operation),
+            Err(_) => {
+                remove_quarantine_directory_if_identity(parent, &name, created_identity)?;
+                return Err(LocalGitFailure::Operation);
+            }
         };
         let identity = match dup(&directory)
             .ok()
@@ -90,7 +93,11 @@ impl QuarantineDirectory {
             .map(|metadata| file_identity(&metadata))
         {
             Some(identity) if identity == created_identity => identity,
-            Some(_) | None => return Err(LocalGitFailure::Operation),
+            Some(_) | None => {
+                drop(directory);
+                remove_quarantine_directory_if_identity(parent, &name, created_identity)?;
+                return Err(LocalGitFailure::Operation);
+            }
         };
         Ok(Self {
             parent: pinned_parent,
@@ -111,6 +118,64 @@ impl QuarantineDirectory {
     pub(super) fn descriptor(&self) -> &OwnedFd {
         &self.directory
     }
+}
+
+fn remove_quarantine_directory_if_identity(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: FileIdentity,
+) -> Result<(), LocalGitFailure> {
+    let current = match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(status) => Some(FileIdentity {
+            device: status.st_dev,
+            inode: status.st_ino,
+        }),
+        Err(error) if error == rustix::io::Errno::NOENT => None,
+        Err(_) => return Err(LocalGitFailure::Operation),
+    };
+    match current {
+        None => Ok(()),
+        Some(identity) if identity == expected => {
+            unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|_| LocalGitFailure::Operation)
+        }
+        Some(_) => Err(LocalGitFailure::Operation),
+    }
+}
+
+fn restore_or_remove_quarantined_entry(
+    quarantine: &QuarantineDirectory,
+    quarantined_name: &OsStr,
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: FileIdentity,
+    removal_flags: AtFlags,
+) -> Result<(), LocalGitFailure> {
+    if rustix::fs::renameat_with(
+        quarantine.descriptor(),
+        quarantined_name,
+        parent,
+        name,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    let current = statat(
+        quarantine.descriptor(),
+        quarantined_name,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .ok()
+    .map(|status| FileIdentity {
+        device: status.st_dev,
+        inode: status.st_ino,
+    });
+    if current != Some(expected) {
+        return Err(LocalGitFailure::Operation);
+    }
+    unlinkat(quarantine.descriptor(), quarantined_name, removal_flags)
+        .map_err(|_| LocalGitFailure::Operation)
 }
 
 impl Drop for QuarantineDirectory {
@@ -237,23 +302,25 @@ pub(super) fn remove_entry_if_identity(
         inode: status.st_ino,
     });
     if current != Some(expected) {
-        let _ = rustix::fs::renameat_with(
-            quarantine.descriptor(),
+        restore_or_remove_quarantined_entry(
+            &quarantine,
             quarantined_name,
             parent,
             name,
-            rustix::fs::RenameFlags::NOREPLACE,
-        );
+            expected,
+            removal_flags,
+        )?;
         return Err(LocalGitFailure::Operation);
     }
     if unlinkat(quarantine.descriptor(), quarantined_name, removal_flags).is_err() {
-        let _ = rustix::fs::renameat_with(
-            quarantine.descriptor(),
+        restore_or_remove_quarantined_entry(
+            &quarantine,
             quarantined_name,
             parent,
             name,
-            rustix::fs::RenameFlags::NOREPLACE,
-        );
+            expected,
+            removal_flags,
+        )?;
         return Err(LocalGitFailure::Operation);
     }
     if descriptor_entry_exists(parent, name)? {

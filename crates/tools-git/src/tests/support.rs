@@ -31,7 +31,10 @@ pub(super) struct Sha256Fixture {
 impl Fixture {
     pub(super) fn new() -> Self {
         let directory = tempfile::tempdir().expect("temporary repository root constructs");
-        let repository = Repository::init(directory.path()).expect("repository initializes");
+        let mut options = RepositoryInitOptions::new();
+        options.external_template(false).initial_head("main");
+        let repository =
+            Repository::init_opts(directory.path(), &options).expect("repository initializes");
         fs::write(directory.path().join(TRACKED_PATH), INITIAL_CONTENT)
             .expect("fixture file writes");
         let initial = commit_all(&repository, INITIAL_MESSAGE);
