@@ -986,17 +986,19 @@ protocol scope). Implemented storage:
   dedicated call, exact positive through position, appended summary, and result
   frontier.
 
-**Session-delegation foundation proposal.** The full delegation stack adds a
-version-one `delegation_wake_outbox_event` typed record. It names the exact
-spawning request and has one closed subject shape: `result` carries an equal
-`result_spawning_request_id`, while `message` carries a `DelegationMessageId`
-belonging to that relationship. Its header's `session_id` is the parent
-receiving a result wake or the peer receiving a message wake. The schema
-requires exactly the selected subject columns and correlates each identity to
-the same relationship; dispatch decodes the same closed union and rejects every
-other storage version. The header completeness trigger includes this record
-kind, and the record is append-only and rejects `TRUNCATE` with the rest of the
-family.
+**Session-delegation foundation proposal.** The full delegation stack adds
+version-one `delegation_update_outbox_event` and `delegation_wake_outbox_event`
+typed records. An update names its affected parent or child stream and exactly
+one closed subject: `child_spawned`, `child_waiting`,
+`child_lifecycle_disposition`, `child_result`, or `session_message`; each
+subject points to its typed delegation record, and one durable fact may be
+recorded once on each affected stream. A wake remains distinct and internal: it
+names the exact spawning request and either an equal result identity or a
+message belonging to that relationship, with the header naming the recipient.
+The schema requires each selected subject shape, correlation, and recipient;
+dispatch rejects every other storage version. Header completeness covers both
+kinds, and both records are append-only and reject `TRUNCATE` with the rest of
+the family.
 
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
