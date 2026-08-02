@@ -683,8 +683,14 @@ mod tests {
         assert_eq!(event.command_id(), command);
     }
 
-    #[test]
-    fn placement_update_terminal_evidence_rejects_impossible_shapes() {
+    struct PlacementUpdateFixture {
+        session: SessionId,
+        command_id: DurableCommandId,
+        replacement: SessionPlacement,
+        command: UpdateSessionPlacement,
+    }
+
+    fn placement_update_fixture() -> PlacementUpdateFixture {
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(3));
         let command_id = DurableCommandId::from_uuid(uuid::Uuid::from_u128(4));
         let replacement = scoped("projects.foo.session");
@@ -694,46 +700,85 @@ mod tests {
             SessionPlacementVersion::INITIAL,
             replacement.clone(),
         );
-        let created = SessionPlacementEvent::created(session, replacement.clone(), command_id);
-        let foreign = SessionPlacementEvent::updated(
+        PlacementUpdateFixture {
             session,
-            SessionPlacementVersion::INITIAL,
-            replacement.clone(),
-            DurableCommandId::from_uuid(uuid::Uuid::from_u128(5)),
-        )
-        .expect("fixture prior version has a successor");
-        let applied = SessionPlacementEvent::updated(
-            session,
-            SessionPlacementVersion::INITIAL,
-            replacement,
             command_id,
+            replacement,
+            command,
+        }
+    }
+
+    #[test]
+    fn placement_update_applied_evidence_rejects_a_created_event() {
+        let fixture = placement_update_fixture();
+        let created = SessionPlacementEvent::created(
+            fixture.session,
+            fixture.replacement,
+            fixture.command_id,
+        );
+
+        assert_eq!(
+            UpdateSessionPlacementApplied::try_new(&fixture.command, created),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_update_applied_evidence_rejects_foreign_command_provenance() {
+        let fixture = placement_update_fixture();
+        let foreign = SessionPlacementEvent::updated(
+            fixture.session,
+            SessionPlacementVersion::INITIAL,
+            fixture.replacement,
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(5)),
         )
         .expect("fixture prior version has a successor");
 
         assert_eq!(
-            UpdateSessionPlacementApplied::try_new(&command, created),
+            UpdateSessionPlacementApplied::try_new(&fixture.command, foreign),
             None
         );
+    }
+
+    #[test]
+    fn placement_update_applied_evidence_accepts_the_matching_update() {
+        let fixture = placement_update_fixture();
+        let applied = SessionPlacementEvent::updated(
+            fixture.session,
+            SessionPlacementVersion::INITIAL,
+            fixture.replacement,
+            fixture.command_id,
+        )
+        .expect("fixture prior version has a successor");
+
         assert_eq!(
-            UpdateSessionPlacementApplied::try_new(&command, foreign),
-            None
-        );
-        assert_eq!(
-            UpdateSessionPlacementApplied::try_new(&command, applied.clone())
+            UpdateSessionPlacementApplied::try_new(&fixture.command, applied.clone())
                 .expect("matching event produces sealed evidence")
                 .event(),
             &applied
         );
+    }
+
+    #[test]
+    fn placement_update_mismatch_evidence_rejects_the_expected_version() {
+        let fixture = placement_update_fixture();
+
         assert_eq!(
             UpdateSessionPlacementRejection::current_version_mismatch(
-                &command,
+                &fixture.command,
                 SessionPlacementVersion::INITIAL,
             ),
             None
         );
+    }
+
+    #[test]
+    fn placement_update_exhaustion_evidence_rejects_a_nonmaximum_version() {
+        let fixture = placement_update_fixture();
+
         assert_eq!(
             UpdateSessionPlacementRejection::version_exhausted(
-                &command,
+                &fixture.command,
                 SessionPlacementVersion::INITIAL,
             ),
             None

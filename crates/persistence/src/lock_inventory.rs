@@ -85,9 +85,9 @@ pub(crate) const UPDATE_SESSION_PLACEMENT_HEAD: &str = "SELECT session_row.ances
          ON native_creation.command_id = event.provenance_command_id
         AND native_creation.created_session_id = event.session_id
         AND native_creation.command_kind = 'create_session'
-        AND native_creation.storage_version IN (1, 2, 3, 4, 5, 6)
+        AND native_creation.storage_version IN (1, 2, 3, 4, 6)
         AND (native_creation.storage_version = 6
-             OR (native_creation.storage_version IN (1, 2, 3, 4, 5)
+             OR (native_creation.storage_version IN (1, 2, 3, 4)
                  AND event.placement_path IS NULL
                  AND NOT event.root_global_read_intent))
         AND native_creation.result_kind = 'applied'
