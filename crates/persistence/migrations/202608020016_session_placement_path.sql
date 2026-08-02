@@ -118,7 +118,8 @@ CREATE TABLE update_session_placement_command (
     ),
     CONSTRAINT update_session_placement_command_result_shape CHECK (
         (result_kind = 'applied' AND rejection_kind IS NULL
-            AND result_version IS NOT NULL AND result_current_version IS NULL)
+            AND result_version = expected_version + 1
+            AND result_current_version IS NULL)
         OR (result_kind = 'rejected' AND rejection_kind = 'session_not_found'
             AND result_version IS NULL AND result_current_version IS NULL)
         OR (result_kind = 'rejected' AND rejection_kind = 'current_version_mismatch'

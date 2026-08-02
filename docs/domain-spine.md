@@ -665,20 +665,34 @@ impl SessionPlacementEvent {
     // accessors: session(), kind(), placement(), prior_version(), command_id()
 }
 pub enum UpdateSessionPlacementResult {
-    Applied(SessionPlacementEvent),
+    Applied(UpdateSessionPlacementApplied),
     Rejected(UpdateSessionPlacementRejection),
 }
-pub enum UpdateSessionPlacementRejection {
-    SessionNotFound { session: SessionId },
-    CurrentVersionMismatch {
-        session: SessionId,
-        expected: SessionPlacementVersion,
+pub struct UpdateSessionPlacementApplied { /* private */ }
+impl UpdateSessionPlacementApplied {
+    pub fn try_new(
+        command: &UpdateSessionPlacement,
+        event: SessionPlacementEvent,
+    ) -> Option<Self>;
+    // accessors: event()
+}
+pub enum UpdateSessionPlacementRejectionKind {
+    SessionNotFound,
+    CurrentVersionMismatch,
+    VersionExhausted,
+}
+pub struct UpdateSessionPlacementRejection { /* private */ }
+impl UpdateSessionPlacementRejection {
+    pub const fn session_not_found(command: &UpdateSessionPlacement) -> Self;
+    pub const fn current_version_mismatch(
+        command: &UpdateSessionPlacement,
         current: SessionPlacementVersion,
-    },
-    VersionExhausted {
-        session: SessionId,
+    ) -> Option<Self>;
+    pub const fn version_exhausted(
+        command: &UpdateSessionPlacement,
         current: SessionPlacementVersion,
-    },
+    ) -> Option<Self>;
+    // accessors: session(), expected_version(), current_version(), kind()
 }
 ```
 
@@ -8045,7 +8059,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
-| domain: session_placement                          | 16                   |
+| domain: session_placement                          | 18                   |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
@@ -8074,7 +8088,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **615 (+7 free fn)** |
+| **signalbox-domain total**                         | **617 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

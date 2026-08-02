@@ -8,7 +8,7 @@ use signalbox_domain::{
     GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
     SessionPlacementEventKind, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
-    UpdateSessionPlacementRejection,
+    UpdateSessionPlacementRejectionKind,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -133,14 +133,12 @@ pub(crate) fn session_placement_result_kind_from_str(
 }
 
 pub(crate) const fn session_placement_rejection_to_str(
-    value: &UpdateSessionPlacementRejection,
+    value: UpdateSessionPlacementRejectionKind,
 ) -> &'static str {
     match value {
-        UpdateSessionPlacementRejection::SessionNotFound { .. } => "session_not_found",
-        UpdateSessionPlacementRejection::CurrentVersionMismatch { .. } => {
-            "current_version_mismatch"
-        }
-        UpdateSessionPlacementRejection::VersionExhausted { .. } => "version_exhausted",
+        UpdateSessionPlacementRejectionKind::SessionNotFound => "session_not_found",
+        UpdateSessionPlacementRejectionKind::CurrentVersionMismatch => "current_version_mismatch",
+        UpdateSessionPlacementRejectionKind::VersionExhausted => "version_exhausted",
     }
 }
 

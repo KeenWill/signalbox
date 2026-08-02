@@ -192,11 +192,12 @@ async fn s36_placement_update_appends_history_and_equal_replay_preserves_it()
     let repository = SessionPlacementRepository::new(pool.clone());
 
     let first = repository.handle(update.clone()).await?;
-    let SessionPlacementRepositoryOutcome::Recorded(UpdateSessionPlacementResult::Applied(event)) =
+    let SessionPlacementRepositoryOutcome::Recorded(UpdateSessionPlacementResult::Applied(applied)) =
         &first
     else {
         panic!("fixture update must apply")
     };
+    let event = applied.event();
     assert_eq!(event.kind(), SessionPlacementEventKind::Updated);
     assert_eq!(
         event.prior_version(),
@@ -463,6 +464,15 @@ async fn s36_creation_replay_rejects_cross_wired_placement_provenance() -> Resul
         .execute(&pool)
         .await?;
 
+    let read_error = SessionPlacementRepository::new(pool.clone())
+        .load_current(first_session)
+        .await
+        .expect_err("a public placement read must authenticate creation provenance");
+    let SessionPlacementRepositoryError::Corruption(read_reason) = read_error else {
+        panic!("cross-wired creation provenance fails public read with typed corruption")
+    };
+    assert_eq!(read_reason, "session placement provenance receipt");
+
     let error = repository
         .handle(first)
         .await
@@ -497,8 +507,9 @@ async fn s36_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Er
         SessionPlacementVersion::INITIAL,
         scoped("projects.foo.first"),
     );
+    let second_command = command(0x109);
     let second = UpdateSessionPlacement::new(
-        command(0x109),
+        second_command,
         session_id,
         SessionPlacementVersion::try_from_u64(2).expect("fixture version is positive"),
         scoped("projects.foo.second"),
@@ -506,16 +517,19 @@ async fn s36_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Er
     let repository = SessionPlacementRepository::new(pool.clone());
     repository.handle(first.clone()).await?;
     repository.handle(second).await?;
-    sqlx::query("ALTER TABLE update_session_placement_command DISABLE TRIGGER ALL")
+    sqlx::query("ALTER TABLE session_placement_event DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
     sqlx::query(
-        "UPDATE update_session_placement_command SET result_version = 3 WHERE command_id = $1",
+        "UPDATE session_placement_event
+            SET provenance_command_id = $2
+          WHERE session_id = $1 AND version = 2",
     )
-    .bind(*first_command.as_uuid())
+    .bind(*session_id.as_uuid())
+    .bind(*second_command.as_uuid())
     .execute(&pool)
     .await?;
-    sqlx::query("ALTER TABLE update_session_placement_command ENABLE TRIGGER ALL")
+    sqlx::query("ALTER TABLE session_placement_event ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
 
@@ -589,8 +603,53 @@ async fn s36_current_read_and_update_authenticate_the_placement_update_receipt()
     let SessionPlacementRepositoryError::Corruption(update_reason) = update_error else {
         panic!("cross-wired current placement fails update with typed corruption")
     };
-    assert_eq!(update_reason, "current placement provenance receipt");
+    assert_eq!(update_reason, "session placement provenance receipt");
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    let command_id = command(0x119);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, $2, $3, transaction_timestamp())",
+    )
+    .bind(*command_id.as_uuid())
+    .bind("update_session_placement")
+    .bind(1_i16)
+    .execute(&mut *transaction)
+    .await?;
+    let malformed = sqlx::query(
+        "INSERT INTO update_session_placement_command
+            (command_id, command_kind, storage_version, session_id,
+             expected_version, replacement_path, root_global_read_intent,
+             result_kind, rejection_kind, result_version, result_current_version)
+         VALUES ($1, 'update_session_placement', 1, $2,
+                 7, NULL, FALSE, 'applied', NULL, 2, NULL)",
+    )
+    .bind(*command_id.as_uuid())
+    .bind(*session(0x20b).as_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("an applied update receipt must advance its expected predecessor");
+    let database_error = malformed
+        .as_database_error()
+        .expect("PostgreSQL reports the applied-result shape constraint");
+
+    assert_eq!(
+        database_error.constraint(),
+        Some("update_session_placement_command_result_shape")
+    );
+
+    transaction.rollback().await?;
     pool.close().await;
     drop(container);
     Ok(())

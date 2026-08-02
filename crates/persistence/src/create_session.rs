@@ -16,7 +16,10 @@ use signalbox_domain::{
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
-use crate::command_registry::{self, CommandKind, RegistryCorruption, RegistryInspectionError};
+use crate::command_registry::{
+    self, CommandKind, RegistryCorruption, RegistryInspectionError,
+    create_session_storage_version_is_supported,
+};
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
@@ -26,7 +29,6 @@ use crate::mapping::{
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const MIN_SUPPORTED_STORAGE_VERSION: i16 = 1;
 const WRITTEN_STORAGE_VERSION: i16 = 6;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
@@ -845,7 +847,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, CreateSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if (MIN_SUPPORTED_STORAGE_VERSION..=WRITTEN_STORAGE_VERSION).contains(&actual) {
+    if create_session_storage_version_is_supported(actual) {
         Ok(actual)
     } else {
         Err(CreateSessionCorruption::Unsupported {
