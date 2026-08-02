@@ -148,6 +148,67 @@ fn exchanged_reference_publication_preserves_a_post_publish_replacement() {
 }
 
 #[test]
+fn reference_publication_rejects_an_in_place_rewrite_of_prepared_bytes() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+    fs::write(&lock_path, format!("{actor_target}\n"))
+        .expect("actor rewrites prepared reference in place");
+
+    let failure = lock
+        .publish(&authority, &expected)
+        .expect_err("in-place prepared reference rewrite rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("original reference reads after rejection"),
+        format!("{}\n", fixture.initial)
+    );
+}
+
+#[test]
+fn reference_publication_preserves_a_directory_replacing_the_cleanup_path() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_cleanup_test_hook(&authority, &expected, || {
+            fs::remove_file(&lock_path).expect("displaced reference removes before cleanup");
+            fs::create_dir(&lock_path).expect("actor cleanup directory constructs");
+        })
+        .expect_err("cleanup-path directory rejects reference cleanup");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("prepared live reference reads"),
+        format!("{}\n", git2::Oid::ZERO_SHA1)
+    );
+    assert!(lock_path.is_dir());
+}
+
+#[test]
 fn loose_reference_rejects_growth_after_metadata_capture() {
     let fixture = Fixture::new();
     let name = "refs/heads/growing";

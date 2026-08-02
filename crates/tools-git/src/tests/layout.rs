@@ -2,7 +2,7 @@
 
 use std::{fs, os::unix::fs::symlink};
 
-use git2::ObjectFormat;
+use git2::{ObjectFormat, ObjectType};
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
 use crate::failure::LocalGitFailure;
@@ -11,7 +11,9 @@ use crate::layout::{reject_administrative_symlinks, validate_repository_layout};
 use crate::limits::MAX_OBJECT_BYTES;
 use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
 use crate::reference_read::resolve_pinned_reference_chain;
-use crate::tests::support::{Fixture, Sha256Fixture, plant_loose_blob};
+use crate::tests::support::{
+    Fixture, Sha256Fixture, plant_loose_blob, plant_loose_blob_with_claimed_id, plant_packed_blob,
+};
 
 #[test]
 fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
@@ -163,6 +165,43 @@ fn object_capture_rejects_a_compressed_loose_object_above_the_decoded_limit() {
         .expect("oversized decoded loose object rejects capture");
 
     assert!(compressed_bytes < content.len() as u64);
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_capture_rejects_a_loose_object_stored_under_an_unrelated_id() {
+    let fixture = Fixture::new();
+    let claimed_id =
+        git2::Oid::hash_object(ObjectType::Blob, b"claimed blob").expect("claimed blob hashes");
+    plant_loose_blob_with_claimed_id(fixture.root(), b"actual blob", claimed_id);
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = PinnedObjectDatabase::capture(&authority)
+        .err()
+        .expect("mismatched loose object rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_capture_rejects_a_packed_object_above_the_decoded_limit() {
+    let fixture = Fixture::new();
+    let content = vec![0_u8; MAX_OBJECT_BYTES + 1];
+    let pack_path = plant_packed_blob(fixture.root(), &content);
+    let packed_bytes = fs::metadata(pack_path)
+        .expect("oversized packed object metadata reads")
+        .len();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = PinnedObjectDatabase::capture(&authority)
+        .err()
+        .expect("oversized decoded packed object rejects capture");
+
+    assert!(packed_bytes < content.len() as u64);
     assert_eq!(failure, LocalGitFailure::Repository);
 }
 

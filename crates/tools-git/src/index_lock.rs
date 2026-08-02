@@ -28,6 +28,7 @@ pub(super) struct IndexLock {
     identity: FileIdentity,
     object_format: ObjectFormat,
     expected_index: Option<IndexSnapshotIdentity>,
+    prepared_index: Option<IndexSnapshotIdentity>,
     _private_directory: tempfile::TempDir,
     private_index_path: PathBuf,
     committed: bool,
@@ -178,6 +179,7 @@ impl IndexLock {
             identity,
             object_format,
             expected_index: None,
+            prepared_index: None,
             _private_directory: private_directory,
             private_index_path,
             committed: false,
@@ -197,6 +199,7 @@ impl IndexLock {
             .lock
             .sync_all()
             .map_err(|_| LocalGitFailure::Operation)?;
+        guard.record_prepared_index()?;
         guard.copy_lock_to_private_index()?;
         let index = Index::open_ext(&guard.private_index_path, guard.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -257,12 +260,14 @@ impl IndexLock {
             .and_then(|()| self.lock.rewind())
             .and_then(|()| self.lock.write_all(bytes))
             .and_then(|()| self.lock.sync_all())
-            .map_err(|_| LocalGitFailure::Operation)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.record_prepared_index()
     }
 
     pub(super) fn write(&mut self, index: &mut Index) -> Result<(), LocalGitFailure> {
         if index.path() != Some(self.private_index_path.as_path()) {
-            return write_index_entries(&mut self.lock, index, self.object_format);
+            write_index_entries(&mut self.lock, index, self.object_format)?;
+            return self.record_prepared_index();
         }
         index.write().map_err(|_| LocalGitFailure::Operation)?;
         let descriptor = openat(
@@ -289,11 +294,14 @@ impl IndexLock {
         if copied != metadata.len() || copied > MAX_INDEX_BYTES as u64 {
             return Err(LocalGitFailure::Operation);
         }
-        self.lock.sync_all().map_err(|_| LocalGitFailure::Operation)
+        self.lock
+            .sync_all()
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.record_prepared_index()
     }
 
     pub(super) fn commit(self) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hook(|| {})
+        self.commit_with_hooks(|| {}, || {}, || {})
     }
 
     #[cfg(test)]
@@ -301,25 +309,42 @@ impl IndexLock {
         self,
         before_publish: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hook(before_publish)
+        self.commit_with_hooks(before_publish, || {}, || {})
     }
 
-    fn commit_with_hook<Hook: FnOnce()>(
-        mut self,
-        before_publish: Hook,
+    #[cfg(test)]
+    pub(super) fn commit_with_exchange_test_hook<Hook: FnOnce()>(
+        self,
+        after_exchange: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        let path_identity =
-            entry_identity(&self.parent, &self.lock_name)?.ok_or(LocalGitFailure::Operation)?;
-        let descriptor_identity = file_identity(
-            &self
-                .lock
-                .metadata()
-                .map_err(|_| LocalGitFailure::Operation)?,
-        );
-        if path_identity != self.identity || descriptor_identity != self.identity {
+        self.commit_with_hooks(|| {}, after_exchange, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn commit_with_cleanup_test_hook<Hook: FnOnce()>(
+        self,
+        before_cleanup: Hook,
+    ) -> Result<FileIdentity, LocalGitFailure> {
+        self.commit_with_hooks(|| {}, || {}, before_cleanup)
+    }
+
+    fn commit_with_hooks<
+        BeforePublish: FnOnce(),
+        AfterExchange: FnOnce(),
+        BeforeCleanup: FnOnce(),
+    >(
+        mut self,
+        before_publish: BeforePublish,
+        after_exchange: AfterExchange,
+        before_cleanup: BeforeCleanup,
+    ) -> Result<FileIdentity, LocalGitFailure> {
+        let prepared_index = self.prepared_index.ok_or(LocalGitFailure::Operation)?;
+        before_publish();
+        if self.lock_snapshot_identity()? != prepared_index
+            || index_snapshot_identity_at(&self.parent, &self.lock_name)? != Some(prepared_index)
+        {
             return Err(LocalGitFailure::Operation);
         }
-        before_publish();
         match self.expected_index {
             Some(original_index) => {
                 if index_snapshot_identity_at(&self.parent, &self.index_name)?
@@ -335,13 +360,15 @@ impl IndexLock {
                     RenameFlags::EXCHANGE,
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
+                after_exchange();
                 let publication_is_owned =
-                    entry_identity(&self.parent, &self.index_name) == Ok(Some(self.identity));
+                    index_snapshot_identity_at(&self.parent, &self.index_name)
+                        == Ok(Some(prepared_index));
                 let displaced_is_current =
                     index_snapshot_identity_at(&self.parent, &self.lock_name)
                         == Ok(Some(original_index));
                 if !publication_is_owned || !displaced_is_current {
-                    if publication_is_owned || displaced_is_current {
+                    if publication_is_owned && displaced_is_current {
                         let _ = renameat_with(
                             &self.parent,
                             &self.lock_name,
@@ -352,14 +379,28 @@ impl IndexLock {
                     }
                     return Err(LocalGitFailure::Operation);
                 }
+                before_cleanup();
                 if unlinkat(&self.parent, &self.lock_name, AtFlags::empty()).is_err() {
-                    let _ = renameat_with(
-                        &self.parent,
-                        &self.lock_name,
-                        &self.parent,
-                        &self.index_name,
-                        RenameFlags::EXCHANGE,
-                    );
+                    let publication_is_current =
+                        index_snapshot_identity_at(&self.parent, &self.index_name)
+                            == Ok(Some(prepared_index));
+                    let displaced_is_current =
+                        index_snapshot_identity_at(&self.parent, &self.lock_name)
+                            == Ok(Some(original_index));
+                    if publication_is_current && displaced_is_current {
+                        let _ = renameat_with(
+                            &self.parent,
+                            &self.lock_name,
+                            &self.parent,
+                            &self.index_name,
+                            RenameFlags::EXCHANGE,
+                        );
+                    }
+                    return Err(LocalGitFailure::Operation);
+                }
+                if index_snapshot_identity_at(&self.parent, &self.index_name)
+                    != Ok(Some(prepared_index))
+                {
                     return Err(LocalGitFailure::Operation);
                 }
             }
@@ -375,20 +416,32 @@ impl IndexLock {
                     RenameFlags::NOREPLACE,
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
-                if entry_identity(&self.parent, &self.index_name) != Ok(Some(self.identity)) {
-                    let _ = renameat_with(
-                        &self.parent,
-                        &self.index_name,
-                        &self.parent,
-                        &self.lock_name,
-                        RenameFlags::NOREPLACE,
-                    );
+                if index_snapshot_identity_at(&self.parent, &self.index_name)
+                    != Ok(Some(prepared_index))
+                {
                     return Err(LocalGitFailure::Operation);
                 }
             }
         }
         self.committed = true;
         Ok(self.identity)
+    }
+
+    fn record_prepared_index(&mut self) -> Result<(), LocalGitFailure> {
+        let snapshot = self.lock_snapshot_identity()?;
+        if snapshot.file != self.identity {
+            return Err(LocalGitFailure::Operation);
+        }
+        self.prepared_index = Some(snapshot);
+        Ok(())
+    }
+
+    fn lock_snapshot_identity(&mut self) -> Result<IndexSnapshotIdentity, LocalGitFailure> {
+        let metadata = self
+            .lock
+            .metadata()
+            .map_err(|_| LocalGitFailure::Operation)?;
+        snapshot_identity(&mut self.lock, &metadata)
     }
 }
 

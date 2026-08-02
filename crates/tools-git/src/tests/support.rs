@@ -97,8 +97,16 @@ pub(super) fn commit_index(repository: &Repository, message: &str) -> Oid {
 }
 
 pub(super) fn plant_loose_blob(root: &Path, content: &[u8]) -> std::path::PathBuf {
-    let object_id = Oid::hash_object(ObjectType::Blob, content).expect("blob object hashes");
-    let object_id = object_id.to_string();
+    let claimed_id = Oid::hash_object(ObjectType::Blob, content).expect("blob object hashes");
+    plant_loose_blob_with_claimed_id(root, content, claimed_id)
+}
+
+pub(super) fn plant_loose_blob_with_claimed_id(
+    root: &Path,
+    content: &[u8],
+    claimed_id: Oid,
+) -> std::path::PathBuf {
+    let object_id = claimed_id.to_string();
     let object_directory = root.join(".git/objects").join(&object_id[..2]);
     let object_path = object_directory.join(&object_id[2..]);
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -108,4 +116,32 @@ pub(super) fn plant_loose_blob(root: &Path, content: &[u8]) -> std::path::PathBu
     fs::create_dir_all(&object_directory).expect("loose object directory constructs");
     fs::write(&object_path, compressed).expect("loose object writes");
     object_path
+}
+
+pub(super) fn plant_packed_blob(root: &Path, content: &[u8]) -> std::path::PathBuf {
+    let repository = Repository::open(root).expect("fixture repository opens for packing");
+    let object_id = repository.blob(content).expect("packed blob writes");
+    let mut builder = repository.packbuilder().expect("pack builder constructs");
+    builder
+        .insert_object(object_id, None)
+        .expect("packed blob enters builder");
+    let pack_directory = root.join(".git/objects/pack");
+    builder
+        .write(&pack_directory, 0o600)
+        .expect("fixture pack writes");
+    let loose_id = object_id.to_string();
+    fs::remove_file(
+        root.join(".git/objects")
+            .join(&loose_id[..2])
+            .join(&loose_id[2..]),
+    )
+    .expect("oversized loose source removes after packing");
+    fs::read_dir(pack_directory)
+        .expect("fixture pack directory reads")
+        .map(|entry| entry.expect("fixture pack entry reads").path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "pack")
+        })
+        .expect("fixture pack file exists")
 }
