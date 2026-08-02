@@ -72,19 +72,24 @@ impl CredentialScrubber {
         std::iter::once(self.exact.as_str()).chain(self.decoded_variants.iter().map(String::as_str))
     }
 
-    fn url_collision_variants(&self) -> Vec<String> {
+    fn url_collision_variants(&self) -> Option<Vec<String>> {
         let mut variants = Vec::new();
         for variant in self.reversible_variants() {
-            if !variants.iter().any(|retained| retained == variant) {
-                variants.push(String::from(variant));
-            }
-            if let Some(preprocessed) = url_preprocessed_credential_variant(variant)
-                && !variants.iter().any(|retained| retained == &preprocessed)
-            {
-                variants.push(preprocessed);
-            }
+            retain_url_collision_variant(&mut variants, variant);
         }
-        variants
+        let mut inspected = 0;
+        while inspected < variants.len() {
+            let variant = variants[inspected].clone();
+            if let Some(preprocessed) = url_preprocessed_credential_variant(&variant) {
+                retain_url_collision_variant(&mut variants, &preprocessed);
+            }
+            let decoded = decoded_credential_variants(&variant)?;
+            for decoded_variant in decoded {
+                retain_url_collision_variant(&mut variants, &decoded_variant);
+            }
+            inspected += 1;
+        }
+        Some(variants)
     }
 
     pub(super) fn output_collision_variants(&self) -> impl Iterator<Item = &str> {
@@ -100,7 +105,9 @@ impl CredentialScrubber {
         }) {
             return true;
         }
-        let url_variants = self.url_collision_variants();
+        let Some(url_variants) = self.url_collision_variants() else {
+            return true;
+        };
         if url_variants.iter().any(|variant| {
             unicode_case_insensitive_contains(text, variant)
                 || encoded_contains_credential(text, variant)
@@ -160,6 +167,19 @@ impl CredentialScrubber {
         let Ok(url) = Url::parse(text) else {
             return true;
         };
+        let default_port = match url.scheme() {
+            "http" => 80,
+            "https" => 443,
+            _ => return true,
+        };
+        if url_variants.iter().any(|variant| {
+            removed_default_port_path_fragment(variant, default_port).is_some_and(|fragment| {
+                unicode_case_insensitive_contains(text, &fragment)
+                    || encoded_contains_credential(text, &fragment)
+            })
+        }) {
+            return true;
+        }
         if url.port().is_some()
             && url_variants.iter().any(|variant| {
                 discarded_port_zero_prefix_context(variant).is_some_and(|retained_context| {
@@ -217,10 +237,9 @@ impl CredentialScrubber {
                             result_hextets
                                 .iter()
                                 .any(|component| component.contains(&fragment))
-                        }) || canonicalized_ipv6_separator_bound_hextet_text_fragment(variant)
-                            .is_some_and(|fragment| {
-                                unicode_case_insensitive_contains(host, &fragment)
-                            })
+                        }) || canonicalized_ipv6_separator_bound_hextet_text_fragments(variant)
+                            .iter()
+                            .any(|fragment| unicode_case_insensitive_contains(host, fragment))
                             || canonicalized_ipv6_fragments(variant)
                                 .into_iter()
                                 .any(|fragment| {
@@ -268,6 +287,12 @@ impl CredentialScrubber {
                 idna_mapped_unicode_variant(variant)
                     .is_some_and(|mapped| unicode_case_insensitive_contains(&unicode_host, &mapped))
             })
+    }
+}
+
+fn retain_url_collision_variant(variants: &mut Vec<String>, candidate: &str) {
+    if !candidate.is_empty() && !variants.iter().any(|retained| retained == candidate) {
+        variants.push(String::from(candidate));
     }
 }
 
@@ -338,18 +363,30 @@ pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
         })
 }
 
-fn fixed_evidence_diagnostic_outputs() -> Option<[String; 4]> {
+fn fixed_evidence_diagnostic_outputs() -> Option<[String; 5]> {
+    const DETAIL_SHAPE_PROBE: &str = "diagnostic probe";
     let populated_detail =
-        ToolExecutionErrorDetail::try_new(String::from("diagnostic probe")).ok()?;
+        ToolExecutionErrorDetail::try_new(String::from(DETAIL_SHAPE_PROBE)).ok()?;
+    let populated_failure = format!(
+        "{:?}",
+        ToolExecutorEvidence::KnownFailed {
+            detail: Some(populated_detail)
+        }
+    );
+    let probe_debug = format!("{:?}", String::from(DETAIL_SHAPE_PROBE));
+    let empty_debug = format!("{:?}", String::new());
+    let populated_failure_shape = populated_failure.replace(&probe_debug, &empty_debug);
+    if populated_failure_shape == populated_failure {
+        return None;
+    }
     Some([
         format!("{:?}", ToolExecutorEvidence::CompletedText(String::new())),
-        format!("{:?}", ToolExecutorEvidence::KnownFailed { detail: None }),
         format!(
             "{:?}",
-            ToolExecutorEvidence::KnownFailed {
-                detail: Some(populated_detail)
-            }
+            ToolExecutorEvidence::CompletedText(String::from("\""))
         ),
+        format!("{:?}", ToolExecutorEvidence::KnownFailed { detail: None }),
+        populated_failure_shape,
         format!("{:?}", ToolExecutorEvidence::Ambiguous),
     ])
 }

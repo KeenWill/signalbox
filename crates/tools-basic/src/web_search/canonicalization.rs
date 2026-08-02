@@ -83,6 +83,18 @@ pub(super) fn canonicalized_port_path_zero_fragments(value: &str) -> Vec<String>
         .collect()
 }
 
+pub(super) fn removed_default_port_path_fragment(value: &str, default_port: u16) -> Option<String> {
+    let (authority_context, port_and_path) = value.rsplit_once(':')?;
+    let (port_fragment, path_suffix) = port_and_path.split_once('/')?;
+    if port_fragment.is_empty()
+        || !port_fragment.bytes().all(|byte| byte.is_ascii_digit())
+        || port_fragment.parse::<u16>().ok()? != default_port
+    {
+        return None;
+    }
+    Some(format!("{authority_context}/{path_suffix}"))
+}
+
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
     let candidate = format!("http://{value}/");
     let url = Url::parse(&candidate).ok()?;
@@ -385,9 +397,7 @@ pub(super) fn canonicalized_ipv6_hextet_text_fragment(value: &str) -> Option<Str
     Some(format!("{hextet:x}"))
 }
 
-pub(super) fn canonicalized_ipv6_separator_bound_hextet_text_fragment(
-    value: &str,
-) -> Option<String> {
+pub(super) fn canonicalized_ipv6_separator_bound_hextet_text_fragments(value: &str) -> Vec<String> {
     let (leading_separator, value) = match value.strip_prefix(':') {
         Some(value) => (true, value),
         None => (false, value),
@@ -397,15 +407,22 @@ pub(super) fn canonicalized_ipv6_separator_bound_hextet_text_fragment(
         None => (false, value),
     };
     if !leading_separator && !trailing_separator {
-        return None;
+        return Vec::new();
     }
-    let hextet = canonicalized_ipv6_hextet_text_fragment(value)?;
-    Some(format!(
+    let Some(hextet) = canonicalized_ipv6_hextet_text_fragment(value) else {
+        return Vec::new();
+    };
+    let separator_bound = format!(
         "{}{}{}",
         if leading_separator { ":" } else { "" },
         hextet,
         if trailing_separator { ":" } else { "" }
-    ))
+    );
+    if leading_separator && trailing_separator && hextet == "0" {
+        vec![separator_bound, String::from("::")]
+    } else {
+        vec![separator_bound]
+    }
 }
 
 pub(super) fn embedded_ipv6_fragment_candidate(
