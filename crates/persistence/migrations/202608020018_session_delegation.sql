@@ -208,6 +208,33 @@ CREATE TRIGGER session_delegation_event_append_guard
 BEFORE INSERT ON session_delegation_event
 FOR EACH ROW EXECUTE FUNCTION guard_session_delegation_event_append();
 
+CREATE FUNCTION durable_command_belongs_to_session(
+    checked_command_id uuid,
+    checked_session_id uuid
+)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM create_session_command
+        WHERE command_id = checked_command_id AND created_session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM create_session_from_imported_frontier_command
+        WHERE command_id = checked_command_id AND created_session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM replace_session_defaults_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM replace_session_metadata_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM submit_input_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (
+        SELECT 1 FROM decide_tool_request_command AS command
+        JOIN tool_request AS request ON request.request_id = command.request_id
+        WHERE command.command_id = checked_command_id
+          AND request.session_id = checked_session_id
+    )
+    OR EXISTS (SELECT 1 FROM compact_session_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+    OR EXISTS (SELECT 1 FROM goal_command
+        WHERE command_id = checked_command_id AND session_id = checked_session_id)
+$$;
+
 CREATE FUNCTION require_session_delegation_event_payload()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
@@ -281,7 +308,10 @@ BEGIN
             'parent_cancelled_parent_and_descendants'
         ) THEN
             IF NEW.provenance_kind <> 'parent_command'
-                OR NEW.provenance_session_id <> relation_parent THEN
+                OR NEW.provenance_session_id <> relation_parent
+                OR NOT durable_command_belongs_to_session(
+                    NEW.provenance_command_id, relation_parent
+                ) THEN
                 RAISE EXCEPTION 'parent disposition has invalid provenance'
                     USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
             END IF;
