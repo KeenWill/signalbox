@@ -452,6 +452,76 @@ async fn delegated_parent_alone_outcome_cannot_commit() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_parent_outcome_rejects_another_sessions_command() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xdf00;
+    let (fixture, _model_repository, _observation, request_id) =
+        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", "{}").await?;
+    let request = ToolRequestReconstitutionInput::new(
+        request_id,
+        fixture.session,
+        fixture.turn,
+        fixture.call,
+        ToolRequestOrdinal::from_u32(0),
+        ToolName::try_new("spawn_session".to_owned()).expect("valid name"),
+        NormalizedToolArguments::try_from_provider_text("{}".to_owned()).expect("valid arguments"),
+    )
+    .into_request();
+    let relation = SessionDelegation::spawn(
+        &request,
+        SessionId::from_uuid(Uuid::from_u128(seed + 0x200)),
+        ChildRelationshipPolicy::Background,
+    )
+    .expect("distinct child");
+    let repository = SessionDelegationRepository::new(pool.clone(), test_session_credential_pin());
+    repository
+        .create(
+            &relation,
+            &SessionConfigurationDefaults::new(direct(seed + 0x300)),
+        )
+        .await?;
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 0x1007,
+            seed + 0x1001,
+            direct(seed + 0x1005),
+        ))
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind,
+             reason_kind, provenance_kind, provenance_session_id,
+             provenance_command_id)
+         VALUES ($1, 2, 'outcome_recorded', 'continue_running',
+                 'parent_stopped_parent_and_descendants',
+                 'parent_command', $2, $3)",
+    )
+    .bind(request_id.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x1007))
+    .execute(&mut *transaction)
+    .await?;
+
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("another session's command cannot disposition this relation");
+    assert_eq!(
+        error
+            .as_database_error()
+            .expect("constraint error")
+            .constraint(),
+        Some("session_delegation_event_semantics")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 fn model_credential_reference() -> ModelCallCredentialReference {
     ModelCallCredentialReference::new("fixture-provider-primary")
 }
