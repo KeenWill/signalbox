@@ -11,8 +11,8 @@ use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
     ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionId, SessionPlacement, SessionReadScopeDecision,
-    SessionReadScopeRefusal, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+    SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision, SessionReadScopeRefusal,
+    ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, VersionedSessionPlacement,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -200,21 +200,13 @@ impl ProcessSessionSummaryReader {
                 current_defaults.current_version AS defaults_version,
                 selected_defaults.model_selection_kind,
                 selected_defaults.direct_model_selection_id,
-                selected_defaults.model_alias_id,
-                placement_head.current_version AS placement_version,
-                placement_event.placement_path,
-                placement_event.root_global_read_intent
+                selected_defaults.model_alias_id
                FROM session AS session_row
                LEFT JOIN session_current_defaults AS current_defaults
                  ON current_defaults.session_id = session_row.session_id
                LEFT JOIN session_defaults_version AS selected_defaults
                  ON selected_defaults.session_id = current_defaults.session_id
                 AND selected_defaults.version = current_defaults.current_version
-               LEFT JOIN session_current_placement AS placement_head
-                 ON placement_head.session_id = session_row.session_id
-               LEFT JOIN session_placement_event AS placement_event
-                 ON placement_event.session_id = placement_head.session_id
-                AND placement_event.version = placement_head.current_version
               WHERE ($1::uuid IS NULL OR session_row.session_id > $1)
               ORDER BY session_row.session_id
               LIMIT 1",
@@ -224,7 +216,11 @@ impl ProcessSessionSummaryReader {
         .await?;
 
         if let Some(row) = row {
-            let summary = decode_session_summary(&row)?;
+            let session = session_id_from_uuid(required(&row, "session_id")?);
+            let placement = load_process_session_placement(transaction, session)
+                .await?
+                .ok_or(ProcessReadCorruption::Missing("session placement"))?;
+            let summary = decode_session_summary(&row, placement)?;
             self.next_session_after = Some(session_id_to_uuid(summary.session()));
             self.summary_count =
                 self.summary_count
@@ -1684,7 +1680,10 @@ impl ProcessReadRepository {
             transaction.commit().await?;
             return Ok(ProcessScopedTranscriptRead::TargetNotFound);
         };
-        match requesting_placement.decide_cross_session_read(&target_placement) {
+        match requesting_placement
+            .placement()
+            .decide_cross_session_read(target_placement.placement())
+        {
             SessionReadScopeDecision::Allowed => Ok(ProcessScopedTranscriptRead::Opened(Box::new(
                 open_transcript_in_transaction(transaction, target_session).await?,
             ))),
@@ -1699,28 +1698,27 @@ impl ProcessReadRepository {
 async fn load_process_session_placement(
     transaction: &mut Transaction<'static, Postgres>,
     session: SessionId,
-) -> Result<Option<SessionPlacement>, ProcessReadError> {
-    let row = sqlx::query(
-        "SELECT event.placement_path, event.root_global_read_intent
-           FROM session AS session_row
-           LEFT JOIN session_current_placement AS head
-             ON head.session_id = session_row.session_id
-           LEFT JOIN session_placement_event AS event
-             ON event.session_id = head.session_id
-            AND event.version = head.current_version
-          WHERE session_row.session_id = $1",
-    )
-    .bind(session_id_to_uuid(session))
-    .fetch_optional(&mut **transaction)
-    .await?;
-    row.map(|row| {
-        let root_intent = row
-            .try_get::<Option<bool>, _>("root_global_read_intent")?
-            .ok_or(ProcessReadCorruption::Missing("session placement event"))?;
-        crate::session_placement::decode_placement(row.try_get("placement_path")?, root_intent)
-            .map_err(|_| ProcessReadCorruption::Inconsistent("session placement").into())
-    })
-    .transpose()
+) -> Result<Option<VersionedSessionPlacement>, ProcessReadError> {
+    crate::session_placement::load_current(transaction, session)
+        .await
+        .map_err(map_session_placement_read_error)
+}
+
+fn map_session_placement_read_error(
+    error: crate::session_placement::SessionPlacementRepositoryError,
+) -> ProcessReadError {
+    use crate::session_placement::SessionPlacementRepositoryError;
+
+    match error {
+        SessionPlacementRepositoryError::Database(error)
+        | SessionPlacementRepositoryError::CommitAmbiguous(error) => {
+            ProcessReadError::Database(error)
+        }
+        SessionPlacementRepositoryError::InvalidCommandId
+        | SessionPlacementRepositoryError::Corruption(_) => {
+            ProcessReadCorruption::Inconsistent("session placement").into()
+        }
+    }
 }
 
 async fn open_transcript_in_transaction(
@@ -1833,7 +1831,10 @@ fn map_seed_validation_error(error: sqlx::Error) -> ProcessReadError {
     }
 }
 
-fn decode_session_summary(row: &PgRow) -> Result<ProcessSessionSummary, ProcessReadError> {
+fn decode_session_summary(
+    row: &PgRow,
+    placement: VersionedSessionPlacement,
+) -> Result<ProcessSessionSummary, ProcessReadError> {
     let session = session_id_from_uuid(required(row, "session_id")?);
     let defaults_version = decode_positive(
         required(row, "defaults_version")?,
@@ -1858,26 +1859,11 @@ fn decode_session_summary(row: &PgRow) -> Result<ProcessSessionSummary, ProcessR
             .into());
         }
     };
-    let placement_version = decode_positive(
-        required(row, "placement_version")?,
-        "current placement version",
-    )?;
-    let placement_version =
-        signalbox_domain::SessionPlacementVersion::try_from_u64(placement_version).ok_or(
-            ProcessReadCorruption::InvalidOrdinal("current placement version"),
-        )?;
-    let root_intent: bool = required(row, "root_global_read_intent")?;
-    let placement =
-        crate::session_placement::decode_placement(row.try_get("placement_path")?, root_intent)
-            .map_err(|_| ProcessReadCorruption::Inconsistent("session placement"))?;
     Ok(ProcessSessionSummary {
         session,
         defaults_version,
         model_selection,
-        placement: signalbox_domain::VersionedSessionPlacement::reconstitute(
-            placement_version,
-            placement,
-        ),
+        placement,
     })
 }
 

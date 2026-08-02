@@ -1395,24 +1395,6 @@ async fn insert_outbox_session_fixture(
     .bind(session)
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
-        "INSERT INTO session_placement_event
-            (session_id, version, prior_version, event_kind, placement_path,
-             root_global_read_intent, provenance_command_id, recorded_at)
-         VALUES ($1, 1, NULL, 'created', NULL, FALSE, $2, transaction_timestamp())",
-    )
-    .bind(session)
-    .bind(command)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO session_current_placement (session_id, current_version)
-         VALUES ($1, 1)",
-    )
-    .bind(session)
-    .execute(&mut *transaction)
-    .await?;
-
     transaction.commit().await?;
     Ok(session)
 }

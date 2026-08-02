@@ -62,8 +62,8 @@ use signalbox_domain::{
     SessionMetadataLastWriter, SessionMetadataSnapshot, SessionPlacement as DomainSessionPlacement,
     SessionPlacementPath, SessionPlacementVersion, SessionTemplateName, SessionTemplateProvenance,
     SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UpdateSessionPlacementRejection,
-    UpdateSessionPlacementResult, UserContent,
+    ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId,
+    UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult, UserContent,
 };
 use signalbox_model_provider_runtime::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
@@ -5769,8 +5769,10 @@ where
                 request_id,
                 ServerMessage::SessionPlacementUpdated {
                     session_id,
-                    placement_version: CanonicalU64::new(event.placement().version().as_u64()),
-                    placement: wire_session_placement(event.placement().placement()),
+                    placement_version: CanonicalU64::new(
+                        event.event().placement().version().as_u64(),
+                    ),
+                    placement: wire_session_placement(event.event().placement().placement()),
                 },
             )
             .await
@@ -5778,24 +5780,48 @@ where
         Ok(UpdateSessionPlacementOutcome::Recorded(UpdateSessionPlacementResult::Rejected(
             rejected,
         ))) => {
-            let detail = match rejected {
-                UpdateSessionPlacementRejection::SessionNotFound { session } => {
+            let detail = match rejected.kind() {
+                UpdateSessionPlacementRejectionKind::SessionNotFound => {
                     RejectionDetail::SessionNotFound {
-                        session_id: wire_uuid(session.into_uuid()),
+                        session_id: wire_uuid(rejected.session().into_uuid()),
                     }
                 }
-                UpdateSessionPlacementRejection::CurrentVersionMismatch {
-                    session,
-                    expected,
-                    current,
-                } => RejectionDetail::SessionPlacementCurrentVersionMismatch {
-                    session_id: wire_uuid(session.into_uuid()),
-                    expected_placement_version: CanonicalU64::new(expected.as_u64()),
-                    current_placement_version: CanonicalU64::new(current.as_u64()),
-                },
-                UpdateSessionPlacementRejection::VersionExhausted { session, current } => {
+                UpdateSessionPlacementRejectionKind::CurrentVersionMismatch => {
+                    let Some(current) = rejected.current_version() else {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            internal_protocol_error(
+                                None,
+                                InternalDiagnostic::ProcessReadCorruption,
+                            ),
+                        )
+                        .await;
+                    };
+                    RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                        expected_placement_version: CanonicalU64::new(
+                            rejected.expected_version().as_u64(),
+                        ),
+                        current_placement_version: CanonicalU64::new(current.as_u64()),
+                    }
+                }
+                UpdateSessionPlacementRejectionKind::VersionExhausted => {
+                    let Some(current) = rejected.current_version() else {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            internal_protocol_error(
+                                None,
+                                InternalDiagnostic::ProcessReadCorruption,
+                            ),
+                        )
+                        .await;
+                    };
                     RejectionDetail::SessionPlacementVersionExhausted {
-                        session_id: wire_uuid(session.into_uuid()),
+                        session_id: wire_uuid(rejected.session().into_uuid()),
                         current_placement_version: CanonicalU64::new(current.as_u64()),
                     }
                 }
@@ -5808,6 +5834,15 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(SessionPlacementRepositoryError::InvalidCommandId) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
             )
             .await
         }
@@ -8908,7 +8943,7 @@ fn domain_model_selection(selection: WireModelSelection) -> ModelSelectionReques
 
 fn domain_session_placement(placement: WireSessionPlacement) -> Result<DomainSessionPlacement, ()> {
     match placement {
-        WireSessionPlacement::Pathless {} => Ok(DomainSessionPlacement::Pathless),
+        WireSessionPlacement::Pathless {} => Ok(DomainSessionPlacement::pathless()),
         WireSessionPlacement::Scoped { path } => {
             DomainSessionPlacement::scoped(SessionPlacementPath::try_new(path).map_err(|_| ())?)
                 .map_err(|_| ())
@@ -8924,16 +8959,17 @@ fn domain_session_placement(placement: WireSessionPlacement) -> Result<DomainSes
 }
 
 fn wire_session_placement(placement: &DomainSessionPlacement) -> WireSessionPlacement {
-    match placement {
-        DomainSessionPlacement::Pathless => WireSessionPlacement::Pathless {},
-        DomainSessionPlacement::Scoped(path) => WireSessionPlacement::Scoped {
+    let Some(path) = placement.path() else {
+        return WireSessionPlacement::Pathless {};
+    };
+    if placement.records_root_global_read_intent() {
+        WireSessionPlacement::RootGlobalRead {
             path: path.as_str().to_owned(),
-        },
-        DomainSessionPlacement::RootGlobalRead { path, .. } => {
-            WireSessionPlacement::RootGlobalRead {
-                path: path.as_str().to_owned(),
-                intent: signalbox_process_protocol::RootPlacementGlobalReadIntent::Acknowledged,
-            }
+            intent: signalbox_process_protocol::RootPlacementGlobalReadIntent::Acknowledged,
+        }
+    } else {
+        WireSessionPlacement::Scoped {
+            path: path.as_str().to_owned(),
         }
     }
 }
