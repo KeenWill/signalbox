@@ -120,7 +120,7 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
             }
         case "process_context_summary":
             do {
-                self = .processContextSummary(try SignalboxProcessContextSummaryEvent(from: decoder))
+                self = .processContextSummary(try SignalboxProcessContextSummaryEvent(closedFrom: decoder))
             } catch {
                 self = .unknown(
                     try SignalboxUnknownEvent(
@@ -132,7 +132,7 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
             }
         case "process_model_identity":
             do {
-                self = .processModelIdentity(try SignalboxProcessModelIdentityEvent(from: decoder))
+                self = .processModelIdentity(try SignalboxProcessModelIdentityEvent(closedFrom: decoder))
             } catch {
                 self = .unknown(
                     try SignalboxUnknownEvent(
@@ -144,7 +144,7 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
             }
         case "process_model_call_usage":
             do {
-                self = .processModelCallUsage(try SignalboxProcessModelCallUsageEvent(from: decoder))
+                self = .processModelCallUsage(try SignalboxProcessModelCallUsageEvent(closedFrom: decoder))
             } catch {
                 self = .unknown(
                     try SignalboxUnknownEvent(
@@ -157,7 +157,7 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
         case "process_imported_content":
             do {
                 self = .processImportedContent(
-                    try SignalboxProcessImportedContentEvent(from: decoder)
+                    try SignalboxProcessImportedContentEvent(closedFrom: decoder)
                 )
             } catch {
                 self = .unknown(

@@ -392,6 +392,12 @@ public struct SignalboxProcessContextSummaryEvent: Codable, Equatable, Sendable 
     self.kind = "process_context_summary"
     self.text = text
   }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["kind", "text"], decoder: decoder)
+    self = try Self(from: decoder)
+  }
 }
 
 public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
@@ -416,6 +422,15 @@ public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
     case turnID = "turn_id"
     case defaultsVersion = "defaults_version"
     case selectedModelID = "selected_model_id"
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["kind", "turn_id", "defaults_version", "selected_model_id"],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
   }
 }
 
@@ -446,6 +461,11 @@ public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable 
     self.costLabel = evidence.cost?.label.rawValue
   }
 
+  var hasAtomicCostFields: Bool {
+    let count = [costAmountUSD, costRateVersion, costLabel].compactMap { $0 }.count
+    return count == 0 || count == 3
+  }
+
   private enum CodingKeys: String, CodingKey {
     case kind
     case turnID = "turn_id"
@@ -458,6 +478,27 @@ public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable 
     case costAmountUSD = "cost_amount_usd"
     case costRateVersion = "cost_rate_version"
     case costLabel = "cost_label"
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      [
+        "kind", "turn_id", "model_call_id", "usage_provenance", "input_tokens",
+        "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+        "cost_amount_usd", "cost_rate_version", "cost_label",
+      ],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
+    guard hasAtomicCostFields else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Usage cost fields must be present together."
+        )
+      )
+    }
   }
 }
 
@@ -491,6 +532,15 @@ public struct SignalboxProcessImportedContentEvent: Codable, Equatable, Sendable
     case kind
     case contentKind = "content_kind"
     case sourceSpeaker = "source_speaker"
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["kind", "content_kind", "source_speaker"],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
   }
 }
 

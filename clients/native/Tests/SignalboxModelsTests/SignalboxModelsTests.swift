@@ -178,4 +178,44 @@ final class SignalboxModelsTests: XCTestCase {
             SignalboxProcessPresentation.retainedLabel(value)
         )
     }
+
+    func testExpandedProcessEventDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":9,"event":{"kind":"process_context_summary","text":"summary","future_field":"\#(Self.expandedProcessEventFieldValue)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["future_field"],
+            .string(Self.expandedProcessEventFieldValue)
+        )
+    }
+
+    func testPartialUsageCostDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":9,"event":{"kind":"process_model_call_usage","turn_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","model_call_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","usage_provenance":"provider_reported","cost_amount_usd":"\#(Self.partialUsageCostAmount)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["cost_amount_usd"],
+            .string(Self.partialUsageCostAmount)
+        )
+    }
+
+    private static let expandedProcessEventFieldValue = "retained"
+    private static let partialUsageCostAmount = "0.01"
+
+    private static func unknownEvent(in stored: SignalboxStoredEvent) throws -> SignalboxUnknownEvent {
+        guard case .unknown(let unknown) = stored.event else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "Expected an unknown event.")
+            )
+        }
+        return unknown
+    }
 }

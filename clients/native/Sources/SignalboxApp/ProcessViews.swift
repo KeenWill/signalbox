@@ -1789,9 +1789,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         switch followed.event {
         case .modelCallTransition(_, _, .unknown),
           .toolBatchTransition(_, _, .unknown):
-          if let record = try projector.projectUnrecognizedFollowedEvent(followed),
-            case .processConservative(let event) = record.event
-          {
+          if let event = projector.projectUnrecognizedFollowedEvent(followed) {
             retainUnrecognizedLiveEvent(
               kind: event.kind,
               diagnostic: event.diagnostic,

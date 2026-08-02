@@ -191,6 +191,8 @@ fileprivate enum SignalboxTimelineLinkage {
 }
 
 public enum SignalboxEventNormalizer {
+    private static let maximumPlanTextUnicodeScalars = 4_096
+
     public static func normalize(_ records: [SignalboxStoredEvent]) -> [SignalboxTimelineItem] {
         var metrics = SignalboxEventNormalizationMetrics()
         return normalize(records, recording: &metrics)
@@ -599,15 +601,31 @@ public enum SignalboxEventNormalizer {
         }
         switch kind {
         case "create":
-            return value.text == nil ? nil : value
+            return value.text.map(validPlanText) == true ? value : nil
         case "revise":
-            return value.entryID == nil || value.text == nil ? nil : value
+            return value.entryID.map({ $0 > 0 }) == true
+                && value.text.map(validPlanText) == true ? value : nil
         case "set_status":
-            return value.entryID == nil || value.status == nil ? nil : value
+            return value.entryID.map({ $0 > 0 }) == true
+                && value.status.map(validPlanStatus) == true ? value : nil
         case "depends_on":
-            return value.entryID == nil || value.dependencyID == nil ? nil : value
+            return value.entryID.map({ $0 > 0 }) == true
+                && value.dependencyID.map({ $0 > 0 }) == true ? value : nil
         default:
             return nil
+        }
+    }
+
+    private static func validPlanText(_ text: String) -> Bool {
+        !text.isEmpty
+            && text.unicodeScalars.count <= maximumPlanTextUnicodeScalars
+            && text.unicodeScalars.allSatisfy { $0.value != 0 }
+    }
+
+    private static func validPlanStatus(_ status: String) -> Bool {
+        switch status {
+        case "pending", "in_progress", "completed", "abandoned": return true
+        default: return false
         }
     }
 

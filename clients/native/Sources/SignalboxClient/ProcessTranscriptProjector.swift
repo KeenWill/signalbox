@@ -53,7 +53,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case toolRequest(String)
     case modelCallUsage(String)
     case turnState(String)
-    case followedCursor(UInt64)
   }
 
   private struct ToolContext: Sendable {
@@ -101,9 +100,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return projection
   }
 
-  public mutating func projectUnrecognizedFollowedEvent(
+  public func projectUnrecognizedFollowedEvent(
     _ followed: SignalboxFollowedSessionEvent
-  ) throws -> SignalboxStoredEvent? {
+  ) -> SignalboxProcessConservativeEvent? {
     let content: (kind: String, diagnostic: String)?
     switch followed.event {
     case .modelCallTransition(_, _, .unknown(let kind, _)):
@@ -134,20 +133,22 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     guard let content else {
       return nil
     }
-    return SignalboxStoredEvent(
-      eventID: try claimFollowedPresentationID(followed.cursor.rawValue),
-      event: .processConservative(
-        SignalboxProcessConservativeEvent(
-          kind: content.kind,
-          diagnostic: content.diagnostic
-        )
-      )
+    return SignalboxProcessConservativeEvent(
+      kind: content.kind,
+      diagnostic: content.diagnostic
     )
   }
 
   private enum Selection {
     case all
     case trigger(SignalboxProcessSessionEvent)
+
+    var includesConservativeSnapshotEvidence: Bool {
+      switch self {
+      case .all: return true
+      case .trigger: return false
+      }
+    }
   }
 
   private mutating func project(
@@ -190,7 +191,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         if case .activeAwaitingToolApproval(let requestID) = turn.state {
           awaitingToolDecisionRequestID = requestID.rawValue
         }
-        if case .all = selection,
+        if selection.includesConservativeSnapshotEvidence,
           let unrecognized = try projectUnrecognizedTurnState(turn)
         {
           store(unrecognized, in: &projectedByID, order: &projectedOrder)
@@ -507,22 +508,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return claimed
   }
 
-  private mutating func claimFollowedPresentationID(
-    _ cursor: UInt64
-  ) throws -> SignalboxEventID {
-    let identity = PresentationIdentity.followedCursor(cursor)
-    if let existing = presentationIDs[identity] {
-      return existing
-    }
-    let base = Int.max / 2
-    guard cursor <= UInt64(Int.max - base) else {
-      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
-    }
-    let claimed = SignalboxEventID(rawValue: base + Int(cursor))
-    presentationIDs[identity] = claimed
-    return claimed
-  }
-
   private mutating func claimModelCallUsagePresentationID(
     _ evidence: SignalboxTranscriptModelCallUsage
   ) throws -> SignalboxEventID {
@@ -550,14 +535,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         diagnostic?.message ?? "The snapshot retained an unrecognized turn state."
       )
     case .activeRunning(_, let currentModelCall):
-      if let currentModelCall, case .unknown(let kind, _) = currentModelCall.state {
+      guard let currentModelCall else {
+        content = nil
+        break
+      }
+      switch currentModelCall.state {
+      case .unknown(let kind, _):
         content = (
           SignalboxProcessPresentation.retainedLabel(
             "current_model_call.state.\(kind)"
           ),
           "The snapshot retained an unrecognized current model-call state."
         )
-      } else {
+      case .prepared, .inFlight, .cancellationRequested:
         content = nil
       }
     case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,

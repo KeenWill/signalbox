@@ -537,24 +537,13 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
-  func testUnknownFollowedEventProjectsAsVisibleTimelineCard() throws {
+  func testUnknownFollowedEventProjectsAsConservativeEvidence() throws {
     let followed = try ProcessProjectionFixture.unknownFollowedEvent()
-    var projector = SignalboxProcessTranscriptProjector()
+    let projector = SignalboxProcessTranscriptProjector()
 
-    let record = try XCTUnwrap(projector.projectUnrecognizedFollowedEvent(followed))
-    let normalizer = try SignalboxIncrementalEventNormalizer(
-      records: [ProcessProjectionFixture.knownMessageRecord]
-    )
-    normalizer.upsert(record)
+    let event = try XCTUnwrap(projector.projectUnrecognizedFollowedEvent(followed))
 
-    XCTAssertEqual(
-      ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
-      ProcessProjectionFixture.futureFollowedEventKinds
-    )
-    XCTAssertEqual(
-      normalizer.timelineItems.map(\.id),
-      ProcessProjectionFixture.knownThenFollowedTimelineIDs
-    )
+    XCTAssertEqual(event.kind, ProcessProjectionFixture.futureFollowedEventKind)
   }
 
   func testUnknownSnapshotTurnStateProjectsAsVisibleTimelineCard() throws {
@@ -5010,7 +4999,6 @@ private enum ProcessProjectionFixture {
     modelCostLabel,
   ]
   static let futureFollowedEventKind = "future_session_event"
-  static let futureFollowedEventKinds = [futureFollowedEventKind]
   static let futureTurnStateKind = "fixture_future_turn_state"
   static let futureTurnStatePresentationKind = "turn.state.\(futureTurnStateKind)"
   static let futureCurrentModelStateKind = "fixture_future_current_model_state"
@@ -5018,15 +5006,6 @@ private enum ProcessProjectionFixture {
     "current_model_call.state.\(futureCurrentModelStateKind)"
   static let futureSnapshotStatePresentationKinds = [
     futureTurnStatePresentationKind, futureCurrentModelStatePresentationKind,
-  ]
-  static let knownMessageRecord = SignalboxStoredEvent(
-    eventID: SignalboxEventID(rawValue: 1),
-    event: .processMessage(
-      SignalboxProcessMessageEvent(role: .user, text: "Known fixture message")
-    )
-  )
-  static let knownThenFollowedTimelineIDs = [
-    "message-1", "unknown-\(Int.max / 2 + 1)",
   ]
   static let planReadRequestID = "ffffffff-5555-4555-8555-555555555551"
   static let planWriteRequestID = "ffffffff-5555-4555-8555-555555555552"
@@ -5045,7 +5024,7 @@ private enum ProcessProjectionFixture {
   static let planStatusOutput = #"{"event":{"ordinal":3,"kind":"status_changed","entry_id":1,"status":"completed","provenance":{}}}"#
   static let planWriteArguments = #"{"kind":"depends_on","entry_id":1,"dependency_id":2}"#
   static let planWriteOutput = #"{"event":{"ordinal":4,"kind":"depends_on","entry_id":1,"dependency_id":2,"provenance":{}}}"#
-  static let malformedPlanArguments = #"{"kind":"create","text":"Draft protocol","unexpected":true}"#
+  static let malformedPlanArguments = #"{"kind":"set_status","entry_id":0,"status":"completed"}"#
   static let malformedPlanReadArguments = #"{"after_entry_id":0,"unexpected":true}"#
   static let planDisplayNames = [
     "Plan read", "Plan update", "Plan update", "Plan update", "Plan update", "Plan update",
