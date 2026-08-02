@@ -7,14 +7,15 @@ use signalbox_domain::{
     BoundChildAction, ChildRelationshipPolicy, DelegationContent, DelegationEvent,
     DelegationMessageDirection, DelegationMessageId, DelegationOutcome, DelegationOutcomeReason,
     DelegationProvenance, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
-    DurableCommandId, ModelCallId, ModelSelectionRequest, NormalizedToolArguments,
-    SessionConfigurationDefaults, SessionDelegation, SessionId, ToolArgumentsKind, ToolName,
-    ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
+    DurableCommandId, ModelCallId, NormalizedToolArguments, SessionDelegation, SessionId,
+    ToolArgumentsKind, ToolName, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
-    SessionCredentialPin, commit_failure_is_ambiguous, mapping::dangerous_tool_auto_approval_to_str,
+    SessionCredentialPin, commit_failure_is_ambiguous,
+    outbox::{DelegationWakeOutboxSubject, OutboxEvent},
 };
 
 #[derive(Debug)]
@@ -77,7 +78,6 @@ impl SessionDelegationRepository {
     pub async fn create(
         &self,
         delegation: &SessionDelegation,
-        defaults: &SessionConfigurationDefaults,
     ) -> Result<(), SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(crate::lock_inventory::SESSION_DELEGATION_PARENT)
@@ -96,7 +96,7 @@ impl SessionDelegationRepository {
         if active >= 32 {
             return Err(SessionDelegationRepositoryError::ActiveDirectChildLimitReached);
         }
-        insert_child(&mut transaction, delegation, defaults, &self.credential_pin).await?;
+        insert_child(&mut transaction, delegation, &self.credential_pin).await?;
         insert_relation(&mut transaction, delegation).await?;
         insert_event(
             &mut transaction,
@@ -156,6 +156,24 @@ impl SessionDelegationRepository {
                 "message event missing",
             ))?;
         insert_event(&mut transaction, spawning_request, event).await?;
+        let message = event
+            .message()
+            .ok_or(SessionDelegationRepositoryError::Corruption(
+                "message event",
+            ))?;
+        let recipient = match message.direction() {
+            DelegationMessageDirection::ParentToChild => updated.child(),
+            DelegationMessageDirection::ChildToParent => updated.parent(),
+        };
+        crate::outbox::append(
+            &mut transaction,
+            OutboxEvent::DelegationWake {
+                session: recipient,
+                spawning_request,
+                subject: DelegationWakeOutboxSubject::Message(id),
+            },
+        )
+        .await?;
         transaction
             .commit()
             .await
@@ -174,9 +192,17 @@ impl SessionDelegationRepository {
             .ok_or(SessionDelegationRepositoryError::Corruption(
                 "relation missing",
             ))?;
+        let prior_event_count = current.events().len();
         let updated = current
             .record_outcome(outcome)
             .map_err(|error| SessionDelegationRepositoryError::Domain(error.failure()))?;
+        if updated.events().len() == prior_event_count {
+            transaction
+                .commit()
+                .await
+                .map_err(classify_commit_failure)?;
+            return Ok(updated);
+        }
         let event = updated
             .events()
             .last()
@@ -184,6 +210,19 @@ impl SessionDelegationRepository {
                 "outcome event missing",
             ))?;
         insert_event(&mut transaction, spawning_request, event).await?;
+        if let DelegationEvent::OutcomeRecorded { outcome, .. } = event
+            && terminal_result(outcome).is_some()
+        {
+            crate::outbox::append(
+                &mut transaction,
+                OutboxEvent::DelegationWake {
+                    session: updated.parent(),
+                    spawning_request,
+                    subject: DelegationWakeOutboxSubject::Result,
+                },
+            )
+            .await?;
+        }
         transaction
             .commit()
             .await
@@ -211,9 +250,8 @@ fn classify_commit_failure(error: sqlx::Error) -> SessionDelegationRepositoryErr
 async fn insert_child(
     connection: &mut PgConnection,
     delegation: &SessionDelegation,
-    defaults: &SessionConfigurationDefaults,
     pin: &SessionCredentialPin,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), SessionDelegationRepositoryError> {
     sqlx::query(
         "INSERT INTO session
             (session_id, creation_cause, ancestry_kind, spawning_tool_request_id)
@@ -227,27 +265,30 @@ async fn insert_child(
         .bind(delegation.child().into_uuid())
         .execute(&mut *connection)
         .await?;
-    let (selection_kind, direct, alias) = encode_selection(defaults.model());
-    sqlx::query(
+    let copied = sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind, direct_model_selection_id,
              model_alias_id, dangerous_tool_auto_approval, system_prompt)
-         VALUES ($1, 1, $2, $3, $4, $5, $6)",
+         SELECT $1, 1, defaults.model_selection_kind,
+                defaults.direct_model_selection_id, defaults.model_alias_id,
+                defaults.dangerous_tool_auto_approval, defaults.system_prompt
+           FROM turn_origin_effective_model_configuration(
+                (SELECT turn_id FROM tool_request
+                  WHERE request_id = $2 AND session_id = $3), $3) AS frozen
+           JOIN session_defaults_version AS defaults
+             ON defaults.session_id = $3
+            AND defaults.version = frozen.defaults_version",
     )
     .bind(delegation.child().into_uuid())
-    .bind(selection_kind)
-    .bind(direct)
-    .bind(alias)
-    .bind(dangerous_tool_auto_approval_to_str(
-        defaults.dangerous_tool_auto_approval(),
-    ))
-    .bind(
-        defaults
-            .system_prompt()
-            .map(signalbox_domain::SessionSystemPrompt::as_str),
-    )
+    .bind(delegation.spawning_request().into_uuid())
+    .bind(delegation.parent().into_uuid())
     .execute(&mut *connection)
     .await?;
+    if copied.rows_affected() != 1 {
+        return Err(SessionDelegationRepositoryError::Corruption(
+            "parent frozen defaults",
+        ));
+    }
     sqlx::query("INSERT INTO session_current_defaults(session_id, current_version) VALUES ($1, 1)")
         .bind(delegation.child().into_uuid())
         .execute(&mut *connection)
@@ -282,15 +323,6 @@ async fn insert_child(
     .execute(&mut *connection)
     .await?;
     Ok(())
-}
-
-fn encode_selection(
-    selection: ModelSelectionRequest,
-) -> (&'static str, Option<Uuid>, Option<Uuid>) {
-    match selection {
-        ModelSelectionRequest::Direct(value) => ("direct", Some(value.into_uuid()), None),
-        ModelSelectionRequest::Alias(value) => ("alias", None, Some(value.into_uuid())),
-    }
 }
 
 async fn insert_relation(
@@ -482,11 +514,11 @@ impl EncodedProvenance {
                 request: None,
                 command: None,
             })
-        } else if let Some((session, command)) = value.parent_command() {
+        } else if let Some((session, turn, command)) = value.parent_command() {
             Ok(Self {
                 kind: "parent_command",
                 session: session.into_uuid(),
-                turn: None,
+                turn: Some(turn.into_uuid()),
                 request: None,
                 command: Some(command.into_uuid()),
             })
@@ -578,6 +610,7 @@ fn decode_provenance(
         )),
         "parent_command" => Ok(DelegationProvenance::from_parent_command(
             session,
+            TurnId::from_uuid(row.try_get("provenance_turn_id")?),
             DurableCommandId::from_uuid(row.try_get("provenance_command_id")?),
         )),
         _ => Err(SessionDelegationRepositoryError::Corruption(
@@ -700,6 +733,8 @@ fn reason_to_str(value: DelegationOutcomeReason) -> &'static str {
     match value {
         DelegationOutcomeReason::ChildCompleted => "child_completed",
         DelegationOutcomeReason::ChildExecutionFailed => "child_execution_failed",
+        DelegationOutcomeReason::ChildStopped => "child_stopped",
+        DelegationOutcomeReason::ChildCancelled => "child_cancelled",
         DelegationOutcomeReason::ParentStopped {
             scope: DescendantTerminationScope::ParentAlone,
         } => "parent_stopped_parent_alone",
@@ -720,6 +755,8 @@ fn reason_from_str(
     match value {
         "child_completed" => Ok(DelegationOutcomeReason::ChildCompleted),
         "child_execution_failed" => Ok(DelegationOutcomeReason::ChildExecutionFailed),
+        "child_stopped" => Ok(DelegationOutcomeReason::ChildStopped),
+        "child_cancelled" => Ok(DelegationOutcomeReason::ChildCancelled),
         "parent_stopped_parent_alone" => Ok(DelegationOutcomeReason::ParentStopped {
             scope: DescendantTerminationScope::ParentAlone,
         }),

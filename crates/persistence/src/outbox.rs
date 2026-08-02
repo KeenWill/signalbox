@@ -9,9 +9,9 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, ContextCompactionId, ContextFrontierId, ModelCallDisposition, ModelCallId,
-    SemanticTranscriptEntryId, SessionId, SessionInputPosition, ToolAttemptId, TurnAttemptId,
-    TurnId,
+    AcceptedInputId, ContextCompactionId, ContextFrontierId, DelegationMessageId,
+    ModelCallDisposition, ModelCallId, SemanticTranscriptEntryId, SessionId, SessionInputPosition,
+    ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -35,6 +35,7 @@ const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
 const TURN_CANCELLED: &str = "turn_cancelled";
 const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
+const DELEGATION_WAKE: &str = "delegation_wake";
 const STORAGE_VERSION: i16 = 1;
 
 type OutboxSlotRow = (
@@ -181,6 +182,28 @@ pub enum DispatchedOutboxEventKind {
         operation: DispatchedReconciliationOperation,
         /// Exact terminal frontier.
         terminal_frontier: ContextFrontierId,
+    },
+    /// A committed delegated result or peer message can wake its recipient.
+    DelegationWake {
+        /// Relationship root request.
+        spawning_request: ToolRequestId,
+        /// Exact committed wake subject.
+        subject: DispatchedDelegationWakeSubject,
+    },
+}
+
+/// Closed correlation carried by a delegated-session wake.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedDelegationWakeSubject {
+    /// The terminal result keyed by the relationship root request.
+    Result {
+        /// Exact result key, equal to the relationship root request.
+        result_spawning_request: ToolRequestId,
+    },
+    /// One delivered relationship message.
+    Message {
+        /// Exact delivered message.
+        message: DelegationMessageId,
     },
 }
 
@@ -1427,6 +1450,38 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
+        DELEGATION_WAKE => {
+            let row = sqlx::query(
+                "SELECT spawning_tool_request_id, subject_kind,
+                        result_spawning_request_id, message_id
+                   FROM delegation_wake_outbox_event
+                  WHERE event_sequence = $1 AND session_id = $2",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            let spawning_request =
+                ToolRequestId::from_uuid(row.try_get("spawning_tool_request_id")?);
+            let subject = match (
+                row.try_get::<String, _>("subject_kind")?.as_str(),
+                row.try_get::<Option<Uuid>, _>("result_spawning_request_id")?,
+                row.try_get::<Option<Uuid>, _>("message_id")?,
+            ) {
+                ("result", Some(result), None) => DispatchedDelegationWakeSubject::Result {
+                    result_spawning_request: ToolRequestId::from_uuid(result),
+                },
+                ("message", None, Some(message)) => DispatchedDelegationWakeSubject::Message {
+                    message: DelegationMessageId::from_uuid(message),
+                },
+                _ => return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into()),
+            };
+            DispatchedOutboxEventKind::DelegationWake {
+                spawning_request,
+                subject,
+            }
+        }
         _ => return Err(OutboxCorruption::UnsupportedEventKind.into()),
     };
 
@@ -1578,6 +1633,16 @@ pub(crate) enum OutboxEvent {
         attempt: ToolAttemptId,
         terminal_frontier: ContextFrontierId,
     },
+    DelegationWake {
+        session: SessionId,
+        spawning_request: ToolRequestId,
+        subject: DelegationWakeOutboxSubject,
+    },
+}
+
+pub(crate) enum DelegationWakeOutboxSubject {
+    Result,
+    Message(DelegationMessageId),
 }
 
 pub(crate) enum ModelCallOutboxState {
@@ -1723,7 +1788,49 @@ pub(crate) async fn append(
             )
             .await
         }
+        OutboxEvent::DelegationWake {
+            session,
+            spawning_request,
+            subject,
+        } => append_delegation_wake(connection, session, spawning_request, subject).await,
     }
+}
+
+async fn append_delegation_wake(
+    connection: &mut PgConnection,
+    session: SessionId,
+    spawning_request: ToolRequestId,
+    subject: DelegationWakeOutboxSubject,
+) -> Result<(), sqlx::Error> {
+    let (subject_kind, result, message) = match subject {
+        DelegationWakeOutboxSubject::Result => ("result", Some(spawning_request.into_uuid()), None),
+        DelegationWakeOutboxSubject::Message(message) => {
+            ("message", None, Some(message.into_uuid()))
+        }
+    };
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_wake_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             spawning_tool_request_id, subject_kind,
+             result_spawning_request_id, message_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6, $7 FROM header",
+    )
+    .bind(DELEGATION_WAKE)
+    .bind(STORAGE_VERSION)
+    .bind(session.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(subject_kind)
+    .bind(result)
+    .bind(message)
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn append_context_compacted(
