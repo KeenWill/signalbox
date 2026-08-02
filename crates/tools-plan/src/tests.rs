@@ -65,6 +65,49 @@ fn event(value: u64, provenance: PlanEventProvenance, kind: PlanEventKind) -> Pl
     PlanEvent::new(ordinal(value), provenance, kind)
 }
 
+fn dependency_overflow_history() -> Vec<PlanEvent> {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let maximum = u64::try_from(MAX_PLAN_DEPENDENCIES_PER_ENTRY)
+        .expect("the fixture dependency limit fits u64");
+    let last_dependency = maximum
+        .checked_add(2)
+        .expect("the fixture dependency identities fit u64");
+    let mut events = Vec::new();
+    for creation in 1..=last_dependency {
+        events.push(event(
+            creation,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ));
+    }
+    let first_edge = last_dependency
+        .checked_add(1)
+        .expect("the fixture edge ordinals fit u64");
+    for dependency in 2..=last_dependency {
+        let edge_ordinal = first_edge
+            .checked_add(dependency - 2)
+            .expect("the fixture edge ordinal fits u64");
+        events.push(event(
+            edge_ordinal,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: entry(1),
+                dependency: entry(dependency),
+            },
+        ));
+    }
+    events
+}
+
+fn dependencies_beyond_limit() -> Vec<PlanEntryId> {
+    (2..)
+        .take(MAX_PLAN_DEPENDENCIES_PER_ENTRY + 1)
+        .map(entry)
+        .collect()
+}
+
 fn arguments(value: Value) -> NormalizedToolArguments {
     NormalizedToolArguments::try_from_provider_text(value.to_string())
         .expect("fixture arguments are admitted")
@@ -232,6 +275,18 @@ fn known_failure_has_detail(evidence: &ToolExecutorEvidence) -> bool {
         ToolExecutorEvidence::CompletedText(_)
         | ToolExecutorEvidence::KnownFailed { detail: None }
         | ToolExecutorEvidence::Ambiguous => false,
+    }
+}
+
+fn dependency_cycle_from(error: PlanFoldError) -> PlanDependencyCycle {
+    match error {
+        PlanFoldError::DependencyCycle(cycle) => cycle,
+        PlanFoldError::NoncontiguousOrdinal { .. }
+        | PlanFoldError::MixedSessions
+        | PlanFoldError::UnknownEntry { .. }
+        | PlanFoldError::DependencyLimitExceeded { .. } => {
+            panic!("fixture fold failure is a dependency cycle")
+        }
     }
 }
 
@@ -448,6 +503,511 @@ fn fold_preserves_creation_order_under_interleaved_entry_appends() {
 }
 
 #[test]
+fn fold_exposes_waiting_until_every_dependency_is_completed() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let prerequisite = entry(1);
+    let dependent = entry(2);
+    let expected_dependencies = vec![prerequisite];
+    let waiting_status = PlanStatus::Pending;
+    let waiting_history = vec![
+        event(
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ),
+        event(
+            2,
+            provenance,
+            PlanEventKind::Created {
+                text: text(SECOND_TEXT),
+            },
+        ),
+        event(
+            3,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: dependent,
+                dependency: prerequisite,
+            },
+        ),
+    ];
+
+    let waiting = fold_plan_events(&waiting_history).expect("acyclic dependency history folds");
+    let waiting_entry = &waiting.entries()[1];
+
+    assert_eq!(waiting_entry.status(), waiting_status);
+    assert_eq!(
+        waiting_entry.dependencies(),
+        expected_dependencies.as_slice()
+    );
+    assert_eq!(waiting_entry.readiness(), PlanReadiness::Waiting);
+
+    let mut ready_history = waiting_history;
+    ready_history.push(event(
+        4,
+        provenance,
+        PlanEventKind::StatusChanged {
+            entry: prerequisite,
+            status: PlanStatus::Completed,
+        },
+    ));
+
+    let ready = fold_plan_events(&ready_history).expect("completed dependency history folds");
+    let ready_entry = &ready.entries()[1];
+
+    assert_eq!(ready_entry.status(), waiting_status);
+    assert_eq!(ready_entry.dependencies(), expected_dependencies.as_slice());
+    assert_eq!(ready_entry.readiness(), PlanReadiness::Ready);
+}
+
+#[test]
+fn fold_rejects_a_dependency_cycle_with_typed_closed_path() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let first = entry(1);
+    let second = entry(2);
+    let expected_path = vec![second, first, second];
+    let events = vec![
+        event(
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ),
+        event(
+            2,
+            provenance,
+            PlanEventKind::Created {
+                text: text(SECOND_TEXT),
+            },
+        ),
+        event(
+            3,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: first,
+                dependency: second,
+            },
+        ),
+        event(
+            4,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: second,
+                dependency: first,
+            },
+        ),
+    ];
+
+    let error = fold_plan_events(&events).expect_err("cyclic dependency history is rejected");
+    let cycle = dependency_cycle_from(error);
+
+    assert_eq!(cycle.entry(), second);
+    assert_eq!(cycle.dependency(), first);
+    assert_eq!(cycle.path(), expected_path.as_slice());
+}
+
+#[test]
+fn fold_rejects_a_self_dependency_with_typed_closed_path() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let dependent = entry(1);
+    let expected_path = vec![dependent, dependent];
+    let events = vec![
+        event(
+            1,
+            provenance,
+            PlanEventKind::Created {
+                text: text(INITIAL_TEXT),
+            },
+        ),
+        event(
+            2,
+            provenance,
+            PlanEventKind::DependsOn {
+                entry: dependent,
+                dependency: dependent,
+            },
+        ),
+    ];
+
+    let error = fold_plan_events(&events).expect_err("self dependency history is rejected");
+    let cycle = dependency_cycle_from(error);
+
+    assert_eq!(cycle.entry(), dependent);
+    assert_eq!(cycle.dependency(), dependent);
+    assert_eq!(cycle.path(), expected_path.as_slice());
+}
+
+#[test]
+fn write_returns_a_known_failure_for_typed_cycle_evidence() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let dependency = entry(2);
+    let cycle_path = vec![dependent, dependency, dependent];
+    let cycle = PlanDependencyCycle::try_new(dependent, dependency, cycle_path)
+        .expect("fixture cycle path is closed");
+    let port = FakePort::rejecting(PlanAppendRejection::DependencyCycle(cycle));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "kind": "depends_on",
+        "entry_id": dependent.as_u64(),
+        "dependency_id": dependency.as_u64()
+    })))
+    .expect("fixture dependency arguments are valid");
+
+    let evidence = run_ready(executor.execute_operation(dispatch, operation))
+        .expect("typed rejection succeeds");
+
+    assert!(known_failure_has_detail(&evidence));
+}
+
+#[test]
+fn dependency_cycle_evidence_rejects_a_repeated_internal_vertex() {
+    let dependent = entry(1);
+    let dependency = entry(2);
+    let repeated_path = vec![dependent, dependency, dependency, dependent];
+
+    assert!(PlanDependencyCycle::try_new(dependent, dependency, repeated_path).is_none());
+}
+
+#[test]
+fn dependency_overflow_fixture_has_exact_boundary_shape() {
+    let provenance = PlanEventProvenance::from_invocation(correlation(10));
+    let maximum = u64::try_from(MAX_PLAN_DEPENDENCIES_PER_ENTRY)
+        .expect("the fixture dependency limit fits u64");
+    let last_dependency = maximum + 2;
+    let first_edge = maximum + 3;
+    let last_event = maximum * 2 + 3;
+    let events = dependency_overflow_history();
+    let expected_last_creation = event(
+        last_dependency,
+        provenance,
+        PlanEventKind::Created {
+            text: text(INITIAL_TEXT),
+        },
+    );
+    let expected_first_edge = event(
+        first_edge,
+        provenance,
+        PlanEventKind::DependsOn {
+            entry: entry(1),
+            dependency: entry(2),
+        },
+    );
+    let expected_last_edge = event(
+        last_event,
+        provenance,
+        PlanEventKind::DependsOn {
+            entry: entry(1),
+            dependency: entry(last_dependency),
+        },
+    );
+
+    assert_eq!(events.len(), MAX_PLAN_DEPENDENCIES_PER_ENTRY * 2 + 3);
+    assert_eq!(
+        events.get(MAX_PLAN_DEPENDENCIES_PER_ENTRY + 1),
+        Some(&expected_last_creation)
+    );
+    assert_eq!(
+        events.get(MAX_PLAN_DEPENDENCIES_PER_ENTRY + 2),
+        Some(&expected_first_edge)
+    );
+    assert_eq!(events.last(), Some(&expected_last_edge));
+}
+
+#[test]
+fn fold_rejects_a_dependency_set_above_the_read_bound() {
+    let dependent = entry(1);
+    let events = dependency_overflow_history();
+
+    let error = fold_plan_events(&events).expect_err("the oversized dependency set is rejected");
+
+    assert_eq!(
+        error,
+        PlanFoldError::DependencyLimitExceeded { entry: dependent }
+    );
+}
+
+#[test]
+fn write_returns_a_known_failure_for_the_dependency_limit() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let dependency = entry(2);
+    let port =
+        FakePort::rejecting(PlanAppendRejection::DependencyLimitReached { entry: dependent });
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "kind": "depends_on",
+        "entry_id": dependent.as_u64(),
+        "dependency_id": dependency.as_u64()
+    })))
+    .expect("fixture dependency arguments are valid");
+
+    let evidence = run_ready(executor.execute_operation(dispatch, operation))
+        .expect("typed dependency-limit rejection succeeds");
+
+    assert!(known_failure_has_detail(&evidence));
+}
+
+#[test]
+fn write_rejects_dependency_limit_evidence_for_a_self_link() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let port =
+        FakePort::rejecting(PlanAppendRejection::DependencyLimitReached { entry: dependent });
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "kind": "depends_on",
+        "entry_id": dependent.as_u64(),
+        "dependency_id": dependent.as_u64()
+    })))
+    .expect("fixture self-link arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("dependency-limit evidence cannot authenticate a self-link");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_rejects_a_dependency_set_above_the_port_bound() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let current = PlanEntry::with_dependencies(
+        dependent,
+        text(INITIAL_TEXT),
+        PlanStatus::Pending,
+        dependencies_beyond_limit(),
+        PlanReadiness::Waiting,
+    );
+    let page = PlanReadPage::new(
+        dispatch.session(),
+        vec![current],
+        PlanPageCompleteness::Complete,
+        None,
+    );
+    let port = FakePort::reading(page);
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("the oversized fake page violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_rejects_a_self_dependency_from_the_port() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let current = PlanEntry::with_dependencies(
+        dependent,
+        text(INITIAL_TEXT),
+        PlanStatus::Pending,
+        vec![dependent],
+        PlanReadiness::Waiting,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![current],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("a self-dependency violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_rejects_an_absent_dependency_from_a_complete_uncursored_page() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let absent_dependency = entry(999);
+    let current = PlanEntry::with_dependencies(
+        dependent,
+        text(INITIAL_TEXT),
+        PlanStatus::Pending,
+        vec![absent_dependency],
+        PlanReadiness::Waiting,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![current],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("a complete uncursored page must contain every dependency entry");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_rejects_a_page_local_dependency_cycle_from_the_port() {
+    let dispatch = correlation(10);
+    let first = entry(1);
+    let second = entry(2);
+    let first_entry = PlanEntry::with_dependencies(
+        first,
+        text(INITIAL_TEXT),
+        PlanStatus::Pending,
+        vec![second],
+        PlanReadiness::Waiting,
+    );
+    let second_entry = PlanEntry::with_dependencies(
+        second,
+        text(SECOND_TEXT),
+        PlanStatus::Pending,
+        vec![first],
+        PlanReadiness::Waiting,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![first_entry, second_entry],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("a page-local cycle violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_rejects_page_local_readiness_that_contradicts_dependency_status() {
+    let dispatch = correlation(10);
+    let prerequisite = entry(1);
+    let dependent = entry(2);
+    let prerequisite_entry = PlanEntry::new(prerequisite, text(INITIAL_TEXT), PlanStatus::Pending);
+    let dependent_entry = PlanEntry::with_dependencies(
+        dependent,
+        text(SECOND_TEXT),
+        PlanStatus::Pending,
+        vec![prerequisite],
+        PlanReadiness::Ready,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![prerequisite_entry, dependent_entry],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("contradictory page-local readiness violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_rejects_ready_when_a_visible_dependency_is_incomplete_among_hidden_dependencies() {
+    let dispatch = correlation(10);
+    let prerequisite = entry(1);
+    let dependent = entry(2);
+    let hidden_dependency = entry(3);
+    let prerequisite_entry = PlanEntry::new(prerequisite, text(INITIAL_TEXT), PlanStatus::Pending);
+    let dependent_entry = PlanEntry::with_dependencies(
+        dependent,
+        text(SECOND_TEXT),
+        PlanStatus::Pending,
+        vec![prerequisite, hidden_dependency],
+        PlanReadiness::Ready,
+    );
+    let port = FakePort::reading(PlanReadPage::new(
+        dispatch.session(),
+        vec![prerequisite_entry, dependent_entry],
+        PlanPageCompleteness::Complete,
+        None,
+    ));
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("a visible pending dependency proves ready is contradictory");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn read_output_exposes_dependencies_and_waiting_readiness() {
+    const PREREQUISITE_ENTRY_ID: u64 = 1;
+    let dispatch = correlation(10);
+    let prerequisite = entry(PREREQUISITE_ENTRY_ID);
+    let dependent = entry(2);
+    let dependencies = vec![prerequisite];
+    let expected_readiness = PlanReadiness::Waiting;
+    let current = PlanEntry::with_dependencies(
+        dependent,
+        text(SECOND_TEXT),
+        PlanStatus::Pending,
+        dependencies.clone(),
+        expected_readiness,
+    );
+    let page = PlanReadPage::new(
+        dispatch.session(),
+        vec![current],
+        PlanPageCompleteness::Truncated,
+        None,
+    );
+    let port = FakePort::reading(page);
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation =
+        decode_read_operation(&arguments(json!({}))).expect("fixture read arguments are valid");
+
+    let evidence =
+        run_ready(executor.execute_operation(dispatch, operation)).expect("fake read succeeds");
+    let output: Value =
+        serde_json::from_str(&completed_text(evidence)).expect("tool result is compact JSON");
+
+    assert_eq!(output["entries"][0]["entry_id"], json!(dependent.as_u64()));
+    assert_eq!(
+        output["entries"][0]["dependencies"],
+        json!([PREREQUISITE_ENTRY_ID])
+    );
+    assert_eq!(output["entries"][0]["readiness"], json!(expected_readiness));
+}
+
+#[test]
 fn write_uses_trusted_provenance() {
     let dispatch = correlation(10);
     let provenance = PlanEventProvenance::from_invocation(dispatch);
@@ -624,6 +1184,36 @@ fn write_rejects_a_port_event_that_precedes_its_mutation_target() {
 
     let error = run_ready(executor.execute_operation(dispatch, operation))
         .expect_err("self-targeting durable mutation violates the port contract");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
+fn write_rejects_a_self_dependency_returned_as_appended_by_the_port() {
+    let dispatch = correlation(10);
+    let provenance = PlanEventProvenance::from_invocation(dispatch);
+    let target = entry(1);
+    let appended = event(
+        2,
+        provenance,
+        PlanEventKind::DependsOn {
+            entry: target,
+            dependency: target,
+        },
+    );
+    let port = FakePort::appending(appended);
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "dependency_id": target.as_u64(),
+        "entry_id": target.as_u64(),
+        "kind": "depends_on"
+    })))
+    .expect("fixture dependency arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("an appended self-dependency violates the port contract");
 
     assert!(is_port_contract(&error));
 }

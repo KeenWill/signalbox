@@ -104,6 +104,11 @@ pub(crate) const PLAN_APPEND_ATTEMPT: &str = "SELECT attempt.attempt_id
                 'entry_id', $8::numeric,
                 'status', $10::text
             )
+            WHEN 'depends_on' THEN jsonb_build_object(
+                'kind', 'depends_on',
+                'entry_id', $8::numeric,
+                'dependency_id', $11::numeric
+            )
         END
  FOR SHARE OF attempt";
 
