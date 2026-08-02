@@ -384,6 +384,25 @@ fn web_search_decodes_supported_named_nonbreaking_space_reference() {
     );
 }
 
+/// Common named references in provider prose remain available as safely
+/// entity-escaped result text.
+#[test]
+fn web_search_preserves_common_named_references_as_entity_escaped_text() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_COMMON_NAMED_REFERENCES_SNIPPET),
+    })
+    .expect("common named-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+
+    let evidence = success_evidence(response, &scrubber()).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    assert!(content.contains(FIXTURE_ESCAPED_COMMON_NAMED_REFERENCES_SNIPPET));
+}
+
 /// INV-035: signed digits are not valid JSON Unicode or HTML numeric
 /// references and cannot be normalized into provider evidence.
 #[test]
