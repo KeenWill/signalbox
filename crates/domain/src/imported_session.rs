@@ -484,14 +484,11 @@ impl BoundedImportedSessionReconstitutionInput {
                 BoundedImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
             ));
         }
-        match self.provenance.cause() {
-            SessionCreationCause::UserInitiated => {}
-            SessionCreationCause::Delegated { .. } => {
-                return Err(fail(
-                    self,
-                    BoundedImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
-                ));
-            }
+        if delegated_imported_session_mismatch(self.provenance) {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
+            ));
         }
         let TranscriptAncestry::ImportedConversation {
             source_frontier, ..
@@ -739,6 +736,10 @@ struct ValidatedImportedSeedProjection {
     semantic_entries: Box<[SemanticTranscriptEntry]>,
 }
 
+const fn delegated_imported_session_mismatch(provenance: SessionCreationProvenance) -> bool {
+    matches!(provenance.cause(), SessionCreationCause::Delegated { .. })
+}
+
 fn validate_imported_seed_projection(
     session: SessionId,
     provenance: SessionCreationProvenance,
@@ -953,6 +954,12 @@ impl ImportedSessionReconstitutionInput {
                 ImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
             ));
         }
+        if delegated_imported_session_mismatch(self.provenance) {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
+            ));
+        }
         let projection = match validate_imported_seed_projection(
             self.stored_session,
             self.provenance,
@@ -1057,6 +1064,8 @@ pub enum ImportedSessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// The current pointer and selected row name different versions.
     CurrentDefaultsVersionMismatch,
+    /// Delegated creation cannot carry imported ancestry.
+    DelegatedAncestryMismatch,
     /// The imported seed projection is inconsistent.
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
@@ -1918,6 +1927,30 @@ mod tests {
             input,
             BoundedImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
         );
+    }
+
+    /// S18 / INV-003: full imported-session reconstitution rejects the same
+    /// impossible delegated/imported provenance pairing before yielding a session.
+    #[test]
+    fn s18_inv003_full_current_session_rejects_delegated_imported_ancestry() {
+        let (conversation, _, prepared) = prepared_fixture();
+        let mut input = current_input(&conversation, &prepared);
+        input.provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated {
+                spawning_request: tool_request_id(90),
+            },
+            input.provenance.ancestry(),
+        );
+        let unchanged = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("delegated creation cannot carry imported ancestry");
+
+        assert_eq!(
+            error.failure(),
+            ImportedSessionReconstitutionFailure::DelegatedAncestryMismatch
+        );
+        assert_eq!(error.input(), &unchanged);
     }
 
     /// S28 / INV-002 / INV-003 / INV-015 / INV-039: every constructible

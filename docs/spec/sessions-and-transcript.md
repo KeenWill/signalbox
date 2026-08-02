@@ -897,6 +897,12 @@ while the spawn request awaits approval or execution, cannot change the child.
 Tool arguments supply no defaults field.
 
 Each spawning request creates at most one immutable parent/child relationship.
+The public domain surface accepts neither a caller-supplied relationship count
+nor an unsealed relationship slice as evidence of that uniqueness. Aggregate
+construction remains sealed in the foundation slice; the persistence slice in
+this stack admits a spawn only from the complete parent relationship inventory
+held under the spawn transaction's lock, together with the child-session
+uniqueness check.
 The relationship records the exact parent session and turn, child session, and
 one parent-chosen policy:
 
@@ -904,9 +910,9 @@ one parent-chosen policy:
 - `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
   each exactly `KeepRunning`, `Stop`, or `Cancel`.
 
-The `SessionDelegation` aggregate admits creation only from a sealed
-`DelegatedSpawnRequest` and records that request's parent, bounded task, policy,
-child, and spawn provenance as the first event in one contiguous history. Typed
+The `SessionDelegation` aggregate records an admitted sealed
+`DelegatedSpawnRequest`'s parent, bounded task, policy, child, and spawn
+provenance as the first event in one contiguous history. Typed
 await and message requests may act only on their exact relationship; consuming
 transition failures return the unchanged aggregate and attempted input. Message
 delivery remains available after a terminal outcome. Outcome authority is
