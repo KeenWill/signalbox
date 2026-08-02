@@ -173,14 +173,17 @@ reference, state, disposition, and reported token usage. Its closed result is
 
 The judge may approve or deny only a request frozen as `Delegated`. An
 `EscalateToHuman` result stores the completed call but no approval decision and
-leaves the same request parked. A request frozen as `Human` admits only that
-escalation result from a delegate; a delegate approval or denial is rejected by
-both domain reconstruction and relational provenance constraints (INV-049). Thus
-delegation can narrow authority but never widen it. A completed approve or deny
-atomically records the decision and advances the same proposal-ordered batch
-transition used by a user decision. Each explicit user or delegate decision
-emits one ordered `ToolApprovalDecided` event carrying the decision, decider
-kind and identity, and delegate rationale when present.
+leaves the same request parked. A `KnownFailed`, `Refused`, `Cancelled`, or
+`Ambiguous` terminal judge call likewise retains that park while immediately
+admitting a user decision, so a terminal judge failure cannot strand the
+approval wait. A request frozen as `Human` admits only that escalation result
+from a delegate; a delegate approval or denial is rejected by both domain
+reconstruction and relational provenance constraints (INV-049). Thus delegation
+can narrow authority but never widen it. A completed approve or deny atomically
+records the decision and advances the same proposal-ordered batch transition
+used by a user decision. Each explicit user or delegate decision emits one
+ordered `ToolApprovalDecided` event carrying the decision, decider kind and
+identity, and delegate rationale when present.
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and

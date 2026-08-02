@@ -3,6 +3,9 @@
 
 ALTER TABLE tool_request ADD COLUMN approval_posture text;
 
+ALTER TABLE tool_request
+    DISABLE TRIGGER tool_request_is_append_only;
+
 UPDATE tool_request AS request
    SET approval_posture = CASE
        WHEN EXISTS (
@@ -13,6 +16,11 @@ UPDATE tool_request AS request
        ) THEN 'auto'
        ELSE 'human'
    END;
+
+SET CONSTRAINTS ALL IMMEDIATE;
+
+ALTER TABLE tool_request
+    ENABLE TRIGGER tool_request_is_append_only;
 
 ALTER TABLE tool_request
     ALTER COLUMN approval_posture SET NOT NULL,
@@ -37,10 +45,10 @@ CREATE TABLE tool_approval_judge_model_call (
     terminal_disposition_kind text,
     recommendation_kind text,
     rationale text,
-    input_tokens numeric(20, 0),
-    output_tokens numeric(20, 0),
-    cache_read_input_tokens numeric(20, 0),
-    cache_creation_input_tokens numeric(20, 0),
+    input_tokens numeric,
+    output_tokens numeric,
+    cache_read_input_tokens numeric,
+    cache_creation_input_tokens numeric,
 
     CONSTRAINT tool_approval_judge_call_state_closed
         CHECK (state_kind IN ('prepared', 'in_flight', 'terminal')),
@@ -83,10 +91,37 @@ CREATE TABLE tool_approval_judge_model_call (
         CHECK (char_length(credential_reference) > 0),
     CONSTRAINT tool_approval_judge_call_usage_u64_range
         CHECK (
-            (input_tokens IS NULL OR input_tokens BETWEEN 0 AND 18446744073709551615)
-            AND (output_tokens IS NULL OR output_tokens BETWEEN 0 AND 18446744073709551615)
-            AND (cache_read_input_tokens IS NULL OR cache_read_input_tokens BETWEEN 0 AND 18446744073709551615)
-            AND (cache_creation_input_tokens IS NULL OR cache_creation_input_tokens BETWEEN 0 AND 18446744073709551615)
+            (
+                input_tokens IS NULL
+                OR (
+                    input_tokens = trunc(input_tokens)
+                    AND input_tokens BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                output_tokens IS NULL
+                OR (
+                    output_tokens = trunc(output_tokens)
+                    AND output_tokens BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                cache_read_input_tokens IS NULL
+                OR (
+                    cache_read_input_tokens = trunc(cache_read_input_tokens)
+                    AND cache_read_input_tokens
+                        BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                cache_creation_input_tokens IS NULL
+                OR (
+                    cache_creation_input_tokens =
+                        trunc(cache_creation_input_tokens)
+                    AND cache_creation_input_tokens
+                        BETWEEN 0 AND 18446744073709551615
+                )
+            )
         ),
     CONSTRAINT tool_approval_judge_call_session_key
         UNIQUE (model_call_id, session_id),
@@ -327,8 +362,17 @@ BEGIN
                           FROM tool_approval_judge_model_call AS judge
                          WHERE judge.request_id = request.request_id
                            AND judge.state_kind = 'terminal'
-                           AND judge.terminal_disposition_kind = 'completed'
-                           AND judge.recommendation_kind = 'escalate_to_human'
+                           AND (
+                                (
+                                    judge.terminal_disposition_kind = 'completed'
+                                    AND judge.recommendation_kind =
+                                        'escalate_to_human'
+                                )
+                                OR judge.terminal_disposition_kind IN (
+                                    'known_failed', 'refused', 'cancelled',
+                                    'ambiguous'
+                                )
+                           )
                     )
                 )
            );
@@ -494,14 +538,14 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_completed_tool_approval_judge_decision();
 
-CREATE FUNCTION require_delegate_tool_approval_effect()
+CREATE FUNCTION require_explicit_tool_approval_effect()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
     matching_effects bigint;
 BEGIN
-    IF NEW.decision_source <> 'delegate' THEN
+    IF NEW.decision_source NOT IN ('owner_command', 'delegate') THEN
         RETURN NULL;
     END IF;
 
@@ -521,21 +565,21 @@ BEGIN
        );
     IF matching_effects <> 1 THEN
         RAISE EXCEPTION
-            'delegate decision lacks its outbox and lifecycle effect'
+            'explicit decision lacks its outbox and lifecycle effect'
             USING
                 ERRCODE = '23514',
                 CONSTRAINT =
-                    'tool_approval_delegate_requires_atomic_effect';
+                    'tool_approval_explicit_requires_atomic_effect';
     END IF;
     RETURN NULL;
 END;
 $$;
 
-CREATE CONSTRAINT TRIGGER tool_approval_delegate_requires_atomic_effect
+CREATE CONSTRAINT TRIGGER tool_approval_explicit_requires_atomic_effect
 AFTER INSERT OR UPDATE ON tool_approval_decision
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
-EXECUTE FUNCTION require_delegate_tool_approval_effect();
+EXECUTE FUNCTION require_explicit_tool_approval_effect();
 
 CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
 RETURNS trigger
