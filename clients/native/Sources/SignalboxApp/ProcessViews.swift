@@ -1708,6 +1708,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         timeline = normalizer.timelineItems
         let snapshotTerminalTurnIDs = terminalTurnIDs(in: snapshot)
         let snapshotActiveTurnID = activeTurnID(in: snapshot)
+        let snapshotTerminalizedActiveTurn = activeTurnID.map {
+          snapshotTerminalTurnIDs.contains($0)
+        } ?? false
         terminalTurnIDs.formUnion(snapshotTerminalTurnIDs)
         if let activeTurnID, snapshotTerminalTurnIDs.contains(activeTurnID) {
           self.activeTurnID = nil
@@ -1724,6 +1727,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
         if let snapshotActiveTurnID {
           activeTurnID = snapshotActiveTurnID
+          if projection.activity.state != .waitingForToolDecision
+            || sideSnapshotApprovalMatchesTrigger(snapshot, trigger: trigger)
+          {
+            activity = projection.activity
+          }
+        } else if snapshotTerminalizedActiveTurn || isTerminalActivity(projection.activity) {
           activity = projection.activity
         } else if case .turnActivated(let turnID, _) = trigger.event,
           snapshotTerminalTurnIDs.contains(turnID)
@@ -2131,6 +2140,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .running, .waitingForToolDecision, .recoveryRequired:
       return true
     case .unavailable, .queued, .failed, .completed, .refused, .cancelled:
+      return false
+    }
+  }
+
+  private func isTerminalActivity(_ activity: SignalboxProcessActivity) -> Bool {
+    switch activity.state {
+    case .failed, .completed, .refused, .cancelled:
+      return true
+    case .unavailable, .queued, .running, .waitingForToolDecision, .recoveryRequired:
       return false
     }
   }

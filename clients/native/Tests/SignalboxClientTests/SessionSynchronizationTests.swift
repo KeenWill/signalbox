@@ -1992,6 +1992,56 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testModelIdentityMarkerRejectsForeignTurnOriginSourceSession() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.secondActiveRunningTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelIdentityMarker(
+          turnID: SynchronizationFixture.secondTurn
+        )
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.textEntry(
+          index: 1,
+          entryID: SynchronizationFixture.secondAcceptedInput,
+          turnID: SynchronizationFixture.secondTurn,
+          sourceSessionID: SynchronizationFixture.foreignSession
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
   func testModelIdentityMarkerIsUniquePerTurn() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -3333,19 +3383,21 @@ private enum SynchronizationFixture {
 
   static func textEntry(
     index: UInt64 = 0,
-    entryID: String = entry
+    entryID: String = entry,
+    turnID: String = turn,
+    sourceSessionID: String = session
   ) throws -> SignalboxProcessServerMessage {
     try message(
       """
       {
         "type":"transcript_text_entry",
         "entry_index":"\(index)",
-        "source_session_id":"\(session)",
+        "source_session_id":"\(sourceSessionID)",
         "entry_id":"\(entryID)",
         "entry":{
           "type":"user",
           "accepted_input_id":"\(acceptedInput)",
-          "turn_id":"\(turn)"
+          "turn_id":"\(turnID)"
         }
       }
       """
