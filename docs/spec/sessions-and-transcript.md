@@ -955,10 +955,11 @@ placement and this stack implements no placement logic.
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant text, tool-use/result references, completed-turn, steering,
-  cancelled-turn, delegation-message, and delegation-result semantic entries are
-  implemented; refusal, reconciliation, mismatch, accepted-risk, and
-  approval-event variants remain open.
+- Assistant text, tool-use/result references, completed-turn, steering, and
+  cancelled-turn semantic entries are implemented. The session-delegation stack
+  adds delegation-message and delegation-result entries. Refusal,
+  reconciliation, mismatch, accepted-risk, and approval-event variants remain
+  open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so

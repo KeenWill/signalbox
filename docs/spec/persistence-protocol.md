@@ -949,8 +949,7 @@ predicate is authoritative after restart.
 
 Committed client-observable transitions become update events only through the
 transactional-outbox family (INV-032 mechanism; observation semantics are
-protocol scope). Implemented storage, extended by the `delegation_wake`
-foundation proposal above when the full delegation stack lands:
+protocol scope). Implemented storage:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
@@ -960,19 +959,11 @@ foundation proposal above when the full delegation stack lands:
   `tool_batch_transition_outbox_event`, `context_compacted_outbox_event`,
   `turn_completed_outbox_event`, `turn_refused_outbox_event`,
   `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
-  `runner_state_transition_outbox_event`, and `delegation_wake_outbox_event` —
-  with a deferred trigger requiring exactly one typed record per header. A
-  version-one delegation-wake record names the exact spawning request and has
-  one closed subject shape: `result` carries an equal
-  `result_spawning_request_id`, while `message` carries a `DelegationMessageId`
-  belonging to that relationship. Its header's `session_id` is the parent
-  receiving a result wake or the peer receiving a message wake. The schema
-  requires exactly the selected subject columns and correlates each identity to
-  the same relationship; dispatch decodes the same closed union and rejects
-  every other storage version. A runner-transition record carries the affected
-  runner, the positive placement revision, the sandbox profile, one closed
-  transition state, and the relocation facts that state requires, so a follower
-  learns of loss, suspicion, recovery, replacement, working-directory
+  and `runner_state_transition_outbox_event` — with a deferred trigger requiring
+  exactly one typed record per header. A runner-transition record carries the
+  affected runner, the positive placement revision, the sandbox profile, one
+  closed transition state, and the relocation facts that state requires, so a
+  follower learns of loss, suspicion, recovery, replacement, working-directory
   relocation, and abandonment from the same family. The family is deliberately
   shaped for extension: a later runner fact — another relocation shape, or
   runner metadata and attributes — adds a state and its columns to this one
@@ -991,6 +982,19 @@ foundation proposal above when the full delegation stack lands:
   A context-compacted record names the authoritative compaction, its completed
   dedicated call, exact positive through position, appended summary, and result
   frontier.
+
+**Session-delegation foundation proposal.** The full delegation stack adds a
+version-one `delegation_wake_outbox_event` typed record. It names the exact
+spawning request and has one closed subject shape: `result` carries an equal
+`result_spawning_request_id`, while `message` carries a `DelegationMessageId`
+belonging to that relationship. Its header's `session_id` is the parent
+receiving a result wake or the peer receiving a message wake. The schema
+requires exactly the selected subject columns and correlates each identity to
+the same relationship; dispatch decodes the same closed union and rejects every
+other storage version. The header completeness trigger includes this record
+kind, and the record is append-only and rejects `TRUNCATE` with the rest of the
+family.
+
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
