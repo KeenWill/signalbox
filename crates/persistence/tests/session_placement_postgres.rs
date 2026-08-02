@@ -529,8 +529,7 @@ async fn s36_inv012_update_replay_authenticates_the_applied_predecessor_chain()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_current_placement_rejects_an_incomplete_applied_receipt()
--> Result<(), Box<dyn Error>>
-{
+-> Result<(), Box<dyn Error>> {
     let (container, pool, repository, update) = placement_update_fixture().await?;
     repository.handle(update.clone()).await?;
     sqlx::query(
