@@ -386,6 +386,17 @@ const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'s
     }
 }
 
+const fn configured_approval_posture_cause(error: &ConfiguredApprovalPostureError) -> &'static str {
+    match error {
+        ConfiguredApprovalPostureError::UnknownTool { .. } => {
+            "tool_approval_posture_names_unknown_tool"
+        }
+        ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { .. } => {
+            "delegated_tool_approval_requires_judge_wiring"
+        }
+    }
+}
+
 /// Records startup-scan failure evidence before reducing it to runtime status.
 ///
 /// The cause is a closed application token and the optional session/turn are
@@ -887,6 +898,16 @@ async fn run_hub(
             )
         })?;
     let daemon_tool_configuration = model_configuration.daemon_tools();
+    DaemonToolCatalog::validate_approval_postures_for_composition(
+        model_configuration.tool_approval_postures(),
+        daemon_tool_configuration.is_some(),
+    )
+    .map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
+        )
+    })?;
     let template_configuration = SessionTemplateConfiguration::read(
         configuration.template_configuration_file(),
         || env::var_os("HOME").map(PathBuf::from),
@@ -1009,17 +1030,9 @@ async fn run_hub(
         match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
             Ok(catalog) => catalog,
             Err(error) => {
-                let cause = match error {
-                    ConfiguredApprovalPostureError::UnknownTool { .. } => {
-                        "tool_approval_posture_names_unknown_tool"
-                    }
-                    ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { .. } => {
-                        "delegated_tool_approval_requires_judge_wiring"
-                    }
-                };
                 let failure = erase_startup_cause(
                     RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static(cause),
+                    SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
                 );
                 let _ = database.close().await;
                 return Err(failure);

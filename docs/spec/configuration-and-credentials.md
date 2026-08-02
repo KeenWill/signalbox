@@ -474,15 +474,16 @@ arguments cannot widen either admission rule.
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
 unknown posture values, and startup rejects a structurally valid name that is
-absent from the actually composed catalog. An absent table or omitted tool name
-preserves that declaration's legacy permission-default and session-blanket
-behavior exactly. An explicit posture supersedes that legacy result for the
-request: `auto` records policy automation and `human` parks for a user even when
-the session blanket is enabled. Committed unimplemented functionality:
-`delegated` will park with delegated authority for the approval-judge wiring.
-Until that wiring lands, daemon startup rejects a configured `delegated`
-override, so this partial configuration slice cannot create a delegated request
-that the ordinary user-decision path could approve.
+absent from the selected composition. That name check and the temporary
+`delegated` refusal run in the pre-database configuration pass. An absent table
+or omitted tool name preserves that declaration's legacy permission-default and
+session-blanket behavior exactly. An explicit posture supersedes that legacy
+result for the request: `auto` records policy automation and `human` parks for a
+user even when the session blanket is enabled. Committed unimplemented
+functionality: `delegated` will park with delegated authority for the
+approval-judge wiring. Until that wiring lands, daemon startup rejects a
+configured `delegated` override, so this partial configuration slice cannot
+create a delegated request that the ordinary user-decision path could approve.
 
 Committed unimplemented functionality: the optional `[approval_judge]` table has
 exactly one `selection_id`, and the configuration parser requires it to name a

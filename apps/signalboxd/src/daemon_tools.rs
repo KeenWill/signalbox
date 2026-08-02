@@ -528,6 +528,24 @@ impl DaemonToolCatalog {
         }
         Ok(Self { entries })
     }
+
+    /// Validates deployment postures against the statically selected
+    /// composition before database-backed tool dependencies are constructed.
+    pub fn validate_approval_postures_for_composition(
+        postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
+        includes_mapped_families: bool,
+    ) -> Result<(), ConfiguredApprovalPostureError> {
+        for (name, posture) in postures {
+            if !configured_composition_contains(&name, includes_mapped_families) {
+                return Err(ConfiguredApprovalPostureError::UnknownTool { name });
+            }
+            if posture == ToolApprovalPosture::Delegated {
+                return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+            }
+        }
+        Ok(())
+    }
+
     /// Applies explicit deployment postures that the current runtime can enforce.
     pub fn with_approval_postures(
         mut self,
@@ -544,6 +562,22 @@ impl DaemonToolCatalog {
         }
         Ok(self)
     }
+}
+
+fn configured_composition_contains(name: &ToolName, includes_mapped_families: bool) -> bool {
+    let name = name.as_str();
+    name == CURRENT_TIME_NAME
+        || name == ECHO_NAME
+        || name == WEB_FETCH_NAME
+        || name == SESSION_STATUS_UPDATE_NAME
+        || name == GOAL_DECLARE_NAME
+        || CODE_HOST_TOOL_NAMES.contains(&name)
+        || PLAN_TOOL_NAMES.contains(&name)
+        || (includes_mapped_families
+            && (GITHUB_TOOL_NAMES.contains(&name)
+                || WORKSPACE_READ_TOOL_NAMES.contains(&name)
+                || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
+                || CONVERSATION_TOOL_NAMES.contains(&name)))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -566,6 +600,19 @@ impl ConfiguredApprovalPostureError {
         }
     }
 }
+
+impl fmt::Display for ConfiguredApprovalPostureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::UnknownTool { .. } => "configured approval posture names an unknown tool",
+            Self::DelegatedJudgeUnavailable { .. } => {
+                "delegated approval posture requires judge wiring"
+            }
+        })
+    }
+}
+
+impl Error for ConfiguredApprovalPostureError {}
 
 impl ToolCatalog for DaemonToolCatalog {
     fn definitions(&self) -> Box<[ToolDefinition]> {
@@ -967,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn composed_catalog_applies_enforceable_postures_and_rejects_unknown_names() {
+    fn composed_catalog_applies_an_enforceable_posture() {
         let (echo_catalog, _executor) = EchoTool::try_new()
             .expect("echo fixture compiles")
             .into_parts();
@@ -975,14 +1022,8 @@ mod tests {
             .expect("single-tool fixture has unique names");
         let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
         let configured = catalog
-            .clone()
             .with_approval_postures([(echo.clone(), ToolApprovalPosture::Human)])
             .expect("known tool posture is applied");
-        let unknown = ToolName::try_new(String::from("unknown_tool"))
-            .expect("unknown fixture name is structurally valid");
-        let rejected = catalog
-            .with_approval_postures([(unknown.clone(), ToolApprovalPosture::Human)])
-            .expect_err("unknown tool posture fails closed");
 
         assert_eq!(
             configured
@@ -991,7 +1032,65 @@ mod tests {
                 .approval_posture(),
             Some(ToolApprovalPosture::Human)
         );
+    }
+
+    #[test]
+    fn composed_catalog_rejects_an_unknown_posture_name() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let unknown = ToolName::try_new(String::from("unknown_tool"))
+            .expect("unknown fixture name is structurally valid");
+        let rejected = catalog
+            .with_approval_postures([(unknown.clone(), ToolApprovalPosture::Human)])
+            .expect_err("unknown tool posture fails closed");
+
         assert_eq!(rejected.name(), &unknown);
+    }
+
+    #[test]
+    fn base_composition_prevalidation_rejects_an_uncomposed_mapped_tool() {
+        let mapped = ToolName::try_new(String::from(PULL_REQUEST_METADATA_NAME))
+            .expect("mapped fixture name is valid");
+        let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(mapped.clone(), ToolApprovalPosture::Human)],
+            false,
+        )
+        .expect_err("base composition excludes mapped families");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::UnknownTool { name: mapped }
+        );
+    }
+
+    #[test]
+    fn mapped_composition_prevalidation_accepts_a_mapped_tool() {
+        let mapped = ToolName::try_new(String::from(PULL_REQUEST_METADATA_NAME))
+            .expect("mapped fixture name is valid");
+
+        DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(mapped, ToolApprovalPosture::Human)],
+            true,
+        )
+        .expect("mapped composition includes configured families");
+    }
+
+    #[test]
+    fn composition_prevalidation_rejects_delegated_without_judge_wiring() {
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+        let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(echo.clone(), ToolApprovalPosture::Delegated)],
+            false,
+        )
+        .expect_err("delegated posture fails before database construction");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
+        );
     }
 
     #[test]
