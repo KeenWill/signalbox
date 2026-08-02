@@ -27,8 +27,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, ErrorCode, FrameEncodeError, GoalHistoryEvent,
-    GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+    ConversationOriginFilter, ConversationSummary, ErrorCode, ErrorDetail, FrameEncodeError,
+    GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
     MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
     ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, RequestId,
     ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
@@ -155,6 +155,105 @@ struct ScannedImportPath {
 enum ConversationImportOutcome {
     Inserted(CanonicalUuid),
     AlreadyImported(CanonicalUuid),
+}
+
+enum ConversationImportResponse {
+    Begun(CanonicalU64),
+    Appended(CanonicalU64),
+    Inserted(CanonicalUuid),
+    AlreadyImported(CanonicalUuid),
+    Error {
+        code: ErrorCode,
+        message: String,
+        detail: ErrorDetail,
+    },
+    Unexpected,
+}
+
+fn classify_conversation_import_response(message: ServerMessage) -> ConversationImportResponse {
+    match message {
+        ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        } => ConversationImportResponse::Begun(declared_size_bytes),
+        ServerMessage::ConversationImportAppended {
+            assembled_size_bytes,
+        } => ConversationImportResponse::Appended(assembled_size_bytes),
+        ServerMessage::ConversationImportInserted {
+            imported_conversation_id,
+        } => ConversationImportResponse::Inserted(imported_conversation_id),
+        ServerMessage::ConversationImportAlreadyImported {
+            imported_conversation_id,
+        } => ConversationImportResponse::AlreadyImported(imported_conversation_id),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => ConversationImportResponse::Error {
+            code,
+            message,
+            detail,
+        },
+        ServerMessage::SessionCreated { .. }
+        | ServerMessage::InputSubmitted { .. }
+        | ServerMessage::SteeringSubmitted { .. }
+        | ServerMessage::GoalTransitionApplied { .. }
+        | ServerMessage::GoalHistoryStart { .. }
+        | ServerMessage::GoalHistoryState { .. }
+        | ServerMessage::GoalHistoryItem { .. }
+        | ServerMessage::GoalHistoryEnd { .. }
+        | ServerMessage::SessionsStart {}
+        | ServerMessage::SessionSummary { .. }
+        | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::TemplatesStart {}
+        | ServerMessage::TemplateSummary { .. }
+        | ServerMessage::TemplatesEnd { .. }
+        | ServerMessage::SessionMetadataPageStart {}
+        | ServerMessage::SessionMetadataSummary { .. }
+        | ServerMessage::SessionMetadataPageEnd { .. }
+        | ServerMessage::ConversationPageStart {}
+        | ServerMessage::ConversationSummary { .. }
+        | ServerMessage::ConversationPageEnd { .. }
+        | ServerMessage::ModelAliasesStart {}
+        | ServerMessage::ModelAliasSummary { .. }
+        | ServerMessage::ModelAliasesEnd { .. }
+        | ServerMessage::SessionMetadata { .. }
+        | ServerMessage::SessionMetadataReplaced { .. }
+        | ServerMessage::SessionDefaultsReplaced { .. }
+        | ServerMessage::SessionDefaults { .. }
+        | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::SessionCompacted { .. }
+        | ServerMessage::ConversationImportAborted {}
+        | ServerMessage::ImportedConversationStart { .. }
+        | ServerMessage::ImportedConversationEntry { .. }
+        | ServerMessage::ImportedConversationEnd { .. }
+        | ServerMessage::TranscriptSnapshotStart { .. }
+        | ServerMessage::TranscriptTurn { .. }
+        | ServerMessage::TranscriptModelCallUsage { .. }
+        | ServerMessage::TranscriptModelCallsEnd { .. }
+        | ServerMessage::TranscriptEntry { .. }
+        | ServerMessage::TranscriptTextEntry { .. }
+        | ServerMessage::TranscriptContent { .. }
+        | ServerMessage::TranscriptSnapshotEnd { .. }
+        | ServerMessage::SessionEvent { .. }
+        | ServerMessage::ProviderTextDelta { .. }
+        | ServerMessage::ReviewTargetCreated { .. }
+        | ServerMessage::ReviewRunStarted { .. }
+        | ServerMessage::ReviewPassActivated { .. }
+        | ServerMessage::ReviewPassCompleted { .. }
+        | ServerMessage::ReviewFindingsRecorded { .. }
+        | ServerMessage::ReviewFindingEventRecorded { .. }
+        | ServerMessage::ReviewExternalLinkReserved { .. }
+        | ServerMessage::ReviewExternalLinkAttached { .. }
+        | ServerMessage::ReviewTarget { .. }
+        | ServerMessage::ReviewRun { .. }
+        | ServerMessage::ReviewFinding { .. }
+        | ServerMessage::ReviewFindingsStart { .. }
+        | ServerMessage::ReviewFindingItem { .. }
+        | ServerMessage::ReviewFindingsEnd { .. }
+        | ServerMessage::ReviewOrchestrationStarted { .. }
+        | ServerMessage::ReviewOrchestrationAdvanced { .. }
+        | ServerMessage::ReviewOrchestration { .. } => ConversationImportResponse::Unexpected,
+    }
 }
 
 #[derive(Default)]
@@ -1324,16 +1423,18 @@ where
             declared_size_bytes,
         })
         .await?;
-    match connection.message().await? {
-        ServerMessage::ConversationImportBegun {
-            declared_size_bytes: admitted,
-        } if admitted == declared_size_bytes => {}
-        ServerMessage::Error {
+    match classify_conversation_import_response(connection.message().await?) {
+        ConversationImportResponse::Begun(admitted) if admitted == declared_size_bytes => {}
+        ConversationImportResponse::Error {
             code,
             message,
             detail,
         } => return Err(ClientError::remote(code, message, detail)),
-        _ => {
+        ConversationImportResponse::Begun(_)
+        | ConversationImportResponse::Appended(_)
+        | ConversationImportResponse::Inserted(_)
+        | ConversationImportResponse::AlreadyImported(_)
+        | ConversationImportResponse::Unexpected => {
             return Err(ClientError::Protocol(
                 "conversation import begin returned an unexpected response",
             ));
@@ -1372,16 +1473,19 @@ where
                 },
             )
             .await?;
-        match connection.message().await? {
-            ServerMessage::ConversationImportAppended {
-                assembled_size_bytes: admitted,
-            } if admitted.value() == assembled_size_bytes => {}
-            ServerMessage::Error {
+        match classify_conversation_import_response(connection.message().await?) {
+            ConversationImportResponse::Appended(admitted)
+                if admitted.value() == assembled_size_bytes => {}
+            ConversationImportResponse::Error {
                 code,
                 message,
                 detail,
             } => return Err(ClientError::remote(code, message, detail)),
-            _ => {
+            ConversationImportResponse::Begun(_)
+            | ConversationImportResponse::Appended(_)
+            | ConversationImportResponse::Inserted(_)
+            | ConversationImportResponse::AlreadyImported(_)
+            | ConversationImportResponse::Unexpected => {
                 return Err(ClientError::Protocol(
                     "conversation import append returned an unexpected response",
                 ));
@@ -1392,23 +1496,23 @@ where
     client
         .continue_mutation_request(&mut connection, ClientRequest::CommitConversationImport {})
         .await?;
-    match connection.message().await.map_err(ClientError::mutation)? {
-        ServerMessage::ConversationImportInserted {
-            imported_conversation_id,
-        } => Ok(ConversationImportOutcome::Inserted(
-            imported_conversation_id,
-        )),
-        ServerMessage::ConversationImportAlreadyImported {
-            imported_conversation_id,
-        } => Ok(ConversationImportOutcome::AlreadyImported(
-            imported_conversation_id,
-        )),
-        ServerMessage::Error {
+    match classify_conversation_import_response(
+        connection.message().await.map_err(ClientError::mutation)?,
+    ) {
+        ConversationImportResponse::Inserted(imported_conversation_id) => Ok(
+            ConversationImportOutcome::Inserted(imported_conversation_id),
+        ),
+        ConversationImportResponse::AlreadyImported(imported_conversation_id) => Ok(
+            ConversationImportOutcome::AlreadyImported(imported_conversation_id),
+        ),
+        ConversationImportResponse::Error {
             code,
             message,
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
-        _ => Err(ClientError::Protocol(
+        ConversationImportResponse::Begun(_)
+        | ConversationImportResponse::Appended(_)
+        | ConversationImportResponse::Unexpected => Err(ClientError::Protocol(
             "conversation import commit returned an unexpected response",
         )
         .mutation()),
