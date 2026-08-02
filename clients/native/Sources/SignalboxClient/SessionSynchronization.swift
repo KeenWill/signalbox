@@ -1629,8 +1629,9 @@ extension SignalboxSynchronizationSnapshot.Record {
     switch self {
     case .turn(let turn):
       return turn.state.retainedUTF8Bytes
-    case .modelCallUsage:
-      return 0
+    case .modelCallUsage(let usage):
+      return UInt(usage.cost?.amountUSD.rawValue.utf8.count ?? 0)
+        .saturatedAdding(UInt(usage.cost?.rateVersion.rawValue.utf8.count ?? 0))
     case .entry(let message):
       return message.entry.retainedUTF8Bytes
     case .textEntry(let message):

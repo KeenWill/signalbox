@@ -641,6 +641,10 @@ mod tests {
             r#"
 version = 1
 
+[[credential_profiles]]
+name = "codex-subscription-primary"
+billing_kind = "subscription"
+
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"

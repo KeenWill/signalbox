@@ -1653,6 +1653,130 @@ async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
     Ok(())
 }
 
+/// INV-048: a continuation can name only the acceptance-latest goal turn,
+/// so a resumed turn prevents a stale completed predecessor from branching.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv048_continuation_requires_the_latest_goal_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let first = turn_candidates(0xbc1);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x9c1),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("resume before continuing")),
+                ),
+                Some(first),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(activate_goal_turn(&pool, 0xdc1).await?, first.turn());
+    terminalize_goal_turn_as_failed(&pool, 0xec1).await?;
+    assert_applied_transition(
+        repository
+            .block_execution_failure(
+                session(SESSION),
+                GoalNeed::try_new(String::from("repair the failed turn"))
+                    .expect("fixture need is admitted"),
+                GoalSchedulerProvenance::new(first.turn()),
+            )
+            .await?,
+    );
+    let resumed = turn_candidates(0xbc2);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x9c2),
+                    session(SESSION),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(resumed),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_eq!(activate_goal_turn(&pool, 0xdc2).await?, resumed.turn());
+    mark_goal_turn_completed(&pool, resumed.turn()).await?;
+    let successor = turn_candidates(0xbc3);
+    assert_eq!(
+        repository
+            .reconcile_current_after_execution(
+                session(SESSION),
+                successor,
+                GoalNeed::try_new(String::from("repair execution"))
+                    .expect("fixture need is admitted"),
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::Scheduled {
+            turn: successor.turn(),
+        }
+    );
+    sqlx::query("ALTER TABLE goal_turn DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM goal_turn WHERE session_id = $1 AND turn_id = $2")
+        .bind(Uuid::from_u128(SESSION))
+        .bind(successor.turn().into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE goal_turn ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+                terminal_frontier_id = $3, active_phase_kind = NULL,
+                terminal_attempt_id = $4, current_attempt_id = NULL,
+                terminal_model_call_id = $5
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(first.turn().into_uuid())
+    .bind(Uuid::from_u128(0xdc4))
+    .bind(Uuid::from_u128(0xdc5))
+    .bind(Uuid::from_u128(0xdc6))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO goal_turn
+            (session_id, goal_generation, turn_id, accepted_input_id,
+             source_event_ordinal, predecessor_turn_id)
+         VALUES ($1, 1, $2, $3, NULL, $4)",
+    )
+    .bind(Uuid::from_u128(SESSION))
+    .bind(successor.turn().into_uuid())
+    .bind(successor.accepted_input().into_uuid())
+    .bind(first.turn().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("a stale completed goal turn cannot branch after resume");
+
+    assert_database_constraint(error, "goal_turn_latest_predecessor");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-048: a direct model event cannot name an older turn from the current
 /// goal generation after a successor has become current.
 #[tokio::test(flavor = "multi_thread")]

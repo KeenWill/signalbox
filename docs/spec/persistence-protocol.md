@@ -27,13 +27,14 @@ lock inventory were verified against PR #314
 was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified against this PR (`agent/plan-tool`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #383 (`agent/goal-mode`); and the session-placement event, current head, and
-update lock were verified through this PR (`agent/scoped-visibility`). This page
-covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
+PR #384 (`agent/goal-mode-runtime`); and the session-placement event, current
+head, and creation transaction were verified through this PR
+(`agent/scoped-visibility-creation`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -43,9 +44,8 @@ INV-tagged tests; this page cites tags resolved through the generated
 [invariant index](../invariants.md). The runner-orchestration transaction and
 lock paragraphs are the foundation proposal at the bottom of their implementing
 stack and become verified only with those child pull requests. The
-session-placement representation and transaction are the foundation proposal at
-the bottom of their implementing stack and become verified with its child pull
-request.
+session-placement update transaction is the foundation proposal at the bottom of
+its implementing stack and becomes verified only with its child pull request.
 
 ## Stack and boundaries
 
@@ -77,12 +77,17 @@ Concrete mapping rules:
 Migration `202608020016_session_placement_path.sql` adds the append-only
 `session_placement_event` history, its one-row mutable current pointer, and the
 typed `update_session_placement_command` record. Every existing session is
-backfilled with a pathless version-one creation event. New creation records use
-storage version 6, store the optional path and explicit root-global-read-intent
-bit, and append the same event atomically with the session. Checks make the
-intent bit true exactly for a one-segment root path and false for pathless and
-non-root scoped values. The current pointer may advance only to the next event;
-event rows and typed command records are immutable.
+backfilled with a pathless version-one creation event. Post-migration legacy
+native creation records below storage version 6 and imported creation records
+materialize that same pathless event and head when their typed creation receipt
+is inserted, so a daemon spanning the migration cannot create an unreadable
+session. A deferred reverse check requires every newly inserted session to end
+its transaction with a complete selected placement event. New native creation
+records use storage version 6, store the optional path and explicit
+root-global-read-intent bit, and append the same event atomically with the
+session. Checks make the intent bit true exactly for a one-segment root path and
+false for pathless and non-root scoped values. The current pointer may advance
+only to the next event; event rows and typed command records are immutable.
 
 Connection options are explicit: production parsing forces
 `PgSslMode::VerifyFull`; the ephemeral-test helper forces `Disable`. Pool sizing
@@ -91,8 +96,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirty-eight files, `202607180001` through
-`202607300101` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — fifty-seven files, `202607180001` through
+`202608020016` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -135,9 +140,10 @@ statement of record and current state is not rebuilt by replaying events
 has a session-local append-only event sequence as its durable statement of
 record, and its current state is the checked fold of that complete history. The
 plan exception was verified against this PR (`agent/plan-tool`), and the goal
-exception through PR #383 (`agent/goal-mode`). Why: database-level invariants
-(INV-009, INV-012) stay declarative over current-state rows, while plan and goal
-history is retained product evidence rather than an implementation log.
+exception through PR #384 (`agent/goal-mode-runtime`). Why: database-level
+invariants (INV-009, INV-012) stay declarative over current-state rows, while
+plan and goal history is retained product evidence rather than an implementation
+log.
 
 Implemented table families (across the forward-only migrations):
 
@@ -426,27 +432,26 @@ identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
-`review_workflow`, `compact_session`, `replace_lost_runner`,
-`abandon_lost_runner`, `promote_pending_runner`) and a kind-scoped
-`storage_version`. The gates above fix the current numbers: create-session
-records write version 5, defaults-bearing imported-create records write version
-4, and replace-defaults records write version 3. Create-session records
-reconstitute version 1 with the disabled dangerous-tool posture, and versions 1
-and 2 with no system prompt — a pre-version-three row carrying one fails closed
-in both the schema and every Rust reader. A pre-version-four create row carrying
-template provenance and a pre-version-five create row carrying a runner
-placement likewise fail closed; therefore a rollback reader that supports only
-versions 1 through 4 rejects every new create record instead of projecting a
-runner-backed creation as daemon-only, exactly as a reader supporting only
-versions 1 through 3 rejects every template-provenance record instead of
-projecting template creation as explicit creation. Metadata, submit, decision,
-review-workflow, compaction, and runner-recovery records use version 1. Each
-kind has one typed subordinate request record keyed by `command_id` that stores
-every caller-supplied semantic field in typed, `CHECK`-constrained columns.
-Every kind except runner replacement also stores the terminal
-`applied`/`rejected` result and typed result fields there.
-`replace_lost_runner_command` is the immutable request and
-provisioning-authorization root; at most one append-only
+`review_workflow`, `review_orchestration`, `compact_session`, `goal`,
+`update_session_placement`) and a kind-scoped `storage_version`. The gates above
+fix the current numbers: create-session records write version 6;
+defaults-bearing imported-create and replace-defaults records write version 3;
+every other closed kind writes version 1. Create-session records reconstitute
+version 1 with the disabled dangerous-tool posture, and versions 1 and 2 with no
+system prompt — a pre-version-three row carrying one fails closed in both the
+schema and every Rust reader. A pre-version-four create row carrying template
+provenance and a pre-version-five create row carrying a runner placement
+likewise fail closed; therefore a rollback reader that supports only versions 1
+through 4 rejects every new create record instead of projecting a runner-backed
+creation as daemon-only, exactly as a reader supporting only versions 1 through
+3 rejects every template-provenance record instead of projecting template
+creation as explicit creation. Metadata, submit, decision, review-workflow,
+compaction, and runner-recovery records use version 1. Each kind has one typed
+subordinate request record keyed by `command_id` that stores every
+caller-supplied semantic field in typed, `CHECK`-constrained columns. Every kind
+except runner replacement also stores the terminal `applied`/`rejected` result
+and typed result fields there. `replace_lost_runner_command` is the immutable
+request and provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
 its fields. Deferred reverse constraints require exactly one typed request per
@@ -517,12 +522,6 @@ scattered through query strings; trigger-resident locks are recorded here
 because they fire outside the Rust inventory's view.
 
 Locks per transaction, in acquisition order:
-
-- **UpdateSessionPlacement**: after claiming an unseen user-global command, the
-  transaction locks the target `session_placement_current` row `FOR UPDATE`,
-  compares the expected version, appends exactly the next history event, moves
-  the current pointer, and records the terminal typed result. Exact replay and
-  conflicting reuse resolve from the registry without taking that lock.
 
 - **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
   insertion and the command/session uniqueness constraints serialize competing

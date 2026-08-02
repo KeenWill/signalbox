@@ -593,15 +593,9 @@ pub enum SessionPlacementPathError {
 // impl Display + std::error::Error
 
 pub enum RootPlacementGlobalReadIntent { Acknowledged }
-pub enum SessionPlacement {
-    Pathless,
-    Scoped(SessionPlacementPath),
-    RootGlobalRead {
-        path: SessionPlacementPath,
-        intent: RootPlacementGlobalReadIntent,
-    },
-}
+pub struct SessionPlacement { /* private */ }
 impl SessionPlacement {
+    pub const fn pathless() -> Self;
     pub fn scoped(path: SessionPlacementPath) -> Result<Self, SessionPlacementError>;
     pub fn root_global_read(
         path: SessionPlacementPath,
@@ -614,6 +608,7 @@ pub enum SessionPlacementError {
     RootRequiresGlobalReadIntent,
     GlobalReadIntentRequiresRoot,
 }
+// impl Display + std::error::Error
 pub struct SessionPlacementDirectory { /* private */ }
 impl SessionPlacementDirectory {
     // accessors: as_str(), prefix(), is_root()
@@ -670,20 +665,34 @@ impl SessionPlacementEvent {
     // accessors: session(), kind(), placement(), prior_version(), command_id()
 }
 pub enum UpdateSessionPlacementResult {
-    Applied(SessionPlacementEvent),
+    Applied(UpdateSessionPlacementApplied),
     Rejected(UpdateSessionPlacementRejection),
 }
-pub enum UpdateSessionPlacementRejection {
-    SessionNotFound { session: SessionId },
-    CurrentVersionMismatch {
-        session: SessionId,
-        expected: SessionPlacementVersion,
+pub struct UpdateSessionPlacementApplied { /* private */ }
+impl UpdateSessionPlacementApplied {
+    pub fn try_new(
+        command: &UpdateSessionPlacement,
+        event: SessionPlacementEvent,
+    ) -> Option<Self>;
+    // accessors: event()
+}
+pub enum UpdateSessionPlacementRejectionKind {
+    SessionNotFound,
+    CurrentVersionMismatch,
+    VersionExhausted,
+}
+pub struct UpdateSessionPlacementRejection { /* private */ }
+impl UpdateSessionPlacementRejection {
+    pub const fn session_not_found(command: &UpdateSessionPlacement) -> Self;
+    pub const fn current_version_mismatch(
+        command: &UpdateSessionPlacement,
         current: SessionPlacementVersion,
-    },
-    VersionExhausted {
-        session: SessionId,
+    ) -> Option<Self>;
+    pub const fn version_exhausted(
+        command: &UpdateSessionPlacement,
         current: SessionPlacementVersion,
-    },
+    ) -> Option<Self>;
+    // accessors: session(), expected_version(), current_version(), kind()
 }
 ```
 
@@ -805,17 +814,20 @@ pub struct Session { /* private */ }
 // non-Copy: owned snapshot, cloned deliberately (session aggregate,
 // spec/sessions-and-transcript.md)
 impl Session {
-    pub fn with_reconstituted_placement(
-        self,
-        placement: VersionedSessionPlacement,
-    ) -> Self;
     // accessors: id(), creation_provenance(), template_provenance(),
     //   current_configuration_defaults(), current_placement()
 }
 
+pub struct SessionPlacementReconstitutionFacts {
+    pub current_pointer_session: SessionId,
+    pub current_pointer_version: SessionPlacementVersion,
+    pub selected_event_session: SessionId,
+    pub selected_event: VersionedSessionPlacement,
+}
+
 pub struct SessionReconstitutionInput { /* private */ }
 impl SessionReconstitutionInput {
-    pub const fn new(
+    pub fn new(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -824,8 +836,9 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self;
-    pub const fn new_with_template_provenance(
+    pub fn new_with_template_provenance(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -835,8 +848,9 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self;
-    pub const fn new_with_template_and_placement(
+    pub fn new_with_template_and_placement(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -846,12 +860,13 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        current_placement: VersionedSessionPlacement,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self;
     pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   template_provenance(), current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults(), placement()
+    //   defaults_session(), defaults_version(), defaults(), current_placement_session(),
+    //   current_placement_version(), placement_session(), current_placement()
 }
 
 pub enum SessionReconstitutionFailure {
@@ -859,6 +874,9 @@ pub enum SessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    CurrentPlacementSessionMismatch,
+    PlacementSessionMismatch,
+    CurrentPlacementVersionMismatch,
     ImportedSessionSeedUnavailable,
 }
 
@@ -1031,6 +1049,10 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
+        current_placement: VersionedSessionPlacement,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
@@ -1047,6 +1069,10 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
+        current_placement: VersionedSessionPlacement,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
@@ -1055,8 +1081,9 @@ impl BoundedImportedSessionReconstitutionInput {
     ) -> Result<Session, BoundedImportedSessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults(), seed_records(),
-    //   seed_headers()
+    //   defaults_session(), defaults_version(), defaults(), current_placement_session(),
+    //   current_placement_version(), placement_session(), current_placement(),
+    //   seed_records(), seed_headers()
 }
 
 pub enum BoundedImportedSessionReconstitutionFailure {
@@ -1064,6 +1091,9 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    CurrentPlacementSessionMismatch,
+    PlacementSessionMismatch,
+    CurrentPlacementVersionMismatch,
     AncestryNotImported,
     MissingSeedRecord,
     DuplicateSeedRecord,
@@ -1120,6 +1150,10 @@ impl ImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
+        current_placement: VersionedSessionPlacement,
         imported_conversation: ImportedConversation,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -1130,7 +1164,8 @@ impl ImportedSessionReconstitutionInput {
     ) -> Result<ReconstitutedImportedSession, ImportedSessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults(),
+    //   defaults_session(), defaults_version(), defaults(), current_placement_session(),
+    //   current_placement_version(), placement_session(), current_placement(),
     //   imported_conversation(), seed_records(), seed_snapshots(),
     //   semantic_entries()
 }
@@ -1140,6 +1175,9 @@ pub enum ImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    CurrentPlacementSessionMismatch,
+    PlacementSessionMismatch,
+    CurrentPlacementVersionMismatch,
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
@@ -3480,6 +3518,7 @@ pub enum DangerousToolAutoApproval {
 pub enum ToolPermissionDefault {
     Auto,
     Confirm,
+    AlwaysConfirm,
 }
 pub enum ToolEffectClass {
     EffectFree,
@@ -3533,6 +3572,7 @@ pub struct ToolApprovalResolutionReconstitutionError { /* private */ }
 // accessors: input(), into_input()
 pub enum InitialToolApproval {
     Confirm,
+    AlwaysConfirm,
     PolicyAuto,
     SessionBlanket,
 }
@@ -8090,8 +8130,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
-| domain: session_placement                          | 16                   |
-| domain: session                                    | 21                   |
+| domain: session_placement                          | 18                   |
+| domain: session                                    | 22                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8119,7 +8159,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **615 (+7 free fn)** |
+| **signalbox-domain total**                         | **618 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: update_session_placement              | 4 (incl. 1 trait)    |

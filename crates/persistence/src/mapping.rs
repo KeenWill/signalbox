@@ -6,8 +6,9 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, DangerousToolAutoApproval, DurableCommandId, GoalBlockedReasonKind,
     GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
-    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, ToolAttemptId,
-    ToolRequestId, TurnId,
+    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+    SessionPlacementEventKind, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
+    UpdateSessionPlacementRejectionKind,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -74,6 +75,82 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "compact_session" => Some(DurableCommandKind::CompactSession),
         "goal" => Some(DurableCommandKind::Goal),
         "update_session_placement" => Some(DurableCommandKind::UpdateSessionPlacement),
+        _ => None,
+    }
+}
+
+/// Closed stored result kinds for placement-update commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionPlacementResultStorageKind {
+    Applied,
+    Rejected,
+}
+
+/// Closed stored rejection kinds for placement-update commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionPlacementRejectionStorageKind {
+    SessionNotFound,
+    CurrentVersionMismatch,
+    VersionExhausted,
+}
+
+pub(crate) const fn session_placement_event_kind_to_str(
+    value: SessionPlacementEventKind,
+) -> &'static str {
+    match value {
+        SessionPlacementEventKind::Created => "created",
+        SessionPlacementEventKind::Updated => "updated",
+    }
+}
+
+pub(crate) fn session_placement_event_kind_from_str(
+    value: &str,
+) -> Option<SessionPlacementEventKind> {
+    match value {
+        "created" => Some(SessionPlacementEventKind::Created),
+        "updated" => Some(SessionPlacementEventKind::Updated),
+        _ => None,
+    }
+}
+
+pub(crate) const fn session_placement_result_kind_to_str(
+    value: SessionPlacementResultStorageKind,
+) -> &'static str {
+    match value {
+        SessionPlacementResultStorageKind::Applied => "applied",
+        SessionPlacementResultStorageKind::Rejected => "rejected",
+    }
+}
+
+pub(crate) fn session_placement_result_kind_from_str(
+    value: &str,
+) -> Option<SessionPlacementResultStorageKind> {
+    match value {
+        "applied" => Some(SessionPlacementResultStorageKind::Applied),
+        "rejected" => Some(SessionPlacementResultStorageKind::Rejected),
+        _ => None,
+    }
+}
+
+pub(crate) const fn session_placement_rejection_to_str(
+    value: UpdateSessionPlacementRejectionKind,
+) -> &'static str {
+    match value {
+        UpdateSessionPlacementRejectionKind::SessionNotFound => "session_not_found",
+        UpdateSessionPlacementRejectionKind::CurrentVersionMismatch => "current_version_mismatch",
+        UpdateSessionPlacementRejectionKind::VersionExhausted => "version_exhausted",
+    }
+}
+
+pub(crate) fn session_placement_rejection_from_str(
+    value: &str,
+) -> Option<SessionPlacementRejectionStorageKind> {
+    match value {
+        "session_not_found" => Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+        "current_version_mismatch" => {
+            Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch)
+        }
+        "version_exhausted" => Some(SessionPlacementRejectionStorageKind::VersionExhausted),
         _ => None,
     }
 }
@@ -266,6 +343,25 @@ pub fn dangerous_tool_auto_approval_from_str(value: &str) -> Option<DangerousToo
     }
 }
 
+/// Encodes a tool permission default as its closed PostgreSQL spelling.
+pub(crate) const fn tool_permission_default_to_str(value: ToolPermissionDefault) -> &'static str {
+    match value {
+        ToolPermissionDefault::Auto => "auto",
+        ToolPermissionDefault::Confirm => "confirm",
+        ToolPermissionDefault::AlwaysConfirm => "always_confirm",
+    }
+}
+
+/// Decodes a tool permission default from its closed PostgreSQL spelling.
+pub(crate) fn tool_permission_default_from_str(value: &str) -> Option<ToolPermissionDefault> {
+    match value {
+        "auto" => Some(ToolPermissionDefault::Auto),
+        "confirm" => Some(ToolPermissionDefault::Confirm),
+        "always_confirm" => Some(ToolPermissionDefault::AlwaysConfirm),
+        _ => None,
+    }
+}
+
 /// Closed plan-event kinds stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PlanEventStorageKind {
@@ -425,18 +521,22 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_domain::{
         AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, TurnId,
+        SessionInputPosition, SessionPlacementEventKind, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
     use super::{
         DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
-        PositiveOrdinalMappingError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        PositiveOrdinalMappingError, SessionPlacementRejectionStorageKind,
+        SessionPlacementResultStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
         input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
-        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
-        turn_id_to_uuid,
+        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
+        session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+        session_placement_rejection_from_str, session_placement_result_kind_from_str,
+        session_placement_result_kind_to_str, tool_permission_default_from_str,
+        tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
@@ -469,6 +569,68 @@ mod tests {
             Some(DurableCommandKind::CompactSession)
         );
         assert_eq!(durable_command_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn session_placement_event_kind_mapping_is_closed() {
+        assert_eq!(
+            session_placement_event_kind_from_str(session_placement_event_kind_to_str(
+                SessionPlacementEventKind::Created,
+            )),
+            Some(SessionPlacementEventKind::Created)
+        );
+        assert_eq!(
+            session_placement_event_kind_from_str(session_placement_event_kind_to_str(
+                SessionPlacementEventKind::Updated,
+            )),
+            Some(SessionPlacementEventKind::Updated)
+        );
+        assert_eq!(session_placement_event_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn session_placement_result_kind_mapping_is_closed() {
+        assert_eq!(
+            session_placement_result_kind_from_str(session_placement_result_kind_to_str(
+                SessionPlacementResultStorageKind::Applied,
+            )),
+            Some(SessionPlacementResultStorageKind::Applied)
+        );
+        assert_eq!(
+            session_placement_result_kind_from_str(session_placement_result_kind_to_str(
+                SessionPlacementResultStorageKind::Rejected,
+            )),
+            Some(SessionPlacementResultStorageKind::Rejected)
+        );
+        assert_eq!(session_placement_result_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn session_placement_rejection_kind_mapping_is_closed() {
+        assert_eq!(
+            session_placement_rejection_from_str("session_not_found"),
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound)
+        );
+        assert_eq!(
+            session_placement_rejection_from_str("current_version_mismatch"),
+            Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch)
+        );
+        assert_eq!(
+            session_placement_rejection_from_str("version_exhausted"),
+            Some(SessionPlacementRejectionStorageKind::VersionExhausted)
+        );
+        assert_eq!(session_placement_rejection_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn always_confirm_permission_mapping_is_closed() {
+        let encoded = tool_permission_default_to_str(ToolPermissionDefault::AlwaysConfirm);
+        let decoded = tool_permission_default_from_str(encoded)
+            .expect("the additive permission encoding is canonical");
+
+        assert_eq!(encoded, "always_confirm");
+        assert_eq!(decoded, ToolPermissionDefault::AlwaysConfirm);
+        assert_eq!(tool_permission_default_from_str("unknown"), None);
     }
 
     /// INV-002: PostgreSQL numeric values are decoded and checked before a

@@ -168,16 +168,17 @@ surface is filtered by this rule.
 
 A one-segment placement sits in the root directory and therefore has global
 conversation read, including pathless sessions. It is legal only through the
-loud `RootGlobalRead` variant carrying
+loud `SessionPlacement::root_global_read` constructor, which requires
 `RootPlacementGlobalReadIntent::Acknowledged`. The creation command, typed
 record, and version-one event all preserve both its path and the explicit
 global-read-intent bit. Ordinary scoped construction rejects a root path.
 
-Why (append-only, one exception): provenance, defaults versions, command
-receipts, and scheduler registration are historical facts; in-place mutation
-would rewrite recorded intent and the context that later work consumed. The
-current-defaults pointer alone is mutable because "current" is a present choice,
-not a historical fact.
+Why (append-only, two pointer exceptions): provenance, defaults versions,
+placement events, command receipts, and scheduler registration are historical
+facts; in-place mutation would rewrite recorded intent and the context that
+later work consumed. The current-defaults pointer and
+`session_current_placement` head are mutable because each selects a present
+choice without rewriting history.
 
 ### Create from an imported frontier
 

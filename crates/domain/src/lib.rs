@@ -208,9 +208,9 @@ pub use session::{
     CreateSessionReconstitutionError, CreateSessionReconstitutionFailure,
     CreateSessionReconstitutionInput, ImportedSessionRelationship, ImportedSessionSeed,
     InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
-    SessionCreationCause, SessionCreationProvenance, SessionReconstitutionError,
-    SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
-    TranscriptFrontier,
+    SessionCreationCause, SessionCreationProvenance, SessionPlacementReconstitutionFacts,
+    SessionReconstitutionError, SessionReconstitutionFailure, SessionReconstitutionInput,
+    TranscriptAncestry, TranscriptFrontier,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
@@ -225,7 +225,8 @@ pub use session_placement::{
     SessionPlacementError, SessionPlacementEvent, SessionPlacementEventKind, SessionPlacementPath,
     SessionPlacementPathError, SessionPlacementVersion, SessionReadRefusalReason,
     SessionReadScopeDecision, SessionReadScopeRefusal, UpdateSessionPlacement,
-    UpdateSessionPlacementRejection, UpdateSessionPlacementResult, VersionedSessionPlacement,
+    UpdateSessionPlacementApplied, UpdateSessionPlacementRejection,
+    UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult, VersionedSessionPlacement,
 };
 pub use session_template::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateNameError,
