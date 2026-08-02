@@ -3,7 +3,12 @@ use signalbox_application::ToolExecutorEvidence;
 use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_model_runtime::{CredentialValue, redact_text};
 
-use super::{canonicalization::*, result::fixed_result_diagnostic_outputs, text_decoding::*};
+use super::{
+    canonicalization::*,
+    egress::fixed_egress_diagnostic_outputs,
+    result::{ParsedResultUrlRemovalFacts, fixed_result_diagnostic_outputs},
+    text_decoding::*,
+};
 
 pub(super) const MAX_CREDENTIAL_BYTES: usize = 4 * 1024;
 
@@ -288,6 +293,43 @@ impl CredentialScrubber {
                     .is_some_and(|mapped| unicode_case_insensitive_contains(&unicode_host, &mapped))
             })
     }
+
+    pub(super) fn url_contains_credential_after_removed_url_components(
+        &self,
+        text: &str,
+        removal_facts: ParsedResultUrlRemovalFacts,
+    ) -> bool {
+        self.url_collision_variants().is_none_or(|mut variants| {
+            let original_variant_count = variants.len();
+            let mut inspected = 0;
+            while inspected < variants.len() {
+                let variant = variants[inspected].clone();
+                if removal_facts.user_information
+                    && let Some((_, retained)) = variant.rsplit_once('@')
+                {
+                    retain_url_collision_variant(&mut variants, retained);
+                }
+                if removal_facts.query
+                    && let Some((retained, _)) = variant.split_once('?')
+                {
+                    retain_url_collision_variant(&mut variants, retained);
+                }
+                if removal_facts.fragment
+                    && let Some((retained, _)) = variant.split_once('#')
+                {
+                    retain_url_collision_variant(&mut variants, retained);
+                }
+                inspected += 1;
+            }
+            variants
+                .iter()
+                .skip(original_variant_count)
+                .any(|retained| {
+                    unicode_case_insensitive_contains(text, retained)
+                        || encoded_contains_credential(text, retained)
+                })
+        })
+    }
 }
 
 fn retain_url_collision_variant(variants: &mut Vec<String>, candidate: &str) {
@@ -357,6 +399,9 @@ pub(super) fn fixed_outer_error_debug_may_contain(credential: &str) -> bool {
 
 pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
     text_contains_credential_variant("Err()", credential)
+        || fixed_egress_diagnostic_outputs()
+            .iter()
+            .any(|output| text_contains_credential_variant(output, credential))
         || fixed_result_diagnostic_outputs()
             .iter()
             .any(|output| text_contains_credential_variant(output, credential))

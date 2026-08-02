@@ -23,7 +23,13 @@ pub(super) fn success_evidence(
         .into_iter()
         .take(MAX_RETURNED_RESULTS)
         .map(|result| {
-            if scrubber.url_contains_encoded_credential(result.url.as_str()) {
+            let removal_facts = result.url.removal_facts();
+            if scrubber.url_contains_encoded_credential(result.url.as_str())
+                || scrubber.url_contains_credential_after_removed_url_components(
+                    result.url.as_str(),
+                    removal_facts,
+                )
+            {
                 return Err(WebSearchExecutorError::EvidenceEncoding);
             }
 

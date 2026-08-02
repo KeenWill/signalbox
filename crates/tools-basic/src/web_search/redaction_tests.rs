@@ -58,6 +58,33 @@ fn web_search_rejects_credentials_colliding_with_fixed_result_diagnostics() {
     assert!(placeholder_collision.is_none());
 }
 
+/// INV-035: credentials colliding with fixed provider, policy, or
+/// configuration Debug labels are rejected before egress objects can render.
+#[test]
+fn web_search_rejects_credentials_colliding_with_fixed_egress_diagnostics() {
+    let provider_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        PROVIDER_VARIANT_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
+    let policy_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        EGRESS_POLICY_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
+    let configuration_collision = CredentialScrubber::try_new(&CredentialValue::new(
+        CONFIGURATION_DEBUG_COLLISION_KEY.as_bytes().to_vec(),
+    ));
+    let configuration = configuration();
+
+    assert!(provider_collision.is_none());
+    assert!(policy_collision.is_none());
+    assert!(configuration_collision.is_none());
+    assert!(
+        format!("{:?}", configuration.provider()).contains(PROVIDER_VARIANT_DEBUG_COLLISION_KEY)
+    );
+    assert!(
+        format!("{:?}", configuration.egress_policy()).contains(EGRESS_POLICY_DEBUG_COLLISION_KEY)
+    );
+    assert!(format!("{configuration:?}").contains(CONFIGURATION_DEBUG_COLLISION_KEY));
+}
+
 /// INV-035: credentials colliding with fixed executor-evidence Debug labels
 /// are rejected before any terminal evidence can be formatted.
 #[test]
@@ -655,7 +682,7 @@ fn web_search_html_reference_scan_bounds_and_rejects_distant_terminator() {
 /// ordinary redaction sentinel.
 #[test]
 fn web_search_redaction_sentinel_cannot_reproduce_credential() {
-    const SENTINEL_OVERLAPPING_KEY: &str = "red";
+    const SENTINEL_OVERLAPPING_KEY: &str = "acted";
     const SHAPED_SECRET: &str = "SYNTHETIC-SHAPED-SECRET";
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: format!("x{SENTINEL_OVERLAPPING_KEY}x"),
