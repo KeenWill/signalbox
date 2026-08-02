@@ -80,7 +80,7 @@ impl SessionDelegationRepository {
         defaults: &SessionConfigurationDefaults,
     ) -> Result<(), SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT 1 FROM session WHERE session_id = $1 FOR UPDATE")
+        sqlx::query(crate::lock_inventory::SESSION_DELEGATION_PARENT)
             .bind(delegation.parent().into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
@@ -378,19 +378,10 @@ async fn load_from_connection(
     connection: &mut PgConnection,
     spawning_request: ToolRequestId,
 ) -> Result<Option<SessionDelegation>, SessionDelegationRepositoryError> {
-    let Some(row) = sqlx::query(
-        "SELECT relation.*, request.request_id, request.producing_model_call_id,
-                request.request_ordinal, request.tool_name,
-                request.arguments_kind, request.arguments_text
-           FROM session_delegation AS relation
-           JOIN tool_request AS request
-             ON request.request_id = relation.spawning_tool_request_id
-          WHERE relation.spawning_tool_request_id = $1
-          FOR UPDATE OF relation",
-    )
-    .bind(spawning_request.into_uuid())
-    .fetch_optional(&mut *connection)
-    .await?
+    let Some(row) = sqlx::query(crate::lock_inventory::SESSION_DELEGATION_RELATION)
+        .bind(spawning_request.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?
     else {
         return Ok(None);
     };

@@ -914,11 +914,11 @@ transaction.
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
 typed reason and complete provenance columns: the spawning request, relevant
-parent session/turn event, and either the sending/declaring tool request or the
-user durable command. Continue-running is a real event kind, not absence of a
-terminal row. Deferred relationship-state checks reject a terminal or continued
-outcome without its event, two terminal outcomes, ordinal gaps, and an event
-whose reason/provenance shape does not match its kind.
+session and turn, and either the exact child turn or the exact parent durable
+command. Continue-running is a real event kind, not absence of a terminal row.
+Deferred relationship-state checks reject a terminal or continued outcome
+without its event, two terminal outcomes, ordinal gaps, and an event whose
+reason/provenance shape does not match its kind.
 
 `session_delegation_wait` records the exact awaiting tool request, relationship,
 parent turn, and foreground/background mode. A foreground row correlates the
@@ -926,9 +926,11 @@ turn's `awaiting_child` phase; a background row cannot. `session_message` is
 append-only, uniquely orders messages per relationship, and requires exact
 parent/child sender and recipient plus the sending tool request.
 `session_child_result` has at most one row per spawning request and carries
-exactly one returned-text, failed, stopped, or cancelled shape with child
-turn/tool provenance. Delivery satellites bind messages/results to their exact
-semantic entries; no transcript query supplies result content.
+exactly one returned-text, failed, stopped, or cancelled shape with child turn
+provenance for returned, failed, and child-originated terminal outcomes, or
+exact parent session/turn/command provenance for a policy-driven stop or
+cancellation. Delivery satellites bind messages/results to their exact semantic
+entries; no transcript query supplies result content.
 
 Parent-and-descendants termination locks relationship rows in stable spawning
 request order before it writes any disposition. The command and every evaluated
@@ -947,7 +949,8 @@ predicate is authoritative after restart.
 
 Committed client-observable transitions become update events only through the
 transactional-outbox family (INV-032 mechanism; observation semantics are
-protocol scope). Implemented storage:
+protocol scope). Implemented storage, extended by the `delegation_wake`
+foundation proposal above when the full delegation stack lands:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
@@ -957,11 +960,19 @@ protocol scope). Implemented storage:
   `tool_batch_transition_outbox_event`, `context_compacted_outbox_event`,
   `turn_completed_outbox_event`, `turn_refused_outbox_event`,
   `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
-  and `runner_state_transition_outbox_event` — with a deferred trigger requiring
-  exactly one typed record per header. A runner-transition record carries the
-  affected runner, the positive placement revision, the sandbox profile, one
-  closed transition state, and the relocation facts that state requires, so a
-  follower learns of loss, suspicion, recovery, replacement, working-directory
+  `runner_state_transition_outbox_event`, and `delegation_wake_outbox_event` —
+  with a deferred trigger requiring exactly one typed record per header. A
+  version-one delegation-wake record names the exact spawning request and has
+  one closed subject shape: `result` carries an equal
+  `result_spawning_request_id`, while `message` carries a `DelegationMessageId`
+  belonging to that relationship. Its header's `session_id` is the parent
+  receiving a result wake or the peer receiving a message wake. The schema
+  requires exactly the selected subject columns and correlates each identity to
+  the same relationship; dispatch decodes the same closed union and rejects
+  every other storage version. A runner-transition record carries the affected
+  runner, the positive placement revision, the sandbox profile, one closed
+  transition state, and the relocation facts that state requires, so a follower
+  learns of loss, suspicion, recovery, replacement, working-directory
   relocation, and abandonment from the same family. The family is deliberately
   shaped for extension: a later runner fact — another relocation shape, or
   runner metadata and attributes — adds a state and its columns to this one
