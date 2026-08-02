@@ -3525,9 +3525,16 @@ async fn approval_judge_preparation_serializes_a_concurrent_user_decision()
     );
 
     judge_transaction.commit().await?;
-    let _decision_error = decision_task
+    let decision_error = decision_task
         .await?
         .expect_err("an unfinished judge prevents a concurrent user decision");
+    let ToolLoopRepositoryError::Database { source, .. } = decision_error else {
+        panic!("the unfinished-judge rejection remains a database constraint")
+    };
+    assert_eq!(
+        database_constraint(&source),
+        Some("tool_approval_decision_requires_terminal_judge")
+    );
     let durable_state: (bool, bool, bool) = sqlx::query_as(
         "SELECT
             EXISTS (
