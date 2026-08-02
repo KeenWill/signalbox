@@ -21663,11 +21663,11 @@ async fn session_plan_projection_rechecks_cycle_after_append_guard_bypass()
     Ok(())
 }
 
-/// The projection trigger rejects a corrupt reachable cycle even when the
-/// proposed edge does not itself close that cycle.
+/// The projection trigger rejects a corrupt reachable cycle for both a
+/// duplicate history append and a newly projected edge.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_projection_rejects_a_preexisting_reachable_cycle()
+async fn session_plan_projection_rejects_a_preexisting_cycle_for_duplicate_and_new_edges()
 -> Result<(), Box<dyn Error>> {
     const OUTSIDE_ENTRY_ORDINAL: u64 = 1;
     const FIRST_CYCLE_ENTRY_ORDINAL: u64 = 2;
@@ -21691,6 +21691,7 @@ async fn session_plan_projection_rejects_a_preexisting_reachable_cycle()
         create_plan_arguments(FIRST_CYCLE_TEXT),
         create_plan_arguments(SECOND_CYCLE_TEXT),
         depends_plan_arguments(first_cycle, second_cycle),
+        depends_plan_arguments(second_cycle, first_cycle),
         depends_plan_arguments(second_cycle, first_cycle),
         depends_plan_arguments(outside, first_cycle),
     ];
@@ -21819,13 +21820,26 @@ async fn session_plan_projection_rejects_a_preexisting_reachable_cycle()
     .execute(&pool)
     .await?;
     fixture.batch.finish(corrupt_attempt).await?;
-    let proposed_attempt = fixture.batch.authorize_next().await?;
     sqlx::query(
         "ALTER TABLE session_plan_event
          DISABLE TRIGGER session_plan_event_append_guard",
     )
     .execute(&pool)
     .await?;
+    let duplicate_attempt = fixture.batch.authorize_next().await?;
+    let duplicate_trigger_error = insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &duplicate_attempt,
+        CORRUPT_EVENT_ORDINAL,
+        PROPOSED_EVENT_ORDINAL,
+        second_cycle,
+        first_cycle,
+    )
+    .await
+    .expect_err("the projection trigger rejects the duplicate edge against a cycle");
+    fixture.batch.finish(duplicate_attempt).await?;
+    let proposed_attempt = fixture.batch.authorize_next().await?;
     let trigger_error = insert_direct_dependency_event_at(
         &pool,
         &fixture,
@@ -21846,6 +21860,12 @@ async fn session_plan_projection_rejects_a_preexisting_reachable_cycle()
 
     assert_eq!(projected.rows_affected(), EXPECTED_MUTATED_ROW_COUNT);
     assert_eq!(advanced.rows_affected(), EXPECTED_MUTATED_ROW_COUNT);
+    assert_eq!(
+        duplicate_trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_graph_cycle")
+    );
     assert_eq!(
         trigger_error
             .as_database_error()

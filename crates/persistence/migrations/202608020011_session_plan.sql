@@ -711,6 +711,23 @@ BEGIN
                     CONSTRAINT = 'session_plan_dependency_target';
         END IF;
 
+        SELECT inspection.graph_cyclic, inspection.closes_cycle
+          INTO graph_cyclic, closes_cycle
+          FROM inspect_session_plan_dependency_graph(
+              NEW.session_id,
+              NEW.entry_ordinal,
+              NEW.dependency_ordinal
+          ) AS inspection;
+        IF graph_cyclic THEN
+            RAISE EXCEPTION 'session plan dependency graph is already cyclic'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_graph_cycle';
+        END IF;
+        IF closes_cycle THEN
+            RAISE EXCEPTION 'session plan dependency would create a cycle'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_cycle';
+        END IF;
         IF NOT EXISTS (
             SELECT 1
               FROM session_plan_current_dependency AS edge
@@ -728,24 +745,6 @@ BEGIN
                 RAISE EXCEPTION 'session plan entry dependency limit reached'
                     USING ERRCODE = '23514',
                         CONSTRAINT = 'session_plan_dependency_limit';
-            END IF;
-
-            SELECT inspection.graph_cyclic, inspection.closes_cycle
-              INTO graph_cyclic, closes_cycle
-              FROM inspect_session_plan_dependency_graph(
-                  NEW.session_id,
-                  NEW.entry_ordinal,
-                  NEW.dependency_ordinal
-              ) AS inspection;
-            IF graph_cyclic THEN
-                RAISE EXCEPTION 'session plan dependency graph is already cyclic'
-                    USING ERRCODE = '23514',
-                        CONSTRAINT = 'session_plan_dependency_graph_cycle';
-            END IF;
-            IF closes_cycle THEN
-                RAISE EXCEPTION 'session plan dependency would create a cycle'
-                    USING ERRCODE = '23514',
-                        CONSTRAINT = 'session_plan_dependency_cycle';
             END IF;
 
             INSERT INTO session_plan_current_dependency (
