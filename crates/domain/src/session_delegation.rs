@@ -419,6 +419,13 @@ impl SessionDelegation {
         provenance: DelegationProvenance,
     ) -> Result<Self, DelegationTransitionError> {
         self.require_active()?;
+        if self
+            .events
+            .iter()
+            .any(|event| event.message().is_some_and(|message| message.id() == id))
+        {
+            return Err(self.fail(DelegationTransitionFailure::DuplicateMessageIdentity));
+        }
         let direction = match provenance.kind {
             DelegationProvenanceKind::ToolRequest { source_session, .. }
                 if source_session == self.parent =>
@@ -605,6 +612,7 @@ pub enum DelegationTransitionFailure {
     AlreadyTerminal,
     MissingSpawnEvent,
     InvalidProvenance,
+    DuplicateMessageIdentity,
     OutcomeReasonMismatch,
     EventOrdinalExhausted,
 }
@@ -787,6 +795,39 @@ mod tests {
         assert_eq!(
             error.failure(),
             DelegationTransitionFailure::InvalidProvenance
+        );
+    }
+
+    /// S18 / INV-012: one message identity names exactly one immutable delivery.
+    #[test]
+    fn s18_inv012_duplicate_message_identity_is_rejected() {
+        let parent_request = request(2);
+        let message_id = DelegationMessageId::from_uuid(uuid::Uuid::from_u128(7));
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let relation = relation
+            .deliver_message(
+                message_id,
+                content("first content"),
+                DelegationProvenance::from_tool_request(&parent_request),
+            )
+            .expect("first identity is admitted");
+
+        let error = relation
+            .deliver_message(
+                message_id,
+                content("conflicting content"),
+                DelegationProvenance::from_tool_request(&parent_request),
+            )
+            .expect_err("message identity cannot name conflicting content");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::DuplicateMessageIdentity
         );
     }
 
