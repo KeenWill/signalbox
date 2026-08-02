@@ -50,6 +50,18 @@ pub(super) fn discarded_port_zero_prefix_context(value: &str) -> Option<&str> {
     Some(retained_context)
 }
 
+pub(super) fn canonicalized_authority_port_zero_fragment(value: &str) -> Option<String> {
+    let (authority_context, port_fragment) = value.rsplit_once(':')?;
+    if port_fragment.len() < 2
+        || !port_fragment.starts_with('0')
+        || !port_fragment.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let canonical_port = port_fragment.trim_start_matches('0');
+    (!canonical_port.is_empty()).then(|| format!("{authority_context}:{canonical_port}"))
+}
+
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
     let candidate = format!("http://{value}/");
     let url = Url::parse(&candidate).ok()?;

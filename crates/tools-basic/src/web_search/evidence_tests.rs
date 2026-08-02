@@ -123,6 +123,16 @@ fn web_search_error_body_is_redacted_before_truncation() {
     assert!(detail.as_str().ends_with(TRUNCATION_SUFFIX));
 }
 
+/// Oversized entity-escaped error details are truncated without indexing
+/// every scalar boundary in the provider-sized allocation.
+#[test]
+fn web_search_truncates_expanded_error_detail_at_utf8_boundary() {
+    let detail = detail_after_redaction(oversized_entity_escaped_error_detail())
+        .expect("expanded fixture detail is bounded");
+
+    assert!(detail.as_str().ends_with(TRUNCATION_SUFFIX));
+}
+
 /// INV-035: fixed provider-error prose cannot collide with the credential
 /// after the provider body has been sanitized.
 #[test]
