@@ -22326,7 +22326,7 @@ async fn session_plan_read_rejects_malformed_hidden_dependency_status() -> Resul
 
     assert_eq!(
         plan_repository_error_kind(error),
-        PlanRepositoryErrorKind::DependencyStatus
+        PlanRepositoryErrorKind::EventSequence
     );
 
     pool.close().await;
