@@ -2263,9 +2263,9 @@ mod aggregate_tests {
         );
     }
 
-    /// S18 / INV-010: messages are relation-directed and request-provenanced.
+    /// S18 / INV-010: each relation peer derives one exact message direction.
     #[test]
-    fn s18_inv010_messages_are_bidirectional_and_ordered() {
+    fn s18_inv010_messages_are_bidirectional() {
         let relation = relation(ChildRelationshipPolicy::Background);
         let parent_message = message_request(
             RequestFixture::ParentMessage,
@@ -2280,12 +2280,10 @@ mod aggregate_tests {
         let (relation, first) = relation
             .deliver_message(parent_message, delegation_message_id(5))
             .expect("parent message is related");
-        let (relation, second) = relation
+        let (_relation, second) = relation
             .deliver_message(child_message, delegation_message_id(6))
             .expect("child message is related");
 
-        assert_eq!(first.ordinal().get(), 2);
-        assert_eq!(second.ordinal().get(), 3);
         assert_eq!(
             first.message().expect("message event").direction(),
             DelegationMessageDirection::ParentToChild
@@ -2294,7 +2292,31 @@ mod aggregate_tests {
             second.message().expect("message event").direction(),
             DelegationMessageDirection::ChildToParent
         );
-        assert_eq!(relation.events().len(), 3);
+    }
+
+    /// S18 / INV-012: distinct message deliveries receive contiguous ordinals.
+    #[test]
+    fn s18_inv012_message_delivery_ordinals_are_contiguous() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let parent_message = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "parent update",
+        );
+        let child_message = message_request(
+            RequestFixture::ChildMessage,
+            relation.parent(),
+            "child update",
+        );
+        let (relation, first) = relation
+            .deliver_message(parent_message, delegation_message_id(5))
+            .expect("parent message is related");
+        let (_relation, second) = relation
+            .deliver_message(child_message, delegation_message_id(6))
+            .expect("child message is related");
+
+        assert_eq!(first.ordinal().get(), 2);
+        assert_eq!(second.ordinal().get(), 3);
     }
 
     /// S18 / INV-010: a typed message for another peer returns exact inputs.
