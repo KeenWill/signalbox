@@ -926,6 +926,7 @@ pub enum DelegationTransitionFailure {
     MissingSpawnEvent,
     InvalidProvenance,
     InvalidToolRequestPurpose,
+    InvalidTaskContent(DelegationContentError),
     DuplicateMessageIdentity,
     ConflictingMessageReplay,
     DuplicateOutcomeAuthority,

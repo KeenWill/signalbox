@@ -825,9 +825,11 @@ propagation transition receives opaque authority produced only by the exact
 applied parent stop or cancellation result; raw parent, turn, and command
 identities cannot construct it. Each edge verifies that authority's parent,
 command kind, and descendant scope against its typed outcome before applying the
-policy. Child-originated stop/cancel outcomes instead carry the child's exact
-terminal turn. Detached child work stays independently schedulable after the
-parent's turn or goal has terminalized.
+policy. Child-originated cancellation instead carries the child's exact
+proof-bearing cancelled turn. A reconciliation-required turn supplies no
+terminal child outcome, and the same cancelled-turn evidence cannot be selected
+as a stopped outcome. Detached child work stays independently schedulable after
+the parent's turn or goal has terminalized.
 
 Startup and the periodic sweep recognize child waits, pending delegation inbox
 content, and undelivered results from durable rows. They neither infer a result
