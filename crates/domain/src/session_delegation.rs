@@ -1,6 +1,9 @@
 //! Typed delegated-session relation, messages, outcomes, and wait subject.
 
-use std::num::NonZeroU64;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -108,6 +111,80 @@ impl ParentTerminationAuthority {
         self.kind
     }
 }
+
+/// One policy-derived disposition for an evaluated relationship edge.
+///
+/// The disposition retains the relationship identity separately from its
+/// outcome so a persistence caller can correlate an ordered plan without
+/// inferring an edge from provenance.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct DelegationCascadeDisposition {
+    spawning_request: ToolRequestId,
+    parent: SessionId,
+    child: SessionId,
+    outcome: DelegationOutcome,
+}
+
+impl DelegationCascadeDisposition {
+    pub const fn spawning_request(&self) -> ToolRequestId {
+        self.spawning_request
+    }
+
+    pub const fn parent(&self) -> SessionId {
+        self.parent
+    }
+
+    pub const fn child(&self) -> SessionId {
+        self.child
+    }
+
+    pub const fn outcome(&self) -> &DelegationOutcome {
+        &self.outcome
+    }
+}
+
+/// Complete deterministic result of evaluating a parent termination cascade.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationCascadeEvaluation {
+    dispositions: Box<[DelegationCascadeDisposition]>,
+}
+
+impl DelegationCascadeEvaluation {
+    pub const fn dispositions(&self) -> &[DelegationCascadeDisposition] {
+        &self.dispositions
+    }
+}
+
+/// Why an explicitly ordered relationship inventory could not be evaluated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationCascadeEvaluationFailure {
+    AuthorityScopeMismatch,
+    InventoryNotStrictlyOrdered {
+        earlier: ToolRequestId,
+        later: ToolRequestId,
+    },
+    DuplicateChild {
+        child: SessionId,
+    },
+    InvalidRelationshipTree {
+        child: SessionId,
+    },
+    UnreachableRelationship {
+        spawning_request: ToolRequestId,
+    },
+    RelationshipTransition {
+        spawning_request: ToolRequestId,
+        failure: DelegationTransitionFailure,
+    },
+}
+
+impl std::fmt::Display for DelegationCascadeEvaluationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "delegation cascade evaluation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for DelegationCascadeEvaluationFailure {}
 
 /// Exact bounded nonempty content delivered across a delegation relation.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -751,6 +828,229 @@ impl SessionDelegation {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PlannedCascadeAction {
+    ContinueRunning,
+    Stop,
+    Cancel,
+}
+
+/// Evaluates one parent termination against an already locked relationship inventory.
+///
+/// The ordered reachable relationships must contain the complete structurally
+/// reachable tree in the caller's stable spawning-request order. This function
+/// does not acquire or imply locks. It returns dispositions in that supplied
+/// order, omitting only descendants below an explicitly pruned relationship.
+pub fn evaluate_delegation_cascade(
+    ordered_reachable_relationships: &[SessionDelegation],
+    scope: DescendantTerminationScope,
+    authority: ParentTerminationAuthority,
+) -> Result<DelegationCascadeEvaluation, DelegationCascadeEvaluationFailure> {
+    if authority.scope() != scope {
+        return Err(DelegationCascadeEvaluationFailure::AuthorityScopeMismatch);
+    }
+    if scope == DescendantTerminationScope::ParentAlone {
+        return Ok(DelegationCascadeEvaluation {
+            dispositions: Box::new([]),
+        });
+    }
+    validate_cascade_inventory_order(ordered_reachable_relationships)?;
+    let children_by_parent =
+        validate_cascade_tree(ordered_reachable_relationships, authority.parent())?;
+    let planned = plan_cascade_actions(
+        ordered_reachable_relationships,
+        &children_by_parent,
+        authority.parent(),
+        authority.kind(),
+    );
+    let mut dispositions = Vec::new();
+    for (relation, planned) in ordered_reachable_relationships.iter().zip(planned) {
+        let Some((parent_kind, action)) = planned else {
+            continue;
+        };
+        let disposition = cascade_disposition(relation, authority, parent_kind, action)?;
+        relation
+            .clone()
+            .record_outcome(disposition.outcome().clone())
+            .map_err(
+                |error| DelegationCascadeEvaluationFailure::RelationshipTransition {
+                    spawning_request: relation.spawning_request(),
+                    failure: error.failure(),
+                },
+            )?;
+        dispositions.push(disposition);
+    }
+    Ok(DelegationCascadeEvaluation {
+        dispositions: dispositions.into_boxed_slice(),
+    })
+}
+
+fn validate_cascade_inventory_order(
+    relationships: &[SessionDelegation],
+) -> Result<(), DelegationCascadeEvaluationFailure> {
+    for adjacent in relationships.windows(2) {
+        let earlier = adjacent[0].spawning_request();
+        let later = adjacent[1].spawning_request();
+        if earlier >= later {
+            return Err(
+                DelegationCascadeEvaluationFailure::InventoryNotStrictlyOrdered { earlier, later },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_cascade_tree(
+    relationships: &[SessionDelegation],
+    root: SessionId,
+) -> Result<BTreeMap<SessionId, Vec<usize>>, DelegationCascadeEvaluationFailure> {
+    let mut parent_by_child = BTreeMap::new();
+    let mut children_by_parent: BTreeMap<SessionId, Vec<usize>> = BTreeMap::new();
+    for (index, relation) in relationships.iter().enumerate() {
+        if parent_by_child
+            .insert(relation.child(), relation.parent())
+            .is_some()
+        {
+            return Err(DelegationCascadeEvaluationFailure::DuplicateChild {
+                child: relation.child(),
+            });
+        }
+        children_by_parent
+            .entry(relation.parent())
+            .or_default()
+            .push(index);
+    }
+    let mut reachable_sessions = BTreeSet::from([root]);
+    let mut pending_parents = vec![root];
+    while let Some(parent) = pending_parents.pop() {
+        let Some(children) = children_by_parent.get(&parent) else {
+            continue;
+        };
+        for index in children {
+            let child = relationships[*index].child();
+            if !reachable_sessions.insert(child) {
+                return Err(DelegationCascadeEvaluationFailure::InvalidRelationshipTree { child });
+            }
+            pending_parents.push(child);
+        }
+    }
+    for relation in relationships {
+        if !reachable_sessions.contains(&relation.child()) {
+            return Err(
+                DelegationCascadeEvaluationFailure::UnreachableRelationship {
+                    spawning_request: relation.spawning_request(),
+                },
+            );
+        }
+    }
+    Ok(children_by_parent)
+}
+
+fn plan_cascade_actions(
+    relationships: &[SessionDelegation],
+    children_by_parent: &BTreeMap<SessionId, Vec<usize>>,
+    root: SessionId,
+    root_kind: ParentTerminationKind,
+) -> Vec<Option<(ParentTerminationKind, PlannedCascadeAction)>> {
+    let mut planned = vec![None; relationships.len()];
+    let mut pending_parents = vec![(root, root_kind)];
+    while let Some((parent, parent_kind)) = pending_parents.pop() {
+        let Some(children) = children_by_parent.get(&parent) else {
+            continue;
+        };
+        for index in children {
+            let relation = &relationships[*index];
+            let action = cascade_action(relation.policy(), parent_kind);
+            planned[*index] = Some((parent_kind, action));
+            match action {
+                PlannedCascadeAction::ContinueRunning => {}
+                PlannedCascadeAction::Stop => {
+                    pending_parents.push((relation.child(), ParentTerminationKind::Stopped));
+                }
+                PlannedCascadeAction::Cancel => {
+                    pending_parents.push((relation.child(), ParentTerminationKind::Cancelled));
+                }
+            }
+        }
+    }
+    planned
+}
+
+const fn cascade_action(
+    policy: ChildRelationshipPolicy,
+    parent_kind: ParentTerminationKind,
+) -> PlannedCascadeAction {
+    let action = match (policy, parent_kind) {
+        (ChildRelationshipPolicy::Background, _) => BoundChildAction::KeepRunning,
+        (
+            ChildRelationshipPolicy::Bound {
+                on_parent_stopped, ..
+            },
+            ParentTerminationKind::Stopped,
+        ) => on_parent_stopped,
+        (
+            ChildRelationshipPolicy::Bound {
+                on_parent_cancelled,
+                ..
+            },
+            ParentTerminationKind::Cancelled,
+        ) => on_parent_cancelled,
+    };
+    match action {
+        BoundChildAction::KeepRunning => PlannedCascadeAction::ContinueRunning,
+        BoundChildAction::Stop => PlannedCascadeAction::Stop,
+        BoundChildAction::Cancel => PlannedCascadeAction::Cancel,
+    }
+}
+
+fn cascade_disposition(
+    relation: &SessionDelegation,
+    authority: ParentTerminationAuthority,
+    parent_kind: ParentTerminationKind,
+    action: PlannedCascadeAction,
+) -> Result<DelegationCascadeDisposition, DelegationCascadeEvaluationFailure> {
+    let spawning_turn = relation.events().first().and_then(|event| match event {
+        DelegationEvent::Spawned { provenance, .. } => {
+            provenance.tool_request().map(|(_, turn, _)| turn)
+        }
+        DelegationEvent::MessageDelivered { .. } | DelegationEvent::OutcomeRecorded { .. } => None,
+    });
+    let Some(turn) = spawning_turn else {
+        return Err(DelegationCascadeEvaluationFailure::RelationshipTransition {
+            spawning_request: relation.spawning_request(),
+            failure: DelegationTransitionFailure::MissingSpawnEvent,
+        });
+    };
+    let reason = match parent_kind {
+        ParentTerminationKind::Stopped => DelegationOutcomeReason::ParentStopped {
+            scope: authority.scope(),
+        },
+        ParentTerminationKind::Cancelled => DelegationOutcomeReason::ParentCancelled {
+            scope: authority.scope(),
+        },
+    };
+    let provenance = DelegationProvenance::from_parent_termination(ParentTerminationAuthority {
+        parent: relation.parent(),
+        turn,
+        command: authority.command(),
+        kind: parent_kind,
+        scope: authority.scope(),
+    });
+    let outcome = match action {
+        PlannedCascadeAction::ContinueRunning => {
+            DelegationOutcome::ContinueRunning { reason, provenance }
+        }
+        PlannedCascadeAction::Stop => DelegationOutcome::ChildStopped { reason, provenance },
+        PlannedCascadeAction::Cancel => DelegationOutcome::ChildCancelled { reason, provenance },
+    };
+    Ok(DelegationCascadeDisposition {
+        spawning_request: relation.spawning_request(),
+        parent: relation.parent(),
+        child: relation.child(),
+        outcome,
+    })
+}
+
 const fn event_ordinal(event: &DelegationEvent) -> DelegationEventOrdinal {
     match event {
         DelegationEvent::Spawned { ordinal, .. }
@@ -1204,6 +1504,55 @@ mod tests {
         })
     }
 
+    #[derive(Clone, Copy)]
+    struct CascadeRelationshipFacts {
+        spawning_request: u128,
+        parent: u128,
+        child: u128,
+        policy: ChildRelationshipPolicy,
+    }
+
+    struct CascadeRelationshipFixture {
+        relation: SessionDelegation,
+        spawning_turn: TurnId,
+    }
+
+    fn cascade_relationship(facts: CascadeRelationshipFacts) -> CascadeRelationshipFixture {
+        let request = named_request_with_id(
+            facts.parent,
+            SPAWN_SESSION_TOOL_NAME,
+            serde_json::json!({
+                "relationship": relationship_argument(facts.policy),
+                "task": TEST_TASK,
+            }),
+            tool_request_id(facts.spawning_request),
+        );
+        let spawning_turn = request.turn();
+        let relation = SessionDelegation::spawn(&request, session_id(facts.child), facts.policy)
+            .expect("cascade relationship fixture is valid");
+        CascadeRelationshipFixture {
+            relation,
+            spawning_turn,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CascadeAuthorityFacts {
+        parent: SessionId,
+        kind: ParentTerminationKind,
+        scope: DescendantTerminationScope,
+    }
+
+    fn cascade_authority(facts: CascadeAuthorityFacts) -> ParentTerminationAuthority {
+        ParentTerminationAuthority {
+            parent: facts.parent,
+            turn: turn_id(900),
+            command: command_id(901),
+            kind: facts.kind,
+            scope: facts.scope,
+        }
+    }
+
     #[test]
     fn assistant_text_projection_preserves_exact_part_order_without_separator() {
         let first = crate::AssistantText::try_new("first".into()).expect("first part");
@@ -1511,6 +1860,400 @@ mod tests {
             argument_error.failure(),
             DelegationTransitionFailure::InvalidToolRequestPurpose
         );
+    }
+
+    /// S19 / INV-010: parent-alone evaluates no relationship and creates no descendant authority.
+    #[test]
+    fn s19_inv010_cascade_parent_alone_returns_no_dispositions() {
+        let relationship = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 10,
+            parent: 1,
+            child: 2,
+            policy: ChildRelationshipPolicy::Background,
+        });
+        let scope = DescendantTerminationScope::ParentAlone;
+        let authority = cascade_authority(CascadeAuthorityFacts {
+            parent: relationship.relation.parent(),
+            kind: ParentTerminationKind::Stopped,
+            scope,
+        });
+
+        let evaluation = evaluate_delegation_cascade(&[relationship.relation], scope, authority)
+            .expect("parent-alone has no descendant work");
+
+        assert_eq!(evaluation.dispositions(), []);
+    }
+
+    /// S19 / INV-010: every selected edge in a mixed tree receives one explicit typed disposition.
+    #[test]
+    fn s19_inv010_cascade_mixed_tree_has_no_silent_orphan_or_kill() {
+        let background = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 10,
+            parent: 1,
+            child: 2,
+            policy: ChildRelationshipPolicy::Background,
+        });
+        let keep_running = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 20,
+            parent: 1,
+            child: 3,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::KeepRunning,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+        let stopped = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 30,
+            parent: 1,
+            child: 4,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::KeepRunning,
+            },
+        });
+        let cancelled = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 40,
+            parent: 1,
+            child: 5,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Cancel,
+                on_parent_cancelled: BoundChildAction::KeepRunning,
+            },
+        });
+        let inventory = vec![
+            background.relation.clone(),
+            keep_running.relation.clone(),
+            stopped.relation.clone(),
+            cancelled.relation.clone(),
+        ];
+        let scope = DescendantTerminationScope::ParentAndDescendants;
+        let authority = cascade_authority(CascadeAuthorityFacts {
+            parent: background.relation.parent(),
+            kind: ParentTerminationKind::Stopped,
+            scope,
+        });
+
+        let evaluation = evaluate_delegation_cascade(&inventory, scope, authority)
+            .expect("mixed tree evaluates");
+        let dispositions = evaluation.dispositions();
+
+        assert_eq!(dispositions.len(), 4);
+        assert_eq!(
+            dispositions[0].spawning_request(),
+            background.relation.spawning_request()
+        );
+        assert_eq!(
+            dispositions[1].spawning_request(),
+            keep_running.relation.spawning_request()
+        );
+        assert_eq!(
+            dispositions[2].spawning_request(),
+            stopped.relation.spawning_request()
+        );
+        assert_eq!(
+            dispositions[3].spawning_request(),
+            cancelled.relation.spawning_request()
+        );
+        assert!(matches!(
+            dispositions[0].outcome(),
+            DelegationOutcome::ContinueRunning { .. }
+        ));
+        assert!(matches!(
+            dispositions[1].outcome(),
+            DelegationOutcome::ContinueRunning { .. }
+        ));
+        assert!(matches!(
+            dispositions[2].outcome(),
+            DelegationOutcome::ChildStopped { .. }
+        ));
+        assert!(matches!(
+            dispositions[3].outcome(),
+            DelegationOutcome::ChildCancelled { .. }
+        ));
+    }
+
+    /// S19 / INV-010: surviving background and bound edges prune their descendants.
+    #[test]
+    fn s19_inv010_cascade_background_survival_prunes_nested_work() {
+        let background = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 10,
+            parent: 1,
+            child: 2,
+            policy: ChildRelationshipPolicy::Background,
+        });
+        let bound_keep_running = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 20,
+            parent: 1,
+            child: 4,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::KeepRunning,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+        let nested_background = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 30,
+            parent: 2,
+            child: 3,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+        let nested_bound = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 40,
+            parent: 4,
+            child: 5,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+        let inventory = vec![
+            background.relation.clone(),
+            bound_keep_running.relation.clone(),
+            nested_background.relation.clone(),
+            nested_bound.relation.clone(),
+        ];
+        let scope = DescendantTerminationScope::ParentAndDescendants;
+        let authority = cascade_authority(CascadeAuthorityFacts {
+            parent: background.relation.parent(),
+            kind: ParentTerminationKind::Stopped,
+            scope,
+        });
+
+        let evaluation = evaluate_delegation_cascade(&inventory, scope, authority)
+            .expect("background and bound keep-running branches survive");
+        let dispositions = evaluation.dispositions();
+
+        assert_eq!(dispositions.len(), 2);
+        assert_eq!(
+            dispositions[0].spawning_request(),
+            background.relation.spawning_request()
+        );
+        assert_eq!(
+            dispositions[1].spawning_request(),
+            bound_keep_running.relation.spawning_request()
+        );
+        assert!(matches!(
+            dispositions[0].outcome(),
+            DelegationOutcome::ContinueRunning {
+                reason: DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAndDescendants
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            dispositions[1].outcome(),
+            DelegationOutcome::ContinueRunning {
+                reason: DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAndDescendants
+                },
+                ..
+            }
+        ));
+    }
+
+    /// S19 / INV-010: recursive evaluation switches to each selected stop or cancel policy arm.
+    #[test]
+    fn s19_inv010_cascade_nested_propagation_uses_selected_policy_arms() {
+        let cancelled_by_stop = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 20,
+            parent: 1,
+            child: 2,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Cancel,
+                on_parent_cancelled: BoundChildAction::KeepRunning,
+            },
+        });
+        let stopped_by_cancel = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 10,
+            parent: 2,
+            child: 3,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::KeepRunning,
+                on_parent_cancelled: BoundChildAction::Stop,
+            },
+        });
+        let inventory = vec![
+            stopped_by_cancel.relation.clone(),
+            cancelled_by_stop.relation.clone(),
+        ];
+        let scope = DescendantTerminationScope::ParentAndDescendants;
+        let authority = cascade_authority(CascadeAuthorityFacts {
+            parent: cancelled_by_stop.relation.parent(),
+            kind: ParentTerminationKind::Stopped,
+            scope,
+        });
+
+        let evaluation = evaluate_delegation_cascade(&inventory, scope, authority)
+            .expect("nested bound cascade evaluates");
+        let dispositions = evaluation.dispositions();
+
+        assert_eq!(dispositions.len(), 2);
+        assert!(matches!(
+            dispositions[0].outcome(),
+            DelegationOutcome::ChildStopped {
+                reason: DelegationOutcomeReason::ParentCancelled {
+                    scope: DescendantTerminationScope::ParentAndDescendants
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            dispositions[1].outcome(),
+            DelegationOutcome::ChildCancelled {
+                reason: DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAndDescendants
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            outcome_provenance(dispositions[0].outcome()).parent_command(),
+            Some((
+                stopped_by_cancel.relation.parent(),
+                stopped_by_cancel.spawning_turn,
+                authority.command()
+            ))
+        );
+        assert_eq!(
+            outcome_provenance(dispositions[1].outcome()).parent_command(),
+            Some((
+                cancelled_by_stop.relation.parent(),
+                cancelled_by_stop.spawning_turn,
+                authority.command()
+            ))
+        );
+    }
+
+    /// S19 / INV-010: parent stop yields stopped outcome, reason, and exact command provenance.
+    #[test]
+    fn s19_inv010_cascade_stop_preserves_typed_reason_and_provenance() {
+        let relationship = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 10,
+            parent: 1,
+            child: 2,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+        let scope = DescendantTerminationScope::ParentAndDescendants;
+        let authority = cascade_authority(CascadeAuthorityFacts {
+            parent: relationship.relation.parent(),
+            kind: ParentTerminationKind::Stopped,
+            scope,
+        });
+
+        let evaluation = evaluate_delegation_cascade(
+            std::slice::from_ref(&relationship.relation),
+            scope,
+            authority,
+        )
+        .expect("stop cascade evaluates");
+        let disposition = &evaluation.dispositions()[0];
+
+        assert_eq!(disposition.parent(), relationship.relation.parent());
+        assert_eq!(disposition.child(), relationship.relation.child());
+        assert!(matches!(
+            disposition.outcome(),
+            DelegationOutcome::ChildStopped {
+                reason: DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAndDescendants
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            outcome_provenance(disposition.outcome()).parent_command(),
+            Some((
+                relationship.relation.parent(),
+                relationship.spawning_turn,
+                authority.command()
+            ))
+        );
+    }
+
+    /// S19 / INV-010: parent cancellation yields cancelled outcome, reason, and exact command provenance.
+    #[test]
+    fn s19_inv010_cascade_cancel_preserves_typed_reason_and_provenance() {
+        let relationship = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 10,
+            parent: 1,
+            child: 2,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+        let scope = DescendantTerminationScope::ParentAndDescendants;
+        let authority = cascade_authority(CascadeAuthorityFacts {
+            parent: relationship.relation.parent(),
+            kind: ParentTerminationKind::Cancelled,
+            scope,
+        });
+
+        let evaluation = evaluate_delegation_cascade(
+            std::slice::from_ref(&relationship.relation),
+            scope,
+            authority,
+        )
+        .expect("cancel cascade evaluates");
+        let disposition = &evaluation.dispositions()[0];
+
+        assert!(matches!(
+            disposition.outcome(),
+            DelegationOutcome::ChildCancelled {
+                reason: DelegationOutcomeReason::ParentCancelled {
+                    scope: DescendantTerminationScope::ParentAndDescendants
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            outcome_provenance(disposition.outcome()).parent_command(),
+            Some((
+                relationship.relation.parent(),
+                relationship.spawning_turn,
+                authority.command()
+            ))
+        );
+    }
+
+    /// S19 / INV-012: applying and reevaluating an equal cascade returns the same disposition.
+    #[test]
+    fn s19_inv012_cascade_equal_replay_is_idempotent() {
+        let relationship = cascade_relationship(CascadeRelationshipFacts {
+            spawning_request: 10,
+            parent: 1,
+            child: 2,
+            policy: ChildRelationshipPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+        let scope = DescendantTerminationScope::ParentAndDescendants;
+        let authority = cascade_authority(CascadeAuthorityFacts {
+            parent: relationship.relation.parent(),
+            kind: ParentTerminationKind::Stopped,
+            scope,
+        });
+        let first = evaluate_delegation_cascade(
+            std::slice::from_ref(&relationship.relation),
+            scope,
+            authority,
+        )
+        .expect("first cascade evaluates");
+        let recorded = relationship
+            .relation
+            .record_outcome(first.dispositions()[0].outcome().clone())
+            .expect("first disposition records");
+
+        let replay = evaluate_delegation_cascade(&[recorded], scope, authority)
+            .expect("equal cascade replay evaluates");
+
+        assert_eq!(replay, first, "equal cascade replay must remain stable");
     }
 
     /// S19 / INV-010: a bound keep-running policy records a typed no-change event.
