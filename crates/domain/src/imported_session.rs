@@ -484,6 +484,15 @@ impl BoundedImportedSessionReconstitutionInput {
                 BoundedImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
             ));
         }
+        match self.provenance.cause() {
+            SessionCreationCause::UserInitiated => {}
+            SessionCreationCause::Delegated { .. } => {
+                return Err(fail(
+                    self,
+                    BoundedImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
+                ));
+            }
+        }
         let TranscriptAncestry::ImportedConversation {
             source_frontier, ..
         } = self.provenance.ancestry()
@@ -606,6 +615,8 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// The current pointer and selected row name different versions.
     CurrentDefaultsVersionMismatch,
+    /// Delegated creation cannot carry imported ancestry.
+    DelegatedAncestryMismatch,
     /// The stored ancestry is not imported ancestry.
     AncestryNotImported,
     /// No one-to-one seed record was supplied.
@@ -1409,7 +1420,7 @@ mod tests {
     use super::*;
     use crate::test_support::{
         accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
-        imported_transcript_entry_id, semantic_transcript_entry_id, session_id,
+        imported_transcript_entry_id, semantic_transcript_entry_id, session_id, tool_request_id,
     };
     use crate::{
         ImportedConversationFormat, ImportedRawRecordPosition, ImportedRawSourceRecord,
@@ -1888,6 +1899,24 @@ mod tests {
         assert_eq!(
             session.current_configuration_defaults(),
             prepared.session().configuration_defaults()
+        );
+    }
+
+    /// S18 / INV-003: delegated bounded current sessions reject imported ancestry.
+    #[test]
+    fn s18_inv003_bounded_current_session_rejects_delegated_imported_ancestry() {
+        let (_, _, prepared) = prepared_fixture();
+        let mut input = bounded_input(&prepared);
+        input.provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated {
+                spawning_request: tool_request_id(90),
+            },
+            input.provenance.ancestry(),
+        );
+
+        assert_bounded_failure(
+            input,
+            BoundedImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
         );
     }
 

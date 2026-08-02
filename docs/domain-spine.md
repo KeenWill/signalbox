@@ -895,7 +895,7 @@ impl DelegationProvenance {
 
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
-// sealed: relation aggregate producer deferred to the delegation aggregate
+// sealed: SessionDelegation::deliver_message
 impl DelegationMessage {
     // accessors: id(), direction(), content(), provenance()
 }
@@ -918,10 +918,6 @@ pub struct DelegationOutcome { /* private validated kind + content + reason + pr
 impl DelegationOutcome {
     pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
         -> Option<Self>;
-    pub const fn from_parent_policy(
-        authority: ParentTerminationAuthority,
-        action: BoundChildAction,
-    ) -> Option<Self>;
     // accessors: kind(), content(), reason(), provenance()
 }
 pub struct ChildWait { /* private awaiting request + spawning request + child */ }
@@ -930,7 +926,7 @@ impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
-// sealed: relation aggregate producer deferred to the delegation aggregate
+// sealed: SessionDelegation::register_wait
 impl DelegationWait {
     // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }
@@ -1114,6 +1110,7 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    DelegatedAncestryMismatch,
     AncestryNotImported,
     MissingSeedRecord,
     DuplicateSeedRecord,
